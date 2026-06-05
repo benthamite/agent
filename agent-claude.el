@@ -2688,7 +2688,7 @@ equivalent to manually closing the session and reopening it."
                          (buffer-name))))
     (when account
       (agent-claude--sync-account-config account))
-    (agent-claude--kill-current-claude-buffer)
+    (agent--force-kill-buffer (current-buffer))
     (cl-letf (((symbol-function 'claude-code--directory) (lambda () dir))
               ((symbol-function 'claude-code--prompt-for-instance-name)
                (lambda (_dir _existing _force) instance-name)))

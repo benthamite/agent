@@ -348,6 +348,8 @@ The Claude commands expose workflows that are specific to Claude Code. @code{age
 
 @code{agent-claude-create-branch} creates a new Claude branch from the current session. With isolated branching it creates a git worktree under @code{agent-claude-fork-worktree-directory} and links the branch session metadata into that project. @code{agent-claude-switch-branch} displays the branch tree and switches to, or resumes, the selected session.
 
+@code{agent-claude-restart} kills the current Claude buffer and resumes the same session in place with @samp{claude --resume}, preserving the session's directory and instance name and relaunching under the active account. It is useful when a configuration change requires relaunching Claude.
+
 The setup command @code{agent-claude-setup-config} ensures that Claude's statusline, Stop hook, and Notification hook are present in @samp{~/.claude/settings.json}. The backend does not run setup automatically when loaded; run the setup command explicitly when installing or repairing hook configuration.
 
 @node Codex commands
