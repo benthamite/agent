@@ -53,13 +53,29 @@ exit is aborted."
 
 (defcustom agent-before-exit-skill-name nil
   "Skill name to submit before exiting matching AI sessions.
-When nil or empty, `agent-run-skill-before-exit' does nothing."
+When nil or empty, `agent-run-skill-before-exit' does nothing.  This is the
+single-skill fallback used when `agent-before-exit-skill-names' is nil."
   :type '(choice (const :tag "Disabled" nil) string)
   :group 'agent)
 
+(defcustom agent-before-exit-skill-names nil
+  "Ordered skills to submit before exiting matching AI sessions.
+Each entry is either a skill-name string, or a list whose car is the skill
+name and whose cdr is a plist accepting `:directories' (a list of directories
+that restrict where the skill runs, overriding
+`agent-before-exit-skill-directories') and `:args' (a string appended to the
+submitted command).
+
+Skills are submitted in order, each after the previous one finishes, and the
+session exits after the last.  When nil, `agent-before-exit-skill-name' is used
+as a single-skill fallback."
+  :type '(repeat sexp)
+  :group 'agent)
+
 (defcustom agent-before-exit-skill-directories nil
-  "Directories whose sessions should run `agent-before-exit-skill-name'.
-When nil, run the configured skill before exiting every session."
+  "Directories whose sessions should run the before-exit skills.
+When nil, run a configured skill before exiting every session.  An entry in
+`agent-before-exit-skill-names' may override this with its own `:directories'."
   :type '(repeat directory)
   :group 'agent)
 
@@ -78,11 +94,14 @@ treated as eligible."
   :type '(alist :key-type symbol :value-type string)
   :group 'agent)
 
-(defvar-local agent--before-exit-skill-sent nil
-  "Non-nil when the configured before-exit skill was sent in this buffer.")
+(defvar-local agent--before-exit-skill-started nil
+  "Non-nil once the before-exit skill chain has begun in this buffer.")
+
+(defvar-local agent--before-exit-skill-remaining nil
+  "Before-exit skill entries not yet submitted in this buffer.")
 
 (defvar-local agent--before-exit-skill-exit-pending nil
-  "Non-nil when BUFFER should exit after its before-exit skill finishes.")
+  "Non-nil when BUFFER should exit after its before-exit skills finish.")
 
 (defvar-local agent-before-exit-skill-inhibit nil
   "Non-nil means skip the configured before-exit skill in this buffer.
@@ -1275,42 +1294,61 @@ runs and prompts for arguments as needed."
         (throw 'abort nil)))))
 
 (defun agent-run-skill-before-exit (backend buffer)
-  "Run `agent-before-exit-skill-name' before exiting BUFFER.
-BACKEND is the resolved `agent' backend.  Return nil when a
-skill command was submitted and exit should be delayed."
+  "Submit the before-exit skills for BUFFER before BACKEND exits it.
+Build the applicable skill queue and submit the first one, returning nil to
+delay the exit until the queue finishes.  Return t when there is nothing to
+run or nothing could be submitted."
   (with-current-buffer buffer
-    (if (or agent--before-exit-skill-sent
-            agent-before-exit-skill-inhibit
-            (not (agent--before-exit-skill-configured-p))
-            (not (agent--before-exit-skill-directory-p backend buffer))
-            (not (agent--before-exit-skill-duration-p backend buffer)))
+    (if (or agent--before-exit-skill-started
+            agent-before-exit-skill-inhibit)
         t
-      (let ((command (agent--before-exit-skill-command backend))
-            (submit-command-fn (agent--backend-get backend :submit-command))
-            (send-command-fn (agent--backend-get backend :send-command)))
-        (if (not (and command (or submit-command-fn send-command-fn)))
+      (let ((queue (agent--before-exit-skill-queue backend buffer)))
+        (if (not queue)
             t
-          (setq-local agent--before-exit-skill-sent t)
+          (setq-local agent--before-exit-skill-started t)
+          (setq-local agent--before-exit-skill-remaining queue)
           (setq-local agent--before-exit-skill-exit-pending t)
-          (if submit-command-fn
-              (funcall submit-command-fn command buffer)
-            (funcall send-command-fn command buffer)
-            (when-let* ((send-return-fn (agent--backend-get backend :send-return)))
-              (funcall send-return-fn buffer)))
-          (message "Started %s; this session will close when it finishes."
-                   command)
-          nil)))))
+          (if (agent--before-exit-skill-send-next backend buffer)
+              nil
+            (setq-local agent--before-exit-skill-exit-pending nil)
+            t))))))
 
 (defun agent-exit-after-before-exit-skill (backend buffer)
-  "Exit BACKEND session BUFFER after its before-exit skill has finished."
+  "Advance the before-exit skill chain for BACKEND BUFFER.
+Submit the next queued skill, or exit BUFFER once the queue is empty.  Return
+non-nil when the chain handled this stop event."
   (when (and (buffer-live-p buffer)
              (buffer-local-value 'agent--before-exit-skill-exit-pending
                                  buffer)
              (agent--before-exit-ready-to-close-p backend buffer))
     (with-current-buffer buffer
-      (setq-local agent--before-exit-skill-exit-pending nil)
-      (run-at-time 0 nil #'agent--exit-after-before-exit-skill backend buffer))
-    t))
+      (if (and agent--before-exit-skill-remaining
+               (agent--before-exit-skill-send-next backend buffer))
+          t
+        (setq-local agent--before-exit-skill-exit-pending nil)
+        (run-at-time 0 nil #'agent--exit-after-before-exit-skill backend buffer)
+        t))))
+
+(defun agent--before-exit-skill-send-next (backend buffer)
+  "Submit the next queued before-exit skill in BUFFER for BACKEND.
+Skip entries that yield no command, and return non-nil when one is submitted."
+  (with-current-buffer buffer
+    (let (sent)
+      (while (and (not sent) agent--before-exit-skill-remaining)
+        (let* ((entry (pop agent--before-exit-skill-remaining))
+               (command (agent--before-exit-skill-command backend entry))
+               (submit-command-fn (agent--backend-get backend :submit-command))
+               (send-command-fn (agent--backend-get backend :send-command)))
+          (when (and command (or submit-command-fn send-command-fn))
+            (if submit-command-fn
+                (funcall submit-command-fn command buffer)
+              (funcall send-command-fn command buffer)
+              (when-let* ((send-return-fn (agent--backend-get backend :send-return)))
+                (funcall send-return-fn buffer)))
+            (message "Started %s; this session will close when the before-exit skills finish"
+                     command)
+            (setq sent t))))
+      sent)))
 
 (defun agent--before-exit-ready-to-close-p (backend buffer)
   "Return non-nil when BUFFER can close after a before-exit skill.
@@ -1327,18 +1365,48 @@ unaccepted at the prompt."
       (when-let* ((fn (agent--backend-get backend :exit)))
         (call-interactively fn)))))
 
-(defun agent--before-exit-skill-configured-p ()
-  "Return non-nil when a before-exit skill is configured."
-  (and agent-before-exit-skill-name
-       (not (string-empty-p agent-before-exit-skill-name))))
+(defun agent--before-exit-skill-queue (backend buffer)
+  "Return the ordered before-exit skill entries applicable to BUFFER.
+Return nil when BACKEND session BUFFER is too short-lived or no configured
+entry matches its directory."
+  (when (agent--before-exit-skill-duration-p backend buffer)
+    (seq-filter
+     (lambda (entry)
+       (agent--before-exit-skill-directory-match-p
+        backend buffer (agent--before-exit-skill-entry-directories entry)))
+     (agent--before-exit-skill-entries))))
 
-(defun agent--before-exit-skill-directory-p (backend buffer)
-  "Return non-nil if BACKEND session BUFFER is in a configured directory."
-  (or (null agent-before-exit-skill-directories)
+(defun agent--before-exit-skill-entries ()
+  "Return the configured ordered before-exit skill entries.
+Use `agent-before-exit-skill-names' when set; otherwise fall back to a
+single-entry list built from `agent-before-exit-skill-name'."
+  (or agent-before-exit-skill-names
+      (and agent-before-exit-skill-name
+           (not (string-empty-p agent-before-exit-skill-name))
+           (list agent-before-exit-skill-name))))
+
+(defun agent--before-exit-skill-entry-name (entry)
+  "Return the skill-name string for before-exit ENTRY."
+  (if (consp entry) (car entry) entry))
+
+(defun agent--before-exit-skill-entry-directories (entry)
+  "Return the directory restriction for before-exit ENTRY.
+Fall back to `agent-before-exit-skill-directories' when ENTRY sets none."
+  (or (and (consp entry) (plist-get (cdr entry) :directories))
+      agent-before-exit-skill-directories))
+
+(defun agent--before-exit-skill-entry-args (entry)
+  "Return the extra command-argument string for before-exit ENTRY, or nil."
+  (and (consp entry) (plist-get (cdr entry) :args)))
+
+(defun agent--before-exit-skill-directory-match-p (backend buffer directories)
+  "Return non-nil if BACKEND session BUFFER lies within DIRECTORIES.
+A nil DIRECTORIES matches every session."
+  (or (null directories)
       (when-let* ((directory (agent--buffer-directory backend buffer)))
         (cl-some (lambda (candidate)
                    (file-in-directory-p directory (file-truename candidate)))
-                 agent-before-exit-skill-directories))))
+                 directories))))
 
 (defun agent--before-exit-skill-duration-p (backend buffer)
   "Return non-nil if BACKEND session BUFFER is old enough."
@@ -1358,10 +1426,13 @@ unaccepted at the prompt."
               (directory (funcall directory-fn buffer)))
     (file-name-as-directory (file-truename directory))))
 
-(defun agent--before-exit-skill-command (backend)
-  "Return the interactive before-exit skill command for BACKEND."
+(defun agent--before-exit-skill-command (backend entry)
+  "Return the interactive command string for before-exit ENTRY on BACKEND.
+Append ENTRY's `:args' when present."
   (when-let* ((prefix (alist-get backend agent-skill-command-prefix-alist)))
-    (concat prefix agent-before-exit-skill-name)))
+    (let ((args (agent--before-exit-skill-entry-args entry)))
+      (concat prefix (agent--before-exit-skill-entry-name entry)
+              (and args (concat " " args))))))
 
 (defun agent--skill-argument-candidates (skill)
   "Return completion candidates for SKILL's arguments.

@@ -209,17 +209,31 @@ The commands ~agent-handoff~, ~agent-audit-project~, ~agent-debug-backtrace~, ~a
 Each function receives the resolved backend and session buffer; returning nil
 aborts the exit.
 
-Set ~agent-before-exit-skill-name~ and
-~agent-before-exit-skill-directories~ to submit an interactive skill before
-exiting matching sessions. ~agent-run-skill-before-exit~ uses
-~agent-skill-command-prefix-alist~ so Claude sessions receive slash commands
-and Codex sessions receive dollar-prefixed skill commands, then submits the
-command. When the backend reports that the skill run has finished, the
-session exits automatically; ordinary ready notifications are left unchanged.
-Leave ~agent-before-exit-skill-directories~ nil to run the skill before
-exiting every session. ~agent-before-exit-skill-min-duration-seconds~ defaults
-to 60 seconds, so very short sessions skip the before-exit skill when the
-backend can report elapsed session time.
+Set ~agent-before-exit-skill-name~ (a single skill) or
+~agent-before-exit-skill-names~ (an ordered list) to submit interactive skills
+before exiting matching sessions. Each entry in ~agent-before-exit-skill-names~
+is either a skill-name string or a list whose car is the skill name and whose
+cdr is a plist accepting ~:directories~ (restrict where that skill runs,
+overriding ~agent-before-exit-skill-directories~) and ~:args~ (a string
+appended to the submitted command). For example:
+
+#+begin_src emacs-lisp
+(setq agent-before-exit-skill-names
+      '("session-learning-capture"
+        ("update-log" :directories ("~/My Drive/Epoch") :args "--auto")))
+#+end_src
+
+~agent-run-skill-before-exit~ uses ~agent-skill-command-prefix-alist~ so Claude
+sessions receive slash commands and Codex sessions receive dollar-prefixed
+skill commands, then submits the first applicable skill. The skills run in
+order, each submitted after the previous one finishes, and the session exits
+after the last; ordinary ready notifications are left unchanged while the chain
+runs. When ~agent-before-exit-skill-names~ is nil, ~agent-before-exit-skill-name~
+is used as a single-skill fallback. Leave ~agent-before-exit-skill-directories~
+nil to run an unscoped skill before exiting every session.
+~agent-before-exit-skill-min-duration-seconds~ defaults to 60 seconds, so very
+short sessions skip the before-exit skills when the backend can report elapsed
+session time.
 Set the buffer-local variable ~agent-before-exit-skill-inhibit~ non-nil for
 orchestration sessions that must close immediately without running the
 configured before-exit skill. Handoff commands set this automatically on the
