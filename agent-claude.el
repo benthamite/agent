@@ -2521,8 +2521,9 @@ the right one before starting a Claude Code session."
                     (insert-file-contents backtrace-file)
                     (buffer-string)))
         (gptel-backend (alist-get agent-claude-debug-backtrace-backend
-                                 gptel--known-backends nil nil #'string=))
+                                  gptel--known-backends nil nil #'string=))
         (gptel-model agent-claude-debug-backtrace-model)
+        (gptel-include-reasoning nil)
         (gptel-use-tools nil))
     (gptel-request
      (format "Backtrace file: %s\n\nContents:\n%s" backtrace-file contents)
@@ -2531,11 +2532,14 @@ the right one before starting a Claude Code session."
      (lambda (response info)
        (if (not response)
            (message "gptel request failed: %s" (plist-get info :status))
-         (let* ((candidates (mapcar #'string-trim (split-string response ",")))
-                (selected (completing-read "Package to debug: " candidates nil nil nil nil
-                                           (car candidates))))
-           (agent-claude--debug-start-session
-            (intern selected) backtrace-file)))))))
+         (when-let* ((text (agent--gptel-response-text response)))
+           (let* ((candidates (mapcar #'string-trim
+                                      (split-string text ",")))
+                  (selected
+                   (completing-read "Package to debug: " candidates nil
+                                    nil nil nil (car candidates))))
+             (agent-claude--debug-start-session
+              (intern selected) backtrace-file))))))))
 
 (declare-function claude-code--start "claude-code")
 

@@ -132,6 +132,8 @@ The Codex backend options control account selection, handoff, skill discovery, n
 
 The Slack-message routing options, ~agent-claude-act-on-slack-message-model~, ~agent-claude-act-on-slack-message-backend~, ~agent-codex-act-on-slack-message-model~, and ~agent-codex-act-on-slack-message-backend~, configure the =gptel= request used to select an Epoch project from the Slack message at point. The selected backend starts in that project's canonical directory from the project document path, not a nested repo, and inserts the Slack URL into the prompt without submitting it, so the prompt can be reviewed first.
 
+The =gptel= classifier requests used by backtrace debugging and Slack routing ignore reasoning-block callback events and parse only the final response text.
+
 ** Chief-of-staff loop
 :PROPERTIES:
 :CUSTOM_ID: h:chief-options

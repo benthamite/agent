@@ -73,6 +73,14 @@
 
 ;;;; Epoch project registry
 
+(ert-deftest agent-test-gptel-response-text-accepts-final-response ()
+  "Return final gptel response text unchanged."
+  (should (equal (agent--gptel-response-text "agent, gptel") "agent, gptel")))
+
+(ert-deftest agent-test-gptel-response-text-ignores-reasoning-event ()
+  "Ignore gptel reasoning events sent before final response text."
+  (should-not (agent--gptel-response-text '(reasoning . "thinking"))))
+
 (ert-deftest agent-test-epoch-project-candidates-read-project-registry ()
   "Read candidates from the canonical project registry schema."
   (let* ((root (file-name-as-directory (make-temp-file "agent-projects" t)))

@@ -1005,8 +1005,9 @@ via `codex exec'."
                     (insert-file-contents backtrace-file)
                     (buffer-string)))
         (gptel-backend (alist-get agent-codex-debug-backtrace-backend
-                                 gptel--known-backends nil nil #'string=))
+                                  gptel--known-backends nil nil #'string=))
         (gptel-model agent-codex-debug-backtrace-model)
+        (gptel-include-reasoning nil)
         (gptel-use-tools nil))
     (gptel-request
      (format "Backtrace file: %s\n\nContents:\n%s" backtrace-file contents)
@@ -1015,11 +1016,14 @@ via `codex exec'."
      (lambda (response info)
        (if (not response)
            (message "gptel request failed: %s" (plist-get info :status))
-         (let* ((candidates (mapcar #'string-trim (split-string response ",")))
-                (selected (completing-read "Package to debug: " candidates nil nil nil nil
-                                           (car candidates))))
-           (agent-codex--debug-start-session
-            (intern selected) backtrace-file)))))))
+         (when-let* ((text (agent--gptel-response-text response)))
+           (let* ((candidates (mapcar #'string-trim
+                                      (split-string text ",")))
+                  (selected
+                   (completing-read "Package to debug: " candidates nil
+                                    nil nil nil (car candidates))))
+             (agent-codex--debug-start-session
+              (intern selected) backtrace-file))))))))
 
 (defun agent-codex--debug-start-session (package backtrace-file)
   "Start a Codex session for PACKAGE with BACKTRACE-FILE."

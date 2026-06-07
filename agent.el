@@ -1669,6 +1669,7 @@ must support `:run-skill'."
           (error nil)))))
 
 (defvar gptel-backend)
+(defvar gptel-include-reasoning)
 (defvar gptel-model)
 (defvar gptel-use-tools)
 (defvar gptel--known-backends)
@@ -1684,6 +1685,13 @@ must support `:run-skill'."
 (declare-function slack-room-find-message "slack-room")
 (declare-function slack-request "slack-request")
 (declare-function slack-request-create "slack-request")
+
+(defun agent--gptel-response-text (response)
+  "Return final text from gptel RESPONSE, or nil.
+Custom gptel callbacks may receive non-text events such as
+reasoning blocks before the final response."
+  (when (stringp response)
+    response))
 
 (defun agent--act-on-slack-message (model backend start-function)
   "Route the Slack message at point using MODEL, BACKEND, and START-FUNCTION.
@@ -1775,6 +1783,7 @@ called with the selected project plist and Slack URL."
          (gptel-backend (alist-get backend gptel--known-backends nil nil
                                    #'string=))
          (gptel-model model)
+         (gptel-include-reasoning nil)
          (gptel-use-tools nil))
     (message "Identifying Epoch project from Slack message...")
     (gptel-request
@@ -1788,8 +1797,9 @@ called with the selected project plist and Slack URL."
      (lambda (response info)
        (if (not response)
            (message "gptel request failed: %s" (plist-get info :status))
-         (agent--read-epoch-project-from-response
-          response projects (plist-get context :url) callback))))))
+         (when-let* ((text (agent--gptel-response-text response)))
+           (agent--read-epoch-project-from-response
+            text projects (plist-get context :url) callback)))))))
 
 (defun agent--slack-project-selection-prompt (context projects)
   "Return a project-selection prompt from Slack CONTEXT and PROJECTS."
