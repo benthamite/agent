@@ -290,7 +290,7 @@
         (should-not (agent-run-skill-before-exit 'codex buf))
         (should (equal (nreverse events)
                        '((command "$session-retro") return)))
-        (should agent--before-exit-skill-sent)
+        (should agent--before-exit-skill-started)
         (should agent--before-exit-skill-exit-pending)
         (should (agent-run-skill-before-exit 'codex buf))))))
 
@@ -389,7 +389,7 @@
           :send-command (lambda (&rest _args) (setq called t))))
         (should (agent-run-skill-before-exit 'codex buf))
         (should-not called)
-        (should-not agent--before-exit-skill-sent)
+        (should-not agent--before-exit-skill-started)
         (should-not agent--before-exit-skill-exit-pending)))))
 
 (ert-deftest agent-test-run-skill-before-exit-honors-buffer-local-inhibit ()
@@ -407,7 +407,7 @@
           :send-command (lambda (&rest _args) (setq called t))))
         (should (agent-run-skill-before-exit 'codex buf))
         (should-not called)
-        (should-not agent--before-exit-skill-sent)
+        (should-not agent--before-exit-skill-started)
         (should-not agent--before-exit-skill-exit-pending)))))
 
 (ert-deftest agent-test-run-skill-before-exit-allows-long-sessions ()
