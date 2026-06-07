@@ -167,6 +167,8 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar gptel-model)
 (defvar gptel-use-tools)
 (defvar gptel--known-backends)
+(defvar codex--session-id)
+(defvar codex--app-server-thread-id)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
 (declare-function codex--terminal-cursor-position "codex" ())
 (declare-function gptel-request "gptel")
@@ -1152,15 +1154,13 @@ buffer that requested the handoff."
 (defun agent-codex-restart ()
   "Kill the current Codex session and resume it in place.
 Useful when a setting change requires relaunching Codex.  Preserves the
-session's directory and instance name.  Codex does not expose a
-session ID to Emacs, so this relies on `codex resume --last', which
-Codex CLI filters by working directory; the just-killed session is
-the most recently updated one for that directory."
+session's directory, instance name, and session id."
   (interactive)
   (unless (codex--buffer-p (current-buffer))
     (user-error "Not in a Codex buffer"))
   (let ((dir default-directory)
         (account agent-codex--buffer-account)
+        (session-id (agent-codex--current-session-id))
         (instance-name (codex--extract-instance-name-from-buffer-name
                         (buffer-name))))
     (agent--force-kill-buffer (current-buffer))
@@ -1168,7 +1168,15 @@ the most recently updated one for that directory."
            (or account (agent-codex--resolve-account))))
       (agent-codex--install-hooks)
       (cl-letf (((symbol-function 'codex--directory) (lambda () dir)))
-        (codex--start-subcommand "resume" t nil instance-name)))))
+        (codex--start-subcommand "resume" nil (list session-id)
+                                 instance-name)))))
+
+(defun agent-codex--current-session-id ()
+  "Return the current Codex session id, or signal when unavailable."
+  (or (and (boundp 'codex--session-id) codex--session-id)
+      (and (boundp 'codex--app-server-thread-id)
+           codex--app-server-thread-id)
+      (user-error "Current Codex buffer has no session id")))
 
 ;;;;; Start or switch (Codex-specific entry point)
 

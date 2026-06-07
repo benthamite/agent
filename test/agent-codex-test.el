@@ -120,6 +120,7 @@
   (let (captured-account)
     (with-temp-buffer
       (rename-buffer "*codex:~/project/:default*" t)
+      (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
       (setq-local agent-codex--buffer-account "work")
       (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
                 ((symbol-function 'agent--force-kill-buffer) #'ignore)
@@ -131,6 +132,25 @@
                    (setq captured-account agent-codex--pending-account))))
         (agent-codex-restart)))
     (should (equal captured-account "work"))))
+
+(ert-deftest agent-codex-test-restart-resumes-current-session-id ()
+  "Restart Codex with the session id attached to the current buffer."
+  (let (captured-last-flag captured-extra-args)
+    (with-temp-buffer
+      (rename-buffer "*codex:~/project/:default*" t)
+      (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
+      (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                ((symbol-function 'agent--force-kill-buffer) #'ignore)
+                ((symbol-function 'agent-codex--resolve-account) (lambda () nil))
+                ((symbol-function 'codex--directory) (lambda () default-directory))
+                ((symbol-function 'codex--start-subcommand)
+                 (lambda (_subcommand last-flag extra-args &rest _)
+                   (setq captured-last-flag last-flag)
+                   (setq captured-extra-args extra-args))))
+        (agent-codex-restart)))
+    (should-not captured-last-flag)
+    (should (equal captured-extra-args
+                   '("019ea295-c3df-70b0-a8e5-a8ffe9df220a")))))
 
 (ert-deftest agent-codex-test-handoff-kills-single-existing-buffer-when-source-missing ()
   "Avoid instance-name prompts when emacsclient did not pass a source buffer."
