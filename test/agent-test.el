@@ -516,6 +516,28 @@
         (should-not ran)
         (should agent--before-exit-skill-exit-pending)))))
 
+(ert-deftest agent-test-exit-after-before-exit-skill-advances-to-next-skill ()
+  "Submit the next queued skill instead of exiting while the chain has more."
+  (let ((agent-backends nil)
+        (agent-skill-command-prefix-alist '((one . "/")))
+        (events nil)
+        ran)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (setq-local agent--before-exit-skill-exit-pending t)
+        (setq-local agent--before-exit-skill-remaining
+                    '(("update-log" :args "--auto")))
+        (agent-register-backend
+         'one
+         (agent-test--backend
+          :submit-command (lambda (cmd &optional _buffer) (push cmd events))
+          :exit (lambda () (interactive) (setq ran t))))
+        (should (agent-exit-after-before-exit-skill 'one buf))
+        (should (equal events '("/update-log --auto")))
+        (should-not ran)
+        (should-not agent--before-exit-skill-remaining)
+        (should agent--before-exit-skill-exit-pending)))))
+
 (ert-deftest agent-test-discover-all-skills-skips-non-invocable ()
   "Do not expose skills marked `user-invocable: false'."
   (let ((agent-backends nil))

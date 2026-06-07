@@ -287,14 +287,14 @@ Source: SVG Repo (CC0).")
   "Return input from the last visible Codex prompt line, or nil."
   (save-excursion
     (goto-char (point-max))
-    (when (re-search-backward "^›[ \t]*\\([^\n]*\\)$" nil t)
+    (when (re-search-backward "^[›❯][ \t]*\\([^\n]*\\)$" nil t)
       (agent-codex--nonempty-prompt-input (match-string-no-properties 1)))))
 
 (defun agent-codex--prompt-input-on-current-line ()
   "Return Codex prompt input on the current line, or nil."
   (let ((line-end (line-end-position)))
     (beginning-of-line)
-    (when (looking-at "^[ \t]*›[ \t]*\\([^\n]*\\)$")
+    (when (looking-at "^[ \t]*[›❯][ \t]*\\([^\n]*\\)$")
       (agent-codex--nonempty-prompt-input
        (buffer-substring-no-properties (match-beginning 1) line-end)))))
 

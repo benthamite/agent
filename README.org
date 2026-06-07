@@ -245,7 +245,9 @@ Backends can veto that automatic close while the submitted skill invocation is
 still visible as unaccepted prompt input. Codex uses this to avoid closing a
 session when the dollar-prefixed skill name was inserted but not submitted,
 while ignoring submitted command scrollback, visible placeholder text, and
-autosuggestion text.
+autosuggestion text. The readiness check recognises the standard Codex prompt
+markers (=›= and =❯=); a chain that stalls after the first skill usually means
+the running Codex renders an unrecognised prompt marker.
 
 Backends can provide an atomic submit operation for before-exit commands.
 Claude and Codex both target the resolved session buffer directly, insert the

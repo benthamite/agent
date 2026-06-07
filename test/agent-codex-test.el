@@ -296,6 +296,24 @@
             (should (agent-codex-before-exit-ready-to-close-p buf))))
       (kill-buffer buf))))
 
+(ert-deftest agent-codex-test-before-exit-ready-vetoes-pending-heavy-prompt ()
+  "Veto auto-close when the `❯'-rendered Codex prompt has pending input."
+  (let ((buf (generate-new-buffer "*codex-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "❯ git status\n\n  gpt-5.5 medium · /tmp")
+          (should-not (agent-codex-before-exit-ready-to-close-p buf)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-codex-test-before-exit-ready-ignores-stale-heavy-prompt-echo ()
+  "Allow auto-close at an empty `❯' prompt despite a stale `›' echo above it."
+  (let ((buf (generate-new-buffer "*codex-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "› $session-learning-capture\n\n❯ \n\n  gpt-5.5 medium · /tmp")
+          (should (agent-codex-before-exit-ready-to-close-p buf)))
+      (kill-buffer buf))))
+
 (ert-deftest agent-codex-test-stop-closes-after-submitted-before-exit-skill ()
   "Close a pending before-exit session when the submitted skill finishes."
   (let ((buf (generate-new-buffer "*codex:/tmp/project/*"))
