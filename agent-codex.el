@@ -575,7 +575,8 @@ segment does not perform disk I/O on every redisplay."
 (defun agent-codex-status-effort ()
   "Return the reasoning effort for the current Codex session."
   (or codex-reasoning-effort
-      (agent-codex--read-config-effort agent-codex--buffer-account)))
+      (agent-codex--read-config-effort agent-codex--buffer-account)
+      "medium"))
 
 (defun agent-codex-status-duration-ms ()
   "Return session duration in milliseconds, or nil."

@@ -140,6 +140,14 @@
                (lambda (_account) "medium")))
       (should (equal (agent-codex-status-effort) "xhigh")))))
 
+(ert-deftest agent-codex-test-status-effort-uses-codex-default ()
+  "Return Codex's default reasoning effort when no override is present."
+  (with-temp-buffer
+    (setq-local codex-reasoning-effort nil)
+    (cl-letf (((symbol-function 'agent-codex--read-config-effort)
+               (lambda (_account) nil)))
+      (should (equal (agent-codex-status-effort) "medium")))))
+
 (ert-deftest agent-codex-test-restart-preserves-buffer-account ()
   "Restart Codex with the account attached to the current session."
   (let (captured-account)
