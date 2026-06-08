@@ -230,9 +230,41 @@ Falls back to an empty string when SVG support is unavailable."
   "Extract the project name from BUFFER-NAME.
 Given \"*claude:~/path/to/project/:default*\" or
 \"*codex:~/path/to/project/:default*\", return \"project\"."
-  (if (string-match "/\\([^/]+\\)/:[^*]+\\*\\'" buffer-name)
-      (match-string 1 buffer-name)
+  (if-let* ((directory (agent--session-directory-from-buffer-name buffer-name))
+            (name (file-name-nondirectory
+                   (directory-file-name directory)))
+            ((not (string-empty-p name))))
+      name
     buffer-name))
+
+(defun agent--session-directory-from-buffer-name (buffer-name)
+  "Return the directory encoded in AI session BUFFER-NAME."
+  (when-let* ((payload (agent--session-buffer-payload buffer-name)))
+    (let ((separator (agent--buffer-name-instance-separator payload)))
+      (if separator
+          (substring payload 0 separator)
+        payload))))
+
+(defun agent--session-buffer-payload (buffer-name)
+  "Return the payload encoded in AI session BUFFER-NAME."
+  (when (and (stringp buffer-name)
+             (string-match "\\`\\*[^:]+:\\(.+\\)\\*\\'" buffer-name))
+    (match-string 1 buffer-name)))
+
+(defun agent--buffer-name-instance-separator (payload)
+  "Return the instance separator position in session buffer PAYLOAD."
+  (let ((search-end (length payload))
+        separator)
+    (while (and (not separator)
+                (setq separator (cl-position ?: payload
+                                             :from-end t
+                                             :end search-end)))
+      (let ((suffix (substring payload (1+ separator))))
+        (when (or (string-empty-p suffix)
+                  (string-match-p "[/\\\\]" suffix))
+          (setq search-end separator
+                separator nil))))
+    separator))
 
 ;;;; Customization
 

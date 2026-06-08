@@ -128,6 +128,12 @@
 
 ;;;; Session keys and display names
 
+(ert-deftest agent-test-session-name-handles-directory-without-trailing-slash ()
+  "Extract the project name when the buffer directory lacks a trailing slash."
+  (should (equal (agent--session-name
+                  "*codex:~/My Drive/Epoch/projects/ai-access-management:default*")
+                 "ai-access-management")))
+
 (ert-deftest agent-test-ensure-session-keys-assigns-home-row-keys ()
   "Assign home-row keys to all active backend buffers."
   (let ((agent-backends nil)
