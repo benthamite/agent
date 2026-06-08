@@ -240,6 +240,16 @@
   (let ((agent-claude--status-data nil))
     (should-not (agent-claude-status-model))))
 
+(ert-deftest agent-claude-test-status-effort-present ()
+  "Return level when effort data is present."
+  (let ((agent-claude--status-data '(:effort (:level "high"))))
+    (should (equal (agent-claude-status-effort) "high"))))
+
+(ert-deftest agent-claude-test-status-effort-nil ()
+  "Return nil when status data has no effort."
+  (let ((agent-claude--status-data nil))
+    (should-not (agent-claude-status-effort))))
+
 (ert-deftest agent-claude-test-status-cost-present ()
   "Return total_cost_usd when cost data is present."
   (let ((agent-claude--status-data

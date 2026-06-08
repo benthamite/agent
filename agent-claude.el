@@ -1125,6 +1125,11 @@ Does nothing if the timer is already running."
   (when-let* ((model (plist-get agent-claude--status-data :model)))
     (plist-get model :display_name)))
 
+(defun agent-claude-status-effort ()
+  "Return the reasoning effort level from the status data."
+  (when-let* ((effort (plist-get agent-claude--status-data :effort)))
+    (plist-get effort :level)))
+
 (defun agent-claude-status-cost ()
   "Return the total session cost in USD from the status data."
   (when-let* ((cost (plist-get agent-claude--status-data :cost)))
