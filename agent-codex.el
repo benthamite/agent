@@ -167,6 +167,7 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar gptel-model)
 (defvar gptel-use-tools)
 (defvar gptel--known-backends)
+(defvar codex-reasoning-effort)
 (defvar codex--session-id)
 (defvar codex--app-server-thread-id)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
@@ -507,20 +508,27 @@ persists the selection.  New sessions will use this account."
   "Time when this Codex session started.")
 
 (defvar agent-codex--config-model-cache nil
-  "Cached model lookup as (CONFIG MTIME . MODEL) for Codex config.")
+  "Cached model lookup as (CONFIG MTIME MODEL EFFORT) for Codex config.")
 
-(defun agent-codex--parse-config-model (config-file)
-  "Return the model string declared in CONFIG-FILE, or nil."
+(defun agent-codex--parse-config-value (config-file key)
+  "Return the string value declared for KEY in CONFIG-FILE, or nil."
   (with-temp-buffer
     (insert-file-contents config-file)
     (goto-char (point-min))
-    (when (re-search-forward "^model *= *\"\\([^\"]+\\)\"" nil t)
+    (when (re-search-forward
+           (format "^%s *= *\"\\([^\"]+\\)\"" (regexp-quote key)) nil t)
       (match-string 1))))
 
-(defun agent-codex--read-config-model (&optional account)
-  "Read the model from ACCOUNT's Codex config.
-Cached by file modification time so the doom-modeline ai-session
-segment does not perform disk I/O on every redisplay."
+(defun agent-codex--parse-config-model (config-file)
+  "Return the model string declared in CONFIG-FILE, or nil."
+  (agent-codex--parse-config-value config-file "model"))
+
+(defun agent-codex--parse-config-effort (config-file)
+  "Return the reasoning effort declared in CONFIG-FILE, or nil."
+  (agent-codex--parse-config-value config-file "model_reasoning_effort"))
+
+(defun agent-codex--read-config-field (account index)
+  "Read a cached config field for ACCOUNT at INDEX."
   (let* ((config-file (agent-codex--config-file account))
          (mtime (file-attribute-modification-time
                  (file-attributes config-file))))
@@ -529,12 +537,25 @@ segment does not perform disk I/O on every redisplay."
      ((and agent-codex--config-model-cache
            (equal config-file (nth 0 agent-codex--config-model-cache))
            (equal mtime (nth 1 agent-codex--config-model-cache)))
-      (nth 2 agent-codex--config-model-cache))
+      (nth index agent-codex--config-model-cache))
      (t
-      (let ((model (agent-codex--parse-config-model config-file)))
+      (let ((model (agent-codex--parse-config-model config-file))
+            (effort (agent-codex--parse-config-effort config-file)))
         (setq agent-codex--config-model-cache
-              (list config-file mtime model))
-        model)))))
+              (list config-file mtime model effort))
+        (nth index agent-codex--config-model-cache))))))
+
+(defun agent-codex--read-config-model (&optional account)
+  "Read the model from ACCOUNT's Codex config.
+Cached by file modification time so the doom-modeline ai-session
+segment does not perform disk I/O on every redisplay."
+  (agent-codex--read-config-field account 2))
+
+(defun agent-codex--read-config-effort (&optional account)
+  "Read the reasoning effort from ACCOUNT's Codex config.
+Cached by file modification time so the doom-modeline ai-session
+segment does not perform disk I/O on every redisplay."
+  (agent-codex--read-config-field account 3))
 
 (defun agent-codex-set-modeline ()
   "Set the doom-modeline to the `ai-session' modeline for this buffer."
@@ -550,6 +571,11 @@ segment does not perform disk I/O on every redisplay."
 (defun agent-codex-status-model ()
   "Return the model name for the current Codex session."
   (agent-codex--read-config-model agent-codex--buffer-account))
+
+(defun agent-codex-status-effort ()
+  "Return the reasoning effort for the current Codex session."
+  (or codex-reasoning-effort
+      (agent-codex--read-config-effort agent-codex--buffer-account)))
 
 (defun agent-codex-status-duration-ms ()
   "Return session duration in milliseconds, or nil."

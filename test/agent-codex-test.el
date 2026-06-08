@@ -115,6 +115,31 @@
                          "gpt-5.5")))
       (delete-directory dir t))))
 
+(ert-deftest agent-codex-test-read-config-effort-uses-account-home ()
+  "Read reasoning effort configuration from the selected account's CODEX_HOME."
+  (let* ((dir (make-temp-file "codex-account" t))
+         (home (expand-file-name "work" dir))
+         (config (expand-file-name "config.toml" home))
+         (agent-codex-accounts `(("work" . ,home)))
+         (agent-codex--config-model-cache nil))
+    (unwind-protect
+        (progn
+          (make-directory home t)
+          (with-temp-file config
+            (insert "model = \"gpt-5.5\"\n")
+            (insert "model_reasoning_effort = \"high\"\n"))
+          (should (equal (agent-codex--read-config-effort "work")
+                         "high")))
+      (delete-directory dir t))))
+
+(ert-deftest agent-codex-test-status-effort-prefers-buffer-override ()
+  "Return the live buffer-local reasoning effort before config."
+  (with-temp-buffer
+    (setq-local codex-reasoning-effort "xhigh")
+    (cl-letf (((symbol-function 'agent-codex--read-config-effort)
+               (lambda (_account) "medium")))
+      (should (equal (agent-codex-status-effort) "xhigh")))))
+
 (ert-deftest agent-codex-test-restart-preserves-buffer-account ()
   "Restart Codex with the account attached to the current session."
   (let (captured-account)

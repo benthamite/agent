@@ -370,8 +370,9 @@ The function ~agent-register-backend~ registers an AI tool by associating a back
 #+findex: agent-claude-status-session-usage
 #+findex: agent-claude-status-weekly-usage
 #+findex: agent-codex-status-model
+#+findex: agent-codex-status-effort
 #+findex: agent-codex-status-duration-ms
-The Claude and Codex status helpers are intended for modeline integrations such as =doom-modeline=. Claude status functions read the current session status JSON and expose model, cost, context, duration, and token information. Claude usage functions expose account-level utilization returned by the Anthropic usage endpoint. Codex status functions expose the configured model and elapsed session duration. The session switcher uses backend busy and background-work detectors to avoid showing actively responding sessions as waiting, and to distinguish truly idle waiting sessions from sessions that are waiting for input while background terminals, agents, or tasks are still running.
+The Claude and Codex status helpers are intended for modeline integrations such as =doom-modeline=. Claude status functions read the current session status JSON and expose model, cost, context, duration, and token information. Claude usage functions expose account-level utilization returned by the Anthropic usage endpoint. Codex status functions expose the configured model, reasoning effort, and elapsed session duration. The session switcher uses backend busy and background-work detectors to avoid showing actively responding sessions as waiting, and to distinguish truly idle waiting sessions from sessions that are waiting for input while background terminals, agents, or tasks are still running.
 
 * Transient menu
 :PROPERTIES:
