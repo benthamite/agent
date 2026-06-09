@@ -174,7 +174,14 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar codex--app-server-thread-id)
 (defvar codex--app-server-turn-active-p)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
+(declare-function codex--buffer-name-for-directory "codex"
+                  (dir instance-name))
+(declare-function codex--build-backend-switches "codex"
+                  (backend extra-switches))
 (declare-function codex--current-session-identity "codex" ())
+(declare-function codex--launch-session "codex"
+                  (dir backend buffer-name instance-name switches
+                       switch-after))
 (declare-function codex--terminal-cursor-position "codex" ())
 (declare-function gptel-request "gptel")
 
@@ -1300,16 +1307,23 @@ buffer that requested the handoff."
 (defun agent-codex-restart ()
   "Kill the current Codex session and resume it in place.
 Useful when a setting change requires relaunching Codex.  Preserves the
-session's directory, instance name, and session id.  If the active
-account differs from the session account, prompt for which account to use."
+session's directory and instance name.  If the active account differs
+from the session account, prompt for which account to use.  Restarts that
+keep the same account resume the existing session id; account-changing
+restarts start a fresh Codex session because Codex session ids are
+account-bound."
   (interactive)
   (unless (codex--buffer-p (current-buffer))
     (user-error "Not in a Codex buffer"))
   (let* ((dir default-directory)
-         (account (agent-codex--restart-account agent-codex--buffer-account))
-         (identity (or (codex--current-session-identity)
-                       (user-error "Current Codex buffer has no session id")))
-         (session-id (plist-get identity :id))
+         (session-account agent-codex--buffer-account)
+         (account (agent-codex--restart-account session-account))
+         (resume-session (agent-codex--restart-resume-p
+                          session-account account))
+         (identity (when resume-session
+                     (or (codex--current-session-identity)
+                         (user-error
+                          "Current Codex buffer has no session id"))))
          (backend (default-value 'codex-terminal-backend))
          (instance-name (codex--extract-instance-name-from-buffer-name
                          (buffer-name))))
@@ -1317,10 +1331,27 @@ account differs from the session account, prompt for which account to use."
     (let ((agent-codex--pending-account account))
       (agent-codex--install-hooks)
       (cl-letf (((symbol-function 'codex--directory) (lambda () dir)))
-        (if (eq backend 'app-server)
-            (codex--app-server-launch-resume-session session-id instance-name)
-          (codex--start-subcommand "resume" nil (list session-id)
-                                   instance-name))))))
+        (if resume-session
+            (agent-codex--resume-session
+             backend (plist-get identity :id) instance-name)
+          (agent-codex--start-fresh-session backend dir instance-name))))))
+
+(defun agent-codex--restart-resume-p (session-account account)
+  "Return non-nil when restart should resume SESSION-ACCOUNT under ACCOUNT."
+  (not (and session-account account
+            (not (equal session-account account)))))
+
+(defun agent-codex--resume-session (backend session-id instance-name)
+  "Resume SESSION-ID with BACKEND and INSTANCE-NAME."
+  (if (eq backend 'app-server)
+      (codex--app-server-launch-resume-session session-id instance-name)
+    (codex--start-subcommand "resume" nil (list session-id) instance-name)))
+
+(defun agent-codex--start-fresh-session (backend dir instance-name)
+  "Start a fresh Codex session using BACKEND in DIR as INSTANCE-NAME."
+  (let ((buffer-name (codex--buffer-name-for-directory dir instance-name))
+        (switches (codex--build-backend-switches backend nil)))
+    (codex--launch-session dir backend buffer-name instance-name switches t)))
 
 (defun agent-codex--restart-account (session-account)
   "Return the account to use when restarting SESSION-ACCOUNT."
