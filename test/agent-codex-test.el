@@ -14,6 +14,11 @@
   "Use the path written by the Codex `/handoff' skill."
   (should (equal agent-codex-handoff-file "/tmp/codex-handoff.md")))
 
+(ert-deftest agent-codex-test-shared-config-items-use-agents-md ()
+  "Share the actual Codex instruction filename across account homes."
+  (should (member "AGENTS.md" agent-codex--shared-config-items))
+  (should-not (member "AGENT.md" agent-codex--shared-config-items)))
+
 (ert-deftest agent-codex-test-account-env-uses-pending-account ()
   "Set CODEX_HOME from the dynamically bound pending account."
   (let* ((dir (make-temp-file "codex-account" t))
@@ -568,7 +573,9 @@
          (agent-codex-programmatic-skill-directories nil)
          (default-directory dir))
     (unwind-protect
-        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'agent-codex--codex-plugin-list)
+                   (lambda (_codex-home) nil)))
           (make-directory (file-name-directory visible) t)
           (make-directory (file-name-directory hidden) t)
           (with-temp-file visible
@@ -580,6 +587,86 @@
                          '("visible"))))
       (delete-directory dir t)
       (delete-directory codex-home t))))
+
+(ert-deftest agent-codex-test-discover-skills-uses-selected-account-home ()
+  "Discover user skills from the selected account's CODEX_HOME."
+  (let* ((dir (make-temp-file "codex-account-skills" t))
+         (env-home (expand-file-name "env-home" dir))
+         (selected-home (expand-file-name "selected-home" dir))
+         (env-skill (expand-file-name "skills/env-only/SKILL.md" env-home))
+         (selected-skill
+          (expand-file-name "skills/selected-only/SKILL.md" selected-home))
+         (process-environment
+          (cons (format "CODEX_HOME=%s" env-home) process-environment))
+         (agent-codex-accounts `(("work" . ,selected-home)))
+         (agent-codex--pending-account "work")
+         (agent-codex-skill-directories nil)
+         (agent-codex-programmatic-skill-directories nil)
+         (default-directory dir))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory env-skill) t)
+          (make-directory (file-name-directory selected-skill) t)
+          (with-temp-file env-skill
+            (insert "---\nname: env-only\n---\n"))
+          (with-temp-file selected-skill
+            (insert "---\nname: selected-only\n---\n"))
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                    ((symbol-function 'agent-codex--codex-plugin-list)
+                     (lambda (_codex-home) nil)))
+            (should (equal (mapcar (lambda (skill) (plist-get skill :name))
+                                   (agent-codex--discover-skills))
+                           '("selected-only")))))
+      (delete-directory dir t))))
+
+(ert-deftest agent-codex-test-discover-skills-includes-current-plugin-roots ()
+  "Discover plugin skills only from enabled current plugin versions."
+  (let* ((dir (make-temp-file "codex-plugin-skills" t))
+         (codex-home (expand-file-name ".codex-work" dir))
+         (old-skill
+          (expand-file-name
+           "plugins/cache/openai-curated/superpowers/oldhash/skills/old-plugin/SKILL.md"
+           codex-home))
+         (new-skill
+          (expand-file-name
+           "plugins/cache/openai-curated/superpowers/newhash/skills/new-plugin/SKILL.md"
+           codex-home))
+         (disabled-skill
+          (expand-file-name
+           "plugins/cache/openai-curated/browser/newhash/skills/disabled-plugin/SKILL.md"
+           codex-home))
+         (agent-codex-accounts `(("work" . ,codex-home)))
+         (agent-codex--pending-account "work")
+         (agent-codex-skill-directories nil)
+         (agent-codex-programmatic-skill-directories nil)
+         (plugin-list '(((name . "superpowers")
+                         (marketplaceName . "openai-curated")
+                         (version . "newhash")
+                         (installed . t)
+                         (enabled . t))
+                        ((name . "browser")
+                         (marketplaceName . "openai-curated")
+                         (version . "newhash")
+                         (installed . t)
+                         (enabled . :false))))
+         (default-directory dir))
+    (unwind-protect
+        (progn
+          (dolist (file (list old-skill new-skill disabled-skill))
+            (make-directory (file-name-directory file) t))
+          (with-temp-file old-skill
+            (insert "---\nname: old-plugin\n---\n"))
+          (with-temp-file new-skill
+            (insert "---\nname: new-plugin\n---\n"))
+          (with-temp-file disabled-skill
+            (insert "---\nname: disabled-plugin\n---\n"))
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                    ((symbol-function 'agent-codex--codex-plugin-list)
+                     (lambda (_codex-home) plugin-list)))
+            (should (equal (mapcar (lambda (skill) (plist-get skill :name))
+                                   (agent-codex--discover-skills))
+                           '("new-plugin")))))
+      (delete-directory dir t))))
 
 (ert-deftest agent-codex-test-build-exec-command ()
   "Build a current `codex exec' command line."

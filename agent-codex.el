@@ -31,6 +31,7 @@
 (require 'codex)
 (eval-and-compile (require 'agent))
 (require 'cl-lib)
+(require 'json)
 (require 'subr-x)
 (require 'transient)
 
@@ -190,7 +191,7 @@ Set by `agent-codex--capture-buffer-account' via
 `codex-start-hook'.")
 
 (defconst agent-codex--shared-config-items
-  '("config.toml" "hooks.json" "AGENT.md" "rules"
+  '("config.toml" "hooks.json" "AGENTS.md" "rules"
     "skills" "programmatic-skills" "plugins" "vendor_imports"
     "history.jsonl" "sessions" "session_index.jsonl"
     "archived_sessions" "memories" "shell_snapshots"
@@ -339,6 +340,22 @@ back to the persisted active account via
   (when-let* ((home (alist-get account agent-codex-accounts
                                nil nil #'string=)))
     (expand-file-name home)))
+
+(defun agent-codex--selected-account-no-prompt ()
+  "Return the selected Codex account without prompting the user."
+  (or agent-codex--pending-account
+      agent-codex--current-account
+      (agent-codex--load-account)))
+
+(defun agent-codex--effective-codex-home ()
+  "Return the Codex home for noninteractive helper discovery.
+Prefer the selected account home.  Fall back to `CODEX_HOME' and
+then the ordinary `~/.codex' home.  This function never prompts."
+  (expand-file-name
+   (or (when-let* ((account (agent-codex--selected-account-no-prompt)))
+         (agent-codex--account-home account))
+       (getenv "CODEX_HOME")
+       "~/.codex")))
 
 (defun agent-codex--config-file (&optional account)
   "Return the config.toml path for ACCOUNT or the default Codex config."
@@ -707,6 +724,81 @@ The :type field is a string from the hook wrapper (e.g. \"Stop\")."
 
 ;;;;; Skill runner
 
+(defun agent-codex--codex-plugin-list (codex-home)
+  "Return enabled-plugin metadata from `codex plugin list --json' for CODEX-HOME."
+  (when-let* ((program (or codex-program (executable-find "codex"))))
+    (with-temp-buffer
+      (let* ((process-environment
+              (cons (format "CODEX_HOME=%s" (expand-file-name codex-home))
+                    process-environment))
+             (exit-code
+              (process-file program nil t nil "plugin" "list" "--json"))
+             (output (buffer-string)))
+        (if (not (equal exit-code 0))
+            (progn
+              (unless (string-empty-p (string-trim output))
+                (message "agent-codex: codex plugin list failed: %s"
+                         (string-trim output)))
+              nil)
+          (condition-case err
+              (let* ((json-object-type 'alist)
+                     (json-array-type 'list)
+                     (json-false :false)
+                     (data (json-read-from-string output))
+                     (installed (alist-get 'installed data)))
+                (and (listp installed) installed))
+            (json-error
+             (message "agent-codex: cannot parse codex plugin list JSON: %S" err)
+             nil)))))))
+
+(defun agent-codex--codex-plugin-entry-skill-root (codex-home entry)
+  "Return the skill root for active plugin ENTRY under CODEX-HOME."
+  (when (and (eq (alist-get 'installed entry) t)
+             (eq (alist-get 'enabled entry) t))
+    (let ((name (alist-get 'name entry))
+          (marketplace (alist-get 'marketplaceName entry))
+          (version (alist-get 'version entry)))
+      (when (and (stringp name)
+                 (stringp marketplace)
+                 version)
+        (let ((root (expand-file-name
+                     (string-join
+                      (list "plugins" "cache" marketplace name
+                            (format "%s" version) "skills")
+                      "/")
+                     codex-home)))
+          (when (and (file-directory-p root)
+                     (not (agent-codex--codex-plugin-root-orphaned-p root)))
+            root))))))
+
+(defun agent-codex--codex-plugin-root-orphaned-p (path)
+  "Return non-nil if PATH is inside an orphaned Codex plugin cache."
+  (let ((current (file-name-as-directory (expand-file-name path)))
+        orphaned)
+    (while (and current (not orphaned))
+      (when (file-exists-p (expand-file-name ".orphaned_at" current))
+        (setq orphaned t))
+      (if (string= (file-name-nondirectory (directory-file-name current))
+                   "cache")
+          (setq current nil)
+        (let ((parent (file-name-directory (directory-file-name current))))
+          (setq current
+                (unless (or (null parent) (equal parent current))
+                  parent)))))
+    orphaned))
+
+(defun agent-codex--codex-plugin-skill-roots (codex-home)
+  "Return current enabled Codex plugin skill roots under CODEX-HOME."
+  (let (roots seen)
+    (dolist (entry (agent-codex--codex-plugin-list codex-home))
+      (when-let* ((root (agent-codex--codex-plugin-entry-skill-root
+                         codex-home entry))
+                  (real (file-truename root)))
+        (unless (member real seen)
+          (push real seen)
+          (push root roots))))
+    (nreverse roots)))
+
 (defun agent-codex--discover-skills ()
   "Discover available Codex skills.
 Scans the standard Codex skill directories, project-local skill
@@ -714,6 +806,7 @@ directories, and any custom ones from
 `agent-codex-skill-directories' and
 `agent-codex-programmatic-skill-directories'."
   (let* ((skills (make-hash-table :test #'equal))
+         (codex-home (agent-codex--effective-codex-home))
          (project-root (or (when-let* ((proj (project-current)))
                              (project-root proj))
                            (locate-dominating-file default-directory ".codex")
@@ -721,13 +814,15 @@ directories, and any custom ones from
          (dirs (append
                 ;; Standard Codex skill locations
                 (list (expand-file-name "skills"
-                                        (or (getenv "CODEX_HOME") "~/.codex")))
+                                        codex-home))
                 ;; Project-local
                 (when project-root
                   (list (expand-file-name ".agent/skills" project-root)
                         (expand-file-name ".codex/skills" project-root)
                         (expand-file-name ".codex/programmatic-skills"
                                           project-root)))
+                ;; Enabled plugin skills for the selected account.
+                (agent-codex--codex-plugin-skill-roots codex-home)
                 ;; Custom
                 agent-codex-skill-directories
                 agent-codex-programmatic-skill-directories)))
