@@ -401,6 +401,15 @@
                    '((string "$session-learning-capture")
                      (action :return))))))
 
+(ert-deftest agent-codex-test-send-return-clears-waiting-flag ()
+  "Clear stale waiting state when submitting the current Codex prompt."
+  (with-temp-buffer
+    (setq-local agent--waiting-for-input (current-time))
+    (cl-letf (((symbol-function 'codex--term-send-action) #'ignore)
+              ((symbol-function 'display-buffer) #'ignore))
+      (agent-codex-send-return (current-buffer)))
+    (should-not agent--waiting-for-input)))
+
 (ert-deftest agent-codex-test-submit-command-delegates-to-codex-buffer-submit ()
   "Submit Codex command text through Codex's target-buffer primitive."
   (let (events expected-buffer)
@@ -414,6 +423,14 @@
     (should (equal (nreverse events)
                    (list (list "$session-learning-capture"
                                expected-buffer))))))
+
+(ert-deftest agent-codex-test-target-buffer-submit-clears-waiting-flag ()
+  "Clear stale waiting state in the target Codex buffer."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent--waiting-for-input (current-time))
+      (agent-codex--clear-waiting-before-send-command-to-buffer "prompt" buf)
+      (should-not agent--waiting-for-input))))
 
 ;;;; Slack message action routing
 
@@ -548,6 +565,15 @@
           (should (agent-codex--busy-p buf)))
       (kill-buffer buf))))
 
+(ert-deftest agent-codex-test-detects-app-server-active-turn ()
+  "Detect active app-server turns without rendered TUI status text."
+  (let ((buf (generate-new-buffer "*codex-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (setq-local codex--app-server-turn-active-p t)
+          (should (agent-codex--busy-p buf)))
+      (kill-buffer buf))))
+
 (ert-deftest agent-codex-test-working-status-is-not-waiting ()
   "Do not render stale Codex waiting flags while Codex is working."
   (let ((buf (generate-new-buffer "*codex-test*")))
@@ -555,6 +581,16 @@
         (with-current-buffer buf
           (setq-local agent--waiting-for-input (current-time))
           (insert "• Working (20m 58s • esc to interrupt)\n")
+          (should-not (agent--session-waiting-p buf 'codex)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-codex-test-app-server-active-turn-is-not-waiting ()
+  "Do not render stale Codex waiting flags during app-server turns."
+  (let ((buf (generate-new-buffer "*codex-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (setq-local agent--waiting-for-input (current-time))
+          (setq-local codex--app-server-turn-active-p t)
           (should-not (agent--session-waiting-p buf 'codex)))
       (kill-buffer buf))))
 

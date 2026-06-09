@@ -171,6 +171,7 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar codex-reasoning-effort)
 (defvar codex--session-id)
 (defvar codex--app-server-thread-id)
+(defvar codex--app-server-turn-active-p)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
 (declare-function codex--current-session-identity "codex" ())
 (declare-function codex--terminal-cursor-position "codex" ())
@@ -260,6 +261,7 @@ Source: SVG Repo (CC0).")
   (when-let* ((codex-buffer (agent-codex--target-buffer buffer)))
     (with-current-buffer codex-buffer
       (sit-for 0.1)
+      (agent--clear-waiting-for-input)
       (codex--term-send-action codex-terminal-backend :return)
       (display-buffer codex-buffer))
     codex-buffer))
@@ -694,11 +696,13 @@ indicator, e.g. \"1 background terminal running\"."
   (let ((buf (or buffer (current-buffer))))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (save-excursion
-          (goto-char (point-max))
-          (re-search-backward agent-codex--working-regexp
-                              (max (point-min) (- (point-max) 800))
-                              t))))))
+        (or (and (boundp 'codex--app-server-turn-active-p)
+                 codex--app-server-turn-active-p)
+            (save-excursion
+              (goto-char (point-max))
+              (re-search-backward agent-codex--working-regexp
+                                  (max (point-min) (- (point-max) 800))
+                                  t)))))))
 
 (defun agent-codex--handle-notification (message)
   "Handle a notification event from Codex CLI.
@@ -1381,7 +1385,30 @@ With prefix ARG, use Codex CLI's `--last' flag."
   (unless (advice-member-p #'agent--clear-waiting-for-input
                            'codex--do-send-command)
     (advice-add 'codex--do-send-command :before
-                #'agent--clear-waiting-for-input)))
+                #'agent--clear-waiting-for-input))
+  (unless (advice-member-p #'agent-codex--clear-waiting-before-send-command-to-buffer
+                           'codex--send-command-to-buffer)
+    (advice-add 'codex--send-command-to-buffer :before
+                #'agent-codex--clear-waiting-before-send-command-to-buffer))
+  (unless (advice-member-p #'agent--clear-waiting-for-input
+                           'codex--terminal-send-return)
+    (advice-add 'codex--terminal-send-return :before
+                #'agent--clear-waiting-for-input))
+  (unless (advice-member-p #'agent-codex--clear-waiting-before-tui-action
+                           'codex--send-tui-action)
+    (advice-add 'codex--send-tui-action :before
+                #'agent-codex--clear-waiting-before-tui-action)))
+
+(defun agent-codex--clear-waiting-before-send-command-to-buffer (_cmd buffer)
+  "Clear stale waiting state before submitting to Codex BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (agent--clear-waiting-for-input))))
+
+(defun agent-codex--clear-waiting-before-tui-action (action)
+  "Clear stale waiting state before a Codex TUI return ACTION."
+  (when (eq (if (listp action) (car action) action) :return)
+    (agent--clear-waiting-for-input)))
 
 (agent-codex--install-hooks)
 
