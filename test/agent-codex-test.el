@@ -249,6 +249,45 @@
                    "019ea295-c3df-70b0-a8e5-a8ffe9df220a"))
     (should (equal captured-instance-name "default"))))
 
+(ert-deftest agent-codex-test-restart-uses-codex-session-identity ()
+  "Restart Codex through the canonical session identity resolver."
+  (let (captured-session-id)
+    (with-temp-buffer
+      (rename-buffer "*codex:~/project/:default*" t)
+      (setq-local codex--session-id nil)
+      (setq-local codex--app-server-thread-id nil)
+      (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                ((symbol-function 'agent--force-kill-buffer) #'ignore)
+                ((symbol-function 'agent-codex--resolve-account) (lambda () nil))
+                ((symbol-function 'codex--directory) (lambda () default-directory))
+                ((symbol-function 'codex--current-session-identity)
+                 (lambda ()
+                   '(:id "019eada4-ebff-7721-9df6-642202f1138f"
+                     :transcript-file "/tmp/session.jsonl")))
+                ((symbol-function 'codex--app-server-launch-resume-session)
+                 (lambda (session-id _instance-name)
+                   (setq captured-session-id session-id))))
+        (agent-codex-restart)))
+    (should (equal captured-session-id
+                   "019eada4-ebff-7721-9df6-642202f1138f"))))
+
+(ert-deftest agent-codex-test-restart-without-session-identity-does-not-kill ()
+  "Restart refuses to kill the current buffer without session identity."
+  (let (killed started)
+    (with-temp-buffer
+      (rename-buffer "*codex:~/project/:default*" t)
+      (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                ((symbol-function 'agent--force-kill-buffer)
+                 (lambda (_buffer) (setq killed t)))
+                ((symbol-function 'agent-codex--resolve-account) (lambda () nil))
+                ((symbol-function 'codex--current-session-identity)
+                 (lambda () nil))
+                ((symbol-function 'codex--app-server-launch-resume-session)
+                 (lambda (&rest _args) (setq started t))))
+        (should-error (agent-codex-restart) :type 'user-error)))
+    (should-not killed)
+    (should-not started)))
+
 (ert-deftest agent-codex-test-restart-uses-default-backend-option ()
   "Restart uses the configured default backend for the new session."
   (let ((codex-terminal-backend 'eat)

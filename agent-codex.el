@@ -172,6 +172,7 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar codex--session-id)
 (defvar codex--app-server-thread-id)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
+(declare-function codex--current-session-identity "codex" ())
 (declare-function codex--terminal-cursor-position "codex" ())
 (declare-function gptel-request "gptel")
 
@@ -1283,7 +1284,9 @@ account differs from the session account, prompt for which account to use."
     (user-error "Not in a Codex buffer"))
   (let* ((dir default-directory)
          (account (agent-codex--restart-account agent-codex--buffer-account))
-         (session-id (agent-codex--current-session-id))
+         (identity (or (codex--current-session-identity)
+                       (user-error "Current Codex buffer has no session id")))
+         (session-id (plist-get identity :id))
          (backend (default-value 'codex-terminal-backend))
          (instance-name (codex--extract-instance-name-from-buffer-name
                          (buffer-name))))
@@ -1322,13 +1325,6 @@ account differs from the session account, prompt for which account to use."
   (when (and account (not (agent-codex--account-home account)))
     (user-error "Codex account `%s' is not configured" account))
   account)
-
-(defun agent-codex--current-session-id ()
-  "Return the current Codex session id, or signal when unavailable."
-  (or (and (boundp 'codex--session-id) codex--session-id)
-      (and (boundp 'codex--app-server-thread-id)
-           codex--app-server-thread-id)
-      (user-error "Current Codex buffer has no session id")))
 
 ;;;;; Start or switch (Codex-specific entry point)
 
