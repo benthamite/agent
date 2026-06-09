@@ -182,7 +182,7 @@
 (ert-deftest agent-codex-test-restart-prompts-when-active-account-differs ()
   "Restart Codex with the selected account when the user chooses it."
   (let ((dir (make-temp-file "codex-restart" t))
-        captured-account prompt-choices)
+        captured-account captured-session-id prompt-choices)
     (unwind-protect
         (with-temp-buffer
           (rename-buffer "*codex:~/project/:default*" t)
@@ -201,66 +201,16 @@
                          (setq prompt-choices choices)
                          "personal"))
                       ((symbol-function 'codex--app-server-launch-resume-session)
-                       (lambda (&rest _args)
-                         (error "should not resume across accounts")))
-                      ((symbol-function 'codex--build-backend-switches)
-                       (lambda (&rest _args) nil))
-                      ((symbol-function 'codex--buffer-name-for-directory)
-                       (lambda (&rest _args) "*codex:fresh*"))
-                      ((symbol-function 'codex--launch-session)
-                       (lambda (&rest _args)
+                       (lambda (session-id _instance-name)
                          (setq captured-account
-                               agent-codex--pending-account))))
+                               agent-codex--pending-account)
+                         (setq captured-session-id session-id))))
               (agent-codex-restart))))
       (delete-directory dir t))
     (should (equal prompt-choices '("personal" "work")))
-    (should (equal captured-account "personal"))))
-
-(ert-deftest agent-codex-test-restart-account-change-starts-fresh-session ()
-  "Start fresh instead of resuming when restart switches accounts."
-  (let ((dir (make-temp-file "codex-restart" t))
-        captured)
-    (unwind-protect
-        (with-temp-buffer
-          (rename-buffer "*codex:~/project/:default*" t)
-          (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
-          (setq-local agent-codex--buffer-account "work")
-          (let ((agent-codex-accounts
-                 `(("work" . ,(expand-file-name "work" dir))
-                   ("personal" . ,(expand-file-name "personal" dir))))
-                (agent-codex--current-account "personal"))
-            (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                      ((symbol-function 'agent--force-kill-buffer) #'ignore)
-                      ((symbol-function 'codex--directory)
-                       (lambda () default-directory))
-                      ((symbol-function 'completing-read)
-                       (lambda (&rest _args) "personal"))
-                      ((symbol-function 'codex--app-server-launch-resume-session)
-                       (lambda (&rest _args)
-                         (error "should not resume across accounts")))
-                      ((symbol-function 'codex--build-backend-switches)
-                       (lambda (backend extra-switches)
-                         (list backend extra-switches)))
-                      ((symbol-function 'codex--buffer-name-for-directory)
-                       (lambda (launch-dir instance-name)
-                         (format "*codex:%s:%s*" launch-dir instance-name)))
-                      ((symbol-function 'codex--launch-session)
-                       (lambda (launch-dir backend buffer-name instance-name
-                                           switches switch-after)
-                         (setq captured
-                               (list :account agent-codex--pending-account
-                                     :dir launch-dir
-                                     :backend backend
-                                     :buffer-name buffer-name
-                                     :instance-name instance-name
-                                     :switches switches
-                                     :switch-after switch-after)))))
-              (agent-codex-restart))))
-      (delete-directory dir t))
-    (should (equal (plist-get captured :account) "personal"))
-    (should (eq (plist-get captured :backend) 'app-server))
-    (should (equal (plist-get captured :instance-name) "default"))
-    (should (plist-get captured :switch-after))))
+    (should (equal captured-account "personal"))
+    (should (equal captured-session-id
+                   "019ea295-c3df-70b0-a8e5-a8ffe9df220a"))))
 
 (ert-deftest agent-codex-test-restart-fails-when-active-account-is-missing ()
   "Do not fall back to the session account when the selected account is stale."
