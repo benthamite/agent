@@ -1338,10 +1338,32 @@ runs and prompts for arguments as needed."
 
 (defun agent--run-before-exit-functions (backend buffer)
   "Return non-nil if BACKEND session BUFFER should exit."
-  (catch 'abort
-    (dolist (fn agent-before-exit-functions t)
-      (unless (funcall fn backend buffer)
-        (throw 'abort nil)))))
+  (and (agent--confirm-no-captured-prompts backend buffer "Exit")
+       (catch 'abort
+         (dolist (fn agent-before-exit-functions t)
+           (unless (funcall fn backend buffer)
+             (throw 'abort nil))))))
+
+(defun agent--confirm-no-captured-prompts (backend buffer action)
+  "Confirm ACTION for BUFFER when it has pending captured prompts."
+  (let ((count (length (agent--captured-prompts backend buffer))))
+    (or (zerop count)
+        (yes-or-no-p
+         (format "%s has %d captured prompt%s.  %s anyway? "
+                 (agent-display-name buffer)
+                 count
+                 (if (= count 1) "" "s")
+                 action)))))
+
+(defun agent--dispatch-with-captured-prompt-confirmation (key action)
+  "Dispatch command KEY after confirming pending captures for ACTION."
+  (let* ((backend (agent--resolve-backend))
+         (buffer (current-buffer))
+         (fn (agent--backend-get backend key)))
+    (if (not fn)
+        (user-error "Backend `%s' does not support `%s'" backend key)
+      (when (agent--confirm-no-captured-prompts backend buffer action)
+        (call-interactively fn)))))
 
 (defun agent-run-skill-before-exit (backend buffer)
   "Submit the before-exit skills for BUFFER before BACKEND exits it.
@@ -1588,7 +1610,7 @@ combined list of skill plists, each augmented with `:backend'."
   "Close the current session and start a new one with the handoff prompt.
 Dispatches to the appropriate backend."
   (interactive)
-  (agent--dispatch :handoff))
+  (agent--dispatch-with-captured-prompt-confirmation :handoff "Handoff"))
 
 ;;;###autoload
 (defun agent-run-skill ()
@@ -1983,7 +2005,7 @@ terminate the CLI process and kill the buffer."
 Useful when a setting change requires relaunching the CLI.
 Dispatches to the backend's `:restart' handler."
   (interactive)
-  (agent--dispatch :restart))
+  (agent--dispatch-with-captured-prompt-confirmation :restart "Restart"))
 
 ;;;; Transient boolean infix class
 

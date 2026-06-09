@@ -287,6 +287,91 @@
         (agent-exit)
         (should ran)))))
 
+(ert-deftest agent-test-exit-confirms-when-captured-prompts-pending ()
+  "Abort exit when pending captured prompts exist and confirmation is declined."
+  (let ((agent-backends nil)
+        (agent-before-exit-functions nil)
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        prompted
+        ran)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*one:~/repo/project/:default*" t)
+          (let ((buf (current-buffer)))
+            (agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))
+              :directory (lambda (_buffer) "/tmp/project/")
+              :exit (lambda () (interactive) (setq ran t))))
+            (let ((file (agent--prompt-capture-file 'one buf)))
+              (make-directory (file-name-directory file) t)
+              (with-temp-file file
+                (insert "* Prompt A\n\nAlpha\n")))
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (prompt)
+                         (setq prompted prompt)
+                         nil)))
+              (agent-exit))
+            (should (string-match-p "1 captured prompt" prompted))
+            (should-not ran)))
+      (delete-directory agent-prompt-capture-directory t))))
+
+(ert-deftest agent-test-exit-skips-capture-confirmation-without-prompts ()
+  "Do not prompt for capture confirmation when no captured prompts exist."
+  (let ((agent-backends nil)
+        (agent-before-exit-functions nil)
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        prompted
+        ran)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*one:~/repo/project/:default*" t)
+          (let ((buf (current-buffer)))
+            (agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))
+              :directory (lambda (_buffer) "/tmp/project/")
+              :exit (lambda () (interactive) (setq ran t))))
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (_prompt)
+                         (setq prompted t)
+                         nil)))
+              (agent-exit))
+            (should-not prompted)
+            (should ran)))
+      (delete-directory agent-prompt-capture-directory t))))
+
+(ert-deftest agent-test-restart-confirms-when-captured-prompts-pending ()
+  "Abort restart when pending captures exist and confirmation is declined."
+  (let ((agent-backends nil)
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        prompted
+        ran)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*one:~/repo/project/:default*" t)
+          (let ((buf (current-buffer)))
+            (agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))
+              :directory (lambda (_buffer) "/tmp/project/")
+              :restart (lambda () (interactive) (setq ran t))))
+            (let ((file (agent--prompt-capture-file 'one buf)))
+              (make-directory (file-name-directory file) t)
+              (with-temp-file file
+                (insert "* Prompt A\n\nAlpha\n")))
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (prompt)
+                         (setq prompted prompt)
+                         nil)))
+              (agent-restart))
+            (should (string-match-p "1 captured prompt" prompted))
+            (should-not ran)))
+      (delete-directory agent-prompt-capture-directory t))))
+
 (ert-deftest agent-test-run-skill-before-exit-submits-codex-skill ()
   "Submit a Codex skill and abort the first exit globally by default."
   (let ((agent-backends nil)
