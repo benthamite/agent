@@ -1290,8 +1290,10 @@ account differs from the session account, prompt for which account to use."
     (let ((agent-codex--pending-account account))
       (agent-codex--install-hooks)
       (cl-letf (((symbol-function 'codex--directory) (lambda () dir)))
-        (codex--start-subcommand "resume" nil (list session-id)
-                                 instance-name)))))
+        (if (eq codex-terminal-backend 'app-server)
+            (codex--app-server-launch-resume-session session-id instance-name)
+          (codex--start-subcommand "resume" nil (list session-id)
+                                   instance-name))))))
 
 (defun agent-codex--restart-account (session-account)
   "Return the account to use when restarting SESSION-ACCOUNT."

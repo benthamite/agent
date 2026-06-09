@@ -589,11 +589,11 @@ If sessions exist, show a transient menu with home-row keys."
   (interactive)
   (let ((all-bufs (agent--find-all-buffers)))
     (if (null all-bufs)
-        (agent--start-new-session)
+        (agent-start-new-session)
       (agent--ensure-all-session-keys)
       (transient-setup 'agent--session-switcher))))
 
-(defun agent--start-new-session ()
+(defun agent-start-new-session ()
   "Start a new session, prompting for backend if multiple are registered."
   (interactive)
   (let ((backends agent-backends))
@@ -611,11 +611,14 @@ If sessions exist, show a transient menu with home-row keys."
              (backend-sym (cdr (assoc choice names))))
         (funcall (agent--backend-get backend-sym :start-new)))))))
 
+(when (fboundp 'agent--start-new-session)
+  (fmakunbound 'agent--start-new-session))
+
 (transient-define-prefix agent--session-switcher ()
   "Switch to an AI session or start a new one."
   [["Actions"
     ("w" "jump to waiting" agent-jump-to-waiting)
-    ("e" "new session" agent--start-new-session)]
+    ("e" "new session" agent-start-new-session)]
    ["Sessions"
     :class transient-column
     :setup-children agent--session-switcher-children]])
