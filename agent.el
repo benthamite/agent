@@ -1017,9 +1017,8 @@ be retrieved with `agent-insert-captured-prompt'."
   "Insert a captured prompt into an AI session BUFFER.
 Prompts are loaded from the current session's persisted Org
 capture file.  The selected prompt is inserted into the CLI input
-field but is not submitted.  After successful insertion, the
-entry is marked with an INSERTED property so it is hidden from
-future selections.
+field but is not submitted.  After successful insertion, the Org
+entry is removed from the capture file.
 
 With prefix argument INCLUDE-INSERTED, include prompts that have
 already been inserted."
@@ -1035,7 +1034,7 @@ already been inserted."
       (user-error "No captured prompts for this session"))
     (let ((prompt (agent--select-captured-prompt prompts)))
       (funcall send-fn (plist-get prompt :text) session-buffer)
-      (agent--mark-captured-prompt-inserted prompt))))
+      (agent--delete-captured-prompt prompt))))
 
 (defun agent--resolve-session-buffer (&optional buffer)
   "Return an AI session buffer from BUFFER, current context, or prompt."
@@ -1248,14 +1247,18 @@ non-nil, include prompts already marked as inserted."
     "[[:space:]\n]+" " " (string-trim (or (plist-get prompt :text) "")))
    agent--captured-prompt-preview-width nil nil "..."))
 
-(defun agent--mark-captured-prompt-inserted (prompt)
-  "Mark PROMPT's Org entry as inserted."
+(defun agent--delete-captured-prompt (prompt)
+  "Remove PROMPT's Org entry from its capture file."
   (when-let* ((file (plist-get prompt :file)))
     (let ((buffer (find-file-noselect file)))
       (with-current-buffer buffer
         (org-mode)
         (when (agent--find-captured-prompt prompt)
-          (org-set-property "INSERTED" (format-time-string "[%Y-%m-%d %a %H:%M]"))
+          (delete-region
+           (point)
+           (save-excursion
+             (or (outline-next-heading) (goto-char (point-max)))
+             (point)))
           (save-buffer))))))
 
 (defun agent--find-captured-prompt (prompt)

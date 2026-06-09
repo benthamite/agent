@@ -635,9 +635,9 @@
                 (should (= (length pending) 1))
                 (should (equal (plist-get (car pending) :text) "Alpha")))
               (let ((all (agent--captured-prompts 'one buf t)))
-                (should (= (length all) 2))
-                (should (plist-get (cadr all) :inserted)))))))
-      (delete-directory agent-prompt-capture-directory t)))
+                (should (= (length all) 1))
+                (should (equal (plist-get (car all) :text) "Alpha"))))))
+      (delete-directory agent-prompt-capture-directory t))))
 
 (ert-deftest agent-test-captured-prompt-candidate-previews-body ()
   "Show a truncated prompt body preview in completion candidates."
