@@ -136,6 +136,8 @@ Each entry is (SYMBOL . PLIST) where PLIST has keys:
 Optional session metadata:
   :account               function (buffer) -> string or nil
                            (account name for session grouping)
+  :waiting-p             function (buffer) -> bool
+                           (non-nil if the session is accepting input)
   :has-background-tasks-p function (buffer) -> bool
                            (non-nil if the session has ongoing
                            background work while idle for input)
@@ -672,11 +674,21 @@ to the backend's :label or symbol name."
 (defun agent--session-waiting-p (buffer backend)
   "Return non-nil when BUFFER is waiting for input.
 BACKEND may provide `:busy-p' to suppress a stale waiting flag
-while the session is actively responding."
-  (and (buffer-local-value 'agent--waiting-for-input buffer)
-       (not (and backend
-                 (when-let* ((fn (agent--backend-get backend :busy-p)))
-                   (funcall fn buffer))))))
+while the session is actively responding.  BACKEND may provide
+`:waiting-p' to report input readiness directly."
+  (let ((backend-waiting (agent--backend-waiting-p buffer backend)))
+    (and (or backend-waiting
+             (buffer-local-value 'agent--waiting-for-input buffer))
+         (or backend-waiting
+             (not (and backend
+                       (when-let* ((fn (agent--backend-get backend :busy-p)))
+                         (funcall fn buffer))))))))
+
+(defun agent--backend-waiting-p (buffer backend)
+  "Return non-nil when BACKEND reports BUFFER is accepting input."
+  (and backend
+       (when-let* ((fn (agent--backend-get backend :waiting-p)))
+         (funcall fn buffer))))
 
 (defun agent--waiting-face (buffer backend)
   "Return the face for BUFFER's waiting indicator.

@@ -170,6 +170,7 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar gptel--known-backends)
 (defvar codex-reasoning-effort)
 (defvar codex--session-id)
+(defvar codex--app-server-input-marker)
 (defvar codex--app-server-thread-id)
 (defvar codex--app-server-turn-active-p)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
@@ -232,6 +233,7 @@ Source: SVG Repo (CC0).")
                                         (if (string-empty-p svg) "CX" svg)))
         :account (lambda (buf)
                    (buffer-local-value 'agent-codex--buffer-account buf))
+        :waiting-p #'agent-codex--waiting-p
         :has-background-tasks-p #'agent-codex--has-background-tasks-p
         :busy-p #'agent-codex--busy-p
         :label "Codex"
@@ -685,11 +687,28 @@ indicator, e.g. \"1 background terminal running\"."
   (let ((buf (or buffer (current-buffer))))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (save-excursion
-          (goto-char (point-max))
-          (re-search-backward agent-codex--background-tasks-regexp
-                              (max (point-min) (- (point-max) 800))
-                              t))))))
+        (or (agent-codex--app-server-accepting-input-p)
+            (save-excursion
+              (goto-char (point-max))
+              (re-search-backward agent-codex--background-tasks-regexp
+                                  (max (point-min) (- (point-max) 800))
+                                  t)))))))
+
+(defun agent-codex--waiting-p (&optional buffer)
+  "Return non-nil when Codex session BUFFER is accepting input."
+  (let ((buf (or buffer (current-buffer))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (agent-codex--app-server-accepting-input-p)))))
+
+(defun agent-codex--app-server-accepting-input-p ()
+  "Return non-nil when an active app-server turn has an input prompt."
+  (and (boundp 'codex--app-server-turn-active-p)
+       codex--app-server-turn-active-p
+       (boundp 'codex--app-server-input-marker)
+       (markerp codex--app-server-input-marker)
+       (marker-position codex--app-server-input-marker)
+       t))
 
 (defun agent-codex--busy-p (&optional buffer)
   "Return non-nil when Codex session BUFFER is actively responding."

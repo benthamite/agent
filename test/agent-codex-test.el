@@ -594,6 +594,19 @@
           (should-not (agent--session-waiting-p buf 'codex)))
       (kill-buffer buf))))
 
+(ert-deftest agent-codex-test-app-server-active-prompt-is-background-waiting ()
+  "Show app-server turns with an available prompt as background waiting."
+  (let ((buf (generate-new-buffer "*codex-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "❯ ")
+          (setq-local codex--app-server-turn-active-p t)
+          (setq-local codex--app-server-input-marker (copy-marker (point-max) nil))
+          (should (agent--session-waiting-p buf 'codex))
+          (should (eq (agent--waiting-face buf 'codex)
+                      'agent-waiting-with-background)))
+      (kill-buffer buf))))
+
 (ert-deftest agent-codex-test-waiting-face-uses-background-work ()
   "Show Codex waiting sessions with background work as background-work."
   (let ((buf (generate-new-buffer "*codex-test*")))
