@@ -249,6 +249,43 @@
                    "019ea295-c3df-70b0-a8e5-a8ffe9df220a"))
     (should (equal captured-instance-name "default"))))
 
+(ert-deftest agent-codex-test-restart-uses-default-backend-option ()
+  "Restart uses the configured default backend for the new session."
+  (let ((codex-terminal-backend 'eat)
+        (other (generate-new-buffer "agent-codex-post-kill"))
+        app-server-called
+        terminal-called)
+    (unwind-protect
+        (let ((old-default (default-value 'codex-terminal-backend)))
+          (unwind-protect
+              (progn
+                (setq-default codex-terminal-backend 'app-server)
+                (with-temp-buffer
+                  (rename-buffer "*codex:~/project/:default*" t)
+                  (setq-local codex-terminal-backend 'eat)
+                  (setq-local codex--session-id
+                              "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
+                  (cl-letf (((symbol-function 'codex--buffer-p)
+                             (lambda (_buffer) t))
+                            ((symbol-function 'agent--force-kill-buffer)
+                             (lambda (_buffer) (set-buffer other)))
+                            ((symbol-function 'agent-codex--resolve-account)
+                             (lambda () nil))
+                            ((symbol-function 'codex--directory)
+                             (lambda () default-directory))
+                            ((symbol-function
+                              'codex--app-server-launch-resume-session)
+                             (lambda (&rest _args)
+                               (setq app-server-called t)))
+                            ((symbol-function 'codex--start-subcommand)
+                             (lambda (&rest _args)
+                               (setq terminal-called t))))
+                    (agent-codex-restart))))
+            (setq-default codex-terminal-backend old-default)))
+      (kill-buffer other))
+    (should app-server-called)
+    (should-not terminal-called)))
+
 (ert-deftest agent-codex-test-handoff-kills-single-existing-buffer-when-source-missing ()
   "Avoid instance-name prompts when emacsclient did not pass a source buffer."
   (let* ((dir (file-name-as-directory (make-temp-file "codex-handoff" t)))
