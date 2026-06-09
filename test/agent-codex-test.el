@@ -155,21 +155,80 @@
 
 (ert-deftest agent-codex-test-restart-preserves-buffer-account ()
   "Restart Codex with the account attached to the current session."
-  (let (captured-account)
-    (with-temp-buffer
-      (rename-buffer "*codex:~/project/:default*" t)
-      (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
-      (setq-local agent-codex--buffer-account "work")
-      (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                ((symbol-function 'agent--force-kill-buffer) #'ignore)
-                ((symbol-function 'agent-codex--resolve-account)
-                 (lambda () (error "should not resolve active account")))
-                ((symbol-function 'codex--directory) (lambda () default-directory))
-                ((symbol-function 'codex--start-subcommand)
-                 (lambda (&rest _)
-                   (setq captured-account agent-codex--pending-account))))
-        (agent-codex-restart)))
+  (let ((dir (make-temp-file "codex-restart" t))
+        captured-account)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*codex:~/project/:default*" t)
+          (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
+          (setq-local agent-codex--buffer-account "work")
+          (let ((agent-codex-accounts
+                 `(("work" . ,(expand-file-name "work" dir))))
+                (agent-codex--current-account nil)
+                (agent-codex-account-file (expand-file-name "current" dir)))
+            (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                      ((symbol-function 'agent--force-kill-buffer) #'ignore)
+                      ((symbol-function 'agent-codex--resolve-account)
+                       (lambda () (error "should not resolve active account")))
+                      ((symbol-function 'codex--directory)
+                       (lambda () default-directory))
+                      ((symbol-function 'codex--start-subcommand)
+                       (lambda (&rest _)
+                         (setq captured-account agent-codex--pending-account))))
+              (agent-codex-restart))))
+      (delete-directory dir t))
     (should (equal captured-account "work"))))
+
+(ert-deftest agent-codex-test-restart-prompts-when-active-account-differs ()
+  "Restart Codex with the selected account when the user chooses it."
+  (let ((dir (make-temp-file "codex-restart" t))
+        captured-account prompt-choices)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*codex:~/project/:default*" t)
+          (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
+          (setq-local agent-codex--buffer-account "work")
+          (let ((agent-codex-accounts
+                 `(("work" . ,(expand-file-name "work" dir))
+                   ("personal" . ,(expand-file-name "personal" dir))))
+                (agent-codex--current-account "personal"))
+            (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                      ((symbol-function 'agent--force-kill-buffer) #'ignore)
+                      ((symbol-function 'codex--directory)
+                       (lambda () default-directory))
+                      ((symbol-function 'completing-read)
+                       (lambda (_prompt choices &rest _args)
+                         (setq prompt-choices choices)
+                         "personal"))
+                      ((symbol-function 'codex--start-subcommand)
+                       (lambda (&rest _)
+                         (setq captured-account agent-codex--pending-account))))
+              (agent-codex-restart))))
+      (delete-directory dir t))
+    (should (equal prompt-choices '("personal" "work")))
+    (should (equal captured-account "personal"))))
+
+(ert-deftest agent-codex-test-restart-fails-when-active-account-is-missing ()
+  "Do not fall back to the session account when the selected account is stale."
+  (let ((dir (make-temp-file "codex-restart" t))
+        killed started)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*codex:~/project/:default*" t)
+          (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
+          (setq-local agent-codex--buffer-account "work")
+          (let ((agent-codex-accounts
+                 `(("work" . ,(expand-file-name "work" dir))))
+                (agent-codex--current-account "personal"))
+            (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                      ((symbol-function 'agent--force-kill-buffer)
+                       (lambda (_buffer) (setq killed t)))
+                      ((symbol-function 'codex--start-subcommand)
+                       (lambda (&rest _args) (setq started t))))
+              (should-error (agent-codex-restart) :type 'user-error))))
+      (delete-directory dir t))
+    (should-not killed)
+    (should-not started)))
 
 (ert-deftest agent-codex-test-restart-resumes-current-session-id ()
   "Restart Codex with the session id attached to the current buffer."

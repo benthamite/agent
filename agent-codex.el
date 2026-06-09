@@ -1276,22 +1276,49 @@ buffer that requested the handoff."
 (defun agent-codex-restart ()
   "Kill the current Codex session and resume it in place.
 Useful when a setting change requires relaunching Codex.  Preserves the
-session's directory, instance name, and session id."
+session's directory, instance name, and session id.  If the active
+account differs from the session account, prompt for which account to use."
   (interactive)
   (unless (codex--buffer-p (current-buffer))
     (user-error "Not in a Codex buffer"))
-  (let ((dir default-directory)
-        (account agent-codex--buffer-account)
-        (session-id (agent-codex--current-session-id))
-        (instance-name (codex--extract-instance-name-from-buffer-name
-                        (buffer-name))))
+  (let* ((dir default-directory)
+         (account (agent-codex--restart-account agent-codex--buffer-account))
+         (session-id (agent-codex--current-session-id))
+         (instance-name (codex--extract-instance-name-from-buffer-name
+                         (buffer-name))))
     (agent--force-kill-buffer (current-buffer))
-    (let ((agent-codex--pending-account
-           (or account (agent-codex--resolve-account))))
+    (let ((agent-codex--pending-account account))
       (agent-codex--install-hooks)
       (cl-letf (((symbol-function 'codex--directory) (lambda () dir)))
         (codex--start-subcommand "resume" nil (list session-id)
                                  instance-name)))))
+
+(defun agent-codex--restart-account (session-account)
+  "Return the account to use when restarting SESSION-ACCOUNT."
+  (let ((selected-account (agent-codex--selected-account-no-prompt)))
+    (agent-codex--ensure-restart-account selected-account)
+    (cond
+     ((and session-account selected-account
+           (not (equal session-account selected-account)))
+      (agent-codex--prompt-restart-account session-account selected-account))
+     (selected-account)
+     (session-account
+      (agent-codex--ensure-restart-account session-account))
+     (t
+      (agent-codex--ensure-restart-account (agent-codex--resolve-account))))))
+
+(defun agent-codex--prompt-restart-account (session-account selected-account)
+  "Prompt for restart account between SESSION-ACCOUNT and SELECTED-ACCOUNT."
+  (agent-codex--ensure-restart-account
+   (completing-read "Restart with account: "
+                    (list selected-account session-account)
+                    nil t nil nil selected-account)))
+
+(defun agent-codex--ensure-restart-account (account)
+  "Return ACCOUNT after checking that named restart accounts exist."
+  (when (and account (not (agent-codex--account-home account)))
+    (user-error "Codex account `%s' is not configured" account))
+  account)
 
 (defun agent-codex--current-session-id ()
   "Return the current Codex session id, or signal when unavailable."
