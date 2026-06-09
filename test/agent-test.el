@@ -238,6 +238,18 @@
       (agent-post-push-ci)
       (should (equal ran '("post-push-ci" "--no-push --commit abc123"))))))
 
+(ert-deftest agent-test-force-kill-buffer-ignores-query-functions ()
+  "Kill buffers even when unrelated query functions would veto it."
+  (let ((buf (generate-new-buffer "agent-force-kill-test")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (add-hook 'kill-buffer-query-functions (lambda () nil) nil t))
+          (agent--force-kill-buffer buf)
+          (should-not (buffer-live-p buf)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
 (ert-deftest agent-test-exit-runs-before-exit-functions ()
   "Abort exit when a before-exit function returns nil."
   (let ((agent-backends nil)

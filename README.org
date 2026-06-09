@@ -210,6 +210,9 @@ The commands ~agent-handoff~, ~agent-audit-project~, ~agent-debug-backtrace~, ~a
 ~agent-before-exit-functions~ can delay ~agent-exit~ for cleanup work.
 Each function receives the resolved backend and session buffer; returning nil
 aborts the exit.
+Once a forced session close proceeds, Agent kills the target buffer without
+running buffer-local kill-query prompts, so stale session buffers do not survive
+restart or exit workflows.
 
 Set ~agent-before-exit-skill-name~ (a single skill) or
 ~agent-before-exit-skill-names~ (an ordered list) to submit interactive skills

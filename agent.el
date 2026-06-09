@@ -769,9 +769,9 @@ session."
     (set-process-query-on-exit-flag proc nil)
     (set-process-sentinel proc #'ignore)
     (delete-process proc))
-  (let ((kill-buffer-query-functions
-         (remq 'agent-protect-buffer kill-buffer-query-functions)))
-    (kill-buffer buffer)))
+  (with-current-buffer buffer
+    (let ((kill-buffer-query-functions nil))
+      (kill-buffer (current-buffer)))))
 
 ;;;; Alert and notification system
 
