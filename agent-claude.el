@@ -175,19 +175,9 @@ Set by `agent-claude--capture-buffer-account' via
 (defvar-local agent-claude--status-data nil
   "Parsed status plist for the current Claude buffer.")
 
-(defvar-local agent-claude--display-name-cache nil
-  "Cached display name for the modeline.
-Updated by `agent--refresh-display-names'.")
-
 (defvar-local agent-claude--original-session-id nil
   "Session ID when this buffer was first created.
 Used to detect when `/branch' creates a new session.")
-
-;; Home-row keys and session key map are now managed by agent.
-(defvar agent-claude--session-keys agent--session-keys
-  "Alias for `agent--session-keys' for backward compatibility.")
-(defconst agent-claude--home-row-keys agent--home-row-keys
-  "Alias for `agent--home-row-keys'.")
 
 (defvar-local agent-claude--status-timer nil
   "Timer for periodic status polling in the current Claude buffer.")
@@ -703,22 +693,6 @@ show the unified session switcher."
       (agent-claude--start-with-account)
     (agent--ensure-all-session-keys)
     (transient-setup 'agent--session-switcher)))
-
-
-
-
-
-
-
-
-
-
-(defun agent-claude-display-name (&optional buffer)
-  "Return the display name for BUFFER's modeline.
-Delegates to `agent-display-name', which appends branch suffixes
-through the Claude backend registration."
-  (agent-display-name (or buffer (current-buffer))))
-
 
 (defun agent-claude--branch-suffix (buffer)
   "Return a short branch ID for BUFFER, or nil if not branched."
@@ -1249,19 +1223,6 @@ status-line indicator (e.g. \"· 3 shells\" or \"· 5 monitors\")."
                               (max (point-min) (- (point-max) 800))
                               t))))))
 
-(defun agent-claude-jump-to-waiting ()
-  "Switch to the Claude session that most recently started waiting for input."
-  (interactive)
-  (let (best-buf best-time)
-    (dolist (buf (claude-code--find-all-claude-buffers))
-      (when (buffer-live-p buf)
-        (let ((ts (buffer-local-value 'agent--waiting-for-input buf)))
-          (when (and ts (or (null best-time) (time-less-p best-time ts)))
-            (setq best-buf buf best-time ts)))))
-    (if best-buf
-        (switch-to-buffer best-buf)
-      (message "No sessions waiting for input"))))
-
 (defun agent-claude--handle-stop (message)
   "Handle a stop event from the Claude Code CLI.
 MESSAGE is a plist with :type, :buffer-name, :json-data, and
@@ -1299,17 +1260,6 @@ Given \"*claude:~/path/to/project/:default*\", return
   (if (string-match "/\\([^/]+\\)/:[^*]+\\*\\'" buffer-name)
       (match-string 1 buffer-name)
     buffer-name))
-
-(defun agent-claude-toggle-alert ()
-  "Toggle OS notifications for the current Claude session."
-  (interactive)
-  (setq agent-alert-on-ready (not agent-alert-on-ready))
-  (message "Claude alert notifications %s"
-           (if agent-alert-on-ready "enabled" "disabled")))
-
-(defun agent-claude-alert-indicator ()
-  "Return a bell icon reflecting the current alert state."
-  (if agent-alert-on-ready "🔔" "🔕"))
 
 ;;;;; Modeline
 

@@ -772,6 +772,16 @@
             (should (member "AI alert sound failed: no sound support" messages))))
       (delete-file sound-file))))
 
+(ert-deftest agent-test-alert-indicator-active ()
+  "Return the bell-on icon when alerts are enabled."
+  (let ((agent-alert-on-ready t))
+    (should (equal (agent-alert-indicator) "🔔"))))
+
+(ert-deftest agent-test-alert-indicator-inactive ()
+  "Return the bell-off icon when alerts are disabled."
+  (let ((agent-alert-on-ready nil))
+    (should (equal (agent-alert-indicator) "🔕"))))
+
 (ert-deftest agent-test-parse-skill-frontmatter-argument-metadata ()
   "Parse shared skill argument metadata from frontmatter."
   (let ((file (make-temp-file "skill" nil ".md")))

@@ -411,23 +411,6 @@
                   :retrieved))
       (should-not observed))))
 
-;;;; Alert indicator
-
-(ert-deftest agent-claude-test-alert-indicator-active ()
-  "Return bell-on icon when alert is enabled."
-  (let ((agent-alert-on-ready t))
-    (should (equal (agent-claude-alert-indicator) "🔔"))))
-
-(ert-deftest agent-claude-test-alert-indicator-inactive ()
-  "Return bell-off icon when alert is disabled."
-  (let ((agent-alert-on-ready nil))
-    (should (equal (agent-claude-alert-indicator) "🔕"))))
-
-(ert-deftest agent-claude-test-alert-indicator-uses-shared-state ()
-  "Reflect the shared `agent-alert-on-ready' state."
-  (let ((agent-alert-on-ready t))
-    (should (equal (agent-claude-alert-indicator) "🔔"))))
-
 ;;;; Transient menu
 
 (ert-deftest agent-claude-test-agent-log-wrapper-is-command ()
@@ -443,7 +426,7 @@
     (let ((agent-claude--original-session-id "original-session")
           (agent-claude--status-data
            '(:session_id "branched-session-id")))
-      (should (equal (agent-claude-display-name (current-buffer))
+      (should (equal (agent-display-name (current-buffer))
                      "unique-claude-display-test:branched")))))
 
 ;;;; Batch parse stream JSON
