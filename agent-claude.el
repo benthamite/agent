@@ -328,22 +328,7 @@ escape sequence directly to it."
 (advice-add 'claude-code-send-escape :around
             #'agent-claude--send-escape-in-current-buffer)
 
-;;;;; Snippet insertion
-
-
-
-
 ;;;;; Buffer protection
-
-(defun agent-claude-protect-buffer ()
-  "Prompt for confirmation before killing claude-code buffers.
-Returns t if the buffer should be killed, nil otherwise.  Skips
-the prompt when the session process has already exited (e.g. via
-/exit).  Intended for use in `kill-buffer-query-functions'."
-  (or (not agent-protect-buffers)
-      (not (claude-code--buffer-p (current-buffer)))
-      (not (process-live-p (get-buffer-process (current-buffer))))
-      (yes-or-no-p "Kill claude-code buffer? ")))
 
 (defun agent-claude--confirm-kill-branches ()
   "Return t unless the current session has branches and user declines.
@@ -393,26 +378,6 @@ the session has branches, prompts for confirmation before killing."
              (condition-case nil
                  (kill-buffer buf)
                (error nil)))))))))
-
-(defun agent-claude-fix-rendering ()
-  "Send SIGWINCH to fix terminal rendering after startup.
-Works around a race condition where Claude Code's TUI queries
-terminal dimensions before the terminal window is fully laid out,
-resulting in a garbled banner."
-  (interactive)
-  (when-let* ((proc (get-buffer-process (current-buffer))))
-    (agent-claude--send-sigwinch-after-delay (current-buffer))))
-
-(defun agent-claude--send-sigwinch-after-delay (buffer)
-  "Send SIGWINCH to the process in BUFFER after a short delay."
-  (run-at-time agent-sigwinch-delay nil
-               #'agent-claude--send-sigwinch buffer))
-
-(defun agent-claude--send-sigwinch (buffer)
-  "Send SIGWINCH to the process in BUFFER."
-  (when (buffer-live-p buffer)
-    (when-let* ((proc (get-buffer-process buffer)))
-      (signal-process proc 'SIGWINCH))))
 
 ;;;;; Smart start
 
@@ -2414,14 +2379,6 @@ TIMEOUT, when non-nil, is written as the hook command timeout."
 (unless (hash-table-p claude-code--window-widths)
   (setq claude-code--window-widths
         (make-hash-table :test 'eq :weakness 'key)))
-
-(defun agent-claude-disable-scrollback-truncation ()
-  "Disable eat scrollback truncation in Claude Code buffers.
-The default `eat-term-scrollback-size' of 131072 characters causes the
-buffer to be truncated, losing earlier output."
-  (interactive)
-  (setq-local eat-term-scrollback-size nil))
-
 
 ;; Fix upstream scroll function.  Two problems:
 ;;
