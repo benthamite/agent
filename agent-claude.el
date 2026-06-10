@@ -1180,7 +1180,7 @@ elicitation_dialog notifications."
   (when (eq (plist-get message :type) 'notification)
     (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
       (with-current-buffer buf
-        (let* ((name (agent-claude--session-name (buffer-name)))
+        (let* ((name (agent--session-name (buffer-name)))
                (ntype (agent-claude--notification-type
                        (plist-get message :json-data))))
           (pcase ntype
@@ -1231,35 +1231,8 @@ MESSAGE is a plist with :type, :buffer-name, :json-data, and
     (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
       (with-current-buffer buf
         (unless (agent-exit-after-before-exit-skill 'claude-code buf)
-          (agent-claude--scroll-to-bottom buf)))))
+          (agent--scroll-to-bottom buf)))))
   nil)
-
-(defun agent-claude--scroll-to-bottom (buffer)
-  "Scroll BUFFER and its windows to the terminal cursor.
-Move point and all windows showing BUFFER to the eat terminal
-cursor, keeping the cursor line at the bottom of each window."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (when (bound-and-true-p eat-terminal)
-        (let ((cursor-pos (eat-term-display-cursor eat-terminal)))
-          (goto-char cursor-pos)
-          (agent-claude--scroll-windows-to cursor-pos))))))
-
-(defun agent-claude--scroll-windows-to (pos)
-  "Set `window-point' to POS and recenter in all windows showing this buffer."
-  (dolist (window (get-buffer-window-list nil nil t))
-    (set-window-point window pos)
-    (with-selected-window window
-      (goto-char pos)
-      (recenter -1))))
-
-(defun agent-claude--session-name (buffer-name)
-  "Extract the project name from BUFFER-NAME.
-Given \"*claude:~/path/to/project/:default*\", return
-\"project\"."
-  (if (string-match "/\\([^/]+\\)/:[^*]+\\*\\'" buffer-name)
-      (match-string 1 buffer-name)
-    buffer-name))
 
 ;;;;; Modeline
 
@@ -1742,14 +1715,6 @@ Returns the process object."
 
 ;;;;; Skill runner
 
-(defun agent-claude--parse-skill-frontmatter (file)
-  "Parse YAML frontmatter from skill FILE and return a plist.
-Returns a plist with keys :name, :description, :argument-hint,
-:argument-source, :argument-choices, :argument-default,
-:argument-multiple, :user-invocable, or nil if FILE has no
-frontmatter."
-  (agent-parse-skill-frontmatter file))
-
 (defun agent-claude--discover-skills ()
   "Discover available Claude Code skills.
 Scans `~/.claude/skills/' for global skills and the current
@@ -1775,7 +1740,7 @@ shadow global skills with the same name."
     (when (file-directory-p global-dir)
       (dolist (file (file-expand-wildcards
                      (expand-file-name "*/SKILL.md" global-dir)))
-        (when-let* ((meta (agent-claude--parse-skill-frontmatter file))
+        (when-let* ((meta (agent-parse-skill-frontmatter file))
                     (name (plist-get meta :name)))
           (puthash name (append meta (list :path file :source "global"))
                    skills))))
@@ -1783,7 +1748,7 @@ shadow global skills with the same name."
     (when (and project-dir (file-directory-p project-dir))
       (dolist (file (file-expand-wildcards
                      (expand-file-name "*/SKILL.md" project-dir)))
-        (when-let* ((meta (agent-claude--parse-skill-frontmatter file))
+        (when-let* ((meta (agent-parse-skill-frontmatter file))
                     (name (plist-get meta :name)))
           (puthash name (append meta (list :path file :source "project"))
                    skills))))
@@ -1793,7 +1758,7 @@ shadow global skills with the same name."
       (when (file-directory-p dir)
         (dolist (file (file-expand-wildcards
                        (expand-file-name "*/SKILL.md" dir)))
-          (when-let* ((meta (agent-claude--parse-skill-frontmatter file))
+          (when-let* ((meta (agent-parse-skill-frontmatter file))
                       (name (plist-get meta :name)))
             (puthash name
                      (append meta (list :path file :source "programmatic"))

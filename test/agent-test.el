@@ -134,6 +134,31 @@
                   "*codex:~/My Drive/Epoch/projects/ai-access-management:default*")
                  "ai-access-management")))
 
+(ert-deftest agent-test-session-name-standard ()
+  "Extract the project name from a standard session buffer name."
+  (should (equal (agent--session-name "*claude:~/path/to/project/:default*")
+                 "project")))
+
+(ert-deftest agent-test-session-name-named-instance ()
+  "Extract the project name regardless of instance name."
+  (should (equal (agent--session-name "*claude:~/repos/my-app/:worktree-1*")
+                 "my-app")))
+
+(ert-deftest agent-test-session-name-deep-path ()
+  "Extract the project name from a deeply nested path."
+  (should (equal (agent--session-name
+                  "*claude:~/My Drive/repos/org/subdir/:main*")
+                 "subdir")))
+
+(ert-deftest agent-test-session-name-non-matching ()
+  "Return the buffer name unchanged when it does not match the pattern."
+  (should (equal (agent--session-name "*scratch*") "*scratch*")))
+
+(ert-deftest agent-test-session-name-no-trailing-star ()
+  "Return the buffer name unchanged when the trailing asterisk is missing."
+  (should (equal (agent--session-name "*claude:~/path/to/project/:default")
+                 "*claude:~/path/to/project/:default")))
+
 (ert-deftest agent-test-ensure-session-keys-assigns-home-row-keys ()
   "Assign home-row keys to all active backend buffers."
   (let ((agent-backends nil)

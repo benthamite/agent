@@ -63,37 +63,6 @@
           (should (equal sent (list url buffer))))
       (kill-buffer buffer))))
 
-;;;; Session name extraction
-
-(ert-deftest agent-claude-test-session-name-standard ()
-  "Extract project name from a standard Claude buffer name."
-  (should (equal (agent-claude--session-name
-                  "*claude:~/path/to/project/:default*")
-                 "project")))
-
-(ert-deftest agent-claude-test-session-name-named-instance ()
-  "Extract project name regardless of instance name."
-  (should (equal (agent-claude--session-name
-                  "*claude:~/repos/my-app/:worktree-1*")
-                 "my-app")))
-
-(ert-deftest agent-claude-test-session-name-deep-path ()
-  "Extract project name from a deeply nested path."
-  (should (equal (agent-claude--session-name
-                  "*claude:~/My Drive/repos/org/subdir/:main*")
-                 "subdir")))
-
-(ert-deftest agent-claude-test-session-name-non-matching ()
-  "Return buffer name unchanged when it does not match the pattern."
-  (should (equal (agent-claude--session-name "*scratch*")
-                 "*scratch*")))
-
-(ert-deftest agent-claude-test-session-name-no-trailing-star ()
-  "Return buffer name unchanged when trailing asterisk is missing."
-  (should (equal (agent-claude--session-name
-                  "*claude:~/path/to/project/:default")
-                 "*claude:~/path/to/project/:default")))
-
 ;;;; Sanitize buffer name
 
 (ert-deftest agent-claude-test-sanitize-buffer-name-replaces-special ()
