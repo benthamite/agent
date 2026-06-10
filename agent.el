@@ -613,9 +613,6 @@ If sessions exist, show a transient menu with home-row keys."
              (backend-sym (cdr (assoc choice names))))
         (funcall (agent--backend-get backend-sym :start-new)))))))
 
-(when (fboundp 'agent--start-new-session)
-  (fmakunbound 'agent--start-new-session))
-
 (transient-define-prefix agent--session-switcher ()
   "Switch to an AI session or start a new one."
   [["Actions"
@@ -1669,7 +1666,6 @@ the backend next to each."
       (user-error "Backend `%s' does not support `:run-skill'" backend))
     (funcall run-fn (plist-get skill :name) args)))
 
-;;;###autoload
 ;;;###autoload
 (defun agent-post-push-ci (&optional commit)
   "Run the post-push CI closeout skill for COMMIT.
