@@ -19,7 +19,7 @@ This manual describes the features and customization options for the Emacs Lisp 
 
 =agent.el= collects the Emacs integration layer for AI coding command-line tools. It provides a shared session model, a unified transient menu, notification handling, terminal helpers, backend modules for Claude Code and Codex, and an optional chief-of-staff loop.
 
-The package is split into a small core and backend modules. The core file, =agent.el=, is backend-agnostic: it knows how to register AI tools, find their buffers, dispatch shared commands, render backend icons, assign stable session keys, and present a single menu. =agent-account.el= implements multi-account support (selection, persistence, per-account config homes, and symlinked shared state) once for all backends. =agent-claude.el= integrates =claude-code.el= with Claude-specific status polling, usage polling, branch navigation, batch TODO processing, and hook setup. =agent-codex.el= integrates =codex.el= with Codex-specific theme sync, skill execution, handoff, auditing, debugging, and modeline helpers. =agent-chief.el= implements an inspectable chief-of-staff loop: Emacs owns timers, state, context collection, and notifications, while Claude Code or Codex provides one-shot judgment on each tick.
+The package is split into a small core and backend modules. The core file, =agent.el=, is backend-agnostic: it knows how to register AI tools, find their buffers, render backend icons, assign stable session keys, and present a single menu, and it implements the shared orchestration workflows (handoff, restart, exit, skill execution, project audits, backtrace debugging, and Slack-message routing) once against the backend primitives. =agent-account.el= implements multi-account support (selection, persistence, per-account config homes, and symlinked shared state) once for all backends. =agent-claude.el= integrates =claude-code.el= with Claude-specific status polling, usage polling, branch navigation, batch TODO processing, and hook setup. =agent-codex.el= integrates =codex.el= with Codex-specific theme sync, =codex exec= execution, and modeline helpers. =agent-chief.el= implements an inspectable chief-of-staff loop: Emacs owns timers, state, context collection, and notifications, while Claude Code or Codex provides one-shot judgment on each tick.
 
 The main workflow is to load =agent.el=, then require the backend modules you use. Once the Claude and Codex modules are loaded, =M-x agent-menu= and =M-x agent-start-or-switch= operate across both tools. Sessions are grouped by account when the backend exposes account metadata, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
 
@@ -41,6 +41,13 @@ The package depends on =transient= for menus and =consult= for completion. The C
 #+vindex: agent-alert-sound
 #+vindex: agent-alert-sound-player
 #+vindex: agent-backtrace-file
+#+vindex: agent-handoff-files
+#+vindex: agent-audit-skills
+#+vindex: agent-audit-project-directories
+#+vindex: agent-debug-backtrace-model
+#+vindex: agent-debug-backtrace-backend
+#+vindex: agent-act-on-slack-message-model
+#+vindex: agent-act-on-slack-message-backend
 #+vindex: agent-epoch-project-registry-file
 #+vindex: agent-epoch-projects-root
 #+vindex: agent-prompt-capture-directory
@@ -51,7 +58,9 @@ The user option ~agent-protect-buffers~ is a boolean that defaults to ~t~. When 
 
 The user option ~agent-alert-on-ready~ is a boolean that defaults to ~nil~. When enabled, backend notification handlers can call ~agent-notify~ to emit visual and/or audible alerts when a session is waiting for input. Codex's own terminal-bell notification path is routed through the same alert setting. ~agent-alert-style~ selects ~visual~, ~sound~, or ~both~; it defaults to ~both~. ~agent-alert-sound~ defaults to ~nil~; set it to a sound file to enable sound alerts. ~agent-alert-sound-player~ optionally names an external sound player when Emacs sound support is unavailable.
 
-The user option ~agent-backtrace-file~ controls where ~agent-save-backtrace~, ~agent-claude-debug-backtrace~, and ~agent-codex-debug-backtrace~ write Emacs backtraces. It defaults to a file in ~temporary-file-directory~.
+The user option ~agent-backtrace-file~ controls where ~agent-save-backtrace~ and ~agent-debug-backtrace~ write Emacs backtraces. It defaults to a file in ~temporary-file-directory~.
+
+The unified orchestration commands share one set of options across backends. ~agent-handoff-files~ maps backend symbols to the handoff files read by ~agent-handoff~. ~agent-audit-skills~ lists the audit skills run by ~agent-audit-project~, and ~agent-audit-project-directories~ stores completion candidates for the audit directory prompt. ~agent-debug-backtrace-model~ and ~agent-debug-backtrace-backend~ configure the =gptel= request used by ~agent-debug-backtrace~ to identify likely culprit packages from an Emacs backtrace. ~agent-act-on-slack-message-model~ and ~agent-act-on-slack-message-backend~ configure the =gptel= request used by ~agent-act-on-slack-message~ to select an Epoch project from the Slack message at point.
 
 The user options ~agent-epoch-project-registry-file~ and ~agent-epoch-projects-root~ configure Slack-message project routing. The default registry is the shared tracked project registry at =shared/project-registry.json=. It contains the Epoch project taxonomy used for project matching.
 
@@ -80,27 +89,19 @@ Snippet helpers use =yasnippet= and =consult-yasnippet= only when those optional
 #+vindex: agent-claude-hook-wrapper
 #+vindex: agent-claude-statusline-script
 #+vindex: agent-claude-status-directory
-#+vindex: agent-claude-handoff-file
 #+vindex: agent-claude-batch-allowed-tools
 #+vindex: agent-claude-batch-permission-mode
 #+vindex: agent-claude-batch-max-turns
 #+vindex: agent-claude-batch-system-prompt
 #+vindex: agent-claude-batch-model
-#+vindex: agent-claude-run-skill-model
-#+vindex: agent-claude-audit-skills
-#+vindex: agent-claude-audit-project-directories
 #+vindex: agent-claude-org-todo-in-progress-keyword
-#+vindex: agent-claude-debug-backtrace-model
-#+vindex: agent-claude-debug-backtrace-backend
-#+vindex: agent-claude-act-on-slack-message-model
-#+vindex: agent-claude-act-on-slack-message-backend
 The Claude backend options control account selection, session metadata, non-interactive execution, and branch workflows. ~agent-claude-accounts~ is an alist of account names to Claude configuration directories, and ~agent-claude-account-file~ stores the selected account across Emacs sessions. Use ~agent-claude-select-account~ or the account infix in ~agent-menu~ to switch accounts before starting a new session. Both commands are thin wrappers around ~agent-account-select~, which persists the choice and syncs the account's config home; ~agent-account-init~ prepares or repairs any backend's account home.
 
 Status and usage polling are controlled by integer intervals. ~agent-claude-status-interval~ defaults to =5= seconds and reads status JSON emitted by the bundled statusline script. ~agent-claude-usage-interval~ defaults to =300= seconds and backs off up to ~agent-claude-usage-max-interval~, which defaults to =900= seconds.
 
 Batch execution options are passed to =claude -p=. ~agent-claude-batch-permission-mode~ defaults to ="auto"=, ~agent-claude-batch-max-turns~ defaults to =30=, and the allowed tool, model, and appended-system-prompt options let you narrow or expand what non-interactive Claude tasks may do.
 
-Branch and buffer safety options default conservatively. ~agent-claude-warn-kill-with-branches~ defaults to ~t~ and warns before killing a session that belongs to a branch tree. ~agent-claude-fork-worktree-directory~ defaults to a cache directory so isolated branch worktrees do not interfere with cloud sync. ~agent-claude-handoff-file~ defaults to a file in ~temporary-file-directory~.
+Branch and buffer safety options default conservatively. ~agent-claude-warn-kill-with-branches~ defaults to ~t~ and warns before killing a session that belongs to a branch tree. ~agent-claude-fork-worktree-directory~ defaults to a cache directory so isolated branch worktrees do not interfere with cloud sync.
 
 Claude hook setup is explicit. ~agent-claude-settings-file~ names the settings file updated by ~agent-claude-setup-config~ and the individual ensure commands. ~agent-claude-hook-wrapper~ points to the upstream =claude-code= hook wrapper, while ~agent-claude-statusline-script~ points to the bundled statusline helper. ~agent-claude-status-directory~ controls where the helper writes per-buffer status JSON files. The statusline setup refreshes an existing agent-owned =claude-code-statusline.sh= command, which keeps the settings file correct after the package moves or is renamed, while preserving unrelated custom Claude statusline commands. Loading the backend does not modify Claude Code configuration.
 
@@ -109,28 +110,17 @@ Claude hook setup is explicit. ~agent-claude-settings-file~ names the settings f
 :CUSTOM_ID: h:codex-options
 :END:
 
-#+vindex: agent-codex-handoff-file
 #+vindex: agent-codex-accounts
 #+vindex: agent-codex-account-file
 #+vindex: agent-codex-skill-directories
-#+vindex: agent-codex-audit-skills
-#+vindex: agent-codex-audit-project-directories
 #+vindex: agent-codex-exec-approval-policy
 #+vindex: agent-codex-exec-sandbox-mode
 #+vindex: agent-codex-exec-skip-git-repo-check
-#+vindex: agent-codex-debug-backtrace-model
-#+vindex: agent-codex-debug-backtrace-backend
-#+vindex: agent-codex-act-on-slack-message-model
-#+vindex: agent-codex-act-on-slack-message-backend
-The Codex backend options control account selection, handoff, skill discovery, non-interactive execution, project auditing, and backtrace debugging. ~agent-codex-accounts~ is an alist of account names to Codex home directories, and ~agent-codex-account-file~ stores the selected account across Emacs sessions. Account homes keep credentials such as =auth.json= separate, while shared Codex state such as =config.toml=, =hooks.json=, skills, sessions, and =history.jsonl= is symlinked from =~/.codex/= so hooks, skills, project trust, and chat history remain available after switching accounts; the Claude backend shares state between account homes the same way. When an account-local file conflicts with a shared item, it is backed up to a timestamped =*.agent-backup-*= sibling before the symlink is created, so no local state is silently lost. Use ~agent-codex-select-account~ or the Codex account infix in ~agent-menu~ to switch accounts before starting a new session. Both commands are thin wrappers around ~agent-account-select~, which persists the choice and syncs the account's config home; ~agent-account-init~ prepares or repairs any backend's account home. ~agent-codex-handoff-file~ defaults to =/tmp/codex-handoff.md= and is read by ~agent-codex-handoff~ after the Codex handoff skill writes next-session instructions.
+The Codex backend options control account selection, skill discovery, and non-interactive execution. ~agent-codex-accounts~ is an alist of account names to Codex home directories, and ~agent-codex-account-file~ stores the selected account across Emacs sessions. Account homes keep credentials such as =auth.json= separate, while shared Codex state such as =config.toml=, =hooks.json=, skills, sessions, and =history.jsonl= is symlinked from =~/.codex/= so hooks, skills, project trust, and chat history remain available after switching accounts; the Claude backend shares state between account homes the same way. When an account-local file conflicts with a shared item, it is backed up to a timestamped =*.agent-backup-*= sibling before the symlink is created, so no local state is silently lost. Use ~agent-codex-select-account~ or the Codex account infix in ~agent-menu~ to switch accounts before starting a new session. Both commands are thin wrappers around ~agent-account-select~, which persists the choice and syncs the account's config home; ~agent-account-init~ prepares or repairs any backend's account home.
 
-~agent-codex-skill-directories~ is a list of additional directories scanned for Codex skills. The backend also scans standard Codex skill locations and project-local skill directories. ~agent-codex-audit-skills~ defaults to the code, design, and interpretability audit skills, while ~agent-codex-audit-project-directories~ stores completion candidates for the audit directory prompt.
+~agent-codex-skill-directories~ is a list of additional directories scanned for Codex skills. The backend also scans standard Codex skill locations and project-local skill directories.
 
 ~agent-codex-exec-approval-policy~, ~agent-codex-exec-sandbox-mode~, and ~agent-codex-exec-skip-git-repo-check~ configure the non-interactive Codex calls used by skill and audit workflows. The approval policy is passed as a top-level Codex CLI option before the =exec= subcommand, while the sandbox and repository-check options are passed to =codex exec= itself.
-
-~agent-codex-debug-backtrace-model~ and ~agent-codex-debug-backtrace-backend~ configure the =gptel= request used by ~agent-codex-debug-backtrace~ to identify likely culprit packages from an Emacs backtrace.
-
-The Slack-message routing options, ~agent-claude-act-on-slack-message-model~, ~agent-claude-act-on-slack-message-backend~, ~agent-codex-act-on-slack-message-model~, and ~agent-codex-act-on-slack-message-backend~, configure the =gptel= request used to select an Epoch project from the Slack message at point. The selected backend starts in that project's canonical directory from the project document path, not a nested repo, and inserts the Slack URL into the prompt without submitting it, so the prompt can be reviewed first.
 
 The =gptel= classifier requests used by backtrace debugging and Slack routing ignore reasoning-block callback events and parse only the final response text.
 
@@ -183,11 +173,13 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 #+findex: agent-run-skill
 #+findex: agent-post-push-ci
 #+findex: agent-handoff
+#+findex: agent-handoff-from-emacsclient
 #+findex: agent-audit-project
 #+findex: agent-debug-backtrace
 #+findex: agent-act-on-slack-message
 #+findex: agent-exit
 #+findex: agent-restart
+#+findex: agent-setup-kill-on-exit
 #+findex: agent-toggle-alert
 #+findex: agent-fix-rendering
 #+findex: agent-disable-scrollback-truncation
@@ -205,7 +197,11 @@ selected backend with =--no-push --commit HEAD=. Use it after a push has
 already happened and you want an agent to inspect GitHub Actions failures, fix
 the root cause, and continue the authorized CI closeout loop.
 
-The commands ~agent-handoff~, ~agent-audit-project~, ~agent-debug-backtrace~, ~agent-act-on-slack-message~, ~agent-exit~, and ~agent-restart~ resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands.
+The commands ~agent-handoff~, ~agent-audit-project~, ~agent-debug-backtrace~, ~agent-act-on-slack-message~, ~agent-exit~, and ~agent-restart~ resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (~agent-claude-handoff~, ~agent-codex-restart~, and so on) remain available as obsolete aliases.
+
+~agent-handoff~ reads the backend's entry in ~agent-handoff-files~, kills the current session buffer, and starts a new session with the handoff prompt. ~agent-handoff-from-emacsclient~ accepts the source buffer name from an =emacsclient= argument, so agent-authored handoff commands can close the requesting session even though Emacs evaluates the form outside that buffer. If the source buffer name is unavailable, handoff closes the single existing session buffer for the handoff directory before starting the replacement session, which avoids the CLI's instance-name prompt in unattended loops.
+
+~agent-restart~ kills the current session buffer and resumes the same session in place, preserving the session's directory, instance name, account, and any launch state the backend's ~:restart-options~ function captures. It prompts when the active account differs from the session account and refuses to restart when a named account is no longer configured or when no resumable session identity exists. ~agent-audit-project~ prompts for a project directory and runs each skill in ~agent-audit-skills~ sequentially through the backend's non-interactive prompt runner. ~agent-debug-backtrace~ saves the current Emacs backtrace, asks =gptel= to identify likely packages, and starts a session in the selected package source directory with instructions to fix the bug. ~agent-setup-kill-on-exit~ arranges for a session buffer to be killed when its process exits, consulting the backend's ~:before-kill-check~ slot first.
 
 ~agent-before-exit-functions~ can delay ~agent-exit~ for cleanup work.
 Each function receives the resolved backend and session buffer; returning nil
@@ -228,9 +224,9 @@ appended to the submitted command). For example:
         ("update-log" :directories ("~/My Drive/Epoch") :args "--auto")))
 #+end_src
 
-~agent-run-skill-before-exit~ uses ~agent-skill-command-prefix-alist~ so Claude
-sessions receive slash commands and Codex sessions receive dollar-prefixed
-skill commands, then submits the first applicable skill. The skills run in
+~agent-run-skill-before-exit~ uses each backend's registered skill command
+prefix so Claude sessions receive slash commands and Codex sessions receive
+dollar-prefixed skill commands, then submits the first applicable skill. The skills run in
 order, each submitted after the previous one finishes, and the session exits
 after the last; ordinary ready notifications are left unchanged while the chain
 runs. When ~agent-before-exit-skill-names~ is nil, ~agent-before-exit-skill-name~
@@ -291,29 +287,19 @@ The command ~agent-chief-open-state~ opens the auditable Org state file. ~agent-
 #+findex: agent-claude-start-or-switch
 #+findex: agent-claude-select-account
 #+findex: agent-claude-init-account
-#+findex: agent-claude-run-skill
 #+findex: agent-claude-batch-todos
 #+findex: agent-claude-send-todo-at-point
-#+findex: agent-claude-audit-project
-#+findex: agent-claude-debug-backtrace
-#+findex: agent-claude-handoff
-#+findex: agent-claude-restart
-#+findex: agent-claude-send-command
-#+findex: agent-claude-send-return
-#+findex: agent-claude-submit-command
 #+findex: agent-claude-switch-branch
 #+findex: agent-claude-create-branch
 #+findex: agent-claude-ensure-statusline-config
 #+findex: agent-claude-ensure-stop-hook-config
 #+findex: agent-claude-ensure-notification-hook-config
 #+findex: agent-claude-setup-config
-The Claude commands expose workflows that are specific to Claude Code. ~agent-claude-start-or-switch~ starts Claude under the selected account or opens the unified switcher. ~agent-claude-select-account~ persists an account choice, and ~agent-claude-init-account~ prepares a new account directory with shared configuration files and symlinks.
+The Claude commands expose workflows that are specific to Claude Code; handoff, restart, exit, skill execution, project audits, backtrace debugging, and Slack-message routing use the unified ~agent-*~ commands described above. ~agent-claude-start-or-switch~ starts Claude under the selected account or opens the unified switcher. ~agent-claude-select-account~ persists an account choice, and ~agent-claude-init-account~ prepares a new account directory with shared configuration files and symlinks.
 
-~agent-claude-run-skill~, ~agent-claude-batch-todos~, and ~agent-claude-send-todo-at-point~ use non-interactive or interactive Claude sessions to run structured work. Batch TODO processing extracts Org headings, formats each heading and body as a prompt, runs entries sequentially, and records a summary buffer. Project audits refuse to auto-commit unless the target git worktree is clean before the audit starts.
+~agent-claude-batch-todos~ and ~agent-claude-send-todo-at-point~ use non-interactive or interactive Claude sessions to run structured work. Batch TODO processing extracts Org headings, formats each heading and body as a prompt, runs entries sequentially, and records a summary buffer. Project audits refuse to auto-commit unless the target git worktree is clean before the audit starts.
 
 ~agent-claude-create-branch~ creates a new Claude branch from the current session. With isolated branching it creates a git worktree under ~agent-claude-fork-worktree-directory~ and links the branch session metadata into that project. ~agent-claude-switch-branch~ displays the branch tree and switches to, or resumes, the selected session.
-
-~agent-claude-restart~ kills the current Claude buffer and resumes the same session in place with =claude --resume=, preserving the session's directory and instance name and relaunching under the active account. It is useful when a configuration change requires relaunching Claude.
 
 The setup command ~agent-claude-setup-config~ ensures that Claude's statusline, Stop hook, and Notification hook are present in =~/.claude/settings.json=. The backend does not run setup automatically when loaded; run the setup command explicitly when installing or repairing hook configuration.
 
@@ -324,20 +310,11 @@ The setup command ~agent-claude-setup-config~ ensures that Claude's statusline, 
 
 #+findex: agent-codex-start-or-switch
 #+findex: agent-codex-select-account
-#+findex: agent-codex-run-skill
-#+findex: agent-codex-audit-project
-#+findex: agent-codex-debug-backtrace
-#+findex: agent-codex-handoff
-#+findex: agent-codex-restart
-#+findex: agent-codex-exit
 #+findex: agent-codex-resume
 #+findex: agent-codex-fork
-#+findex: agent-codex-setup-kill-on-exit
-The Codex commands mirror the shared workflows for the Codex CLI. ~agent-codex-start-or-switch~ starts Codex under the selected account when no Codex sessions exist, otherwise it opens the shared switcher. ~agent-codex-select-account~ persists an account choice by name and applies it to new interactive sessions and non-interactive =codex exec= runs. ~agent-codex-run-skill~ runs a skill non-interactively with =codex exec=, using local skill metadata when available and falling back to a slash invocation otherwise. Additional programmatic skill directories are configured through ~agent-codex-programmatic-skill-directories~.
+The Codex commands expose workflows that are specific to the Codex CLI; handoff, restart, exit, skill execution, project audits, backtrace debugging, and Slack-message routing use the unified ~agent-*~ commands described above. ~agent-codex-start-or-switch~ starts Codex under the selected account when no Codex sessions exist, otherwise it opens the shared switcher. ~agent-codex-select-account~ persists an account choice by name and applies it to new interactive sessions and non-interactive =codex exec= runs. Skills run non-interactively with =codex exec=, using local skill metadata when available and falling back to a slash invocation otherwise; additional programmatic skill directories are configured through ~agent-codex-programmatic-skill-directories~.
 
-~agent-codex-audit-project~ prompts for a project directory and runs each configured audit skill sequentially through =codex exec=. ~agent-codex-debug-backtrace~ saves the current Emacs backtrace, asks =gptel= to identify likely packages, and starts a Codex session in the selected package source directory with instructions to fix the bug.
-
-~agent-codex-handoff~ reads ~agent-codex-handoff-file~, kills the current Codex buffer, and starts a new session with the handoff prompt. ~agent-codex-handoff-from-emacsclient~ accepts the source buffer name from an =emacsclient= argument, so agent-authored handoff commands can close the requesting session even though Emacs evaluates the form outside that buffer. If the source buffer name is unavailable, handoff closes the single existing Codex buffer for the handoff directory before starting the replacement session, which avoids Codex's instance-name prompt in unattended loops. ~agent-codex-restart~ prompts when the active account differs from the session account, then resumes codex.el's canonical session identity under the chosen account; app-server sessions use the native app-server resume path and terminal backends use =codex resume=. It refuses to restart when a named account is no longer configured or when restart has no resumable session identity. ~agent-codex-resume~ and ~agent-codex-fork~ expose the Codex CLI's resume and fork subcommands from the unified menu.
+When ~agent-restart~ operates on a Codex session, it resumes codex.el's canonical session identity under the chosen account; app-server sessions use the native app-server resume path and terminal backends use =codex resume=. ~agent-codex-resume~ and ~agent-codex-fork~ expose the Codex CLI's resume and fork subcommands from the unified menu.
 
 * Functions
 :PROPERTIES:
@@ -358,9 +335,11 @@ The Codex commands mirror the shared workflows for the Codex CLI. ~agent-codex-s
 #+findex: agent-notify
 #+findex: agent-protect-buffer
 #+findex: agent-kill-session-buffer
-The function ~agent-register-backend~ registers an AI tool by constructing an ~agent-backend~ struct from keyword arguments: buffer predicates, session discovery functions, command senders, and optional command handlers. Backend modules call it at load time. Keywords are validated against the struct's slot names, and required slots are checked so the shared session layer can rely on a consistent interface.
+The function ~agent-register-backend~ registers an AI tool by constructing an ~agent-backend~ struct from keyword arguments. Backend modules call it at load time. Keywords are validated against the struct's slot names, and the required slots ~:buffer-p~, ~:find-all-buffers~, and ~:start-session~ are checked so the shared session layer can rely on a consistent interface.
 
-The ~:start-session~ slot starts a new session parameterized by an ~agent-session~ identity struct, optionally with an initial prompt or a resume id. The ~:session-identity~ slot returns a live session buffer's canonical identity as an ~agent-session~ struct. ~agent-start-session~ is the core dispatcher that starts a session through its backend's ~:start-session~ function, passing any extra backend-specific options through.
+The full slot set is: identity and presentation (~name~, ~label~, ~icon~, ~program~), buffer discovery (~buffer-p~, ~find-all-buffers~, ~find-buffers-for-dir~), session lifecycle (~start-session~, ~session-identity~, ~restart-options~), send primitives (~send-string~, ~send-return~, ~submit~, ~target-buffer~), session state probes (~waiting-p~, ~busy-p~, ~background-tasks-p~, ~duration-ms~, ~display-name-suffix~, ~notify~), accounts (~account-env-var~, ~accounts~, ~account-file~, ~shared-config-items~, ~canonical-home~, ~account-init~), skills (~run-prompt~, ~skill-roots~, ~skill-command-prefix~), integration hooks (~sync-theme~, ~modeline-status~, ~menu-suffixes~), and exit safety (~before-exit-ready-to-close-p~, ~before-kill-check~).
+
+The ~:start-session~ slot starts a new session parameterized by an ~agent-session~ identity struct, optionally with an initial prompt or a resume id. The ~:session-identity~ slot returns a live session buffer's CLI session id, used by ~agent-restart~ to resume in place. ~agent-start-session~ is the core dispatcher that starts a session through its backend's ~:start-session~ function, passing any extra backend-specific options through. The ~:send-string~ slot inserts text into a session's prompt without submitting it, ~:send-return~ submits the pending prompt, and ~:submit~ atomically inserts and submits; the core wrappers ~agent-send-string~, ~agent-send-return~, and ~agent-submit~ dispatch through these slots and emit the corresponding session events.
 
 ~agent-display-name~ returns a human-readable label for a session buffer. It starts with the project name, adds an instance name when needed to disambiguate duplicates, and lets backends append their own suffixes. The Claude backend uses this to expose branch identity in the modeline and switcher.
 
