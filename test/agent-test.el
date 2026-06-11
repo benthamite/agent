@@ -58,18 +58,51 @@
     (should-error
      (apply #'agent-register-backend 'bad (list :buffer-p #'ignore)))))
 
-(ert-deftest agent-test-act-on-slack-message-dispatches-new-backend-key ()
-  "Dispatch Slack-message action routing through the renamed backend key."
+(ert-deftest agent-test-act-on-slack-message-uses-unified-defcustoms ()
+  "Route Slack-message action through the unified core defcustom pair."
   (let ((agent-backends nil)
-        (called nil))
-    (apply #'agent-register-backend
-     'one
-     (agent-test--backend
-      :act-on-slack-message (lambda ()
-                              (interactive)
-                              (setq called t))))
-    (agent-act-on-slack-message)
-    (should called)))
+        (agent-act-on-slack-message-model 'test-model)
+        (agent-act-on-slack-message-backend "TestBackend")
+        (captured nil))
+    (apply #'agent-register-backend 'one (agent-test--backend))
+    (cl-letf (((symbol-function 'agent--act-on-slack-message)
+               (lambda (model backend _start-function)
+                 (setq captured (list model backend)))))
+      (agent-act-on-slack-message)
+      (should (equal captured '(test-model "TestBackend"))))))
+
+(ert-deftest agent-test-act-on-slack-start-session-inserts-url-for-review ()
+  "Start a backend session and insert the Slack URL without submitting it."
+  (let ((agent-backends nil)
+        (project '(:id "project" :directory "/tmp/project"))
+        (url "https://example.slack.com/archives/C1/p123")
+        (buffer (generate-new-buffer " *agent-test*"))
+        started
+        sent)
+    (apply #'agent-register-backend 'one (agent-test--backend))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-start-session)
+                   (lambda (session &rest options)
+                     (setq started (list session options))
+                     buffer))
+                  ((symbol-function 'agent-send-string)
+                   (lambda (cmd target)
+                     (setq sent (list cmd target))
+                     target))
+                  ((symbol-function 'agent-submit)
+                   (lambda (&rest _) (ert-fail "agent-submit was called")))
+                  ((symbol-function 'agent-send-return)
+                   (lambda (&rest _)
+                     (ert-fail "agent-send-return was called"))))
+          (should (eq (agent--act-on-slack-start-session 'one project url)
+                      buffer))
+          (let ((session (car started)))
+            (should (eq (agent-session-backend session) 'one))
+            (should (equal (agent-session-directory session) "/tmp/project/"))
+            (should-not (agent-session-instance session)))
+          (should-not (cadr started))
+          (should (equal sent (list url buffer))))
+      (kill-buffer buffer))))
 
 ;;;; Epoch project registry
 

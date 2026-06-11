@@ -420,33 +420,6 @@
       (agent-codex--note-submission buf)
       (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))))
 
-;;;; Slack message action routing
-
-(ert-deftest agent-codex-test-act-on-slack-message-inserts-url-for-review ()
-  "Start Codex without an initial prompt and insert the Slack URL."
-  (let ((project '(:id "project" :directory "/tmp/project"))
-        (url "https://example.slack.com/archives/C1/p123")
-        (buffer (generate-new-buffer " *codex-test*"))
-        started
-        sent)
-    (unwind-protect
-        (cl-letf (((symbol-function 'agent-codex--install-hooks) #'ignore)
-                  ((symbol-function 'codex-start-session)
-                   (lambda (&rest keys)
-                     (setq started keys)
-                     buffer))
-                  ((symbol-function 'agent-send-string)
-                   (lambda (cmd target)
-                     (setq sent (list cmd target))
-                     target)))
-          (should (eq (agent-codex--act-on-slack-message-start-session
-                       project url)
-                      buffer))
-          (should (equal (plist-get started :directory) "/tmp/project/"))
-          (should-not (plist-get started :initial-prompt))
-          (should (equal sent (list url buffer))))
-      (kill-buffer buffer))))
-
 (ert-deftest agent-codex-test-before-exit-ready-vetoes-pending-prompt ()
   "Do not auto-close while Codex still has prompt input."
   (with-temp-buffer

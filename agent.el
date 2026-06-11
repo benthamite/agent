@@ -469,6 +469,34 @@ that function is available."
   :type 'string
   :group 'agent)
 
+(define-obsolete-variable-alias 'agent-claude-debug-slack-message-model
+  'agent-act-on-slack-message-model "0.2")
+(define-obsolete-variable-alias 'agent-claude-act-on-slack-message-model
+  'agent-act-on-slack-message-model "0.2")
+(make-obsolete-variable 'agent-codex-debug-slack-message-model
+                        'agent-act-on-slack-message-model "0.2")
+(make-obsolete-variable 'agent-codex-act-on-slack-message-model
+                        'agent-act-on-slack-message-model "0.2")
+
+(defcustom agent-act-on-slack-message-model 'gemini-flash-lite-latest
+  "GPtel model for selecting an Epoch project from a Slack message."
+  :type 'symbol
+  :group 'agent)
+
+(define-obsolete-variable-alias 'agent-claude-debug-slack-message-backend
+  'agent-act-on-slack-message-backend "0.2")
+(define-obsolete-variable-alias 'agent-claude-act-on-slack-message-backend
+  'agent-act-on-slack-message-backend "0.2")
+(make-obsolete-variable 'agent-codex-debug-slack-message-backend
+                        'agent-act-on-slack-message-backend "0.2")
+(make-obsolete-variable 'agent-codex-act-on-slack-message-backend
+                        'agent-act-on-slack-message-backend "0.2")
+
+(defcustom agent-act-on-slack-message-backend "Gemini"
+  "GPtel backend name for Slack message project selection."
+  :type 'string
+  :group 'agent)
+
 (defcustom agent-handoff-files
   '((claude-code . "/tmp/claude-code-handoff.md")
     (codex . "/tmp/codex-handoff.md"))
@@ -2368,13 +2396,35 @@ backtrace file path as the initial prompt."
 
 ;;;###autoload
 (defun agent-act-on-slack-message ()
-  "Route the Slack message at point to an Epoch project session."
+  "Route the Slack message at point to an Epoch project session.
+Identifies the project with `gptel', starts a session in the
+project directory, and inserts the Slack message URL into the
+prompt for review without submitting it."
   (interactive)
-  (agent--dispatch :act-on-slack-message))
+  (let ((backend (agent--resolve-backend)))
+    (agent--act-on-slack-message
+     agent-act-on-slack-message-model
+     agent-act-on-slack-message-backend
+     (lambda (project slack-url)
+       (agent--act-on-slack-start-session backend project slack-url)))))
 
 ;;;###autoload
 (define-obsolete-function-alias
   'agent-debug-slack-message #'agent-act-on-slack-message "0.2")
+
+(defun agent--act-on-slack-start-session (backend project slack-url)
+  "Start a BACKEND session for PROJECT and insert SLACK-URL.
+PROJECT is an Epoch registry project plist.  Return the new session
+buffer with SLACK-URL inserted into its prompt, unsubmitted."
+  (let ((dir (file-name-as-directory
+              (expand-file-name (plist-get project :directory)))))
+    (message "Starting %s for `%s' in %s..."
+             (agent--backend-get backend :label)
+             (plist-get project :id) dir)
+    (let ((buffer (agent-start-session
+                   (agent-session-create :backend backend :directory dir))))
+      (agent-send-string slack-url buffer)
+      buffer)))
 
 ;;;###autoload
 (defun agent-save-backtrace ()

@@ -104,26 +104,6 @@ When nil, use `codex-sandbox-mode' or the CLI default."
   :type 'boolean
   :group 'agent-codex)
 
-(defcustom agent-codex-act-on-slack-message-model 'gemini-flash-lite-latest
-  "GPtel model for selecting an Epoch project from a Slack message."
-  :type 'symbol
-  :group 'agent-codex)
-
-(define-obsolete-variable-alias
-  'agent-codex-debug-slack-message-model
-  'agent-codex-act-on-slack-message-model
-  "0.2")
-
-(defcustom agent-codex-act-on-slack-message-backend "Gemini"
-  "GPtel backend name for Slack message project selection."
-  :type 'string
-  :group 'agent-codex)
-
-(define-obsolete-variable-alias
-  'agent-codex-debug-slack-message-backend
-  'agent-codex-act-on-slack-message-backend
-  "0.2")
-
 (defvar codex-reasoning-effort)
 (defvar codex--session-id)
 (defvar codex--app-server-input-marker)
@@ -184,7 +164,6 @@ Source: SVG Repo (CC0).")
   :run-prompt #'agent-codex-run-prompt
   :skill-roots #'agent-codex-skill-roots
   :skill-command-prefix "$"
-  :act-on-slack-message #'agent-codex-act-on-slack-message
   :start-session #'agent-codex--start-session
   :session-identity #'agent-codex--session-identity
   :restart-options #'agent-codex--restart-options
@@ -740,32 +719,10 @@ This is the `run-prompt' backend slot implementation."
 
 ;;;;; Slack message routing
 
-;;;###autoload
-(defun agent-codex-act-on-slack-message ()
-  "Select an Epoch project from a Slack message and open Codex."
-  (interactive)
-  (agent--act-on-slack-message
-   agent-codex-act-on-slack-message-model
-   agent-codex-act-on-slack-message-backend
-   #'agent-codex--act-on-slack-message-start-session))
-
 (define-obsolete-function-alias
-  'agent-codex-debug-slack-message #'agent-codex-act-on-slack-message "0.2")
-
-(defun agent-codex--act-on-slack-message-start-session (project slack-url)
-  "Start a Codex session for PROJECT with SLACK-URL."
-  (let ((dir (file-name-as-directory
-              (expand-file-name (plist-get project :directory)))))
-    (message "Starting Codex for `%s' in %s..."
-             (plist-get project :id) dir)
-    (let ((buffer (agent-start-session
-                   (agent-session-create :backend 'codex :directory dir))))
-      (agent-send-string slack-url buffer))))
-
+  'agent-codex-act-on-slack-message #'agent-act-on-slack-message "0.2")
 (define-obsolete-function-alias
-  'agent-codex--debug-slack-message-start-session
-  #'agent-codex--act-on-slack-message-start-session
-  "0.2")
+  'agent-codex-debug-slack-message #'agent-act-on-slack-message "0.2")
 
 ;;;;; Handoff
 

@@ -134,35 +134,6 @@
     (should (equal captured-account "work"))
     (should (equal captured-resume-id "0c5e1c5e-claude-session"))))
 
-;;;; Slack message action routing
-
-(ert-deftest agent-claude-test-act-on-slack-message-inserts-url-for-review ()
-  "Start Claude Code without an initial prompt and insert the Slack URL."
-  (let ((project '(:id "project" :directory "/tmp/project"))
-        (url "https://example.slack.com/archives/C1/p123")
-        (buffer (generate-new-buffer " *claude-test*"))
-        started
-        sent)
-    (unwind-protect
-        (cl-letf (((symbol-function 'agent-start-session)
-                   (lambda (session &rest options)
-                     (setq started (list session options))
-                     buffer))
-                  ((symbol-function 'agent-send-string)
-                   (lambda (cmd target)
-                     (setq sent (list cmd target))
-                     target)))
-          (should (eq (agent-claude--act-on-slack-message-start-session
-                       project url)
-                      buffer))
-          (let ((session (car started)))
-            (should (eq (agent-session-backend session) 'claude-code))
-            (should (equal (agent-session-directory session) "/tmp/project/"))
-            (should-not (agent-session-instance session)))
-          (should-not (cadr started))
-          (should (equal sent (list url buffer))))
-      (kill-buffer buffer))))
-
 ;;;; Sanitize buffer name
 
 (ert-deftest agent-claude-test-sanitize-buffer-name-replaces-special ()

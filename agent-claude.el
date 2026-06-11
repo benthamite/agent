@@ -240,7 +240,6 @@ Source: lobehub/lobe-icons (MIT).")
   :notify #'agent-claude-notify
   :skill-roots #'agent-claude-skill-roots
   :skill-command-prefix "/"
-  :act-on-slack-message #'agent-claude-act-on-slack-message
   :before-kill-check (lambda (_buffer) (agent-claude--confirm-kill-branches))
   :start-session #'agent-claude--start-session
   :session-identity #'agent-claude--session-identity
@@ -2008,53 +2007,10 @@ unconditionally recenter with `(recenter -1)'."
 
 ;;;;; Slack message routing
 
-(defcustom agent-claude-act-on-slack-message-model 'gemini-flash-lite-latest
-  "GPtel model for selecting an Epoch project from a Slack message."
-  :type 'symbol
-  :group 'agent-claude)
-
-(define-obsolete-variable-alias
-  'agent-claude-debug-slack-message-model
-  'agent-claude-act-on-slack-message-model
-  "0.2")
-
-(defcustom agent-claude-act-on-slack-message-backend "Gemini"
-  "GPtel backend name for Slack message project selection."
-  :type 'string
-  :group 'agent-claude)
-
-(define-obsolete-variable-alias
-  'agent-claude-debug-slack-message-backend
-  'agent-claude-act-on-slack-message-backend
-  "0.2")
-
-;;;###autoload
-(defun agent-claude-act-on-slack-message ()
-  "Select an Epoch project from a Slack message and open Claude Code."
-  (interactive)
-  (agent--act-on-slack-message
-   agent-claude-act-on-slack-message-model
-   agent-claude-act-on-slack-message-backend
-   #'agent-claude--act-on-slack-message-start-session))
-
 (define-obsolete-function-alias
-  'agent-claude-debug-slack-message #'agent-claude-act-on-slack-message "0.2")
-
-(defun agent-claude--act-on-slack-message-start-session (project slack-url)
-  "Start a Claude Code session for PROJECT with SLACK-URL."
-  (let ((dir (file-name-as-directory
-              (expand-file-name (plist-get project :directory)))))
-    (message "Starting Claude Code for `%s' in %s..."
-             (plist-get project :id) dir)
-    (let ((buffer (agent-start-session
-                   (agent-session-create :backend 'claude-code
-                                         :directory dir))))
-      (agent-send-string slack-url buffer))))
-
+  'agent-claude-act-on-slack-message #'agent-act-on-slack-message "0.2")
 (define-obsolete-function-alias
-  'agent-claude--debug-slack-message-start-session
-  #'agent-claude--act-on-slack-message-start-session
-  "0.2")
+  'agent-claude-debug-slack-message #'agent-act-on-slack-message "0.2")
 
 (setq claude-code-notification-function #'claude-code-default-notification)
 (add-hook 'claude-code-event-hook #'agent-claude--handle-notification)
