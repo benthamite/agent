@@ -209,6 +209,25 @@ Return nil when BACKEND is not registered."
   "Return the `agent-backend' slot symbol named by keyword KEY."
   (intern (substring (symbol-name key) 1)))
 
+(cl-defun agent-start-session (session &rest options
+                                       &key initial-prompt resume-id
+                                       &allow-other-keys)
+  "Start SESSION through its backend's `start-session' function.
+SESSION is an `agent-session' whose backend, account, directory, and
+instance slots parameterize the new session; nil slots fall back to the
+backend's ambient defaults.  INITIAL-PROMPT is submitted as the first
+user message.  RESUME-ID resumes that session id instead of starting
+fresh.  Remaining OPTIONS are passed through to the backend, which may
+support extras such as `:fork' (Claude Code) or `:terminal-backend'
+\(Codex).  Return the new session buffer."
+  (ignore initial-prompt resume-id)
+  (let ((start (agent--backend-get (agent-session-backend session)
+                                   :start-session)))
+    (unless start
+      (user-error "Backend `%s' does not support parameterized session start"
+                  (agent-session-backend session)))
+    (apply start session options)))
+
 (defun agent-backend-icon-string (backend &optional face)
   "Return the icon string for the backend named BACKEND.
 BACKEND is a backend name symbol.  FACE is passed to the icon

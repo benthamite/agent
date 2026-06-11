@@ -1048,5 +1048,29 @@
           :buffer-p (lambda (candidate) (eq candidate buf))))
         (should (eq (agent--detect-backend buf) 'one))))))
 
+(ert-deftest agent-test-start-session-dispatches-to-backend ()
+  "Dispatch session starts to the backend's start-session function."
+  (let* ((buffer (generate-new-buffer " *agent-test-session*"))
+         (session (agent-session-create :backend 'codex :directory "/tmp/"))
+         captured)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent--backend-get)
+                   (lambda (_backend key)
+                     (when (eq key :start-session)
+                       (lambda (sess &rest options)
+                         (setq captured (cons sess options))
+                         buffer)))))
+          (should (eq (agent-start-session session :resume-id "abc") buffer))
+          (should (eq (car captured) session))
+          (should (equal (plist-get (cdr captured) :resume-id) "abc")))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-start-session-rejects-unsupported-backend ()
+  "Signal a user error for backends without start-session support."
+  (let ((session (agent-session-create :backend 'codex :directory "/tmp/")))
+    (cl-letf (((symbol-function 'agent--backend-get)
+               (lambda (_backend _key) nil)))
+      (should-error (agent-start-session session) :type 'user-error))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here
