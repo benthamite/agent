@@ -210,6 +210,41 @@
     (should (equal captured-session-id
                    "019ea295-c3df-70b0-a8e5-a8ffe9df220a"))))
 
+(ert-deftest agent-codex-test-restart-completes-partial-session-identity ()
+  "Restart a migrated session in its buffer directory, not ambient state."
+  (let ((dir (make-temp-file "codex-restart" t))
+        (ambient-dir (file-name-as-directory
+                      (make-temp-file "codex-ambient" t)))
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        captured-directory)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*codex:~/project/:default*" t)
+          (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
+          (setq-local agent--session (agent-session-create :backend 'codex
+                                                           :account "work"))
+          (let ((default-directory ambient-dir)
+                (agent-codex-accounts
+                 `(("work" . ,(expand-file-name "work" dir))
+                   ("personal" . ,(expand-file-name "personal" dir))))
+                (agent-account--current (make-hash-table :test #'eq)))
+            (puthash 'codex "personal" agent-account--current)
+            (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                      ((symbol-function 'agent--force-kill-buffer) #'ignore)
+                      ((symbol-function 'agent-account-sync) #'ignore)
+                      ((symbol-function 'completing-read)
+                       (lambda (_prompt _choices &rest _args) "personal"))
+                      ((symbol-function 'codex-start-session)
+                       (lambda (&rest keys)
+                         (setq captured-directory
+                               (plist-get keys :directory))
+                         (generate-new-buffer " *codex-restart-target*"))))
+              (kill-buffer (agent-restart)))))
+      (delete-directory agent-prompt-capture-directory t)
+      (delete-directory ambient-dir t)
+      (delete-directory dir t))
+    (should (equal captured-directory "~/project/"))))
+
 (ert-deftest agent-codex-test-restart-fails-when-active-account-is-missing ()
   "Do not fall back to the session account when the selected account is stale."
   (let ((dir (make-temp-file "codex-restart" t))

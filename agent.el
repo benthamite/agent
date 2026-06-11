@@ -356,8 +356,40 @@ sessions created before the struct existed keep working during
 the migration."
   (let ((buf (or buffer (current-buffer))))
     (when (buffer-live-p buf)
-      (or (buffer-local-value 'agent--session buf)
-          (agent--capture-session buf)))))
+      (if-let* ((session (buffer-local-value 'agent--session buf)))
+          (agent--complete-session buf session)
+        (agent--capture-session buf)))))
+
+(defun agent--complete-session (buffer session)
+  "Fill missing identity slots in SESSION from BUFFER.
+Keep the account recorded on SESSION when present, because it names
+the account that launched the session and may intentionally differ
+from the currently selected account."
+  (if (agent--session-complete-p buffer session)
+      session
+    (when-let* ((captured (agent--derive-session buffer)))
+      (unless (agent-session-backend session)
+        (setf (agent-session-backend session)
+              (agent-session-backend captured)))
+      (unless (agent-session-account session)
+        (setf (agent-session-account session)
+              (agent-session-account captured)))
+      (unless (agent-session-directory session)
+        (setf (agent-session-directory session)
+              (agent-session-directory captured)))
+      (unless (agent-session-instance session)
+        (setf (agent-session-instance session)
+              (agent-session-instance captured)))
+      (agent--set-session buffer session))
+    session))
+
+(defun agent--session-complete-p (buffer session)
+  "Return non-nil when SESSION has all identity available from BUFFER."
+  (and (agent-session-backend session)
+       (agent-session-directory session)
+       (or (agent-session-instance session)
+           (not (agent--session-instance-from-buffer-name
+                 (buffer-name buffer))))))
 
 (defun agent--capture-session (buffer)
   "Construct, store, and return the `agent-session' struct for BUFFER.
@@ -367,19 +399,22 @@ in-flight `agent-account--starting' binding when it belongs to
 the backend, falling back to the persisted current account.
 Return nil when BUFFER belongs to no registered backend or its
 name encodes no directory."
+  (when-let* ((session (agent--derive-session buffer)))
+    (agent--set-session buffer session)))
+
+(defun agent--derive-session (buffer)
+  "Return a session identity derived from BUFFER, or nil."
   (when-let* ((backend (agent--detect-backend buffer))
               (name (buffer-name buffer))
               (directory (agent--session-directory-from-buffer-name name)))
-    (let* ((instance (agent--session-instance-from-buffer-name name))
-           (account (or (and (eq (car-safe agent-account--starting) backend)
-                             (cdr agent-account--starting))
-                        (agent-account-current backend))))
-      (agent--set-session
-       buffer
-       (agent-session-create :backend backend
-                             :account account
-                             :directory directory
-                             :instance instance)))))
+    (let ((account (or (and (eq (car-safe agent-account--starting) backend)
+                            (cdr agent-account--starting))
+                       (agent-account-current backend))))
+      (agent-session-create
+       :backend backend
+       :account account
+       :directory directory
+       :instance (agent--session-instance-from-buffer-name name)))))
 
 (defun agent-session-buffer-name (session)
   "Return the buffer name encoding SESSION's identity.
