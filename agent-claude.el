@@ -2490,8 +2490,9 @@ there with the backtrace prompt passed as a CLI argument."
          (prompt (format "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
                          backtrace-file)))
     (message "Starting Claude Code for `%s' in %s..." package dir)
-    (cl-letf (((symbol-function 'claude-code--directory) (lambda () dir)))
-      (claude-code--start nil (list prompt) nil t))))
+    (agent-start-session
+     (agent-session-create :backend 'claude-code :directory dir)
+     :initial-prompt prompt)))
 
 ;;;###autoload
 (defun agent-claude-act-on-slack-message ()
@@ -2507,14 +2508,14 @@ there with the backtrace prompt passed as a CLI argument."
 
 (defun agent-claude--act-on-slack-message-start-session (project slack-url)
   "Start a Claude Code session for PROJECT with SLACK-URL."
-  (let* ((dir (file-name-as-directory
-               (expand-file-name (plist-get project :directory))))
-         (default-directory dir))
+  (let ((dir (file-name-as-directory
+              (expand-file-name (plist-get project :directory)))))
     (message "Starting Claude Code for `%s' in %s..."
              (plist-get project :id) dir)
-    (cl-letf (((symbol-function 'claude-code--directory) (lambda () dir)))
-      (let ((buffer (claude-code--start nil nil nil t)))
-        (agent-claude-send-command slack-url buffer)))))
+    (let ((buffer (agent-start-session
+                   (agent-session-create :backend 'claude-code
+                                         :directory dir))))
+      (agent-claude-send-command slack-url buffer))))
 
 (define-obsolete-function-alias
   'agent-claude--debug-slack-message-start-session
@@ -2573,8 +2574,9 @@ the handoff contents passed as a CLI argument."
       (with-current-buffer source-buffer
         (setq-local agent-before-exit-skill-inhibit t))
       (agent--force-kill-buffer source-buffer))
-    (cl-letf (((symbol-function 'claude-code--directory) (lambda () dir)))
-      (claude-code--start nil (list prompt) nil t))))
+    (agent-start-session
+     (agent-session-create :backend 'claude-code :directory dir)
+     :initial-prompt prompt)))
 
 (defun agent-claude-handoff-from-emacsclient ()
   "Run `agent-claude-handoff' for the client-provided buffer name.
@@ -2623,7 +2625,6 @@ equivalent to manually closing the session and reopening it."
   (unless (claude-code--buffer-p (current-buffer))
     (user-error "Not in a Claude buffer"))
   (let* ((account (agent-claude--resolve-account))
-         (agent-claude--pending-account account)
          (session-id (agent-claude--current-session-id))
          (dir default-directory)
          (instance-name (claude-code--extract-instance-name-from-buffer-name
@@ -2631,10 +2632,12 @@ equivalent to manually closing the session and reopening it."
     (when account
       (agent-claude--sync-account-config account))
     (agent--force-kill-buffer (current-buffer))
-    (cl-letf (((symbol-function 'claude-code--directory) (lambda () dir))
-              ((symbol-function 'claude-code--prompt-for-instance-name)
-               (lambda (_dir _existing _force) instance-name)))
-      (claude-code--start nil (list "--resume" session-id) nil t))))
+    (agent-start-session
+     (agent-session-create :backend 'claude-code
+                           :account account
+                           :directory dir
+                           :instance instance-name)
+     :resume-id session-id)))
 
 ;;;;; Branch navigation
 
@@ -2921,10 +2924,12 @@ select one to switch to or resume."
   "Resume SESSION-ID in a new Claude buffer.
 Auto-generates an instance name from the session ID to avoid the
 interactive instance-name prompt."
-  (cl-letf (((symbol-function 'claude-code--prompt-for-instance-name)
-             (lambda (_dir _existing _force)
-               (format "branch-%s" (substring session-id 0 8)))))
-    (claude-code--start nil (list "--resume" session-id) nil t)))
+  (agent-start-session
+   (agent-session-create
+    :backend 'claude-code
+    :directory default-directory
+    :instance (format "branch-%s" (substring session-id 0 8)))
+   :resume-id session-id))
 
 ;;;###autoload
 (defun agent-claude-create-branch (&optional isolated)
@@ -2954,13 +2959,13 @@ concern; otherwise the default is what you want."
     (when worktree
       (agent-claude--link-session-into-project
        session-id parent-cwd (car worktree)))
-    (cl-letf (((symbol-function 'claude-code--prompt-for-instance-name)
-               (lambda (_dir _existing _force)
-                 (format "fork-%s" fork-id))))
-      (let ((default-directory (or (car worktree) default-directory)))
-        (claude-code--start nil
-                            (list "--resume" session-id "--fork-session")
-                            nil t)))
+    (agent-start-session
+     (agent-session-create
+      :backend 'claude-code
+      :directory (or (car worktree) default-directory)
+      :instance (format "fork-%s" fork-id))
+     :resume-id session-id
+     :fork t)
     (when worktree
       (message "Forked in worktree %s on branch %s"
                (car worktree) (cdr worktree)))))

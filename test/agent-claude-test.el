@@ -39,16 +39,11 @@
         (url "https://example.slack.com/archives/C1/p123")
         (buffer (generate-new-buffer " *claude-test*"))
         started
-        sent
-        launch-directory)
+        sent)
     (unwind-protect
-        (cl-letf (((symbol-function 'claude-code--start)
-                   (lambda (arg extra-switches force-prompt force-switch-to-buffer)
-                     (setq started
-                           (list arg extra-switches force-prompt
-                                 force-switch-to-buffer
-                                 (claude-code--directory)))
-                     (setq launch-directory default-directory)
+        (cl-letf (((symbol-function 'agent-start-session)
+                   (lambda (session &rest options)
+                     (setq started (list session options))
                      buffer))
                   ((symbol-function 'agent-claude-send-command)
                    (lambda (cmd target)
@@ -57,9 +52,11 @@
           (should (eq (agent-claude--act-on-slack-message-start-session
                        project url)
                       buffer))
-          (should (equal started
-                         (list nil nil nil t "/tmp/project/")))
-          (should (equal launch-directory "/tmp/project/"))
+          (let ((session (car started)))
+            (should (eq (agent-session-backend session) 'claude-code))
+            (should (equal (agent-session-directory session) "/tmp/project/"))
+            (should-not (agent-session-instance session)))
+          (should-not (cadr started))
           (should (equal sent (list url buffer))))
       (kill-buffer buffer))))
 
