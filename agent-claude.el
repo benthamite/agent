@@ -221,37 +221,38 @@ Used to detect when `/branch' creates a new session.")
 Source: lobehub/lobe-icons (MIT).")
 
 (agent-register-backend 'claude-code
-  (list :buffer-p #'claude-code--buffer-p
-        :find-all-buffers #'claude-code--find-all-claude-buffers
-        :find-buffers-for-dir #'claude-code--find-claude-buffers-for-directory
-        :extract-directory #'claude-code--extract-directory-from-buffer-name
-        :extract-instance-name #'claude-code--extract-instance-name-from-buffer-name
-        :send-command #'agent-claude-send-command
-        :submit-command #'agent-claude-submit-command
-        :start #'claude-code--start
-        :start-new #'agent-claude--start-with-account
-        :program "claude"
-        :send-return #'agent-claude-send-return
-        :icon (lambda (&optional face) (let ((svg (agent-svg-icon agent-claude-icon-svg face)))
-                                        (if (string-empty-p svg) "CC" svg)))
-        :account (lambda (buf)
-                   (buffer-local-value 'agent-claude--buffer-account buf))
-        :background-tasks-p #'agent-claude--has-background-tasks-p
-        :duration-ms (lambda (buf)
-                       (with-current-buffer buf
-                         (agent-claude-status-duration-ms)))
-        :display-name-suffix #'agent-claude--branch-suffix
-        :label "Claude Code"
-        :discover-skills #'agent-claude--discover-skills
-        :handoff #'agent-claude-handoff
-        :run-skill #'agent-claude-run-skill
-        :audit-project #'agent-claude-audit-project
-        :debug-backtrace #'agent-claude-debug-backtrace
-        :act-on-slack-message #'agent-claude-act-on-slack-message
-        :setup-kill-on-exit #'agent-claude-setup-kill-on-exit
-        :exit #'agent-claude-exit
-        :restart #'agent-claude-restart
-        :sync-theme #'agent-claude--sync-theme))
+  :buffer-p #'claude-code--buffer-p
+  :find-all-buffers #'claude-code--find-all-claude-buffers
+  :find-buffers-for-dir #'claude-code--find-claude-buffers-for-directory
+  :extract-directory #'claude-code--extract-directory-from-buffer-name
+  :extract-instance-name #'claude-code--extract-instance-name-from-buffer-name
+  :send-command #'agent-claude-send-command
+  :submit-command #'agent-claude-submit-command
+  :start #'claude-code--start
+  :start-new #'agent-claude--start-with-account
+  :program "claude"
+  :send-return #'agent-claude-send-return
+  :icon (lambda (&optional face)
+          (let ((svg (agent-svg-icon agent-claude-icon-svg face)))
+            (if (string-empty-p svg) "CC" svg)))
+  :account (lambda (buf)
+             (buffer-local-value 'agent-claude--buffer-account buf))
+  :background-tasks-p #'agent-claude--has-background-tasks-p
+  :duration-ms (lambda (buf)
+                 (with-current-buffer buf
+                   (agent-claude-status-duration-ms)))
+  :display-name-suffix #'agent-claude--branch-suffix
+  :label "Claude Code"
+  :discover-skills #'agent-claude--discover-skills
+  :handoff #'agent-claude-handoff
+  :run-skill #'agent-claude-run-skill
+  :audit-project #'agent-claude-audit-project
+  :debug-backtrace #'agent-claude-debug-backtrace
+  :act-on-slack-message #'agent-claude-act-on-slack-message
+  :setup-kill-on-exit #'agent-claude-setup-kill-on-exit
+  :exit #'agent-claude-exit
+  :restart #'agent-claude-restart
+  :sync-theme #'agent-claude--sync-theme)
 
 ;;;; Functions
 

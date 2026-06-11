@@ -24,11 +24,11 @@
   "Dispatch theme sync to all registered backend handlers."
   (let ((agent-backends nil)
         (seen nil))
-    (agent-register-backend
+    (apply #'agent-register-backend
      'one
      (agent-test--backend
       :sync-theme (lambda (theme) (push (cons 'one theme) seen))))
-    (agent-register-backend
+    (apply #'agent-register-backend
      'two
      (agent-test--backend
       :sync-theme (lambda (theme) (push (cons 'two theme) seen))))
@@ -56,13 +56,13 @@
   "Reject backend registrations that are missing required keys."
   (let ((agent-backends nil))
     (should-error
-     (agent-register-backend 'bad (list :buffer-p #'ignore)))))
+     (apply #'agent-register-backend 'bad (list :buffer-p #'ignore)))))
 
 (ert-deftest agent-test-act-on-slack-message-dispatches-new-backend-key ()
   "Dispatch Slack-message action routing through the renamed backend key."
   (let ((agent-backends nil)
         (called nil))
-    (agent-register-backend
+    (apply #'agent-register-backend
      'one
      (agent-test--backend
       :act-on-slack-message (lambda ()
@@ -169,7 +169,7 @@
         (with-temp-buffer
           (rename-buffer "*one:~/repo/b/:default*" t)
           (let ((two (current-buffer)))
-            (agent-register-backend
+            (apply #'agent-register-backend
              'one
              (agent-test--backend
               :buffer-p (lambda (buf)
@@ -186,7 +186,7 @@
     (with-temp-buffer
       (rename-buffer "*one:~/repo/project/:default*" t)
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -201,7 +201,7 @@
     (with-temp-buffer
       (rename-buffer "*one:~/repo/a/:default*" t)
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -216,7 +216,7 @@
   (let ((agent-backends nil))
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -231,13 +231,13 @@
   "Run the selected backend skill when names collide."
   (let ((agent-backends nil)
         (ran nil))
-    (agent-register-backend
+    (apply #'agent-register-backend
      'one
      (agent-test--backend
       :label "One"
       :discover-skills (lambda () (list (list :name "audit")))
       :run-skill (lambda (name args) (setq ran (list 'one name args)))))
-    (agent-register-backend
+    (apply #'agent-register-backend
      'two
      (agent-test--backend
       :label "Two"
@@ -252,7 +252,7 @@
   "Run post-push CI through the selected backend with the current HEAD."
   (let ((agent-backends nil)
         ran)
-    (agent-register-backend
+    (apply #'agent-register-backend
      'one
      (agent-test--backend
       :run-skill (lambda (name args) (setq ran (list name args)))))
@@ -283,7 +283,7 @@
         seen)
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -303,7 +303,7 @@
         ran)
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -323,7 +323,7 @@
         (with-temp-buffer
           (rename-buffer "*one:~/repo/project/:default*" t)
           (let ((buf (current-buffer)))
-            (agent-register-backend
+            (apply #'agent-register-backend
              'one
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
@@ -352,7 +352,7 @@
         (with-temp-buffer
           (rename-buffer "*one:~/repo/project/:default*" t)
           (let ((buf (current-buffer)))
-            (agent-register-backend
+            (apply #'agent-register-backend
              'one
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
@@ -376,7 +376,7 @@
         (with-temp-buffer
           (rename-buffer "*one:~/repo/project/:default*" t)
           (let ((buf (current-buffer)))
-            (agent-register-backend
+            (apply #'agent-register-backend
              'one
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
@@ -403,7 +403,7 @@
     (with-temp-buffer
       (let ((buf (current-buffer))
             (agent-before-exit-skill-directories nil))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -426,7 +426,7 @@
       (let* ((dir (file-name-as-directory default-directory))
              (buf (current-buffer))
              (agent-before-exit-skill-directories (list dir)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -446,7 +446,7 @@
         events)
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -468,7 +468,7 @@
       (let* ((dir (file-name-as-directory default-directory))
              (buf (current-buffer))
              (agent-before-exit-skill-directories (list dir)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'claude-code
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -489,7 +489,7 @@
         called)
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -509,7 +509,7 @@
         called)
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'codex
          (agent-test--backend
           :duration-ms (lambda (_buffer) 30000)
@@ -528,7 +528,7 @@
     (with-temp-buffer
       (let ((buf (current-buffer)))
         (setq-local agent-before-exit-skill-inhibit t)
-        (agent-register-backend
+        (apply #'agent-register-backend
          'codex
          (agent-test--backend
           :send-command (lambda (&rest _args) (setq called t))))
@@ -546,7 +546,7 @@
         events)
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'codex
          (agent-test--backend
           :duration-ms (lambda (_buffer) 60000)
@@ -566,7 +566,7 @@
       (let* ((dir (expand-file-name "~/tmp/agent-before-exit-test/"))
              (buf (current-buffer))
              (agent-before-exit-skill-directories '("~/tmp/")))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -588,7 +588,7 @@
       (let* ((dir (file-name-as-directory default-directory))
              (buf (current-buffer))
              (agent-before-exit-skill-directories (list dir)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'other
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -605,7 +605,7 @@
     (with-temp-buffer
       (let ((buf (current-buffer)))
         (setq-local agent--before-exit-skill-exit-pending t)
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :exit (lambda () (interactive) (setq ran t))))
@@ -622,7 +622,7 @@
         ran)
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :exit (lambda () (interactive) (setq ran t))))
@@ -636,7 +636,7 @@
     (with-temp-buffer
       (let ((buf (current-buffer)))
         (setq-local agent--before-exit-skill-exit-pending t)
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :before-exit-ready-to-close-p (lambda (_buffer) nil)
@@ -656,7 +656,7 @@
         (setq-local agent--before-exit-skill-exit-pending t)
         (setq-local agent--before-exit-skill-remaining
                     '(("update-log" :args "--auto")))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :submit-command (lambda (cmd &optional _buffer) (push cmd events))
@@ -670,7 +670,7 @@
 (ert-deftest agent-test-discover-all-skills-skips-non-invocable ()
   "Do not expose skills marked `user-invocable: false'."
   (let ((agent-backends nil))
-    (agent-register-backend
+    (apply #'agent-register-backend
      'one
      (agent-test--backend
       :discover-skills (lambda ()
@@ -690,7 +690,7 @@
     (with-temp-buffer
       (rename-buffer "*one:~/repo/project/:default*" t)
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -735,7 +735,7 @@
         (with-temp-buffer
           (rename-buffer "*one:~/repo/project/:default*" t)
           (let ((buf (current-buffer)))
-            (agent-register-backend
+            (apply #'agent-register-backend
              'one
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
@@ -869,7 +869,7 @@
     (with-temp-buffer
       (rename-buffer "*one:~/repo/backfill-proj/:tests*" t)
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -900,7 +900,7 @@
     (with-temp-buffer
       (rename-buffer "*claude:~/repo/roundtrip-proj/:tests*" t)
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'claude-code
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
@@ -938,14 +938,14 @@
   "Signal an error when registering a backend with an unknown keyword."
   (let ((agent-backends nil))
     (should-error
-     (agent-register-backend
+     (apply #'agent-register-backend
       'bad
       (agent-test--backend :bogus-slot #'ignore)))))
 
 (ert-deftest agent-test-registered-backend-is-struct ()
   "Store registrations as `agent-backend' structs keyed by name."
   (let ((agent-backends nil))
-    (agent-register-backend 'one (agent-test--backend))
+    (apply #'agent-register-backend 'one (agent-test--backend))
     (let ((struct (agent-backend 'one)))
       (should (agent-backend-p struct))
       (should (eq (agent-backend-name struct) 'one))
@@ -970,7 +970,7 @@
 (ert-deftest agent-test-backend-get-maps-keywords-to-slots ()
   "Map legacy keyword lookups onto struct slots."
   (let ((agent-backends nil))
-    (agent-register-backend 'one (agent-test--backend :program "one-cli"))
+    (apply #'agent-register-backend 'one (agent-test--backend :program "one-cli"))
     (should (equal (agent--backend-get 'one :program) "one-cli"))
     (should (equal (agent--backend-get 'one :label) "Test"))
     (should-not (agent--backend-get 'unregistered :label))))
@@ -978,7 +978,7 @@
 (ert-deftest agent-test-backend-get-rejects-unknown-slot-keyword ()
   "Signal an error for shim lookups naming no struct slot."
   (let ((agent-backends nil))
-    (agent-register-backend 'one (agent-test--backend))
+    (apply #'agent-register-backend 'one (agent-test--backend))
     (should-error (agent--backend-get 'one :not-a-slot))))
 
 (ert-deftest agent-test-detect-backend-resolves-with-struct-registry ()
@@ -986,7 +986,7 @@
   (let ((agent-backends nil))
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (agent-register-backend
+        (apply #'agent-register-backend
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))))

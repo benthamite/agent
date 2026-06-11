@@ -151,7 +151,7 @@
         submitted)
     (unwind-protect
         (progn
-          (agent-register-backend
+          (apply #'agent-register-backend
            'codex
            (agent-chief-test--backend
             :find-buffers-for-dir (lambda (_dir)
@@ -185,7 +185,7 @@
         minibuffer-prompted)
     (unwind-protect
         (progn
-          (agent-register-backend
+          (apply #'agent-register-backend
            'codex
            (agent-chief-test--backend
             :find-buffers-for-dir (lambda (_dir)
@@ -225,7 +225,7 @@
         submitted)
     (unwind-protect
         (progn
-          (agent-register-backend
+          (apply #'agent-register-backend
            'codex
            (agent-chief-test--backend
             :submit-command (lambda (prompt buffer)

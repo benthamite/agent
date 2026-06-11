@@ -213,39 +213,40 @@ Only account credentials such as `auth.json' remain account-local.")
 Source: SVG Repo (CC0).")
 
 (agent-register-backend 'codex
-  (list :buffer-p #'codex--buffer-p
-        :find-all-buffers #'codex--find-all-codex-buffers
-        :find-buffers-for-dir #'codex--find-codex-buffers-for-directory
-        :extract-directory #'codex--extract-directory-from-buffer-name
-        :extract-instance-name #'codex--extract-instance-name-from-buffer-name
-        :send-command #'agent-codex-send-command
-        :send-return #'agent-codex-send-return
-        :submit-command #'agent-codex-submit-command
-        :before-exit-ready-to-close-p #'agent-codex-before-exit-ready-to-close-p
-        :duration-ms (lambda (buf)
-                       (with-current-buffer buf
-                         (agent-codex-status-duration-ms)))
-        :start #'codex--start
-        :start-new #'agent-codex--start-with-account
-        :program "codex"
-        :icon (lambda (&optional face) (let ((svg (agent-svg-icon agent-codex-icon-svg face)))
-                                        (if (string-empty-p svg) "CX" svg)))
-        :account (lambda (buf)
-                   (buffer-local-value 'agent-codex--buffer-account buf))
-        :waiting-p #'agent-codex--waiting-p
-        :background-tasks-p #'agent-codex--has-background-tasks-p
-        :busy-p #'agent-codex--busy-p
-        :label "Codex"
-        :discover-skills #'agent-codex--discover-skills
-        :handoff #'agent-codex-handoff
-        :run-skill #'agent-codex-run-skill
-        :audit-project #'agent-codex-audit-project
-        :debug-backtrace #'agent-codex-debug-backtrace
-        :act-on-slack-message #'agent-codex-act-on-slack-message
-        :setup-kill-on-exit #'agent-codex-setup-kill-on-exit
-        :exit #'agent-codex-exit
-        :restart #'agent-codex-restart
-        :sync-theme #'agent-codex--sync-theme))
+  :buffer-p #'codex--buffer-p
+  :find-all-buffers #'codex--find-all-codex-buffers
+  :find-buffers-for-dir #'codex--find-codex-buffers-for-directory
+  :extract-directory #'codex--extract-directory-from-buffer-name
+  :extract-instance-name #'codex--extract-instance-name-from-buffer-name
+  :send-command #'agent-codex-send-command
+  :send-return #'agent-codex-send-return
+  :submit-command #'agent-codex-submit-command
+  :before-exit-ready-to-close-p #'agent-codex-before-exit-ready-to-close-p
+  :duration-ms (lambda (buf)
+                 (with-current-buffer buf
+                   (agent-codex-status-duration-ms)))
+  :start #'codex--start
+  :start-new #'agent-codex--start-with-account
+  :program "codex"
+  :icon (lambda (&optional face)
+          (let ((svg (agent-svg-icon agent-codex-icon-svg face)))
+            (if (string-empty-p svg) "CX" svg)))
+  :account (lambda (buf)
+             (buffer-local-value 'agent-codex--buffer-account buf))
+  :waiting-p #'agent-codex--waiting-p
+  :background-tasks-p #'agent-codex--has-background-tasks-p
+  :busy-p #'agent-codex--busy-p
+  :label "Codex"
+  :discover-skills #'agent-codex--discover-skills
+  :handoff #'agent-codex-handoff
+  :run-skill #'agent-codex-run-skill
+  :audit-project #'agent-codex-audit-project
+  :debug-backtrace #'agent-codex-debug-backtrace
+  :act-on-slack-message #'agent-codex-act-on-slack-message
+  :setup-kill-on-exit #'agent-codex-setup-kill-on-exit
+  :exit #'agent-codex-exit
+  :restart #'agent-codex-restart
+  :sync-theme #'agent-codex--sync-theme)
 
 ;;;; Functions
 

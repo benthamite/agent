@@ -398,7 +398,7 @@ The Codex commands mirror the shared workflows for the Codex CLI@. @code{agent-c
 @findex agent-notify
 @findex agent-protect-buffer
 @findex agent-kill-session-buffer
-The function @code{agent-register-backend} registers an AI tool by associating a backend symbol with a property list of buffer predicates, session discovery functions, command senders, and optional command handlers. Backend modules call it at load time. Required keys are validated so the shared session layer can rely on a consistent interface.
+The function @code{agent-register-backend} registers an AI tool by constructing an @code{agent-backend} struct from keyword arguments: buffer predicates, session discovery functions, command senders, and optional command handlers. Backend modules call it at load time. Keywords are validated against the struct's slot names, and required slots are checked so the shared session layer can rely on a consistent interface.
 
 @code{agent-display-name} returns a human-readable label for a session buffer. It starts with the project name, adds an instance name when needed to disambiguate duplicates, and lets backends append their own suffixes. The Claude backend uses this to expose branch identity in the modeline and switcher.
 

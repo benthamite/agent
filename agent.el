@@ -151,16 +151,12 @@ and STRUCT is an `agent-backend'.")
 (defun agent-register-backend (name &rest slots)
   "Register NAME as an AI agent backend built from SLOTS.
 SLOTS is a keyword-value list whose keywords match `agent-backend'
-slot names, e.g. (:buffer-p #\\='fn :label \"Codex\").  During the
-struct migration, a single plist argument is also accepted.
-Signal an error when SLOTS contains an unknown keyword or lacks a
-key in `agent--required-backend-keys'."
-  (let ((plist (if (and (= (length slots) 1) (listp (car slots)))
-                   (car slots)
-                 slots)))
-    (agent--validate-backend name plist)
-    (setf (alist-get name agent-backends)
-          (apply #'agent-backend--create :name name plist))))
+slot names, e.g. (:buffer-p #\\='fn :label \"Codex\").  Signal an
+error when SLOTS contains an unknown keyword or lacks a key in
+`agent--required-backend-keys'."
+  (agent--validate-backend name slots)
+  (setf (alist-get name agent-backends)
+        (apply #'agent-backend--create :name name slots)))
 
 (defun agent--validate-backend (name plist)
   "Signal an error if backend NAME's PLIST is invalid.
