@@ -455,6 +455,28 @@
                                    :start-time (current-time))))
     (should (equal commits '("a")))))
 
+(ert-deftest agent-test-audit-strips-leading-slash-from-skill-names ()
+  "Resolve legacy slash-format audit skill names like plain names."
+  (let ((agent-backends nil)
+        prompts)
+    (apply #'agent-register-backend
+     'one
+     (agent-test--backend
+      :skill-roots (lambda () nil)
+      :run-prompt (cl-function
+                   (lambda (prompt &key directory callback)
+                     (ignore directory)
+                     (push prompt prompts)
+                     (funcall callback "out" :error nil)))))
+    (cl-letf (((symbol-function 'agent--audit-commit-changes) #'ignore)
+              ((symbol-function 'agent--audit-finish) #'ignore))
+      (dolist (queue '(("/code-audit") ("code-audit")))
+        (agent--audit-run-next (list :backend 'one :queue queue
+                                     :results nil :dir "/tmp/"
+                                     :start-time (current-time)))))
+    (should (equal prompts
+                   '("/code-audit --accept" "/code-audit --accept")))))
+
 (ert-deftest agent-test-force-kill-buffer-ignores-query-functions ()
   "Kill buffers even when unrelated query functions would veto it."
   (let ((buf (generate-new-buffer "agent-force-kill-test")))

@@ -2279,7 +2279,7 @@ after each successful skill, and displays a summary when done."
       (agent--audit-finish state)
     (let* ((backend (plist-get state :backend))
            (queue (plist-get state :queue))
-           (name (car queue))
+           (name (string-remove-prefix "/" (car queue)))
            (skill (or (cl-find name (agent-discover-skills backend)
                                :key (lambda (s) (plist-get s :name))
                                :test #'equal)
