@@ -647,15 +647,42 @@ Returns a plist, or nil if the file is missing or malformed."
            :object-type 'plist)
         (json-parse-error nil)))))
 
-(defun agent-claude--status-file ()
-  "Return the status file path for the current buffer."
-  (expand-file-name
-   (agent-claude--status-file-name (buffer-name))
-   agent-claude-status-directory))
+(defvar agent-claude--pending-status-uuid nil
+  "Status UUID for the Claude process currently being started.
+Set by `agent-claude--status-uuid-env' on the environment hook and
+consumed by `agent-claude--capture-status-uuid' on the start hook.")
 
-(defun agent-claude--status-file-name (buffer-name)
-  "Return the collision-resistant status filename for BUFFER-NAME."
-  (concat (secure-hash 'sha256 buffer-name) ".json"))
+(defvar-local agent-claude--status-uuid nil
+  "Per-process UUID keying this session's statusline file.
+Restarted sessions reuse buffer names, so files keyed by buffer
+name would be inherited from dead processes; the UUID is unique
+per CLI process.")
+
+(defun agent-claude--status-uuid-env (_buffer-name _dir)
+  "Return the AGENT_SESSION_UUID environment entry for a new session."
+  (setq agent-claude--pending-status-uuid (agent-claude--generate-uuid))
+  (list (format "AGENT_SESSION_UUID=%s" agent-claude--pending-status-uuid)))
+
+(defun agent-claude--capture-status-uuid ()
+  "Store the pending status UUID buffer-locally at session start."
+  (when (claude-code--buffer-p (current-buffer))
+    (setq agent-claude--status-uuid agent-claude--pending-status-uuid)
+    (setq agent-claude--pending-status-uuid nil)))
+
+(defun agent-claude--generate-uuid ()
+  "Return a random UUID-shaped string for status-file identity."
+  (format "%08x-%04x-%04x-%04x-%012x"
+          (random (expt 2 32)) (random (expt 2 16)) (random (expt 2 16))
+          (random (expt 2 16)) (random (expt 2 48))))
+
+(defun agent-claude--status-file ()
+  "Return the status file path for the current buffer.
+Keyed by the per-process UUID when available; falls back to the
+buffer name for sessions started before the UUID existed."
+  (expand-file-name
+   (concat (secure-hash 'sha256 (or agent-claude--status-uuid (buffer-name)))
+           ".json")
+   agent-claude-status-directory))
 
 (defun agent-claude--sanitize-buffer-name ()
   "Sanitize the current buffer name for use as a filename.
@@ -669,6 +696,19 @@ or hyphen with an underscore, mirroring the shell script's
   (let ((file (agent-claude--status-file)))
     (when (file-exists-p file)
       (delete-file file))))
+
+(defconst agent-claude--status-file-max-age (* 7 24 60 60)
+  "Seconds after which an unclaimed status file is considered stale.")
+
+(defun agent-claude--sweep-stale-status-files ()
+  "Delete status files older than `agent-claude--status-file-max-age'."
+  (when (file-directory-p agent-claude-status-directory)
+    (dolist (file (directory-files agent-claude-status-directory t "\\.json\\'"))
+      (when-let* ((mtime (file-attribute-modification-time
+                          (file-attributes file))))
+        (when (> (float-time (time-subtract (current-time) mtime))
+                 agent-claude--status-file-max-age)
+          (delete-file file))))))
 
 ;;;;; Usage polling
 
@@ -2273,6 +2313,7 @@ Signals an error if the status file is missing or incomplete."
 
 (defconst agent-claude--start-hook-functions
   '(agent-setup-kill-on-exit
+    agent-claude--capture-status-uuid
     agent-claude-start-status-polling
     agent-claude-set-modeline
     agent--refresh-display-names
@@ -2296,6 +2337,7 @@ symmetrically and restores `claude-code-notification-function'."
 
 (defun agent-claude--mode-enable ()
   "Install Claude backend hooks, advice, and timers."
+  (agent-claude--sweep-stale-status-files)
   (setq agent-claude--saved-notification-function
         claude-code-notification-function)
   (setq claude-code-notification-function #'claude-code-default-notification)
@@ -2306,6 +2348,8 @@ symmetrically and restores `claude-code-notification-function'."
     (add-hook 'claude-code-start-hook fn))
   (add-hook 'claude-code-process-environment-functions
             #'agent-claude-account-env)
+  (add-hook 'claude-code-process-environment-functions
+            #'agent-claude--status-uuid-env)
   (add-hook 'claude-code-process-environment-functions
             #'agent-claude--sync-theme-before-start)
   (advice-add 'claude-code--eat-send-return :before
@@ -2343,6 +2387,8 @@ symmetrically and restores `claude-code-notification-function'."
     (remove-hook 'claude-code-start-hook fn))
   (remove-hook 'claude-code-process-environment-functions
                #'agent-claude-account-env)
+  (remove-hook 'claude-code-process-environment-functions
+               #'agent-claude--status-uuid-env)
   (remove-hook 'claude-code-process-environment-functions
                #'agent-claude--sync-theme-before-start)
   (advice-remove 'claude-code--eat-send-return #'agent-claude--note-submission)

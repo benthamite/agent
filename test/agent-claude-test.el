@@ -176,10 +176,29 @@
                    "my_buffer_name"))))
 
 (ert-deftest agent-claude-test-status-file-name-avoids-sanitizer-collisions ()
-  "Distinct buffer names get distinct status filenames."
-  (should-not
-   (equal (agent-claude--status-file-name "*claude:~/foo/bar/:default*")
-          (agent-claude--status-file-name "*claude:~/foo_bar/:default*"))))
+  "Distinct buffer names get distinct status files in the UUID-less fallback."
+  (let (file-a file-b)
+    (with-temp-buffer
+      (rename-buffer "*claude:~/foo/bar/:default*" t)
+      (setq file-a (agent-claude--status-file)))
+    (with-temp-buffer
+      (rename-buffer "*claude:~/foo_bar/:default*" t)
+      (setq file-b (agent-claude--status-file)))
+    (should-not (equal file-a file-b))))
+
+(ert-deftest agent-claude-test-status-file-keyed-by-uuid ()
+  "Two buffers with the same name but different UUIDs get distinct files."
+  (with-temp-buffer
+    (setq-local agent-claude--status-uuid "uuid-a")
+    (let ((a (agent-claude--status-file)))
+      (setq-local agent-claude--status-uuid "uuid-b")
+      (should-not (equal a (agent-claude--status-file))))))
+
+(ert-deftest agent-claude-test-status-uuid-env-shape ()
+  "The env hook returns one AGENT_SESSION_UUID entry."
+  (let ((entries (agent-claude--status-uuid-env "buf" "/tmp/")))
+    (should (= (length entries) 1))
+    (should (string-prefix-p "AGENT_SESSION_UUID=" (car entries)))))
 
 ;;;; Theme sync
 
