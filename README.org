@@ -345,6 +345,7 @@ The Codex commands mirror the shared workflows for the Codex CLI. ~agent-codex-s
 :END:
 
 #+findex: agent-register-backend
+#+findex: agent-start-session
 #+findex: agent-backend-icon
 #+findex: agent-svg-icon
 #+findex: agent-display-name
@@ -353,6 +354,8 @@ The Codex commands mirror the shared workflows for the Codex CLI. ~agent-codex-s
 #+findex: agent-protect-buffer
 #+findex: agent-kill-session-buffer
 The function ~agent-register-backend~ registers an AI tool by constructing an ~agent-backend~ struct from keyword arguments: buffer predicates, session discovery functions, command senders, and optional command handlers. Backend modules call it at load time. Keywords are validated against the struct's slot names, and required slots are checked so the shared session layer can rely on a consistent interface.
+
+The ~:start-session~ slot starts a new session parameterized by an ~agent-session~ identity struct, optionally with an initial prompt or a resume id. The ~:session-identity~ slot returns a live session buffer's canonical identity as an ~agent-session~ struct. ~agent-start-session~ is the core dispatcher that starts a session through its backend's ~:start-session~ function, passing any extra backend-specific options through.
 
 ~agent-display-name~ returns a human-readable label for a session buffer. It starts with the project name, adds an instance name when needed to disambiguate duplicates, and lets backends append their own suffixes. The Claude backend uses this to expose branch identity in the modeline and switcher.
 
