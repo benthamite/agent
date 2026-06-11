@@ -174,7 +174,6 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar codex--app-server-thread-id)
 (defvar codex--app-server-turn-active-p)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
-(declare-function codex--terminal-cursor-position "codex" ())
 (declare-function codex-start-session "codex")
 (declare-function codex-session-identity "codex" (&optional buffer))
 (declare-function codex-prompt-input "codex" (&optional buffer))
@@ -280,48 +279,7 @@ Source: SVG Repo (CC0).")
 (defun agent-codex-before-exit-ready-to-close-p (&optional buffer)
   "Return non-nil when BUFFER has no pending Codex prompt input."
   (when-let* ((codex-buffer (agent-codex--target-buffer buffer)))
-    (with-current-buffer codex-buffer
-      (not (agent-codex--current-prompt-input)))))
-
-(defun agent-codex--current-prompt-input ()
-  "Return the current Codex prompt input, or nil when empty."
-  (if (codex--terminal-cursor-position)
-      (agent-codex--prompt-input-at-cursor)
-    (agent-codex--last-prompt-input)))
-
-(defun agent-codex--prompt-input-at-cursor ()
-  "Return Codex prompt input at the terminal cursor, or nil."
-  (when-let* ((cursor (codex--terminal-cursor-position)))
-    (save-excursion
-      (goto-char cursor)
-      (agent-codex--prompt-input-on-current-line))))
-
-(defun agent-codex--last-prompt-input ()
-  "Return input from the last visible Codex prompt line, or nil."
-  (save-excursion
-    (goto-char (point-max))
-    (when (re-search-backward "^[›❯][ \t]*\\([^\n]*\\)$" nil t)
-      (agent-codex--nonempty-prompt-input (match-string-no-properties 1)))))
-
-(defun agent-codex--prompt-input-on-current-line ()
-  "Return Codex prompt input on the current line, or nil."
-  (let ((line-end (line-end-position)))
-    (beginning-of-line)
-    (when (looking-at "^[ \t]*[›❯][ \t]*\\([^\n]*\\)$")
-      (agent-codex--nonempty-prompt-input
-       (buffer-substring-no-properties (match-beginning 1) line-end)))))
-
-(defun agent-codex--nonempty-prompt-input (input)
-  "Return sanitized INPUT when it is meaningful prompt input."
-  (let ((trimmed (string-trim input)))
-    (unless (or (string-empty-p trimmed)
-                (agent-codex--prompt-autosuggestion-p trimmed))
-      trimmed)))
-
-(defun agent-codex--prompt-autosuggestion-p (input)
-  "Return non-nil when INPUT is Codex placeholder text."
-  (and (fboundp 'codex--known-prompt-autosuggestion-p)
-       (codex--known-prompt-autosuggestion-p input)))
+    (not (codex-prompt-input codex-buffer))))
 
 (defun agent-codex--target-buffer (buffer)
   "Return BUFFER when live, otherwise prompt for a Codex buffer."
@@ -1436,33 +1394,17 @@ With prefix ARG, use Codex CLI's `--last' flag."
             #'agent-codex--sync-theme-before-start)
   (add-hook 'kill-buffer-hook #'agent--release-session-key)
   (add-hook 'kill-buffer-hook #'agent--refresh-display-names-deferred)
-  (unless (advice-member-p #'agent--clear-waiting-for-input
-                           'codex--do-send-command)
-    (advice-add 'codex--do-send-command :before
-                #'agent--clear-waiting-for-input))
-  (unless (advice-member-p #'agent-codex--clear-waiting-before-send-command-to-buffer
-                           'codex--send-command-to-buffer)
-    (advice-add 'codex--send-command-to-buffer :before
-                #'agent-codex--clear-waiting-before-send-command-to-buffer))
-  (unless (advice-member-p #'agent--clear-waiting-for-input
-                           'codex--terminal-send-return)
-    (advice-add 'codex--terminal-send-return :before
-                #'agent--clear-waiting-for-input))
-  (unless (advice-member-p #'agent-codex--clear-waiting-before-tui-action
-                           'codex--send-tui-action)
-    (advice-add 'codex--send-tui-action :before
-                #'agent-codex--clear-waiting-before-tui-action)))
+  (add-hook 'codex-command-submitted-hook #'agent-codex--on-command-submitted))
 
-(defun agent-codex--clear-waiting-before-send-command-to-buffer (_cmd buffer)
-  "Clear stale waiting state before submitting to Codex BUFFER."
+(defun agent-codex--on-command-submitted (buffer)
+  "Clear stale waiting state when input is submitted in BUFFER.
+Runs on `codex-command-submitted-hook', which may fire more than once
+per submission and also fires for submissions that start no turn, such
+as a local slash command or an empty Return; clearing the flag is
+idempotent, so repeated runs are harmless."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (agent--clear-waiting-for-input))))
-
-(defun agent-codex--clear-waiting-before-tui-action (action)
-  "Clear stale waiting state before a Codex TUI return ACTION."
-  (when (eq (if (listp action) (car action) action) :return)
-    (agent--clear-waiting-for-input)))
 
 (agent-codex--install-hooks)
 

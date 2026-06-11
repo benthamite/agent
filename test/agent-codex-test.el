@@ -417,13 +417,19 @@
                    (list (list "$session-learning-capture"
                                expected-buffer))))))
 
-(ert-deftest agent-codex-test-target-buffer-submit-clears-waiting-flag ()
-  "Clear stale waiting state in the target Codex buffer."
+(ert-deftest agent-codex-test-on-command-submitted-clears-waiting-flag ()
+  "Clear stale waiting state in the buffer that received a submission."
   (with-temp-buffer
     (let ((buf (current-buffer)))
       (setq-local agent--waiting-for-input (current-time))
-      (agent-codex--clear-waiting-before-send-command-to-buffer "prompt" buf)
+      (agent-codex--on-command-submitted buf)
       (should-not agent--waiting-for-input))))
+
+(ert-deftest agent-codex-test-install-hooks-registers-submitted-hook ()
+  "Register the waiting-state consumer on the upstream submitted hook."
+  (agent-codex--install-hooks)
+  (should (memq #'agent-codex--on-command-submitted
+                codex-command-submitted-hook)))
 
 ;;;; Slack message action routing
 
