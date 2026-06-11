@@ -456,6 +456,13 @@ that function is available."
   :type 'file
   :group 'agent)
 
+(defcustom agent-handoff-files
+  '((claude-code . "/tmp/claude-code-handoff.md")
+    (codex . "/tmp/codex-handoff.md"))
+  "Alist mapping backend symbols to handoff files written by /handoff."
+  :type '(alist :key-type symbol :value-type file)
+  :group 'agent)
+
 (defconst agent--epoch-project-registry-file-default
   "/Users/pablostafforini/My Drive/Epoch/projects/shared/project-registry.json"
   "Default canonical Epoch project registry file.")
@@ -1938,11 +1945,97 @@ combined list of skill plists, each augmented with `:backend'."
                          (cl-find candidate candidates :test #'string=))))
 
 ;;;###autoload
-(defun agent-handoff ()
+(defun agent-handoff (&optional buffer-name)
   "Close the current session and start a new one with the handoff prompt.
-Dispatches to the appropriate backend."
+The /handoff skill must have been run first to write the handoff
+file.  BUFFER-NAME optionally names the source session buffer; it
+defaults to the current buffer.  The new session starts in the
+same directory with the same account and the handoff contents
+passed as the initial prompt."
   (interactive)
-  (agent--dispatch-with-captured-prompt-confirmation :handoff "Handoff"))
+  (let* ((source (agent--handoff-source-buffer buffer-name))
+         (session (agent--handoff-session source))
+         (backend (agent-session-backend session))
+         (prompt (agent--read-handoff-file (agent--handoff-file backend))))
+    (when (and source
+               (not (agent--confirm-no-captured-prompts
+                     backend source "Handoff")))
+      (user-error "Handoff aborted"))
+    (agent--kill-handoff-source backend source
+                                (agent-session-directory session))
+    (agent-start-session session :initial-prompt prompt)))
+
+(defun agent--handoff-source-buffer (buffer-name)
+  "Return the session buffer named BUFFER-NAME, or the current buffer.
+Return nil when neither names a live session buffer."
+  (cond
+   ((and buffer-name (not (string-empty-p buffer-name)))
+    (let ((buffer (get-buffer buffer-name)))
+      (unless buffer
+        (user-error "No session buffer named `%s'" buffer-name))
+      (unless (agent--detect-backend buffer)
+        (user-error "Buffer `%s' is not an AI session" buffer-name))
+      buffer))
+   ((agent--detect-backend (current-buffer))
+    (current-buffer))))
+
+(defun agent--handoff-session (source)
+  "Return the session to hand off to, derived from SOURCE.
+Without a SOURCE buffer, build a session for a prompted backend in
+`default-directory'."
+  (if source
+      (agent-session source)
+    (agent-session-create :backend (agent--resolve-backend)
+                          :directory default-directory)))
+
+(defun agent--handoff-file (backend)
+  "Return the handoff file configured for BACKEND."
+  (or (alist-get backend agent-handoff-files)
+      (user-error "No handoff file configured for backend `%s'" backend)))
+
+(defun agent--read-handoff-file (file)
+  "Return the trimmed contents of handoff FILE, validating it."
+  (unless (file-exists-p file)
+    (user-error "No handoff file at %s — run /handoff first" file))
+  (let ((prompt (with-temp-buffer
+                  (insert-file-contents file)
+                  (string-trim (buffer-string)))))
+    (when (string-empty-p prompt)
+      (user-error "Handoff file is empty — run /handoff first"))
+    prompt))
+
+(defun agent--kill-handoff-source (backend source dir)
+  "Kill SOURCE, or the single existing BACKEND buffer in DIR.
+The fallback handles emacsclient invocations that reach Emacs
+without the requesting buffer name; leaving that buffer alive
+would trigger an instance-name prompt and break unattended loops."
+  (when-let* ((target (or source
+                          (agent--single-session-buffer-for-dir backend dir))))
+    (with-current-buffer target
+      (setq-local agent-before-exit-skill-inhibit t))
+    (agent--force-kill-buffer target)))
+
+(defun agent--single-session-buffer-for-dir (backend dir)
+  "Return the only BACKEND session buffer for DIR, or signal on ambiguity."
+  (let* ((find-fn (agent--backend-get backend :find-buffers-for-dir))
+         (buffers (and find-fn (funcall find-fn dir))))
+    (pcase buffers
+      ('nil nil)
+      (`(,buffer) buffer)
+      (_ (user-error "Multiple sessions already exist for %s"
+                     (abbreviate-file-name dir))))))
+
+(defvar server-eval-args-left)
+
+;;;###autoload
+(defun agent-handoff-from-emacsclient ()
+  "Run `agent-handoff' for the client-provided buffer name.
+The first value in `server-eval-args-left' is treated as the
+session buffer that requested the handoff."
+  (interactive)
+  (let ((buffer-name (car server-eval-args-left)))
+    (setq server-eval-args-left nil)
+    (agent-handoff buffer-name)))
 
 ;;;###autoload
 (defun agent-run-skill ()

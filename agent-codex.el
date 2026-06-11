@@ -42,26 +42,6 @@
   "Extensions for `codex'."
   :group 'codex)
 
-(defconst agent-codex--handoff-file-default
-  (expand-file-name "codex-handoff.md" "/tmp/")
-  "Default path used by the Codex `/handoff' skill.")
-
-(defconst agent-codex--legacy-handoff-file-default
-  (expand-file-name "codex-handoff.md" temporary-file-directory)
-  "Previous default path for `agent-codex-handoff-file'.")
-
-(defcustom agent-codex-handoff-file
-  agent-codex--handoff-file-default
-  "Path to the handoff file written by the handoff skill."
-  :type 'file
-  :group 'agent-codex)
-
-(when (and (equal agent-codex-handoff-file
-                  agent-codex--legacy-handoff-file-default)
-           (not (get 'agent-codex-handoff-file 'saved-value))
-           (not (get 'agent-codex-handoff-file 'customized-value)))
-  (setq agent-codex-handoff-file agent-codex--handoff-file-default))
-
 (defcustom agent-codex-accounts nil
   "Alist of account names to Codex home directories.
 Each entry is (NAME . CODEX-HOME).  When non-nil,
@@ -229,7 +209,6 @@ Source: SVG Repo (CC0).")
   :label "Codex"
   :run-prompt #'agent-codex-run-prompt
   :discover-skills #'agent-codex--discover-skills
-  :handoff #'agent-codex-handoff
   :run-skill #'agent-codex-run-skill
   :audit-project #'agent-codex-audit-project
   :debug-backtrace #'agent-codex-debug-backtrace
@@ -1056,81 +1035,10 @@ via `codex exec'."
 
 ;;;;; Handoff
 
-;;;###autoload
-(defun agent-codex-handoff (&optional buffer-name)
-  "Close this Codex session and start a new one with the handoff prompt."
-  (interactive)
-  (unless (file-exists-p agent-codex-handoff-file)
-    (user-error "No handoff file at %s — run /handoff first"
-                agent-codex-handoff-file))
-  (let* ((prompt (with-temp-buffer
-                   (insert-file-contents agent-codex-handoff-file)
-                   (string-trim (buffer-string))))
-         (source-buffer (agent-codex--handoff-source-buffer buffer-name))
-         (account (when source-buffer
-                    (agent-codex--session-account source-buffer)))
-         (dir (agent-codex--handoff-directory source-buffer)))
-    (when (string-empty-p prompt)
-      (user-error "Handoff file is empty"))
-    (agent-codex--kill-handoff-source source-buffer dir)
-    (agent-start-session
-     (agent-session-create :backend 'codex :account account :directory dir)
-     :initial-prompt prompt)))
-
-(defun agent-codex--kill-handoff-source (source-buffer dir)
-  "Kill SOURCE-BUFFER, or the single existing Codex buffer in DIR.
-The fallback handles emacsclient invocations that reach Emacs
-without the requesting buffer name.  Handoff replaces the current
-session, so leaving that buffer alive would make `codex-start-session'
-prompt for a new instance name and break unattended loops."
-  (let ((target (or source-buffer
-                    (agent-codex--single-existing-buffer-for-handoff dir))))
-    (when target
-      (with-current-buffer target
-        (setq-local agent-before-exit-skill-inhibit t))
-      (agent--force-kill-buffer target))))
-
-(defun agent-codex--single-existing-buffer-for-handoff (dir)
-  "Return the only existing Codex buffer for DIR, or signal on ambiguity."
-  (let ((buffers (codex--find-codex-buffers-for-directory dir)))
-    (pcase buffers
-      ('nil nil)
-      (`(,buffer) buffer)
-      (_ (user-error
-          "Multiple Codex sessions already exist for %s: %s"
-          (abbreviate-file-name dir)
-          (mapconcat (lambda (buffer)
-                       (or (codex--buffer-instance-name-for buffer)
-                           "default"))
-                     buffers ", "))))))
-
-(defun agent-codex-handoff-from-emacsclient ()
-  "Run `agent-codex-handoff' for the client-provided buffer name.
-The first value in `server-eval-args-left' is treated as the Codex
-buffer that requested the handoff."
-  (interactive)
-  (let ((buffer-name (car server-eval-args-left)))
-    (setq server-eval-args-left nil)
-    (agent-codex-handoff buffer-name)))
-
-(defun agent-codex--handoff-source-buffer (buffer-name)
-  "Return the Codex source buffer named BUFFER-NAME, or current buffer."
-  (cond
-   ((and buffer-name (not (string-empty-p buffer-name)))
-    (let ((buffer (get-buffer buffer-name)))
-      (unless buffer
-        (user-error "No Codex session buffer named `%s'" buffer-name))
-      (unless (codex--buffer-p buffer)
-        (user-error "Buffer `%s' is not a Codex session" buffer-name))
-      buffer))
-   ((codex--buffer-p (current-buffer))
-    (current-buffer))))
-
-(defun agent-codex--handoff-directory (source-buffer)
-  "Return the project directory for SOURCE-BUFFER or fallback context."
-  (if source-buffer
-      (buffer-local-value 'default-directory source-buffer)
-    (codex--directory)))
+(define-obsolete-function-alias 'agent-codex-handoff #'agent-handoff "0.2")
+(define-obsolete-function-alias 'agent-codex-handoff-from-emacsclient
+  #'agent-handoff-from-emacsclient "0.2")
+(make-obsolete-variable 'agent-codex-handoff-file 'agent-handoff-files "0.2")
 
 ;;;;; Restart
 

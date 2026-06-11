@@ -239,7 +239,6 @@ Source: lobehub/lobe-icons (MIT).")
   :run-prompt #'agent-claude-run-prompt
   :notify #'agent-claude-notify
   :discover-skills #'agent-claude--discover-skills
-  :handoff #'agent-claude-handoff
   :run-skill #'agent-claude-run-skill
   :audit-project #'agent-claude-audit-project
   :debug-backtrace #'agent-claude-debug-backtrace
@@ -2380,68 +2379,10 @@ there with the backtrace prompt passed as a CLI argument."
 
 ;;;;; Handoff
 
-(defcustom agent-claude-handoff-file
-  (expand-file-name "claude-code-handoff.md" temporary-file-directory)
-  "Path to the handoff file written by the `/handoff' skill."
-  :type 'file
-  :group 'agent-claude)
-
-;;;###autoload
-(defun agent-claude-handoff (&optional buffer-name)
-  "Close this Claude session and start a new one with the handoff prompt.
-The `/handoff' skill must have been run first to write the handoff
-file.  The new session starts in the same project directory with
-the handoff contents passed as a CLI argument."
-  (interactive)
-  (unless (file-exists-p agent-claude-handoff-file)
-    (user-error "No handoff file at %s — run /handoff first"
-                agent-claude-handoff-file))
-  (let* ((prompt (agent-claude--read-handoff-file))
-         (source-buffer (agent-claude--handoff-source-buffer buffer-name))
-         (dir (agent-claude--handoff-directory source-buffer)))
-    (when (string-empty-p prompt)
-      (user-error "Handoff file is empty — run /handoff first"))
-    (when source-buffer
-      (with-current-buffer source-buffer
-        (setq-local agent-before-exit-skill-inhibit t))
-      (agent--force-kill-buffer source-buffer))
-    (agent-start-session
-     (agent-session-create :backend 'claude-code :directory dir)
-     :initial-prompt prompt)))
-
-(defun agent-claude-handoff-from-emacsclient ()
-  "Run `agent-claude-handoff' for the client-provided buffer name.
-The first value in `server-eval-args-left' is treated as the
-Claude buffer that requested the handoff."
-  (interactive)
-  (let ((buffer-name (car server-eval-args-left)))
-    (setq server-eval-args-left nil)
-    (agent-claude-handoff buffer-name)))
-
-(defun agent-claude--read-handoff-file ()
-  "Read and return the trimmed contents of the handoff file."
-  (with-temp-buffer
-    (insert-file-contents agent-claude-handoff-file)
-    (string-trim (buffer-string))))
-
-(defun agent-claude--handoff-source-buffer (buffer-name)
-  "Return the Claude source buffer named BUFFER-NAME, or current buffer."
-  (cond
-   ((and buffer-name (not (string-empty-p buffer-name)))
-    (let ((buffer (get-buffer buffer-name)))
-      (unless buffer
-        (user-error "No Claude session buffer named `%s'" buffer-name))
-      (unless (claude-code--buffer-p buffer)
-        (user-error "Buffer `%s' is not a Claude session" buffer-name))
-      buffer))
-   ((claude-code--buffer-p (current-buffer))
-    (current-buffer))))
-
-(defun agent-claude--handoff-directory (source-buffer)
-  "Return the project directory for SOURCE-BUFFER or fallback context."
-  (if source-buffer
-      (buffer-local-value 'default-directory source-buffer)
-    (claude-code--directory)))
+(define-obsolete-function-alias 'agent-claude-handoff #'agent-handoff "0.2")
+(define-obsolete-function-alias 'agent-claude-handoff-from-emacsclient
+  #'agent-handoff-from-emacsclient "0.2")
+(make-obsolete-variable 'agent-claude-handoff-file 'agent-handoff-files "0.2")
 
 ;;;;; Restart
 

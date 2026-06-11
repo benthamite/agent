@@ -9,6 +9,13 @@
 (require 'agent-account)
 (require 'agent-claude)
 
+;;;; Handoff
+
+(ert-deftest agent-claude-test-handoff-file-default-matches-skill ()
+  "Use the path written by the Claude `/handoff' skill."
+  (should (equal (alist-get 'claude-code agent-handoff-files)
+                 "/tmp/claude-code-handoff.md")))
+
 ;;;; Prompt submission
 
 (ert-deftest agent-claude-test-submit-command-targets-explicit-buffer ()

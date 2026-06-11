@@ -605,6 +605,43 @@
             (should (equal captured '(:resume-id "sid-123")))))
       (delete-directory agent-prompt-capture-directory t))))
 
+(ert-deftest agent-test-handoff-carries-source-session ()
+  "Start the handoff session with the source buffer's account and directory."
+  (let* ((agent-backends nil)
+         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+         (dir (file-name-as-directory (make-temp-file "agent-handoff" t)))
+         (handoff-file (expand-file-name "handoff.md" dir))
+         killed started)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((buf (current-buffer)))
+            (setq default-directory dir)
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))))
+            (with-temp-file handoff-file (insert "continue\n"))
+            (let ((agent-handoff-files '((one . "handoff.md"))))
+              (cl-letf (((symbol-function 'agent--handoff-file)
+                         (lambda (_backend) handoff-file))
+                        ((symbol-function 'agent-session)
+                         (lambda (&optional _buffer)
+                           (agent-session-create :backend 'one :account "work"
+                                                 :directory dir)))
+                        ((symbol-function 'agent--force-kill-buffer)
+                         (lambda (buffer) (setq killed buffer)))
+                        ((symbol-function 'agent-start-session)
+                         (cl-function
+                          (lambda (session &key initial-prompt &allow-other-keys)
+                            (setq started (list (agent-session-account session)
+                                                (agent-session-directory session)
+                                                initial-prompt))))))
+                (agent-handoff)))
+            (should (eq killed buf))
+            (should (equal started (list "work" dir "continue")))))
+      (delete-directory agent-prompt-capture-directory t)
+      (delete-directory dir t))))
+
 (ert-deftest agent-test-run-skill-before-exit-submits-codex-skill ()
   "Submit a Codex skill and abort the first exit globally by default."
   (let ((agent-backends nil)
