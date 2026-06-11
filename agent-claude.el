@@ -1057,18 +1057,26 @@ alerts for permission_prompt and elicitation_dialog notifications."
 Claude Code renders \"· N shells\" or \"· N monitors\" near the
 footer when background Bash processes or Task agent are running.")
 
+(defconst agent-claude--remote-control-active-regexp
+  "Remote Control active"
+  "Regexp matching Claude's active Remote Control task UI.")
+
 (defun agent-claude--has-background-tasks-p (&optional buffer)
   "Return non-nil when Claude session BUFFER has active background tasks.
-Scans the tail of the terminal buffer for Claude Code's
-status-line indicator (e.g. \"· 3 shells\" or \"· 5 monitors\")."
+Scans the tail of the terminal buffer for Claude Code's status
+indicators, e.g. \"· 3 shells\", \"· 5 monitors\", or \"Remote
+Control active\"."
   (let ((buf (or buffer (current-buffer))))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (save-excursion
           (goto-char (point-max))
-          (re-search-backward agent-claude--background-tasks-regexp
-                              (max (point-min) (- (point-max) 800))
-                              t))))))
+          (let ((limit (max (point-min) (- (point-max) 800))))
+            (or (re-search-backward agent-claude--background-tasks-regexp
+                                    limit t)
+                (re-search-backward
+                 agent-claude--remote-control-active-regexp
+                 limit t))))))))
 
 (defun agent-claude--handle-stop (message)
   "Handle a stop event from the Claude Code CLI.

@@ -86,6 +86,16 @@
       (agent-claude--note-submission))
     (should (eq agent--session-state 'awaiting-input))))
 
+;;;; Background task detection
+
+(ert-deftest agent-claude-test-has-background-tasks-detects-remote-control ()
+  "Detect Claude's active Remote Control task UI as background work."
+  (with-temp-buffer
+    (insert "Remote Control active\n")
+    (insert "  \342\227\257 general-purpose  Implement Task 6.8\n")
+    (insert "13s\n")
+    (should (agent-claude--has-background-tasks-p (current-buffer)))))
+
 ;;;; Restart
 
 (ert-deftest agent-claude-test-restart-prompts-when-active-account-differs ()
