@@ -240,7 +240,6 @@ Source: lobehub/lobe-icons (MIT).")
   :notify #'agent-claude-notify
   :skill-roots #'agent-claude-skill-roots
   :skill-command-prefix "/"
-  :debug-backtrace #'agent-claude-debug-backtrace
   :act-on-slack-message #'agent-claude-act-on-slack-message
   :before-kill-check (lambda (_buffer) (agent-claude--confirm-kill-branches))
   :start-session #'agent-claude--start-session
@@ -1996,15 +1995,10 @@ unconditionally recenter with `(recenter -1)'."
 
 ;;;;; Debug backtrace
 
-(defcustom agent-claude-debug-backtrace-model 'gemini-flash-lite-latest
-  "GPtel model for identifying candidate packages from a backtrace."
-  :type 'symbol
-  :group 'agent-claude)
+(define-obsolete-function-alias 'agent-claude-debug-backtrace
+  #'agent-debug-backtrace "0.2")
 
-(defcustom agent-claude-debug-backtrace-backend "Gemini"
-  "GPtel backend name for backtrace analysis."
-  :type 'string
-  :group 'agent-claude)
+;;;;; Slack message routing
 
 (defcustom agent-claude-act-on-slack-message-model 'gemini-flash-lite-latest
   "GPtel model for selecting an Epoch project from a Slack message."
@@ -2025,77 +2019,6 @@ unconditionally recenter with `(recenter -1)'."
   'agent-claude-debug-slack-message-backend
   'agent-claude-act-on-slack-message-backend
   "0.2")
-
-(defvar gptel-backend)
-(defvar gptel-model)
-(defvar gptel-use-tools)
-(defvar gptel--known-backends)
-(declare-function gptel-request "gptel")
-
-;;;###autoload
-(defun agent-claude-debug-backtrace ()
-  "Save the backtrace, choose the offending package, and open Claude Code.
-Save the current backtrace to `agent-backtrace-file', then ask
-`gptel' to list all packages implicated in the error.  The user
-selects the right one via `completing-read', then an interactive
-Claude Code session starts in that package's source directory with
-the backtrace file path."
-  (interactive)
-  (let ((backtrace-file (expand-file-name agent-backtrace-file)))
-    ;; Schedule the identification work to run after the current command.
-    ;; `agent-save-backtrace' kills the *Backtrace* buffer, which exits the
-    ;; debugger's `recursive-edit' and unwinds this call frame.
-    (run-with-timer 0 nil #'agent-claude--debug-identify-package backtrace-file)
-    (agent-save-backtrace)))
-
-(defun agent-claude--debug-identify-package (backtrace-file)
-  "Identify candidate packages from BACKTRACE-FILE and let the user choose.
-Ask a light LLM to list all packages implicated in the backtrace,
-then present the list via `completing-read' so the user can select
-the right one before starting a Claude Code session."
-  (unless (file-exists-p backtrace-file)
-    (user-error "Backtrace file not found: %s" backtrace-file))
-  (unless (and (require 'gptel nil t) (fboundp 'gptel-request))
-    (user-error "Package `gptel' is required for backtrace debugging"))
-  (message "Identifying packages from backtrace...")
-  (let ((contents (with-temp-buffer
-                    (insert-file-contents backtrace-file)
-                    (buffer-string)))
-        (gptel-backend (alist-get agent-claude-debug-backtrace-backend
-                                  gptel--known-backends nil nil #'string=))
-        (gptel-model agent-claude-debug-backtrace-model)
-        (gptel-include-reasoning nil)
-        (gptel-use-tools nil))
-    (gptel-request
-     (format "Backtrace file: %s\n\nContents:\n%s" backtrace-file contents)
-     :system "You are an Emacs expert. Given the backtrace, identify ALL Emacs packages that appear in the stack trace and could be the root cause of the error. Return ONLY a comma-separated list of package names, ordered from most likely root cause to least likely. For example: \"org-roam, org, emacsql\" or \"magit, transient, with-editor\"."
-     :callback
-     (lambda (response info)
-       (if (not response)
-           (message "gptel request failed: %s" (plist-get info :status))
-         (when-let* ((text (agent--gptel-response-text response)))
-           (let* ((candidates (mapcar #'string-trim
-                                      (split-string text ",")))
-                  (selected
-                   (completing-read "Package to debug: " candidates nil
-                                    nil nil nil (car candidates))))
-             (agent-claude--debug-start-session
-              (intern selected) backtrace-file))))))))
-
-(declare-function claude-code--start "claude-code")
-
-(defun agent-claude--debug-start-session (package backtrace-file)
-  "Start a Claude Code session for PACKAGE with BACKTRACE-FILE.
-Find the elpaca source directory for PACKAGE, start Claude Code
-there with the backtrace prompt passed as a CLI argument."
-  (let* ((dir (or (agent--package-source-directory package)
-                  (user-error "Package `%s' not found" package)))
-         (prompt (format "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
-                         backtrace-file)))
-    (message "Starting Claude Code for `%s' in %s..." package dir)
-    (agent-start-session
-     (agent-session-create :backend 'claude-code :directory dir)
-     :initial-prompt prompt)))
 
 ;;;###autoload
 (defun agent-claude-act-on-slack-message ()

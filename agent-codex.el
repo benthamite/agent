@@ -104,16 +104,6 @@ When nil, use `codex-sandbox-mode' or the CLI default."
   :type 'boolean
   :group 'agent-codex)
 
-(defcustom agent-codex-debug-backtrace-model 'gemini-flash-lite-latest
-  "GPtel model for identifying candidate packages from a backtrace."
-  :type 'symbol
-  :group 'agent-codex)
-
-(defcustom agent-codex-debug-backtrace-backend "Gemini"
-  "GPtel backend name for backtrace analysis."
-  :type 'string
-  :group 'agent-codex)
-
 (defcustom agent-codex-act-on-slack-message-model 'gemini-flash-lite-latest
   "GPtel model for selecting an Epoch project from a Slack message."
   :type 'symbol
@@ -134,10 +124,6 @@ When nil, use `codex-sandbox-mode' or the CLI default."
   'agent-codex-act-on-slack-message-backend
   "0.2")
 
-(defvar gptel-backend)
-(defvar gptel-model)
-(defvar gptel-use-tools)
-(defvar gptel--known-backends)
 (defvar codex-reasoning-effort)
 (defvar codex--session-id)
 (defvar codex--app-server-input-marker)
@@ -147,7 +133,6 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (declare-function codex-start-session "codex")
 (declare-function codex-session-identity "codex" (&optional buffer))
 (declare-function codex-prompt-input "codex" (&optional buffer))
-(declare-function gptel-request "gptel")
 
 (defconst agent-codex--shared-config-items
   '("config.toml" "hooks.json" "AGENTS.md" "rules"
@@ -199,7 +184,6 @@ Source: SVG Repo (CC0).")
   :run-prompt #'agent-codex-run-prompt
   :skill-roots #'agent-codex-skill-roots
   :skill-command-prefix "$"
-  :debug-backtrace #'agent-codex-debug-backtrace
   :act-on-slack-message #'agent-codex-act-on-slack-message
   :start-session #'agent-codex--start-session
   :session-identity #'agent-codex--session-identity
@@ -751,55 +735,10 @@ This is the `run-prompt' backend slot implementation."
 
 ;;;;; Debug backtrace
 
-;;;###autoload
-(defun agent-codex-debug-backtrace ()
-  "Save the backtrace, identify the offending package, and open Codex."
-  (interactive)
-  (let ((backtrace-file (expand-file-name agent-backtrace-file)))
-    (run-with-timer 0 nil #'agent-codex--debug-identify-package backtrace-file)
-    (agent-save-backtrace)))
+(define-obsolete-function-alias 'agent-codex-debug-backtrace
+  #'agent-debug-backtrace "0.2")
 
-(defun agent-codex--debug-identify-package (backtrace-file)
-  "Identify candidate packages from BACKTRACE-FILE and let the user choose."
-  (unless (file-exists-p backtrace-file)
-    (user-error "Backtrace file not found: %s" backtrace-file))
-  (unless (and (require 'gptel nil t) (fboundp 'gptel-request))
-    (user-error "Package `gptel' is required for backtrace debugging"))
-  (message "Identifying packages from backtrace...")
-  (let ((contents (with-temp-buffer
-                    (insert-file-contents backtrace-file)
-                    (buffer-string)))
-        (gptel-backend (alist-get agent-codex-debug-backtrace-backend
-                                  gptel--known-backends nil nil #'string=))
-        (gptel-model agent-codex-debug-backtrace-model)
-        (gptel-include-reasoning nil)
-        (gptel-use-tools nil))
-    (gptel-request
-     (format "Backtrace file: %s\n\nContents:\n%s" backtrace-file contents)
-     :system "You are an Emacs expert. Given the backtrace, identify ALL Emacs packages that appear in the stack trace and could be the root cause of the error. Return ONLY a comma-separated list of package names."
-     :callback
-     (lambda (response info)
-       (if (not response)
-           (message "gptel request failed: %s" (plist-get info :status))
-         (when-let* ((text (agent--gptel-response-text response)))
-           (let* ((candidates (mapcar #'string-trim
-                                      (split-string text ",")))
-                  (selected
-                   (completing-read "Package to debug: " candidates nil
-                                    nil nil nil (car candidates))))
-             (agent-codex--debug-start-session
-              (intern selected) backtrace-file))))))))
-
-(defun agent-codex--debug-start-session (package backtrace-file)
-  "Start a Codex session for PACKAGE with BACKTRACE-FILE."
-  (let* ((dir (or (agent--package-source-directory package)
-                  (user-error "Package `%s' not found" package)))
-         (prompt (format "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
-                         backtrace-file)))
-    (message "Starting Codex for `%s' in %s..." package dir)
-    (agent-start-session
-     (agent-session-create :backend 'codex :directory dir)
-     :initial-prompt prompt)))
+;;;;; Slack message routing
 
 ;;;###autoload
 (defun agent-codex-act-on-slack-message ()
