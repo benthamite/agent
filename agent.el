@@ -231,32 +231,6 @@ Return nil when BACKEND is not registered."
   "Return the `agent-backend' slot symbol named by keyword KEY."
   (intern (substring (symbol-name key) 1)))
 
-(cl-defun agent-start-session (session &rest options
-                                       &key initial-prompt resume-id
-                                       &allow-other-keys)
-  "Start SESSION through its backend's `start-session' function.
-SESSION is an `agent-session' whose backend, account, directory, and
-instance slots parameterize the new session; nil slots fall back to the
-backend's ambient defaults.  INITIAL-PROMPT is submitted as the first
-user message.  RESUME-ID resumes that session id instead of starting
-fresh.  Remaining OPTIONS are passed through to the backend, which may
-support extras such as `:fork' (Claude Code) or `:terminal-backend'
-\(Codex).  When SESSION carries an account, defensively sync its config
-home with `agent-account-sync' and bind `agent-account--starting'
-around the backend call so process-environment hooks see the account
-at spawn time.  Return the new session buffer."
-  (ignore initial-prompt resume-id)
-  (let* ((backend (agent-session-backend session))
-         (account (agent-session-account session))
-         (start (agent--backend-get backend :start-session)))
-    (unless start
-      (user-error "Backend `%s' does not support parameterized session start"
-                  backend))
-    (when account
-      (agent-account-sync backend account))
-    (let ((agent-account--starting (and account (cons backend account))))
-      (apply start session options))))
-
 (defun agent-backend-icon-string (backend &optional face)
   "Return the icon string for the backend named BACKEND.
 BACKEND is a backend name symbol.  FACE is passed to the icon
@@ -341,6 +315,37 @@ Given \"*claude:~/path/to/project/:default*\" or
 with a trailing slash.")
   (instance nil :documentation "Instance name string, or nil for default.")
   (id nil :documentation "CLI session id string, or nil until known."))
+
+(cl-defun agent-start-session (session &rest options
+                                       &key initial-prompt resume-id
+                                       &allow-other-keys)
+  "Start SESSION through its backend's `start-session' function.
+SESSION is an `agent-session' whose backend, account, directory, and
+instance slots parameterize the new session; nil slots fall back to the
+backend's ambient defaults, except that a nil account slot is filled
+from `agent-account-resolve' so the recorded identity always matches
+the environment the backend spawns with (still nil when the backend has
+no accounts configured).  INITIAL-PROMPT is submitted as the first
+user message.  RESUME-ID resumes that session id instead of starting
+fresh.  Remaining OPTIONS are passed through to the backend, which may
+support extras such as `:fork' (Claude Code) or `:terminal-backend'
+\(Codex).  When SESSION carries an account, defensively sync its config
+home with `agent-account-sync' and bind `agent-account--starting'
+around the backend call so process-environment hooks see the account
+at spawn time.  Return the new session buffer."
+  (ignore initial-prompt resume-id)
+  (let* ((backend (agent-session-backend session))
+         (account (or (agent-session-account session)
+                      (setf (agent-session-account session)
+                            (agent-account-resolve backend))))
+         (start (agent--backend-get backend :start-session)))
+    (unless start
+      (user-error "Backend `%s' does not support parameterized session start"
+                  backend))
+    (when account
+      (agent-account-sync backend account))
+    (let ((agent-account--starting (and account (cons backend account))))
+      (apply start session options))))
 
 (defvar-local agent--session nil
   "The `agent-session' struct for this buffer, or nil.")

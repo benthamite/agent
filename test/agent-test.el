@@ -1276,6 +1276,30 @@
                    '((sync . (one . "work"))
                      (start . (one . "work")))))))
 
+(ert-deftest agent-test-start-session-backfills-account-from-current ()
+  "Fill an accountless session's account slot from the active account."
+  (let ((agent-backends nil)
+        (agent-account--current (make-hash-table :test #'eq))
+        (events nil)
+        captured-account captured-starting)
+    (puthash 'one "work" agent-account--current)
+    (apply #'agent-register-backend
+     'one
+     (agent-test--backend
+      :accounts '(("work" . "/tmp/agent-test-work/"))
+      :start-session (lambda (session &rest _)
+                       (setq captured-account (agent-session-account session)
+                             captured-starting agent-account--starting))))
+    (cl-letf (((symbol-function 'agent-account-sync)
+               (lambda (backend account)
+                 (push (cons backend account) events))))
+      (let ((session (agent-session-create :backend 'one)))
+        (agent-start-session session)
+        (should (equal (agent-session-account session) "work"))))
+    (should (equal captured-account "work"))
+    (should (equal captured-starting '(one . "work")))
+    (should (equal events '((one . "work"))))))
+
 (ert-deftest agent-test-account-sync-reads-backend-account-slots ()
   "Sync shared symlinks through the real backend registry slots."
   (let* ((root (make-temp-file "agent-account-sync" t))
