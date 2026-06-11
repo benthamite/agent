@@ -281,6 +281,96 @@ The session account is bound as `agent-account--starting' by
   (list :terminal-backend
         (plist-get (codex-session-identity buffer) :terminal-backend)))
 
+;;;;; TOML helpers
+
+(defvar agent-codex--toml-cache (make-hash-table :test #'equal)
+  "Map from config file path to (MTIME . VALUES) for TOML reads.
+VALUES maps (KEY . SECTION) cons keys to string values, so reads
+for different account config files never evict each other.")
+
+(defun agent-codex--toml-get (file key &optional section)
+  "Return the string value of KEY in TOML FILE, or nil.
+With SECTION, look KEY up inside the [SECTION] table; otherwise
+look it up in the top-level table before the first section
+header.  Results are cached per FILE keyed by modification time."
+  (when-let* ((mtime (file-attribute-modification-time
+                      (file-attributes file))))
+    (let* ((entry (gethash file agent-codex--toml-cache))
+           (values (if (and entry (equal (car entry) mtime))
+                       (cdr entry)
+                     (cdr (puthash file
+                                   (cons mtime (make-hash-table :test #'equal))
+                                   agent-codex--toml-cache))))
+           (cache-key (cons key section))
+           (cached (gethash cache-key values 'agent-codex--toml-miss)))
+      (if (eq cached 'agent-codex--toml-miss)
+          (puthash cache-key (agent-codex--toml-read-value file key section)
+                   values)
+        cached))))
+
+(defun agent-codex--toml-read-value (file key section)
+  "Read KEY from TOML FILE inside SECTION, without caching."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (goto-char (point-min))
+    (pcase-let ((`(,beg . ,end) (agent-codex--toml-region section)))
+      (when beg
+        (goto-char beg)
+        (when (re-search-forward
+               (format "^%s *= *\"\\([^\"]*\\)\"" (regexp-quote key)) end t)
+          (match-string 1))))))
+
+(defun agent-codex--toml-region (section)
+  "Return the (BEG . END) region for SECTION in the current buffer.
+A nil SECTION means the top-level table: point-min up to the
+first section header.  Returns (nil . nil) when SECTION is absent."
+  (goto-char (point-min))
+  (if (null section)
+      (cons (point-min)
+            (if (re-search-forward "^\\[" nil t)
+                (line-beginning-position)
+              (point-max)))
+    (if (re-search-forward (format "^\\[%s\\]" (regexp-quote section)) nil t)
+        (cons (point)
+              (if (re-search-forward "^\\[" nil t)
+                  (line-beginning-position)
+                (point-max)))
+      (cons nil nil))))
+
+(defun agent-codex--toml-set (file key value &optional section)
+  "Set KEY to string VALUE in TOML FILE, inside [SECTION] when given.
+Create the file and the section as needed.  Write only when the
+content changes; return non-nil in that case.  Invalidates the
+read cache for FILE."
+  (make-directory (file-name-directory file) t)
+  (with-temp-buffer
+    (when (file-exists-p file)
+      (insert-file-contents file))
+    (let ((original (buffer-string))
+          (new-line (format "%s = \"%s\"" key value)))
+      (pcase-let ((`(,beg . ,end) (agent-codex--toml-region section)))
+        (cond
+         ((and beg (progn (goto-char beg)
+                          (re-search-forward
+                           (format "^%s *= *\"[^\"]*\"" (regexp-quote key))
+                           end t)))
+          (replace-match new-line t t))
+         (beg
+          (goto-char beg)
+          (if section
+              (insert "\n" new-line)
+            (goto-char end)
+            (insert new-line "\n")))
+         (t
+          (goto-char (point-max))
+          (unless (or (bobp) (bolp)) (insert "\n"))
+          (unless (bobp) (insert "\n"))
+          (insert (format "[%s]\n" section) new-line "\n"))))
+      (unless (equal original (buffer-string))
+        (write-region (point-min) (point-max) file nil 'silent)
+        (remhash file agent-codex--toml-cache)
+        t))))
+
 ;;;;; Mode line
 
 (declare-function doom-modeline-set-modeline "doom-modeline-core")
@@ -288,55 +378,14 @@ The session account is bound as `agent-account--starting' by
 (defvar-local agent-codex--start-time nil
   "Time when this Codex session started.")
 
-(defvar agent-codex--config-model-cache nil
-  "Cached model lookup as (CONFIG MTIME MODEL EFFORT) for Codex config.")
-
-(defun agent-codex--parse-config-value (config-file key)
-  "Return the string value declared for KEY in CONFIG-FILE, or nil."
-  (with-temp-buffer
-    (insert-file-contents config-file)
-    (goto-char (point-min))
-    (when (re-search-forward
-           (format "^%s *= *\"\\([^\"]+\\)\"" (regexp-quote key)) nil t)
-      (match-string 1))))
-
-(defun agent-codex--parse-config-model (config-file)
-  "Return the model string declared in CONFIG-FILE, or nil."
-  (agent-codex--parse-config-value config-file "model"))
-
-(defun agent-codex--parse-config-effort (config-file)
-  "Return the reasoning effort declared in CONFIG-FILE, or nil."
-  (agent-codex--parse-config-value config-file "model_reasoning_effort"))
-
-(defun agent-codex--read-config-field (account index)
-  "Read a cached config field for ACCOUNT at INDEX."
-  (let* ((config-file (agent-codex--config-file account))
-         (mtime (file-attribute-modification-time
-                 (file-attributes config-file))))
-    (cond
-     ((null mtime) nil)
-     ((and agent-codex--config-model-cache
-           (equal config-file (nth 0 agent-codex--config-model-cache))
-           (equal mtime (nth 1 agent-codex--config-model-cache)))
-      (nth index agent-codex--config-model-cache))
-     (t
-      (let ((model (agent-codex--parse-config-model config-file))
-            (effort (agent-codex--parse-config-effort config-file)))
-        (setq agent-codex--config-model-cache
-              (list config-file mtime model effort))
-        (nth index agent-codex--config-model-cache))))))
-
 (defun agent-codex--read-config-model (&optional account)
-  "Read the model from ACCOUNT's Codex config.
-Cached by file modification time so the doom-modeline ai-session
-segment does not perform disk I/O on every redisplay."
-  (agent-codex--read-config-field account 2))
+  "Return the model declared in ACCOUNT's Codex config, or nil."
+  (agent-codex--toml-get (agent-codex--config-file account) "model"))
 
 (defun agent-codex--read-config-effort (&optional account)
-  "Read the reasoning effort from ACCOUNT's Codex config.
-Cached by file modification time so the doom-modeline ai-session
-segment does not perform disk I/O on every redisplay."
-  (agent-codex--read-config-field account 3))
+  "Return the reasoning effort declared in ACCOUNT's Codex config, or nil."
+  (agent-codex--toml-get (agent-codex--config-file account)
+                         "model_reasoning_effort"))
 
 (defun agent-codex-set-modeline ()
   "Set the doom-modeline to the `ai-session' modeline for this buffer."
@@ -376,42 +425,14 @@ config file changed."
 
 (defun agent-codex--sync-theme-to-config (&optional theme)
   "Update `tui.theme' in the active Codex config to THEME.
-When THEME is nil, use the current Emacs AI theme.  Only writes
-the file when the theme value actually changes."
+When THEME is nil, use the current Emacs AI theme.  Return
+non-nil when the file changed."
   (let* ((theme (or theme (agent--theme)))
          (account (or (and (eq (car-safe agent-account--starting) 'codex)
                            (cdr agent-account--starting))
                       (agent-codex--session-account)))
-         (config-file (agent-codex--config-file account))
-         (new-line (format "theme = \"%s\"" theme)))
-    (make-directory (file-name-directory config-file) t)
-    (with-temp-buffer
-      (when (file-exists-p config-file)
-        (insert-file-contents config-file))
-      (let ((original (buffer-string))
-            (found nil))
-        (goto-char (point-min))
-        (when (re-search-forward "^\\[tui\\]" nil t)
-          (let ((section-end (save-excursion
-                               (if (re-search-forward "^\\[" nil t)
-                                   (line-beginning-position)
-                                 (point-max)))))
-            (when (re-search-forward "^theme *= *\"[^\"]*\"" section-end t)
-              (replace-match new-line)
-              (setq found t))))
-        (unless found
-          (goto-char (point-min))
-          (if (re-search-forward "^\\[tui\\]" nil t)
-              (progn
-                (end-of-line)
-                (insert "\n" new-line))
-            (goto-char (point-max))
-            (unless (or (bobp) (bolp)) (insert "\n"))
-            (unless (bobp) (insert "\n"))
-            (insert "[tui]\n" new-line "\n")))
-        (unless (equal original (buffer-string))
-          (write-region (point-min) (point-max) config-file nil 'silent)
-          t)))))
+         (config-file (agent-codex--config-file account)))
+    (agent-codex--toml-set config-file "theme" theme "tui")))
 
 (defun agent-codex--sync-theme-before-start (&rest _)
   "Persist the shared AI theme before starting a Codex process."

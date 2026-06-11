@@ -36,13 +36,71 @@
                          (list (format "CODEX_HOME=%s" home)))))
       (delete-directory dir t))))
 
+;;;; TOML helpers
+
+(ert-deftest agent-codex-test-toml-roundtrip ()
+  "toml-set writes values that toml-get reads back, per section."
+  (let ((file (make-temp-file "agent-codex-toml" nil ".toml"))
+        (agent-codex--toml-cache (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (should (agent-codex--toml-set file "model" "gpt-5.2" nil))
+          (should (agent-codex--toml-set file "theme" "dark" "tui"))
+          (should (equal (agent-codex--toml-get file "model") "gpt-5.2"))
+          (should (equal (agent-codex--toml-get file "theme" "tui") "dark"))
+          (should-not (agent-codex--toml-get file "theme"))
+          (should-not (agent-codex--toml-set file "theme" "dark" "tui")))
+      (delete-file file))))
+
+(ert-deftest agent-codex-test-toml-get-ignores-commented-keys ()
+  "Commented-out TOML keys are not matched by toml-get."
+  (let ((file (make-temp-file "agent-codex-toml" nil ".toml"))
+        (agent-codex--toml-cache (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "# model = \"old\"\nmodel = \"new\"\n# effort = \"high\"\n"))
+          (should (equal (agent-codex--toml-get file "model") "new"))
+          (should-not (agent-codex--toml-get file "effort")))
+      (delete-file file))))
+
+(ert-deftest agent-codex-test-toml-cache-invalidates-on-mtime-change ()
+  "A changed file modification time refreshes cached TOML reads."
+  (let ((file (make-temp-file "agent-codex-toml" nil ".toml"))
+        (agent-codex--toml-cache (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "model = \"before\"\n"))
+          (should (equal (agent-codex--toml-get file "model") "before"))
+          (with-temp-file file
+            (insert "model = \"after\"\n"))
+          (set-file-times file (time-add (current-time) 5))
+          (should (equal (agent-codex--toml-get file "model") "after")))
+      (delete-file file))))
+
+(ert-deftest agent-codex-test-toml-cache-per-file ()
+  "Reads from two files do not evict each other."
+  (let ((a (make-temp-file "agent-codex-a" nil ".toml"))
+        (b (make-temp-file "agent-codex-b" nil ".toml"))
+        (agent-codex--toml-cache (make-hash-table :test #'equal)))
+    (unwind-protect
+        (progn
+          (agent-codex--toml-set a "model" "model-a" nil)
+          (agent-codex--toml-set b "model" "model-b" nil)
+          (agent-codex--toml-get a "model")
+          (agent-codex--toml-get b "model")
+          (should (equal (agent-codex--toml-get a "model") "model-a"))
+          (should (= (hash-table-count agent-codex--toml-cache) 2)))
+      (delete-file a) (delete-file b))))
+
 (ert-deftest agent-codex-test-read-config-model-uses-account-home ()
   "Read model configuration from the selected account's CODEX_HOME."
   (let* ((dir (make-temp-file "codex-account" t))
          (home (expand-file-name "work" dir))
          (config (expand-file-name "config.toml" home))
          (agent-codex-accounts `(("work" . ,home)))
-         (agent-codex--config-model-cache nil))
+         (agent-codex--toml-cache (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
           (make-directory home t)
@@ -58,7 +116,7 @@
          (home (expand-file-name "work" dir))
          (config (expand-file-name "config.toml" home))
          (agent-codex-accounts `(("work" . ,home)))
-         (agent-codex--config-model-cache nil))
+         (agent-codex--toml-cache (make-hash-table :test #'equal)))
     (unwind-protect
         (progn
           (make-directory home t)
