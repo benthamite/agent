@@ -87,6 +87,14 @@ treated as eligible."
   :type '(choice (const :tag "Disabled" nil) number)
   :group 'agent)
 
+(defcustom agent-before-exit-timeout 600
+  "Seconds before an unfinished before-exit skill chain is abandoned.
+When a session's chain has run this long without reaching its
+exit, the watchdog resets the chain state, warns, and leaves the
+session open."
+  :type 'number
+  :group 'agent)
+
 (defcustom agent-skill-command-prefix-alist
   '((claude-code . "/")
     (codex . "$"))
@@ -94,14 +102,13 @@ treated as eligible."
   :type '(alist :key-type symbol :value-type string)
   :group 'agent)
 
-(defvar-local agent--before-exit-skill-started nil
-  "Non-nil once the before-exit skill chain has begun in this buffer.")
-
-(defvar-local agent--before-exit-skill-remaining nil
-  "Before-exit skill entries not yet submitted in this buffer.")
-
-(defvar-local agent--before-exit-skill-exit-pending nil
-  "Non-nil when BUFFER should exit after its before-exit skills finish.")
+(defvar-local agent--before-exit nil
+  "State of the before-exit skill chain in this session buffer.
+Nil when no chain has started.  Otherwise a plist with keys
+`:queue' (skill entries not yet submitted), `:state' (`running'
+or `closing'), `:started-at' (`float-time' when the chain
+started), and `:timer' (the watchdog timer, or nil).  Only
+`agent--before-exit-transition' may set this variable.")
 
 (defvar-local agent-before-exit-skill-inhibit nil
   "Non-nil means skip the configured before-exit skill in this buffer.
@@ -987,8 +994,7 @@ advanced first; when it consumes the event, the ready alert,
 scrolling, and display-name refresh are suppressed.  The ready
 alert fires only for `idle-prompt' events."
   (agent--session-set-state buffer 'awaiting-input)
-  (unless (agent-exit-after-before-exit-skill
-           (agent--detect-backend buffer) buffer)
+  (unless (agent--before-exit-transition buffer 'step)
     (when (eq event 'idle-prompt)
       (agent--session-notify-ready buffer))
     (agent--scroll-to-bottom buffer)
@@ -1601,56 +1607,119 @@ runs and prompts for arguments as needed."
 
 (defun agent-run-skill-before-exit (backend buffer)
   "Submit the before-exit skills for BUFFER before BACKEND exits it.
-Build the applicable skill queue and submit the first one, returning nil to
-delay the exit until the queue finishes.  Return t when there is nothing to
-run or nothing could be submitted."
+Member of `agent-before-exit-functions'.  Return nil to delay the
+exit while the chain runs, and t when there is nothing to run."
   (with-current-buffer buffer
-    (if (or agent--before-exit-skill-started
-            agent-before-exit-skill-inhibit)
-        t
-      (let ((queue (agent--before-exit-skill-queue backend buffer)))
-        (if (not queue)
-            t
-          (setq-local agent--before-exit-skill-started t)
-          (setq-local agent--before-exit-skill-remaining queue)
-          (setq-local agent--before-exit-skill-exit-pending t)
-          (if (agent--before-exit-skill-send-next backend buffer)
-              nil
-            (setq-local agent--before-exit-skill-exit-pending nil)
-            t))))))
+    (setq agent--backend backend))
+  (not (agent--before-exit-transition buffer 'start)))
 
-(defun agent-exit-after-before-exit-skill (backend buffer)
-  "Advance the before-exit skill chain for BACKEND BUFFER.
-Submit the next queued skill, or exit BUFFER once the queue is empty.  Return
-non-nil when the chain handled this stop event."
-  (when (and (buffer-live-p buffer)
-             (buffer-local-value 'agent--before-exit-skill-exit-pending
-                                 buffer)
-             (agent--before-exit-ready-to-close-p backend buffer))
+(defun agent--before-exit-transition (buffer event)
+  "Advance the before-exit chain in BUFFER for EVENT.
+EVENT is one of the symbols `start', `step', and `abort'.  This
+function is the only writer of `agent--before-exit'.  Return
+non-nil when the chain consumed the event."
+  (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (if (and agent--before-exit-skill-remaining
-               (agent--before-exit-skill-send-next backend buffer))
-          t
-        (setq-local agent--before-exit-skill-exit-pending nil)
-        (run-at-time 0 nil #'agent--exit-after-before-exit-skill backend buffer)
-        t))))
+      (pcase event
+        ('start (agent--before-exit-start buffer))
+        ('step (agent--before-exit-step buffer))
+        ('abort (agent--before-exit-abort buffer))
+        (_ (error "Unknown before-exit event: %s" event))))))
 
-(defun agent--before-exit-skill-send-next (backend buffer)
-  "Submit the next queued before-exit skill in BUFFER for BACKEND.
-Skip entries that yield no command, and return non-nil when one is submitted."
-  (with-current-buffer buffer
-    (let (sent)
-      (while (and (not sent) agent--before-exit-skill-remaining)
-        (let* ((entry (pop agent--before-exit-skill-remaining))
-               (command (agent--before-exit-skill-command backend entry)))
-          (when (and command
-                     (or (agent--backend-get backend :submit-command)
-                         (agent--backend-get backend :send-command)))
-            (agent-submit command buffer)
-            (message "Started %s; this session will close when the before-exit skills finish"
-                     command)
-            (setq sent t))))
-      sent)))
+(defun agent--before-exit-start (buffer)
+  "Start the before-exit skill chain in BUFFER.
+Return non-nil when a chain started and the exit must wait.
+Return nil when a chain is already running, the buffer inhibits
+the chain, no skill applies, or nothing could be submitted."
+  (unless (or agent--before-exit agent-before-exit-skill-inhibit)
+    (let* ((backend (agent--detect-backend buffer))
+           (queue (agent--before-exit-skill-queue backend buffer)))
+      (when queue
+        (setq agent--before-exit
+              (list :queue queue
+                    :state 'running
+                    :started-at (float-time)
+                    :timer (agent--before-exit-start-watchdog buffer)))
+        (if (agent--before-exit-submit-next buffer)
+            t
+          (agent--before-exit-reset)
+          nil)))))
+
+(defun agent--before-exit-step (buffer)
+  "Advance BUFFER's running before-exit chain on a stop event.
+Submit the next queued skill, or schedule the exit once the queue
+is drained.  When the backend's readiness veto applies, leave the
+chain untouched so it is re-checked on the next stop event.
+Return non-nil when the chain consumed the event."
+  (when (eq (plist-get agent--before-exit :state) 'running)
+    (let ((backend (agent--detect-backend buffer)))
+      (when (agent--before-exit-ready-to-close-p backend buffer)
+        (if (and (plist-get agent--before-exit :queue)
+                 (agent--before-exit-submit-next buffer))
+            t
+          (agent--before-exit-close buffer backend))))))
+
+(defun agent--before-exit-abort (buffer)
+  "Abandon BUFFER's before-exit chain, leaving the session open."
+  (when agent--before-exit
+    (agent--before-exit-reset)
+    (message "agent: before-exit skills timed out in %s; leaving session open"
+             (buffer-name buffer))
+    t))
+
+(defun agent--before-exit-close (buffer backend)
+  "Mark BUFFER's chain as closing and schedule BACKEND's exit."
+  (agent--before-exit-cancel-watchdog)
+  (setq agent--before-exit (plist-put agent--before-exit :state 'closing))
+  (agent-session-event buffer 'exit-request)
+  (run-at-time 0 nil #'agent--exit-after-before-exit-skill backend buffer)
+  t)
+
+(defun agent--before-exit-submit-next (buffer)
+  "Submit the next queued before-exit skill in BUFFER.
+Skip entries that yield no command, and return non-nil when one
+is submitted."
+  (let ((backend (agent--detect-backend buffer))
+        sent)
+    (while (and (not sent) (plist-get agent--before-exit :queue))
+      (let* ((queue (plist-get agent--before-exit :queue))
+             (entry (car queue))
+             (command (agent--before-exit-skill-command backend entry)))
+        (setq agent--before-exit
+              (plist-put agent--before-exit :queue (cdr queue)))
+        (when (and command
+                   (or (agent--backend-get backend :submit-command)
+                       (agent--backend-get backend :send-command)))
+          (agent-submit command buffer)
+          (message "Started %s; this session will close when the before-exit skills finish"
+                   command)
+          (setq sent t))))
+    sent))
+
+(defun agent--before-exit-reset ()
+  "Clear the current buffer's chain state and watchdog."
+  (agent--before-exit-cancel-watchdog)
+  (setq agent--before-exit nil))
+
+(defun agent--before-exit-start-watchdog (buffer)
+  "Return a timer that aborts BUFFER's chain after the timeout."
+  (run-at-time agent-before-exit-timeout nil
+               #'agent--before-exit-watchdog-fire buffer))
+
+(defun agent--before-exit-watchdog-fire (buffer)
+  "Abort the before-exit chain in BUFFER when the watchdog expires."
+  (when (buffer-live-p buffer)
+    (agent--before-exit-transition buffer 'abort)))
+
+(defun agent--before-exit-cancel-watchdog ()
+  "Cancel the current buffer's before-exit watchdog timer, if any."
+  (when-let* ((timer (plist-get agent--before-exit :timer)))
+    (cancel-timer timer)
+    (setq agent--before-exit (plist-put agent--before-exit :timer nil))))
+
+(defun agent--before-exit-teardown ()
+  "Cancel the before-exit watchdog when a session buffer is killed."
+  (agent--before-exit-cancel-watchdog))
 
 (defun agent--before-exit-ready-to-close-p (backend buffer)
   "Return non-nil when BUFFER can close after a before-exit skill.
@@ -2314,6 +2383,8 @@ Dispatches to the backend's `:restart' handler."
 
 (add-hook 'enable-theme-functions #'agent-sync-theme)
 (add-hook 'agent-before-exit-functions #'agent-run-skill-before-exit)
+;; Phase 7 moves this into the agent minor mode's teardown.
+(add-hook 'kill-buffer-hook #'agent--before-exit-teardown)
 
 ;;;; Provide
 

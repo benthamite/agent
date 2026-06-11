@@ -485,8 +485,7 @@
         (agent-before-exit-skill-directories nil)
         events)
     (with-temp-buffer
-      (let ((buf (current-buffer))
-            (agent-before-exit-skill-directories nil))
+      (let ((buf (current-buffer)))
         (apply #'agent-register-backend
          'codex
          (agent-test--backend
@@ -497,9 +496,105 @@
         (should-not (agent-run-skill-before-exit 'codex buf))
         (should (equal (nreverse events)
                        '((command "$session-retro") return)))
-        (should agent--before-exit-skill-started)
-        (should agent--before-exit-skill-exit-pending)
+        (should (eq (plist-get agent--before-exit :state) 'running))
+        (should-not (plist-get agent--before-exit :queue))
+        (should (numberp (plist-get agent--before-exit :started-at)))
         (should (agent-run-skill-before-exit 'codex buf))))))
+
+(ert-deftest agent-test-before-exit-chain-advances-on-stop-events ()
+  "Advance a two-skill chain across stop events, then close."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names '("update-log" "session-retro"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        (agent-skill-command-prefix-alist '((codex . "$")))
+        (events nil)
+        exited)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'codex
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :submit-command (lambda (cmd &optional _buffer) (push cmd events))
+          :exit (lambda () (interactive) (setq exited t))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (apply function args))))
+          (should-not (agent-run-skill-before-exit 'codex buf))
+          (should (equal events '("$update-log")))
+          (should-not exited)
+          (should (agent--before-exit-transition buf 'step))
+          (should (equal events '("$session-retro" "$update-log")))
+          (should-not exited)
+          (should (agent--before-exit-transition buf 'step))
+          (should exited)
+          (should (eq (plist-get agent--before-exit :state) 'closing)))))))
+
+(ert-deftest agent-test-before-exit-veto-defers-exactly-one-stop ()
+  "Defer chain advance while the backend vetoes, then proceed."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-name "session-retro")
+        (agent-before-exit-skill-directories nil)
+        (ready nil)
+        exited)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'codex
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :submit-command (lambda (_cmd &optional _buffer))
+          :before-exit-ready-to-close-p (lambda (_buffer) ready)
+          :exit (lambda () (interactive) (setq exited t))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (apply function args))))
+          (should-not (agent-run-skill-before-exit 'codex buf))
+          (should-not (agent--before-exit-transition buf 'step))
+          (should-not exited)
+          (should (eq (plist-get agent--before-exit :state) 'running))
+          (setq ready t)
+          (should (agent--before-exit-transition buf 'step))
+          (should exited))))))
+
+(ert-deftest agent-test-before-exit-timeout-aborts-and-warns ()
+  "Reset the chain and warn when the watchdog expires."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-name "session-retro")
+        (agent-before-exit-skill-directories nil)
+        (agent-before-exit-timeout 600)
+        watchdog
+        messages
+        exited)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'codex
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :submit-command (lambda (_cmd &optional _buffer))
+          :exit (lambda () (interactive) (setq exited t))))
+        (cl-letf (((symbol-function 'run-at-time)
+                   (lambda (time _repeat function &rest args)
+                     (when (equal time agent-before-exit-timeout)
+                       (setq watchdog (cons function args)))
+                     'agent-test-timer))
+                  ((symbol-function 'cancel-timer) #'ignore)
+                  ((symbol-function 'message)
+                   (lambda (fmt &rest args)
+                     (push (apply #'format fmt args) messages))))
+          (should-not (agent-run-skill-before-exit 'codex buf))
+          (should watchdog)
+          (apply (car watchdog) (cdr watchdog))
+          (should-not agent--before-exit)
+          (should-not exited)
+          (should (cl-some (lambda (m) (string-match-p "timed out" m))
+                           messages)))))))
 
 (ert-deftest agent-test-run-skill-before-exit-submits-in-matching-directory ()
   "Submit a Codex skill in explicitly configured directories."
@@ -596,12 +691,12 @@
         (apply #'agent-register-backend
          'codex
          (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
           :duration-ms (lambda (_buffer) 30000)
           :send-command (lambda (&rest _args) (setq called t))))
         (should (agent-run-skill-before-exit 'codex buf))
         (should-not called)
-        (should-not agent--before-exit-skill-started)
-        (should-not agent--before-exit-skill-exit-pending)))))
+        (should-not agent--before-exit)))))
 
 (ert-deftest agent-test-run-skill-before-exit-honors-buffer-local-inhibit ()
   "Do not submit before-exit skills when the session inhibits them."
@@ -615,11 +710,11 @@
         (apply #'agent-register-backend
          'codex
          (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
           :send-command (lambda (&rest _args) (setq called t))))
         (should (agent-run-skill-before-exit 'codex buf))
         (should-not called)
-        (should-not agent--before-exit-skill-started)
-        (should-not agent--before-exit-skill-exit-pending)))))
+        (should-not agent--before-exit)))))
 
 (ert-deftest agent-test-run-skill-before-exit-allows-long-sessions ()
   "Submit before-exit skills after the minimum duration."
@@ -683,26 +778,27 @@
         (should (agent-run-skill-before-exit 'other buf))
         (should-not called)))))
 
-(ert-deftest agent-test-exit-after-before-exit-skill-closes-pending-session ()
-  "Exit a session when its before-exit skill has finished."
+(ert-deftest agent-test-before-exit-step-closes-pending-session ()
+  "Exit a session when its before-exit chain has drained."
   (let ((agent-backends nil)
         ran)
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (setq-local agent--before-exit-skill-exit-pending t)
         (apply #'agent-register-backend
          'one
          (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
           :exit (lambda () (interactive) (setq ran t))))
+        (setq-local agent--before-exit '(:queue nil :state running))
         (cl-letf (((symbol-function 'run-at-time)
                    (lambda (_time _repeat function &rest args)
                      (apply function args))))
-          (should (agent-exit-after-before-exit-skill 'one buf))
+          (should (agent--before-exit-transition buf 'step))
           (should ran)
-          (should-not agent--before-exit-skill-exit-pending))))))
+          (should (eq (plist-get agent--before-exit :state) 'closing)))))))
 
-(ert-deftest agent-test-exit-after-before-exit-skill-ignores-ordinary-ready ()
-  "Do not exit sessions without a pending before-exit skill."
+(ert-deftest agent-test-before-exit-step-ignores-idle-sessions ()
+  "Do not consume stop events in sessions without a running chain."
   (let ((agent-backends nil)
         ran)
     (with-temp-buffer
@@ -710,27 +806,29 @@
         (apply #'agent-register-backend
          'one
          (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
           :exit (lambda () (interactive) (setq ran t))))
-        (should-not (agent-exit-after-before-exit-skill 'one buf))
+        (should-not (agent--before-exit-transition buf 'step))
         (should-not ran)))))
 
-(ert-deftest agent-test-exit-after-before-exit-skill-honors-backend-veto ()
+(ert-deftest agent-test-before-exit-step-honors-backend-veto ()
   "Do not close while a backend reports unaccepted prompt input."
   (let ((agent-backends nil)
         ran)
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (setq-local agent--before-exit-skill-exit-pending t)
         (apply #'agent-register-backend
          'one
          (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
           :before-exit-ready-to-close-p (lambda (_buffer) nil)
           :exit (lambda () (interactive) (setq ran t))))
-        (should-not (agent-exit-after-before-exit-skill 'one buf))
+        (setq-local agent--before-exit '(:queue nil :state running))
+        (should-not (agent--before-exit-transition buf 'step))
         (should-not ran)
-        (should agent--before-exit-skill-exit-pending)))))
+        (should (eq (plist-get agent--before-exit :state) 'running))))))
 
-(ert-deftest agent-test-exit-after-before-exit-skill-advances-to-next-skill ()
+(ert-deftest agent-test-before-exit-step-advances-to-next-skill ()
   "Submit the next queued skill instead of exiting while the chain has more."
   (let ((agent-backends nil)
         (agent-skill-command-prefix-alist '((one . "/")))
@@ -738,20 +836,19 @@
         ran)
     (with-temp-buffer
       (let ((buf (current-buffer)))
-        (setq-local agent--before-exit-skill-exit-pending t)
-        (setq-local agent--before-exit-skill-remaining
-                    '(("update-log" :args "--auto")))
         (apply #'agent-register-backend
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :submit-command (lambda (cmd &optional _buffer) (push cmd events))
           :exit (lambda () (interactive) (setq ran t))))
-        (should (agent-exit-after-before-exit-skill 'one buf))
+        (setq-local agent--before-exit
+                    '(:queue (("update-log" :args "--auto")) :state running))
+        (should (agent--before-exit-transition buf 'step))
         (should (equal events '("/update-log --auto")))
         (should-not ran)
-        (should-not agent--before-exit-skill-remaining)
-        (should agent--before-exit-skill-exit-pending)))))
+        (should-not (plist-get agent--before-exit :queue))
+        (should (eq (plist-get agent--before-exit :state) 'running))))))
 
 (ert-deftest agent-test-discover-all-skills-skips-non-invocable ()
   "Do not expose skills marked `user-invocable: false'."
@@ -1276,8 +1373,8 @@
     (with-temp-buffer
       (cl-letf (((symbol-function 'agent-notify)
                  (lambda (&rest args) (setq notified args)))
-                ((symbol-function 'agent-exit-after-before-exit-skill)
-                 (lambda (_backend _buffer) t)))
+                ((symbol-function 'agent--before-exit-transition)
+                 (lambda (_buffer _event) t)))
         (agent-session-event (current-buffer) 'idle-prompt))
       (should (eq agent--session-state 'awaiting-input))
       (should-not notified))))
