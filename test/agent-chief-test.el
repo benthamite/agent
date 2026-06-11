@@ -128,17 +128,45 @@
         (delete-file agent-chief-state-file)))))
 
 (ert-deftest agent-chief-test-run-backend-dispatches-to-codex ()
-  "Dispatch a chief tick to the Codex non-interactive runner."
+  "Dispatch a chief tick through the codex run-prompt slot."
   (let ((agent-chief-backend 'codex)
         (agent-chief-directory "/tmp/")
         called)
     (cl-letf (((symbol-function 'require) #'ignore)
-              ((symbol-function 'agent-codex--run-prompt)
-               (lambda (prompt &rest kwargs)
-                 (setq called (list prompt kwargs)))))
+              ((symbol-function 'agent--backend-get)
+               (lambda (_backend key)
+                 (when (eq key :run-prompt)
+                   (cl-function
+                    (lambda (prompt &key directory callback)
+                      (setq called (list prompt directory callback))))))))
       (agent-chief--run-backend "Prompt" #'ignore)
       (should (equal (car called) "Prompt"))
-      (should (equal (plist-get (cadr called) :dir) "/tmp/")))))
+      (should (equal (cadr called) "/tmp/")))))
+
+(ert-deftest agent-chief-test-stateless-tick-clears-flag-on-bad-backend ()
+  "Clear the running flag when the backend symbol is unsupported."
+  (let ((agent-chief-backend 'unsupported)
+        (agent-chief--running nil))
+    (cl-letf (((symbol-function 'agent-chief--build-prompt)
+               (lambda () "Prompt")))
+      (should-error (agent-chief-stateless-tick) :type 'user-error)
+      (should-not agent-chief--running))))
+
+(ert-deftest agent-chief-test-stateless-tick-clears-flag-on-sync-error ()
+  "Clear the running flag when dispatch signals synchronously."
+  (let ((agent-chief-backend 'codex)
+        (agent-chief-directory "/tmp/")
+        (agent-chief--running nil))
+    (cl-letf (((symbol-function 'agent-chief--build-prompt)
+               (lambda () "Prompt"))
+              ((symbol-function 'require) #'ignore)
+              ((symbol-function 'agent--backend-get)
+               (lambda (_backend key)
+                 (when (eq key :run-prompt)
+                   (lambda (&rest _)
+                     (error "Codex program not found"))))))
+      (should-error (agent-chief-stateless-tick))
+      (should-not agent-chief--running))))
 
 (ert-deftest agent-chief-test-session-heartbeat-submits-to-chief-buffer ()
   "Submit heartbeat prompts to the configured chief session."

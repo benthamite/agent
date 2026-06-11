@@ -227,6 +227,7 @@ Source: SVG Repo (CC0).")
   :background-tasks-p #'agent-codex--has-background-tasks-p
   :busy-p #'agent-codex--busy-p
   :label "Codex"
+  :run-prompt #'agent-codex-run-prompt
   :discover-skills #'agent-codex--discover-skills
   :handoff #'agent-codex-handoff
   :run-skill #'agent-codex-run-skill
@@ -843,6 +844,22 @@ with :exit-code, :duration, :text, and :raw."
                                 :raw raw)))
              (ignore-errors (kill-buffer (process-buffer proc)))
              (funcall callback result))))))))
+
+(cl-defun agent-codex-run-prompt (prompt &key directory callback)
+  "Run PROMPT through `codex exec' with the normalized agent signature.
+DIRECTORY is the working directory; it defaults to
+`default-directory'.  CALLBACK is called as (TEXT &key ERROR),
+where ERROR is nil on success or a short failure description.
+This is the `run-prompt' backend slot implementation."
+  (agent-codex--run-prompt
+   prompt
+   :dir (or directory default-directory)
+   :callback
+   (lambda (result)
+     (let ((code (plist-get result :exit-code)))
+       (funcall callback (plist-get result :text)
+                :error (unless (eq code 0)
+                         (format "codex exited with exit code %s" code)))))))
 
 ;;;###autoload
 (defun agent-codex-run-skill (skill-name &optional arguments)

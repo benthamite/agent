@@ -818,6 +818,35 @@
           (should (equal captured-dir default-directory)))
       (delete-directory dir t))))
 
+(ert-deftest agent-codex-test-run-prompt-slot-normalizes-success ()
+  "Translate the rich codex result plist into the normalized callback."
+  (let (got)
+    (cl-letf (((symbol-function 'agent-codex--run-prompt)
+               (lambda (_prompt &rest kwargs)
+                 (funcall (plist-get kwargs :callback)
+                          '(:exit-code 0 :duration 1.0
+                            :text "done" :raw "done")))))
+      (agent-codex-run-prompt "p" :directory "/tmp/"
+                              :callback (cl-function
+                                         (lambda (text &key error)
+                                           (setq got (list text error)))))
+      (should (equal got '("done" nil))))))
+
+(ert-deftest agent-codex-test-run-prompt-slot-reports-error ()
+  "Pass a non-nil :error to the normalized callback on failure."
+  (let (got)
+    (cl-letf (((symbol-function 'agent-codex--run-prompt)
+               (lambda (_prompt &rest kwargs)
+                 (funcall (plist-get kwargs :callback)
+                          '(:exit-code 2 :duration 1.0
+                            :text "boom" :raw "boom")))))
+      (agent-codex-run-prompt "p"
+                              :callback (cl-function
+                                         (lambda (text &key error)
+                                           (setq got (list text error)))))
+      (should (equal (car got) "boom"))
+      (should (string-match-p "exit code 2" (cadr got))))))
+
 ;;;; Session capture
 
 (ert-deftest agent-codex-test-capture-session-stores-starting-account ()

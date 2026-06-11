@@ -619,6 +619,35 @@
       (should-not (member "ANTHROPIC_API_KEY=key" env))
       (should-not (member "CLAUDE_CODE=1" env)))))
 
+(ert-deftest agent-claude-test-run-prompt-slot-normalizes-success ()
+  "Translate the rich claude result plist into the normalized callback."
+  (let (got)
+    (cl-letf (((symbol-function 'agent-claude--run-prompt)
+               (lambda (_prompt &rest kwargs)
+                 (funcall (plist-get kwargs :callback)
+                          '(:exit-code 0 :duration 1.0 :cost 0.01
+                            :text "done" :session-id "sid" :raw "")))))
+      (agent-claude-run-prompt "p" :directory "/tmp/"
+                               :callback (cl-function
+                                          (lambda (text &key error)
+                                            (setq got (list text error)))))
+      (should (equal got '("done" nil))))))
+
+(ert-deftest agent-claude-test-run-prompt-slot-reports-error ()
+  "Pass a non-nil :error to the normalized callback on failure."
+  (let (got)
+    (cl-letf (((symbol-function 'agent-claude--run-prompt)
+               (lambda (_prompt &rest kwargs)
+                 (funcall (plist-get kwargs :callback)
+                          '(:exit-code 2 :duration 1.0 :cost 0
+                            :text "boom" :session-id nil :raw "")))))
+      (agent-claude-run-prompt "p"
+                               :callback (cl-function
+                                          (lambda (text &key error)
+                                            (setq got (list text error)))))
+      (should (equal (car got) "boom"))
+      (should (string-match-p "exit code 2" (cadr got))))))
+
 (ert-deftest agent-claude-test-diff-file-in-session-uses-directory-boundary ()
   "Do not treat sibling paths with the same prefix as inside a session."
   (let* ((session-dir (make-temp-file "agent-proj" t))

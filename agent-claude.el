@@ -236,6 +236,7 @@ Source: lobehub/lobe-icons (MIT).")
                    (agent-claude-status-duration-ms)))
   :display-name-suffix #'agent-claude--branch-suffix
   :label "Claude Code"
+  :run-prompt #'agent-claude-run-prompt
   :notify #'agent-claude-notify
   :discover-skills #'agent-claude--discover-skills
   :handoff #'agent-claude-handoff
@@ -1608,6 +1609,22 @@ Returns the process object."
                                    :raw ""))))
              (ignore-errors (kill-buffer (process-buffer proc)))
              (funcall callback result))))))))
+
+(cl-defun agent-claude-run-prompt (prompt &key directory callback)
+  "Run PROMPT through `claude -p' with the normalized agent signature.
+DIRECTORY is the working directory; it defaults to
+`default-directory'.  CALLBACK is called as (TEXT &key ERROR),
+where ERROR is nil on success or a short failure description.
+This is the `run-prompt' backend slot implementation."
+  (agent-claude--run-prompt
+   prompt
+   :dir (or directory default-directory)
+   :callback
+   (lambda (result)
+     (let ((code (plist-get result :exit-code)))
+       (funcall callback (plist-get result :text)
+                :error (unless (eq code 0)
+                         (format "claude exited with exit code %s" code)))))))
 
 (defun agent-claude--batch-process-environment ()
   "Return the process environment for non-interactive Claude runs."

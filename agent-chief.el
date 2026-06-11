@@ -36,8 +36,6 @@
 (require 'json)
 (require 'subr-x)
 
-(declare-function agent-claude--run-prompt "agent-claude" (prompt &rest kwargs))
-(declare-function agent-codex--run-prompt "agent-codex" (prompt &rest kwargs))
 (declare-function alert "alert")
 
 ;;;; Customization
@@ -107,6 +105,9 @@ perform externally visible actions."
   :type 'integer
   :group 'agent-chief)
 
+(make-obsolete-variable 'agent-chief-max-turns
+                        'agent-claude-batch-max-turns "0.2")
+
 (defcustom agent-chief-notify-function #'agent-chief-notify
   "Function called with TITLE and MESSAGE when the chief contacts you."
   :type 'function
@@ -152,7 +153,7 @@ enter the state file through `agent-chief-set-day-plan' and
   "Non-nil while a chief-of-staff tick is in progress.")
 
 (defvar agent-chief--last-result nil
-  "Last raw result plist returned by the selected backend.")
+  "Last normalized (:text TEXT :error ERROR) plist from the backend.")
 
 (defvar agent-chief--last-decision nil
   "Last parsed decision plist returned by the model.")
@@ -233,11 +234,16 @@ conversationally in the agent buffer."
   (if agent-chief--running
       (message "Agent chief tick skipped; previous tick still running")
     (setq agent-chief--running t)
-    (agent-chief--run-backend
-     (agent-chief--build-prompt)
-     (lambda (result)
+    (condition-case err
+        (agent-chief--run-backend
+         (agent-chief--build-prompt)
+         (cl-function
+          (lambda (text &key error)
+            (setq agent-chief--running nil)
+            (agent-chief--handle-result text :error error))))
+      (error
        (setq agent-chief--running nil)
-       (agent-chief--handle-result result)))))
+       (signal (car err) (cdr err))))))
 
 ;;;###autoload
 (defun agent-chief-session-heartbeat ()
@@ -559,37 +565,29 @@ conversationally in the agent buffer."
 ;;;; Backend dispatch
 
 (defun agent-chief--run-backend (prompt callback)
-  "Run PROMPT through `agent-chief-backend' and call CALLBACK."
-  (pcase agent-chief-backend
-    ('codex
-     (require 'agent-codex)
-     (agent-codex--run-prompt
-      prompt
-      :dir agent-chief-directory
-      :callback callback))
-    ('claude-code
-     (require 'agent-claude)
-     (agent-claude--run-prompt
-      prompt
-      :dir agent-chief-directory
-      :max-turns agent-chief-max-turns
-      :callback callback))
-    (_
-     (setq agent-chief--running nil)
-     (user-error "Unsupported agent-chief backend: %S"
-                 agent-chief-backend))))
+  "Run PROMPT through `agent-chief-backend' and call CALLBACK.
+CALLBACK is called as (TEXT &key ERROR) per the normalized
+`run-prompt' backend slot contract."
+  (agent-chief--require-backend)
+  (let ((run (agent--backend-get agent-chief-backend :run-prompt)))
+    (unless run
+      (user-error "Backend `%s' does not register a run-prompt slot"
+                  agent-chief-backend))
+    (funcall run prompt
+             :directory agent-chief-directory
+             :callback callback)))
 
 ;;;; Result handling
 
-(defun agent-chief--handle-result (result)
-  "Handle backend RESULT from one chief-of-staff tick."
-  (setq agent-chief--last-result result)
-  (if (not (zerop (or (plist-get result :exit-code) 1)))
-      (message "Agent chief backend failed: %s"
-               (or (plist-get result :text) "(no output)"))
+(cl-defun agent-chief--handle-result (text &key error)
+  "Handle normalized backend TEXT and ERROR from one chief tick."
+  (setq agent-chief--last-result (list :text text :error error))
+  (if error
+      (message "Agent chief backend failed: %s (%s)"
+               (or text "(no output)") error)
     (condition-case err
         (agent-chief--handle-decision
-         (agent-chief--parse-decision (plist-get result :text)))
+         (agent-chief--parse-decision text))
       (error
        (message "Agent chief could not parse backend output: %s"
                 (error-message-string err))))))
