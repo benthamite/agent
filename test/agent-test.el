@@ -360,6 +360,50 @@
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
+(ert-deftest agent-test-add-process-exit-hook-composes-with-sentinel ()
+  "Run the original sentinel and stacked exit hooks once each on exit."
+  (let* ((buf (generate-new-buffer " *agent-exit-hook*"))
+         (events nil)
+         (proc (make-process :name "agent-exit-hook-test" :buffer buf
+                             :command '("true") :connection-type 'pipe)))
+    (unwind-protect
+        (progn
+          (set-process-sentinel proc (lambda (_p _e) (push 'orig events)))
+          (agent--add-process-exit-hook
+           buf (lambda (_buffer) (push 'hook events)))
+          (agent--add-process-exit-hook
+           buf (lambda (_buffer) (push 'hook2 events)))
+          (while (process-live-p proc)
+            (accept-process-output proc 0.1))
+          (with-timeout (2 (ert-fail "sentinel never ran"))
+            (while (< (length events) 3)
+              (sit-for 0.05)))
+          (should (= (length events) 3))
+          (should (memq 'orig events))
+          (should (memq 'hook events))
+          (should (memq 'hook2 events)))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(ert-deftest agent-test-setup-kill-on-exit-honors-before-kill-check ()
+  "Do not kill the buffer when the backend before-kill-check vetoes."
+  (let ((agent-backends nil)
+        (hook-fn nil))
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :before-kill-check (lambda (_buffer) nil)))
+        (cl-letf (((symbol-function 'get-buffer-process)
+                   (lambda (_b) 'fake-proc))
+                  ((symbol-function 'agent--add-process-exit-hook)
+                   (lambda (_buffer fn) (setq hook-fn fn))))
+          (agent-setup-kill-on-exit))
+        (funcall hook-fn buf)
+        (should (buffer-live-p buf))))))
+
 (ert-deftest agent-test-exit-runs-before-exit-functions ()
   "Abort exit when a before-exit function returns nil."
   (let ((agent-backends nil)
@@ -367,17 +411,19 @@
         ran
         seen)
     (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
       (let ((buf (current-buffer)))
         (apply #'agent-register-backend
          'one
          (agent-test--backend
-          :buffer-p (lambda (candidate) (eq candidate buf))
-          :exit (lambda () (interactive) (setq ran t))))
+          :buffer-p (lambda (candidate) (eq candidate buf))))
         (add-hook 'agent-before-exit-functions
                   (lambda (backend buffer)
                     (setq seen (list backend buffer))
                     nil))
-        (agent-exit)
+        (cl-letf (((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq ran t))))
+          (agent-exit))
         (should (equal seen (list 'one buf)))
         (should-not ran)))))
 
@@ -387,14 +433,16 @@
         (agent-before-exit-functions nil)
         ran)
     (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
       (let ((buf (current-buffer)))
         (apply #'agent-register-backend
          'one
          (agent-test--backend
-          :buffer-p (lambda (candidate) (eq candidate buf))
-          :exit (lambda () (interactive) (setq ran t))))
+          :buffer-p (lambda (candidate) (eq candidate buf))))
         (add-hook 'agent-before-exit-functions (lambda (_backend _buffer) t))
-        (agent-exit)
+        (cl-letf (((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq ran t))))
+          (agent-exit))
         (should ran)))))
 
 (ert-deftest agent-test-exit-confirms-when-captured-prompts-pending ()
@@ -411,8 +459,7 @@
             (apply #'agent-register-backend
              'one
              (agent-test--backend
-              :buffer-p (lambda (candidate) (eq candidate buf))
-              :exit (lambda () (interactive) (setq ran t))))
+              :buffer-p (lambda (candidate) (eq candidate buf))))
             (let ((file (agent--prompt-capture-file 'one buf)))
               (make-directory (file-name-directory file) t)
               (with-temp-file file
@@ -420,7 +467,9 @@
             (cl-letf (((symbol-function 'yes-or-no-p)
                        (lambda (prompt)
                          (setq prompted prompt)
-                         nil)))
+                         nil))
+                      ((symbol-function 'agent--exit-session)
+                       (lambda (_buffer) (setq ran t))))
               (agent-exit))
             (should (string-match-p "1 captured prompt" prompted))
             (should-not ran)))
@@ -440,12 +489,13 @@
             (apply #'agent-register-backend
              'one
              (agent-test--backend
-              :buffer-p (lambda (candidate) (eq candidate buf))
-              :exit (lambda () (interactive) (setq ran t))))
+              :buffer-p (lambda (candidate) (eq candidate buf))))
             (cl-letf (((symbol-function 'yes-or-no-p)
                        (lambda (_prompt)
                          (setq prompted t)
-                         nil)))
+                         nil))
+                      ((symbol-function 'agent--exit-session)
+                       (lambda (_buffer) (setq ran t))))
               (agent-exit))
             (should-not prompted)
             (should ran)))
@@ -517,10 +567,11 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :submit-command (lambda (cmd &optional _buffer) (push cmd events))
-          :exit (lambda () (interactive) (setq exited t))))
+          :submit-command (lambda (cmd &optional _buffer) (push cmd events))))
         (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
                    (lambda (_buffer) nil))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
                   ((symbol-function 'run-at-time)
                    (lambda (_time _repeat function &rest args)
                      (apply function args))))
@@ -548,10 +599,11 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :submit-command (lambda (_cmd &optional _buffer))
-          :before-exit-ready-to-close-p (lambda (_buffer) ready)
-          :exit (lambda () (interactive) (setq exited t))))
+          :before-exit-ready-to-close-p (lambda (_buffer) ready)))
         (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
                    (lambda (_buffer) nil))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
                   ((symbol-function 'run-at-time)
                    (lambda (_time _repeat function &rest args)
                      (apply function args))))
@@ -578,9 +630,10 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :submit-command (lambda (_cmd &optional _buffer))
-          :exit (lambda () (interactive) (setq exited t))))
-        (cl-letf (((symbol-function 'run-at-time)
+          :submit-command (lambda (_cmd &optional _buffer))))
+        (cl-letf (((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
+                  ((symbol-function 'run-at-time)
                    (lambda (time _repeat function &rest args)
                      (when (equal time agent-before-exit-timeout)
                        (setq watchdog (cons function args)))
@@ -788,10 +841,11 @@
         (apply #'agent-register-backend
          'one
          (agent-test--backend
-          :buffer-p (lambda (candidate) (eq candidate buf))
-          :exit (lambda () (interactive) (setq ran t))))
+          :buffer-p (lambda (candidate) (eq candidate buf))))
         (setq-local agent--before-exit (list :queue nil :state 'running))
-        (cl-letf (((symbol-function 'run-at-time)
+        (cl-letf (((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq ran t)))
+                  ((symbol-function 'run-at-time)
                    (lambda (_time _repeat function &rest args)
                      (apply function args))))
           (should (agent--before-exit-transition buf 'step))
@@ -807,9 +861,10 @@
         (apply #'agent-register-backend
          'one
          (agent-test--backend
-          :buffer-p (lambda (candidate) (eq candidate buf))
-          :exit (lambda () (interactive) (setq ran t))))
-        (should-not (agent--before-exit-transition buf 'step))
+          :buffer-p (lambda (candidate) (eq candidate buf))))
+        (cl-letf (((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq ran t))))
+          (should-not (agent--before-exit-transition buf 'step)))
         (should-not ran)))))
 
 (ert-deftest agent-test-before-exit-step-honors-backend-veto ()
@@ -822,10 +877,11 @@
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :before-exit-ready-to-close-p (lambda (_buffer) nil)
-          :exit (lambda () (interactive) (setq ran t))))
+          :before-exit-ready-to-close-p (lambda (_buffer) nil)))
         (setq-local agent--before-exit '(:queue nil :state running))
-        (should-not (agent--before-exit-transition buf 'step))
+        (cl-letf (((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq ran t))))
+          (should-not (agent--before-exit-transition buf 'step)))
         (should-not ran)
         (should (eq (plist-get agent--before-exit :state) 'running))))))
 
@@ -841,12 +897,13 @@
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :submit-command (lambda (cmd &optional _buffer) (push cmd events))
-          :exit (lambda () (interactive) (setq ran t))))
+          :submit-command (lambda (cmd &optional _buffer) (push cmd events))))
         (setq-local agent--before-exit
                     (list :queue (list (list "update-log" :args "--auto"))
                           :state 'running))
-        (should (agent--before-exit-transition buf 'step))
+        (cl-letf (((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq ran t))))
+          (should (agent--before-exit-transition buf 'step)))
         (should (equal events '("/update-log --auto")))
         (should-not ran)
         (should-not (plist-get agent--before-exit :queue))

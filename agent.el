@@ -135,7 +135,7 @@ call sites."
   canonical-home
   run-prompt skill-roots skill-command-prefix
   sync-theme modeline-status menu-suffixes
-  before-exit-ready-to-close-p
+  before-exit-ready-to-close-p before-kill-check
   ;; Transitional slots, deleted in later phases:
   start start-new extract-directory extract-instance-name account
   send-command submit-command discover-skills handoff run-skill
@@ -1755,12 +1755,10 @@ unaccepted at the prompt."
       (funcall fn buffer)
     t))
 
-(defun agent--exit-after-before-exit-skill (backend buffer)
-  "Exit BACKEND session BUFFER without re-running before-exit hooks."
+(defun agent--exit-after-before-exit-skill (_backend buffer)
+  "Exit the session in BUFFER without re-running before-exit hooks."
   (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (when-let* ((fn (agent--backend-get backend :exit)))
-        (call-interactively fn)))))
+    (agent--exit-session buffer)))
 
 (defun agent--before-exit-skill-queue (backend buffer)
   "Return the ordered before-exit skill entries applicable to BUFFER.
@@ -2307,24 +2305,56 @@ called with the selected project plist and Slack URL."
 
 ;;;###autoload
 (defun agent-setup-kill-on-exit ()
-  "Arrange for the buffer to be killed when the session process exits."
+  "Arrange for the buffer to be killed when the session process exits.
+Consults the backend's `before-kill-check' slot, which may veto or
+prompt before the buffer is killed."
   (interactive)
-  (agent--dispatch :setup-kill-on-exit))
+  (when-let* ((session (agent-session))
+              (backend (agent-session-backend session))
+              ((get-buffer-process (current-buffer))))
+    (agent--add-process-exit-hook
+     (current-buffer)
+     (lambda (buffer)
+       (when (and (buffer-live-p buffer)
+                  (agent--before-kill-allowed-p backend buffer))
+         (ignore-errors (kill-buffer buffer)))))))
+
+(defun agent--before-kill-allowed-p (backend buffer)
+  "Return non-nil when BACKEND allows killing session BUFFER."
+  (let ((check (agent--backend-get backend :before-kill-check)))
+    (or (null check)
+        (with-current-buffer buffer
+          (funcall check buffer)))))
+
+(defun agent--add-process-exit-hook (buffer fn)
+  "Call FN with BUFFER after the process in BUFFER exits.
+Composes with any existing sentinel via `add-function', so
+repeated calls and pre-existing sentinels all run."
+  (when-let* ((proc (get-buffer-process buffer)))
+    (unless (process-sentinel proc)
+      (set-process-sentinel proc #'ignore))
+    (add-function :after (process-sentinel proc)
+                  (lambda (process _event)
+                    (when (memq (process-status process) '(exit signal))
+                      (funcall fn buffer))))))
 
 ;;;###autoload
 (defun agent-exit ()
   "Exit the current AI session and kill its buffer.
-Dispatches to the backend's `:exit' handler, which should
-terminate the CLI process and kill the buffer."
+Runs the before-exit chain, then submits `/exit'.  Claude Code
+handles `/exit' natively; the codex backend intercepts it and
+kills the session, since the Codex CLI has no `/exit'."
   (interactive)
-  (let* ((backend (agent--resolve-backend))
-         (buffer (current-buffer))
-         (fn (agent--backend-get backend :exit)))
-    (unless fn
-      (user-error "Backend `%s' does not support `:exit'" backend))
+  (let* ((session (or (agent-session)
+                      (user-error "Not in an AI session buffer")))
+         (backend (agent-session-backend session))
+         (buffer (current-buffer)))
     (when (agent--run-before-exit-functions backend buffer)
-      (agent-session-event buffer 'exit-request)
-      (call-interactively fn))))
+      (agent--exit-session buffer))))
+
+(defun agent--exit-session (buffer)
+  "Submit `/exit' to session BUFFER without re-running before-exit hooks."
+  (agent-submit "/exit" buffer))
 
 ;;;###autoload
 (defun agent-restart ()

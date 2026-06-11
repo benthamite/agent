@@ -244,8 +244,7 @@ Source: lobehub/lobe-icons (MIT).")
   :audit-project #'agent-claude-audit-project
   :debug-backtrace #'agent-claude-debug-backtrace
   :act-on-slack-message #'agent-claude-act-on-slack-message
-  :setup-kill-on-exit #'agent-claude-setup-kill-on-exit
-  :exit #'agent-claude-exit
+  :before-kill-check (lambda (_buffer) (agent-claude--confirm-kill-branches))
   :restart #'agent-claude-restart
   :start-session #'agent-claude--start-session
   :session-identity #'agent-claude--session-identity
@@ -288,14 +287,7 @@ Source: lobehub/lobe-icons (MIT).")
    (t
     (claude-code--get-or-prompt-for-buffer))))
 
-;;;###autoload
-(defun agent-claude-exit ()
-  "Exit the current Claude Code session.
-Sends `/exit' to the CLI, which terminates the process.  The
-sentinel installed by `agent-claude-setup-kill-on-exit'
-then kills the buffer."
-  (interactive)
-  (claude-code--do-send-command "/exit"))
+(define-obsolete-function-alias 'agent-claude-exit #'agent-exit "0.2")
 
 ;;;;; C-g fix
 
@@ -344,27 +336,8 @@ if the status file is unavailable, or if the user confirms."
                            (if (= branch-count 1) "branch" "branches")))))))))
     (error t)))
 
-(defun agent-claude-setup-kill-on-exit ()
-  "Arrange for the buffer to be killed when the Claude process exits.
-Works with any terminal backend by wrapping the process sentinel.
-When `agent-claude-warn-kill-with-branches' is non-nil and
-the session has branches, prompts for confirmation before killing."
-  (interactive)
-  (when (claude-code--buffer-p (current-buffer))
-    (when-let* ((proc (get-buffer-process (current-buffer))))
-      (let ((orig (process-sentinel proc))
-            (buf (current-buffer)))
-        (set-process-sentinel
-         proc
-         (lambda (process event)
-           (when orig
-             (funcall orig process event))
-           (when (and (buffer-live-p buf)
-                      (with-current-buffer buf
-                        (agent-claude--confirm-kill-branches)))
-             (condition-case nil
-                 (kill-buffer buf)
-               (error nil)))))))))
+(define-obsolete-function-alias 'agent-claude-setup-kill-on-exit
+  #'agent-setup-kill-on-exit "0.2")
 
 ;;;;; Smart start
 
@@ -2390,7 +2363,7 @@ there with the backtrace prompt passed as a CLI argument."
 (add-hook 'claude-code-event-hook #'agent-claude--handle-notification)
 (add-hook 'claude-code-event-hook #'agent-claude--handle-stop)
 (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
-(add-hook 'claude-code-start-hook #'agent-claude-setup-kill-on-exit)
+(add-hook 'claude-code-start-hook #'agent-setup-kill-on-exit)
 (add-hook 'claude-code-start-hook #'agent-claude-start-status-polling)
 (add-hook 'claude-code-start-hook #'agent-claude-set-modeline)
 (add-hook 'claude-code-start-hook #'agent--refresh-display-names)

@@ -453,8 +453,8 @@
                   ((symbol-function 'run-at-time)
                    (lambda (_time _repeat function &rest args)
                      (apply function args)))
-                  ((symbol-function 'agent-codex-exit)
-                   (lambda () (interactive) (setq ran t))))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq ran t))))
           (with-current-buffer buf
             (setq-local agent--backend 'codex)
             (setq-local agent--before-exit

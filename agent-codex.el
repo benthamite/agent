@@ -234,8 +234,6 @@ Source: SVG Repo (CC0).")
   :audit-project #'agent-codex-audit-project
   :debug-backtrace #'agent-codex-debug-backtrace
   :act-on-slack-message #'agent-codex-act-on-slack-message
-  :setup-kill-on-exit #'agent-codex-setup-kill-on-exit
-  :exit #'agent-codex-exit
   :restart #'agent-codex-restart
   :start-session #'agent-codex--start-session
   :session-identity #'agent-codex--session-identity
@@ -1252,14 +1250,6 @@ Runs on `codex-command-submitted-hook' for every submission path."
 
 ;;;;; Exit and kill on exit
 
-;;;###autoload
-(defun agent-codex-exit ()
-  "Exit the current Codex session and kill its buffer.
-Codex CLI does not support `/exit', so this sends the process a
-SIGHUP and kills the buffer from the Emacs side."
-  (interactive)
-  (agent-kill-session-buffer))
-
 (defun agent-codex--intercept-exit (orig-fn cmd)
   "Intercept `/exit' and kill the session instead of forwarding it.
 ORIG-FN is `codex--do-send-command'.  CMD is the command string.
@@ -1268,27 +1258,28 @@ Emacs side to match Claude Code's behavior."
   (if (string= (string-trim cmd) "/exit")
       (when-let* ((buf (codex--get-or-prompt-for-buffer)))
         (with-current-buffer buf
-          (agent-codex-exit)))
+          (agent-kill-session-buffer)))
     (funcall orig-fn cmd)))
 
-(defun agent-codex-setup-kill-on-exit ()
-  "Arrange for the buffer to be killed when the Codex process exits."
-  (interactive)
-  (when (codex--buffer-p (current-buffer))
-    (when-let* ((proc (get-buffer-process (current-buffer))))
-      (let ((orig (process-sentinel proc))
-            (buf (current-buffer)))
-        (set-process-sentinel
-         proc
-         (lambda (process event)
-           (when orig (funcall orig process event))
-           (when (buffer-live-p buf)
-             (condition-case nil
-                 (kill-buffer buf)
-               (error nil)))))))))
+(defun agent-codex--intercept-exit-to-buffer (orig-fn cmd buffer)
+  "Intercept `/exit' submitted to BUFFER and kill the session instead.
+ORIG-FN is `codex--send-command-to-buffer'.  CMD is the command
+string.  Codex CLI does not recognize `/exit', so it is handled on
+the Emacs side to match Claude Code's behavior."
+  (if (string= (string-trim cmd) "/exit")
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (agent-kill-session-buffer)))
+    (funcall orig-fn cmd buffer)))
 
-(add-hook 'codex-start-hook #'agent-codex-setup-kill-on-exit)
+(define-obsolete-function-alias 'agent-codex-exit #'agent-exit "0.2")
+(define-obsolete-function-alias 'agent-codex-setup-kill-on-exit
+  #'agent-setup-kill-on-exit "0.2")
+
+(add-hook 'codex-start-hook #'agent-setup-kill-on-exit)
 (advice-add 'codex--do-send-command :around #'agent-codex--intercept-exit)
+(advice-add 'codex--send-command-to-buffer :around
+            #'agent-codex--intercept-exit-to-buffer)
 
 ;;;;; Account menu infix
 
