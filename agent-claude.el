@@ -1281,12 +1281,9 @@ struct via `agent--capture-session'."
 SESSION is an `agent-session'.  INITIAL-PROMPT is passed to the Claude
 CLI as the opening user message.  RESUME-ID resumes that session id.
 FORK non-nil adds `--fork-session' to a resume.  The session account
-\(or the resolved active account) is bound as the pending account so
-`agent-claude-account-env' sees it."
-  (let* ((agent-claude--pending-account
-          (or (agent-session-account session)
-              (agent-claude--resolve-account)))
-         (switches (append (when resume-id (list "--resume" resume-id))
+is bound as `agent-account--starting' by `agent-start-session' so
+environment hooks see it at spawn time."
+  (let* ((switches (append (when resume-id (list "--resume" resume-id))
                            (when fork (list "--fork-session"))
                            (when initial-prompt (list initial-prompt))))
          (buffer (agent-claude--start-with-overrides

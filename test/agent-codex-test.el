@@ -173,7 +173,8 @@
                        (lambda () (error "should not resolve active account")))
                       ((symbol-function 'codex-start-session)
                        (lambda (&rest _keys)
-                         (setq captured-account agent-codex--pending-account)
+                         (setq captured-account
+                               (cdr-safe agent-account--starting))
                          (generate-new-buffer " *codex-restart-target*"))))
               (kill-buffer (agent-codex-restart)))))
       (delete-directory dir t))
@@ -201,7 +202,8 @@
                          "personal"))
                       ((symbol-function 'codex-start-session)
                        (lambda (&rest keys)
-                         (setq captured-account agent-codex--pending-account)
+                         (setq captured-account
+                               (cdr-safe agent-account--starting))
                          (setq captured-session-id (plist-get keys :resume-id))
                          (generate-new-buffer " *codex-restart-target*"))))
               (kill-buffer (agent-codex-restart)))))
@@ -883,7 +885,8 @@
      (current-buffer)
      (agent-session-create :backend 'codex
                            :directory "~/repo/codex-capture-session-test/"))
-    (let ((agent-codex--pending-account "personal"))
+    (let ((agent-codex--pending-account "personal")
+          (agent-account--starting '(codex . "personal")))
       (agent-codex--capture-buffer-account)
       (let ((session (agent-session (current-buffer))))
         (should session)
@@ -894,26 +897,25 @@
         (should (equal (agent-session-instance session) "default"))))))
 
 (ert-deftest agent-codex-test-start-session-binds-account-and-records-session ()
-  "Bind the pending account and attach the session to the new buffer."
+  "Bind the starting account and attach the session to the new buffer."
   (let ((buffer (generate-new-buffer " *codex-test-session*"))
         captured)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-codex--install-hooks) #'ignore)
-                  ((symbol-function 'agent-codex--resolve-account)
-                   (lambda () nil))
+                  ((symbol-function 'agent-account-sync) #'ignore)
                   ((symbol-function 'codex-start-session)
                    (lambda (&rest keys)
                      (setq captured
                            (append keys
                                    (list :account
-                                         agent-codex--pending-account)))
+                                         (cdr-safe agent-account--starting))))
                      buffer)))
           (let ((session (agent-session-create
                           :backend 'codex
                           :account "work"
                           :directory "/tmp/project/"
                           :instance "fix")))
-            (should (eq (agent-codex--start-session session :resume-id "abc")
+            (should (eq (agent-start-session session :resume-id "abc")
                         buffer))
             (should (equal (plist-get captured :directory) "/tmp/project/"))
             (should (equal (plist-get captured :instance-name) "fix"))

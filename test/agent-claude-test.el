@@ -822,7 +822,8 @@
      (current-buffer)
      (agent-session-create :backend 'claude-code
                            :directory "~/repo/claude-capture-session-test/"))
-    (let ((agent-claude--pending-account "personal"))
+    (let ((agent-claude--pending-account "personal")
+          (agent-account--starting '(claude-code . "personal")))
       (agent-claude--capture-buffer-account)
       (let ((session (agent-session (current-buffer))))
         (should session)
@@ -839,8 +840,7 @@
   (let ((buffer (generate-new-buffer " *claude-test-session*"))
         captured-dir captured-instance captured-switches captured-account)
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude--resolve-account)
-                   (lambda () nil))
+        (cl-letf (((symbol-function 'agent-account-sync) #'ignore)
                   ((symbol-function 'claude-code--start)
                    (lambda (_arg switches &optional _force-prompt _force-switch)
                      (setq captured-dir (claude-code--directory))
@@ -848,14 +848,14 @@
                            (claude-code--prompt-for-instance-name
                             "/elsewhere/" nil))
                      (setq captured-switches switches)
-                     (setq captured-account agent-claude--pending-account)
+                     (setq captured-account (cdr-safe agent-account--starting))
                      buffer)))
           (let ((session (agent-session-create
                           :backend 'claude-code
                           :account "work"
                           :directory "/tmp/project/"
                           :instance "fix")))
-            (should (eq (agent-claude--start-session
+            (should (eq (agent-start-session
                          session :resume-id "abc" :fork t
                          :initial-prompt "continue")
                         buffer))

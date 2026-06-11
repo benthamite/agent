@@ -36,6 +36,7 @@
 (require 'json)
 (require 'subr-x)
 (eval-and-compile (require 'transient))
+(require 'agent-account)
 
 ;;;; Custom group
 
@@ -131,6 +132,7 @@ call sites."
   waiting-p busy-p background-tasks-p duration-ms display-name-suffix
   notify
   account-env-var accounts account-file shared-config-items account-init
+  canonical-home
   run-prompt skill-roots skill-command-prefix
   sync-theme modeline-status menu-suffixes
   before-exit-ready-to-close-p
@@ -161,7 +163,19 @@ and STRUCT is an `agent-backend'.")
 SLOTS is a keyword-value list whose keywords match `agent-backend'
 slot names, e.g. (:buffer-p #\\='fn :label \"Codex\").  Signal an
 error when SLOTS contains an unknown keyword or lacks a key in
-`agent--required-backend-keys'."
+`agent--required-backend-keys'.
+
+Multi-account backends provide the optional account keys read by
+`agent-account': `:account-env-var' (environment variable naming
+the account config home), `:accounts' (alist of (NAME . HOME)),
+`:account-file' (file persisting the current account name),
+`:shared-config-items' (items symlinked from the canonical home
+into each account home), `:canonical-home' (the backend's default
+config directory), and `:account-init' (function called with the
+account name after syncing).  The `:accounts', `:account-file',
+`:shared-config-items', and `:canonical-home' values may each be
+a literal value, a function returning one, or a symbol naming a
+variable, resolved at read time by `agent-account--backend-value'."
   (agent--validate-backend name slots)
   (setf (alist-get name agent-backends)
         (apply #'agent-backend--create :name name slots)))
@@ -227,14 +241,21 @@ backend's ambient defaults.  INITIAL-PROMPT is submitted as the first
 user message.  RESUME-ID resumes that session id instead of starting
 fresh.  Remaining OPTIONS are passed through to the backend, which may
 support extras such as `:fork' (Claude Code) or `:terminal-backend'
-\(Codex).  Return the new session buffer."
+\(Codex).  When SESSION carries an account, defensively sync its config
+home with `agent-account-sync' and bind `agent-account--starting'
+around the backend call so process-environment hooks see the account
+at spawn time.  Return the new session buffer."
   (ignore initial-prompt resume-id)
-  (let ((start (agent--backend-get (agent-session-backend session)
-                                   :start-session)))
+  (let* ((backend (agent-session-backend session))
+         (account (agent-session-account session))
+         (start (agent--backend-get backend :start-session)))
     (unless start
       (user-error "Backend `%s' does not support parameterized session start"
-                  (agent-session-backend session)))
-    (apply start session options)))
+                  backend))
+    (when account
+      (agent-account-sync backend account))
+    (let ((agent-account--starting (and account (cons backend account))))
+      (apply start session options))))
 
 (defun agent-backend-icon-string (backend &optional face)
   "Return the icon string for the backend named BACKEND.
@@ -339,15 +360,18 @@ the migration."
   "Construct, store, and return the `agent-session' struct for BUFFER.
 Derive the backend with `agent--detect-backend', the directory
 and instance by parsing BUFFER's name, and the account from the
-backend's account function.  Return nil when BUFFER belongs to no
-registered backend or its name encodes no directory."
+in-flight `agent-account--starting' binding when it belongs to
+the backend, falling back to the persisted current account.
+Return nil when BUFFER belongs to no registered backend or its
+name encodes no directory."
   (when-let* ((backend (agent--detect-backend buffer))
               (name (buffer-name buffer))
               (directory (agent--session-directory-from-buffer-name name)))
     (let* ((instance-fn (agent--backend-get backend :extract-instance-name))
            (instance (when instance-fn (funcall instance-fn name)))
-           (account-fn (agent--backend-get backend :account))
-           (account (when account-fn (funcall account-fn buffer))))
+           (account (or (and (eq (car-safe agent-account--starting) backend)
+                             (cdr agent-account--starting))
+                        (agent-account-current backend))))
       (agent--set-session
        buffer
        (agent-session-create :backend backend
@@ -778,14 +802,11 @@ Each SPECS is a list of suffix specs sorted by home-row key."
 
 (defun agent--session-group-key (buffer)
   "Return the group key for BUFFER in the session switcher.
-Prefers the account stored in BUFFER's `agent-session', then the
-backend's :account function, then the backend's :label or symbol
-name."
+Uses the account recorded in the buffer's session, falling back to
+the backend's :label or symbol name."
   (let ((backend (agent--detect-backend buffer)))
     (or (when-let* ((session (agent-session buffer)))
           (agent-session-account session))
-        (when-let* ((account-fn (agent--backend-get backend :account)))
-          (funcall account-fn buffer))
         (agent--backend-get backend :label)
         (and backend (symbol-name backend))
         "Sessions")))
@@ -870,13 +891,13 @@ Each value's suffix specs are sorted by session-key pool index."
     (sort alist (lambda (a b) (string< (car a) (car b))))))
 
 (defun agent--accountless-labels ()
-  "Return labels for backends without an :account function.
+  "Return labels for backends without configured accounts.
 These backends don't support multi-account grouping, so their
 sessions appear without a heading."
   (let (labels)
     (dolist (entry agent-backends labels)
-      (unless (agent-backend-account (cdr entry))
-        (when-let* ((label (agent-backend-label (cdr entry))))
+      (unless (agent-account-list (car entry))
+        (when-let* ((label (agent--backend-get (car entry) :label)))
           (push label labels))))))
 
 (defun agent--interleave-group-headers (groups)
@@ -1320,8 +1341,8 @@ already been inserted."
   "Return a completion label for session BUFFER."
   (let* ((backend (agent--detect-backend buffer))
          (label (agent--backend-get backend :label))
-         (account (when-let* ((fn (agent--backend-get backend :account)))
-                    (funcall fn buffer))))
+         (account (when-let* ((session (agent-session buffer)))
+                    (agent-session-account session))))
     (string-join (delq nil (list label account (agent-display-name buffer)))
                  " ")))
 
@@ -1340,8 +1361,8 @@ already been inserted."
 (defun agent--prompt-session-identity (backend buffer)
   "Return the stable prompt capture identity for BACKEND session BUFFER."
   (let* ((directory (or (agent--buffer-directory backend buffer) ""))
-         (account (when-let* ((fn (agent--backend-get backend :account)))
-                    (funcall fn buffer)))
+         (account (when-let* ((session (agent-session buffer)))
+                    (agent-session-account session)))
          (instance (funcall (agent--backend-get backend :extract-instance-name)
                             (buffer-name buffer))))
     (prin1-to-string (list backend account directory instance))))

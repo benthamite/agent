@@ -195,7 +195,7 @@
         (should (equal (agent-display-name buf) "project:branch"))))))
 
 (ert-deftest agent-test-session-groups-use-account-key ()
-  "Group session switcher suffixes by backend account."
+  "Group session switcher suffixes by session account."
   (let ((agent-backends nil)
         (agent--session-keys (make-hash-table :test 'eq)))
     (with-temp-buffer
@@ -205,8 +205,9 @@
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :find-all-buffers (lambda () (list buf))
-          :account (lambda (_buffer) "work")))
+          :find-all-buffers (lambda () (list buf))))
+        (setq-local agent--session
+                    (agent-session-create :backend 'one :account "work"))
         (puthash buf "a" agent--session-keys)
         (should (equal (mapcar #'car (agent--group-sessions-by-account))
                        '("work")))))))
@@ -878,8 +879,9 @@
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :account (lambda (_buffer) "work")
           :extract-instance-name (lambda (_buffer-name) "default")))
+        (setq-local agent--session
+                    (agent-session-create :backend 'one :account "work"))
         (should
          (string-prefix-p
           (expand-file-name "one-" temporary-file-directory)
@@ -1060,9 +1062,9 @@
           :extract-instance-name
           (lambda (name)
             (when (string-match ":\\([^:/*]+\\)\\*\\'" name)
-              (match-string 1 name)))
-          :account (lambda (_buffer) "work")))
-        (let ((session (agent-session buf)))
+              (match-string 1 name)))))
+        (let* ((agent-account--starting '(one . "work"))
+               (session (agent-session buf)))
           (should session)
           (should (eq (agent-session-backend session) 'one))
           (should (equal (agent-session-directory session)
@@ -1129,13 +1131,13 @@
                 :extract-instance-name
                 (lambda (name)
                   (when (string-match ":\\([^:/*]+\\)\\*\\'" name)
-                    (match-string 1 name)))
-                :account (lambda (_buffer) "work")))
+                    (match-string 1 name)))))
         (agent--set-session
          buf
          (agent-session-create :backend 'one
                                :directory "~/repo/recapture-proj/"))
-        (let ((session (agent--capture-session buf)))
+        (let* ((agent-account--starting '(one . "work"))
+               (session (agent--capture-session buf)))
           (should (equal (agent-session-account session) "work"))
           (should (eq (buffer-local-value 'agent--session buf) session)))))))
 
@@ -1255,6 +1257,52 @@
     (cl-letf (((symbol-function 'agent--backend-get)
                (lambda (_backend _key) nil)))
       (should-error (agent-start-session session) :type 'user-error))))
+
+(ert-deftest agent-test-start-session-binds-starting-account ()
+  "Bind `agent-account--starting' and sync before the backend start call."
+  (let ((agent-backends nil)
+        (events nil))
+    (apply #'agent-register-backend
+     'one
+     (agent-test--backend
+      :start-session (lambda (_session &rest _)
+                       (push (cons 'start agent-account--starting) events))))
+    (cl-letf (((symbol-function 'agent-account-sync)
+               (lambda (backend account)
+                 (push (cons 'sync (cons backend account)) events))))
+      (agent-start-session
+       (agent-session-create :backend 'one :account "work")))
+    (should (equal (nreverse events)
+                   '((sync . (one . "work"))
+                     (start . (one . "work")))))))
+
+(ert-deftest agent-test-account-sync-reads-backend-account-slots ()
+  "Sync shared symlinks through the real backend registry slots."
+  (let* ((root (make-temp-file "agent-account-sync" t))
+         (canonical (expand-file-name "canonical/" root))
+         (home (expand-file-name "home/" root))
+         (agent-backends nil)
+         (inits nil))
+    (unwind-protect
+        (progn
+          (make-directory canonical t)
+          (with-temp-file (expand-file-name "settings.json" canonical)
+            (insert "{\"shared\": true}"))
+          (apply #'agent-register-backend
+           'throwaway
+           (agent-test--backend
+            :accounts `(("work" . ,home))
+            :canonical-home canonical
+            :shared-config-items '("settings.json")
+            :account-init (lambda (account) (push account inits))))
+          (agent-account-sync 'throwaway "work")
+          (let ((link (expand-file-name "settings.json" home)))
+            (should (file-symlink-p link))
+            (should (equal (file-truename link)
+                           (file-truename
+                            (expand-file-name "settings.json" canonical)))))
+          (should (equal inits '("work"))))
+      (delete-directory root t))))
 
 ;;;; Session state machine
 

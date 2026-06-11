@@ -494,18 +494,15 @@ buffer's `agent-session' struct via `agent--capture-session'."
 SESSION is an `agent-session'.  INITIAL-PROMPT is submitted as the
 first user message.  RESUME-ID resumes that session id.
 TERMINAL-BACKEND overrides `codex-terminal-backend' for this session.
-The session account (or the resolved active account) is bound as the
-pending account so `agent-codex-account-env' sees it."
+The session account is bound as `agent-account--starting' by
+`agent-start-session' so environment hooks see it at spawn time."
   (agent-codex--install-hooks)
-  (let* ((agent-codex--pending-account
-          (or (agent-session-account session)
-              (agent-codex--resolve-account)))
-         (buffer (codex-start-session
-                  :directory (agent-session-directory session)
-                  :instance-name (agent-session-instance session)
-                  :initial-prompt initial-prompt
-                  :resume-id resume-id
-                  :terminal-backend terminal-backend)))
+  (let ((buffer (codex-start-session
+                 :directory (agent-session-directory session)
+                 :instance-name (agent-session-instance session)
+                 :initial-prompt initial-prompt
+                 :resume-id resume-id
+                 :terminal-backend terminal-backend)))
     (agent--set-session buffer session)
     buffer))
 
