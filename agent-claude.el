@@ -224,7 +224,6 @@ Source: lobehub/lobe-icons (MIT).")
   (list :buffer-p #'claude-code--buffer-p
         :find-all-buffers #'claude-code--find-all-claude-buffers
         :find-buffers-for-dir #'claude-code--find-claude-buffers-for-directory
-        :directory (lambda (buf) (with-current-buffer buf (claude-code--directory)))
         :extract-directory #'claude-code--extract-directory-from-buffer-name
         :extract-instance-name #'claude-code--extract-instance-name-from-buffer-name
         :send-command #'agent-claude-send-command
@@ -237,7 +236,7 @@ Source: lobehub/lobe-icons (MIT).")
                                         (if (string-empty-p svg) "CC" svg)))
         :account (lambda (buf)
                    (buffer-local-value 'agent-claude--buffer-account buf))
-        :has-background-tasks-p #'agent-claude--has-background-tasks-p
+        :background-tasks-p #'agent-claude--has-background-tasks-p
         :duration-ms (lambda (buf)
                        (with-current-buffer buf
                          (agent-claude-status-duration-ms)))

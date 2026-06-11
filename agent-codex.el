@@ -216,7 +216,6 @@ Source: SVG Repo (CC0).")
   (list :buffer-p #'codex--buffer-p
         :find-all-buffers #'codex--find-all-codex-buffers
         :find-buffers-for-dir #'codex--find-codex-buffers-for-directory
-        :directory (lambda (buf) (with-current-buffer buf (codex--directory)))
         :extract-directory #'codex--extract-directory-from-buffer-name
         :extract-instance-name #'codex--extract-instance-name-from-buffer-name
         :send-command #'agent-codex-send-command
@@ -234,7 +233,7 @@ Source: SVG Repo (CC0).")
         :account (lambda (buf)
                    (buffer-local-value 'agent-codex--buffer-account buf))
         :waiting-p #'agent-codex--waiting-p
-        :has-background-tasks-p #'agent-codex--has-background-tasks-p
+        :background-tasks-p #'agent-codex--has-background-tasks-p
         :busy-p #'agent-codex--busy-p
         :label "Codex"
         :discover-skills #'agent-codex--discover-skills

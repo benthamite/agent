@@ -110,81 +110,87 @@ such as handoff-driven autoloops.")
 
 ;;;; Backend registry
 
+(cl-defstruct (agent-backend
+               (:constructor agent-backend--create)
+               (:copier nil))
+  "Static description of one registered AI agent backend.
+Slots listed after the transitional marker mirror legacy plist
+keys and are deleted as later refactoring phases migrate their
+call sites."
+  name label icon program
+  buffer-p find-all-buffers find-buffers-for-dir
+  start-session session-identity
+  send-string send-return submit target-buffer
+  waiting-p busy-p background-tasks-p duration-ms display-name-suffix
+  account-env-var accounts account-file shared-config-items account-init
+  run-prompt skill-roots skill-command-prefix
+  sync-theme modeline-status menu-suffixes
+  before-exit-ready-to-close-p
+  ;; Transitional slots, deleted in later phases:
+  start start-new extract-directory extract-instance-name account
+  send-command submit-command discover-skills handoff run-skill
+  audit-project debug-backtrace act-on-slack-message setup-kill-on-exit
+  exit restart)
+
 (defvar agent-backends nil
   "Alist of registered AI backends.
-Each entry is (SYMBOL . PLIST) where PLIST has keys:
-  :buffer-p              function (buffer) -> bool
-  :find-all-buffers      function () -> list of buffers
-  :find-buffers-for-dir  function (dir) -> list of buffers
-  :directory             function (buffer) -> directory string
-  :extract-directory     function (buffer-name) -> directory string
-  :extract-instance-name function (buffer-name) -> instance or nil
-  :send-command          function (cmd &optional buffer)
-  :submit-command        function (cmd &optional buffer)
-  :start                 function (arg extra-switches
-                           &optional force-prompt force-switch)
-  :start-new             function () -> buffer (start a new session)
-  :program               string (CLI binary name)
-  :send-return           function (&optional buffer)
-  :icon                  string or function (&optional face)
-                           returning a propertized string
-  :label                 string (display name,
-                           e.g. \"Claude Code\" or \"Codex\")
-  :display-name-suffix   function (buffer) -> string or nil
-                           (extra suffix appended after base name)
-
-Optional session metadata:
-  :account               function (buffer) -> string or nil
-                           (account name for session grouping)
-  :waiting-p             function (buffer) -> bool
-                           (non-nil if the session is accepting input)
-  :has-background-tasks-p function (buffer) -> bool
-                           (non-nil if the session has ongoing
-                           background work while idle for input)
-  :busy-p                 function (buffer) -> bool
-                           (non-nil if the session is actively responding)
-  :duration-ms           function (buffer) -> integer or nil
-                           (elapsed session duration in milliseconds)
-
-Optional command keys for dispatching shared commands:
-  :discover-skills       function () -> list of skill plists
-  :handoff               function () (close session, start new with handoff)
-  :run-skill             function (name &optional args) (run a skill)
-  :audit-project         function () (run audit skills on a project)
-  :debug-backtrace       function () (analyze backtrace, start session)
-  :act-on-slack-message  function () (route Slack message to project)
-  :setup-kill-on-exit    function () (auto-kill buffer on process exit)
-  :exit                  function () (exit session and kill buffer)
-  :restart               function () (restart current session)
-  :sync-theme            function (theme) (persist light/dark theme)")
+Each entry is (NAME . STRUCT) where NAME is the backend symbol
+and STRUCT is an `agent-backend'.")
 
 (defvar-local agent--backend nil
   "Cached backend symbol for this buffer.")
 
 (defconst agent--required-backend-keys
   '(:buffer-p :find-all-buffers :extract-instance-name :start-new)
-  "Backend plist keys required by the shared session layer.")
+  "Backend slots required by the shared session layer.")
 
-(defun agent-register-backend (symbol plist)
-  "Register SYMBOL as an AI agent backend with PLIST properties."
-  (agent--validate-backend symbol plist)
-  (setf (alist-get symbol agent-backends) plist))
+(defconst agent--backend-slot-names
+  (mapcar #'car (cdr (cl-struct-slot-info 'agent-backend)))
+  "Slot names accepted by `agent-register-backend'.")
 
-(defun agent--validate-backend (symbol plist)
-  "Signal an error if SYMBOL's backend PLIST is missing required keys."
+(defun agent-register-backend (name &rest slots)
+  "Register NAME as an AI agent backend built from SLOTS.
+SLOTS is a keyword-value list whose keywords match `agent-backend'
+slot names, e.g. (:buffer-p #\\='fn :label \"Codex\").  During the
+struct migration, a single plist argument is also accepted.
+Signal an error when SLOTS contains an unknown keyword or lacks a
+key in `agent--required-backend-keys'."
+  (let ((plist (if (and (= (length slots) 1) (listp (car slots)))
+                   (car slots)
+                 slots)))
+    (agent--validate-backend name plist)
+    (setf (alist-get name agent-backends)
+          (apply #'agent-backend--create :name name plist))))
+
+(defun agent--validate-backend (name plist)
+  "Signal an error if backend NAME's PLIST is invalid.
+PLIST must contain only keywords naming `agent-backend' slots and
+must include every key in `agent--required-backend-keys'."
+  (let ((rest plist))
+    (while rest
+      (let ((key (car rest)))
+        (unless (and (keywordp key)
+                     (memq (agent--backend-keyword-slot key)
+                           agent--backend-slot-names))
+          (error "AI backend `%s' has unknown slot keyword `%S'" name key))
+        (setq rest (cddr rest)))))
   (dolist (key agent--required-backend-keys)
     (unless (plist-get plist key)
-      (error "AI backend `%s' is missing required key `%s'" symbol key))))
+      (error "AI backend `%s' is missing required key `%s'" name key))))
+
+(defun agent-backend (name)
+  "Return the registered `agent-backend' struct for NAME, or nil."
+  (alist-get name agent-backends))
 
 (defun agent--detect-backend (&optional buffer)
   "Detect which AI backend BUFFER belongs to.
-Try each registered backend's :buffer-p predicate.  Return the
-backend symbol or nil."
+Try each registered backend's buffer predicate.  Return the
+backend name symbol or nil."
   (let ((buf (or buffer (current-buffer))))
     (or (buffer-local-value 'agent--backend buf)
         (let ((found (cl-find-if
                       (lambda (entry)
-                        (funcall (plist-get (cdr entry) :buffer-p) buf))
+                        (funcall (agent-backend-buffer-p (cdr entry)) buf))
                       agent-backends)))
           (when found
             (with-current-buffer buf
@@ -192,14 +198,27 @@ backend symbol or nil."
             (car found))))))
 
 (defun agent--backend-get (backend key)
-  "Get KEY from the registered plist for BACKEND."
-  (plist-get (alist-get backend agent-backends) key))
+  "Return the slot named by keyword KEY in BACKEND's struct.
+BACKEND is a backend name symbol.  KEY is a keyword whose name,
+minus the leading colon, matches an `agent-backend' slot name.
+This is a compatibility shim during the struct migration; new
+code should call `agent-backend' slot accessors directly.
+Return nil when BACKEND is not registered."
+  (when-let* ((struct (agent-backend backend)))
+    (cl-struct-slot-value 'agent-backend
+                          (agent--backend-keyword-slot key)
+                          struct)))
 
-(defun agent-backend-icon (backend &optional face)
-  "Return the icon string for BACKEND.
-FACE is passed to the icon function to control the rendering color;
-see `agent-svg-icon'.  The :icon property can be a string or a
-function; if a function, it is called with FACE to produce the icon."
+(defun agent--backend-keyword-slot (key)
+  "Return the `agent-backend' slot symbol named by keyword KEY."
+  (intern (substring (symbol-name key) 1)))
+
+(defun agent-backend-icon-string (backend &optional face)
+  "Return the icon string for the backend named BACKEND.
+BACKEND is a backend name symbol.  FACE is passed to the icon
+function to control the rendering color; see `agent-svg-icon'.
+The icon slot can be a string or a function; if a function, it is
+called with FACE to produce the icon."
   (let ((icon (agent--backend-get backend :icon)))
     (if (functionp icon) (funcall icon face) (or icon ""))))
 
@@ -224,7 +243,7 @@ Falls back to an empty string when SVG support is unavailable."
   "Return all active AI session buffers across all backends."
   (let (result)
     (dolist (entry agent-backends)
-      (let ((bufs (funcall (plist-get (cdr entry) :find-all-buffers))))
+      (let ((bufs (funcall (agent-backend-find-all-buffers (cdr entry)))))
         (setq result (nconc result bufs))))
     result))
 
@@ -436,7 +455,7 @@ so it does not inject text into a running conversation."
   '((t :inherit warning))
   "Face for sessions waiting for user input while background work runs.
 Applied in the session switcher when the backend's
-`:has-background-tasks-p' reports ongoing work, to distinguish
+`:background-tasks-p' reports ongoing work, to distinguish
 these sessions from `agent-waiting' (truly idle)."
   :group 'agent)
 
@@ -544,7 +563,7 @@ When FORCE is non-nil, sync even if `agent-sync-theme' is nil."
   (when (or force agent-sync-theme)
     (let ((theme (agent--theme)))
       (dolist (entry agent-backends)
-        (when-let* ((sync-fn (plist-get (cdr entry) :sync-theme)))
+        (when-let* ((sync-fn (agent-backend-sync-theme (cdr entry))))
           (condition-case err
               (funcall sync-fn theme)
             (error
@@ -677,10 +696,10 @@ If sessions exist, show a transient menu with home-row keys."
     (cond
      ((null backends) (user-error "No AI backends registered"))
      ((= (length backends) 1)
-      (funcall (plist-get (cdar backends) :start-new)))
+      (funcall (agent-backend-start-new (cdar backends))))
      (t
       (let* ((names (mapcar (lambda (e)
-                              (cons (or (plist-get (cdr e) :label)
+                              (cons (or (agent-backend-label (cdr e))
                                         (symbol-name (car e)))
                                     (car e)))
                             backends))
@@ -730,7 +749,7 @@ to the backend's :label or symbol name."
 (defun agent--session-suffix-spec (buf key)
   "Build a transient suffix spec for BUF bound to KEY."
   (let* ((backend (agent--detect-backend buf))
-         (icon (when backend (agent-backend-icon backend)))
+         (icon (when backend (agent-backend-icon-string backend)))
          (name (agent-display-name buf))
          (label (if (and icon (not (string-empty-p icon)))
                     (format "%s %s" icon name) name))
@@ -769,7 +788,7 @@ that BUFFER has active background tasks, `agent-waiting'
 otherwise."
   (if (and backend
            (when-let* ((fn (agent--backend-get
-                            backend :has-background-tasks-p)))
+                            backend :background-tasks-p)))
              (funcall fn buffer)))
       'agent-waiting-with-background
     'agent-waiting))
@@ -795,8 +814,8 @@ These backends don't support multi-account grouping, so their
 sessions appear without a heading."
   (let (labels)
     (dolist (entry agent-backends labels)
-      (unless (plist-get (cdr entry) :account)
-        (when-let* ((label (plist-get (cdr entry) :label)))
+      (unless (agent-backend-account (cdr entry))
+        (when-let* ((label (agent-backend-label (cdr entry))))
           (push label labels))))))
 
 (defun agent--interleave-group-headers (groups)
@@ -1375,7 +1394,7 @@ registered, use it.  Otherwise, prompt."
       (if (= (length agent-backends) 1)
           (caar agent-backends)
         (let* ((entries (mapcar (lambda (e)
-                                  (cons (or (plist-get (cdr e) :label)
+                                  (cons (or (agent-backend-label (cdr e))
                                             (symbol-name (car e)))
                                         (car e)))
                                 agent-backends))
@@ -1383,7 +1402,8 @@ registered, use it.  Otherwise, prompt."
                (affixate (lambda (cands)
                            (mapcar (lambda (c)
                                      (let* ((sym (cdr (assoc c entries)))
-                                            (icon (agent-backend-icon sym)))
+                                            (icon (agent-backend-icon-string
+                                                   sym)))
                                        (list c
                                              (if (string-empty-p icon) ""
                                                (concat icon " "))
@@ -1564,10 +1584,12 @@ A nil DIRECTORIES matches every session."
         (>= duration-ms (* agent-before-exit-skill-min-duration-seconds
                            1000)))))
 
-(defun agent--buffer-directory (backend buffer)
-  "Return the normalized directory for BACKEND session BUFFER."
-  (when-let* ((directory-fn (agent--backend-get backend :directory))
-              (directory (funcall directory-fn buffer)))
+(defun agent--buffer-directory (_backend buffer)
+  "Return the normalized directory for BUFFER's session.
+_BACKEND is unused; the directory comes from BUFFER's
+`agent-session' struct."
+  (when-let* ((session (agent-session buffer))
+              (directory (agent-session-directory session)))
     (file-name-as-directory (file-truename directory))))
 
 (defun agent--before-exit-skill-command (backend entry)
@@ -1650,7 +1672,7 @@ Calls each backend's `:discover-skills' function and returns a
 combined list of skill plists, each augmented with `:backend'."
   (let (all-skills)
     (dolist (entry agent-backends)
-      (when-let* ((discover-fn (plist-get (cdr entry) :discover-skills)))
+      (when-let* ((discover-fn (agent-backend-discover-skills (cdr entry))))
         (dolist (skill (funcall discover-fn))
           (unless (and (plist-member skill :user-invocable)
                        (not (plist-get skill :user-invocable)))

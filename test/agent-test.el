@@ -221,7 +221,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :find-all-buffers (lambda () (list buf))
-          :has-background-tasks-p (lambda (_buffer) t)))
+          :background-tasks-p (lambda (_buffer) t)))
         (should (eq (agent--waiting-face buf 'one)
                     'agent-waiting-with-background))))))
 
@@ -327,7 +327,6 @@
              'one
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
-              :directory (lambda (_buffer) "/tmp/project/")
               :exit (lambda () (interactive) (setq ran t))))
             (let ((file (agent--prompt-capture-file 'one buf)))
               (make-directory (file-name-directory file) t)
@@ -357,7 +356,6 @@
              'one
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
-              :directory (lambda (_buffer) "/tmp/project/")
               :exit (lambda () (interactive) (setq ran t))))
             (cl-letf (((symbol-function 'yes-or-no-p)
                        (lambda (_prompt)
@@ -382,7 +380,6 @@
              'one
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
-              :directory (lambda (_buffer) "/tmp/project/")
               :restart (lambda () (interactive) (setq ran t))))
             (let ((file (agent--prompt-capture-file 'one buf)))
               (make-directory (file-name-directory file) t)
@@ -404,14 +401,12 @@
         (agent-before-exit-skill-directories nil)
         events)
     (with-temp-buffer
-      (let* ((dir (file-name-as-directory default-directory))
-             (buf (current-buffer))
-             (agent-before-exit-skill-directories nil))
+      (let ((buf (current-buffer))
+            (agent-before-exit-skill-directories nil))
         (agent-register-backend
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :directory (lambda (_buffer) dir)
           :send-command (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
@@ -435,10 +430,11 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :directory (lambda (_buffer) dir)
           :send-command (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
+        (agent--set-session
+         buf (agent-session-create :backend 'codex :directory dir))
         (should-not (agent-run-skill-before-exit 'codex buf))
         (should (equal (nreverse events)
                        '((command "$session-retro") return)))))))
@@ -476,10 +472,11 @@
          'claude-code
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :directory (lambda (_buffer) dir)
           :send-command (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
+        (agent--set-session
+         buf (agent-session-create :backend 'claude-code :directory dir))
         (should-not (agent-run-skill-before-exit 'claude-code buf))
         (should (equal (nreverse events)
                        '((command "/session-retro") return)))))))
@@ -496,8 +493,10 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :directory (lambda (_buffer) default-directory)
           :send-command (lambda (&rest _args) (setq called t))))
+        (agent--set-session
+         buf (agent-session-create :backend 'codex
+                                   :directory default-directory))
         (should (agent-run-skill-before-exit 'codex buf))
         (should-not called)))))
 
@@ -571,10 +570,11 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :directory (lambda (_buffer) dir)
           :send-command (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
+        (agent--set-session
+         buf (agent-session-create :backend 'codex :directory dir))
         (should-not (agent-run-skill-before-exit 'codex buf))
         (should (equal (nreverse events)
                        '((command "$session-retro") return)))))))
@@ -592,8 +592,9 @@
          'other
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :directory (lambda (_buffer) dir)
           :send-command (lambda (&rest _args) (setq called t))))
+        (agent--set-session
+         buf (agent-session-create :backend 'other :directory dir))
         (should (agent-run-skill-before-exit 'other buf))
         (should-not called)))))
 
@@ -693,7 +694,6 @@
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :directory (lambda (_buffer) "/tmp/project/")
           :account (lambda (_buffer) "work")
           :extract-instance-name (lambda (_buffer-name) "default")))
         (should
@@ -740,7 +740,6 @@
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
               :find-all-buffers (lambda () (list buf))
-              :directory (lambda (_buffer) "/tmp/project/")
               :send-command (lambda (text target)
                               (setq sent (list text target)))))
             (let ((file (agent--prompt-capture-file 'one buf)))
@@ -932,6 +931,66 @@
                                (file-name-as-directory
                                 (file-truename directory)))))
       (delete-directory directory))))
+
+;;;; Backend struct registry
+
+(ert-deftest agent-test-register-backend-rejects-unknown-keyword ()
+  "Signal an error when registering a backend with an unknown keyword."
+  (let ((agent-backends nil))
+    (should-error
+     (agent-register-backend
+      'bad
+      (agent-test--backend :bogus-slot #'ignore)))))
+
+(ert-deftest agent-test-registered-backend-is-struct ()
+  "Store registrations as `agent-backend' structs keyed by name."
+  (let ((agent-backends nil))
+    (agent-register-backend 'one (agent-test--backend))
+    (let ((struct (agent-backend 'one)))
+      (should (agent-backend-p struct))
+      (should (eq (agent-backend-name struct) 'one))
+      (should (equal (agent-backend-label struct) "Test")))))
+
+(ert-deftest agent-test-register-backend-accepts-keyword-spread ()
+  "Register a backend from spread keyword arguments."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'kwspread
+     :buffer-p (lambda (_buffer) nil)
+     :find-all-buffers (lambda () nil)
+     :extract-instance-name (lambda (_buffer-name) nil)
+     :start-new #'ignore
+     :label "Spread")
+    (let ((struct (agent-backend 'kwspread)))
+      (should (agent-backend-p struct))
+      (should (eq (agent-backend-name struct) 'kwspread))
+      (should (equal (agent-backend-label struct) "Spread"))
+      (should (eq (agent-backend-start-new struct) #'ignore)))))
+
+(ert-deftest agent-test-backend-get-maps-keywords-to-slots ()
+  "Map legacy keyword lookups onto struct slots."
+  (let ((agent-backends nil))
+    (agent-register-backend 'one (agent-test--backend :program "one-cli"))
+    (should (equal (agent--backend-get 'one :program) "one-cli"))
+    (should (equal (agent--backend-get 'one :label) "Test"))
+    (should-not (agent--backend-get 'unregistered :label))))
+
+(ert-deftest agent-test-backend-get-rejects-unknown-slot-keyword ()
+  "Signal an error for shim lookups naming no struct slot."
+  (let ((agent-backends nil))
+    (agent-register-backend 'one (agent-test--backend))
+    (should-error (agent--backend-get 'one :not-a-slot))))
+
+(ert-deftest agent-test-detect-backend-resolves-with-struct-registry ()
+  "Resolve a buffer's backend through struct-based registrations."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))))
+        (should (eq (agent--detect-backend buf) 'one))))))
 
 (provide 'agent-test)
 ;;; agent-test.el ends here
