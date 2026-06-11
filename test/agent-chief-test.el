@@ -158,9 +158,9 @@
                                     (and started-buffer
                                          (list started-buffer)))
             :extract-instance-name (lambda (_name) "chief")
-            :start (lambda (&rest _args)
-                     (setq started-buffer
-                           (get-buffer-create "*codex:/tmp/:chief*")))
+            :start-session (lambda (_session &rest _options)
+                             (setq started-buffer
+                                   (get-buffer-create "*codex:/tmp/:chief*")))
             :submit-command (lambda (prompt buffer)
                               (setq submitted (list prompt buffer)))))
           (cl-letf (((symbol-function 'require) #'ignore))
@@ -192,9 +192,9 @@
                                     (and started-buffer
                                          (list started-buffer)))
             :extract-instance-name (lambda (_name) "chief")
-            :start (lambda (&rest _args)
-                     (setq started-buffer
-                           (get-buffer-create "*codex:/tmp/:chief*")))
+            :start-session (lambda (_session &rest _options)
+                             (setq started-buffer
+                                   (get-buffer-create "*codex:/tmp/:chief*")))
             :submit-command (lambda (prompt buffer)
                               (push (list prompt buffer) submitted))))
           (cl-letf (((symbol-function 'require) #'ignore)

@@ -38,12 +38,6 @@
 
 (declare-function agent-claude--run-prompt "agent-claude" (prompt &rest kwargs))
 (declare-function agent-codex--run-prompt "agent-codex" (prompt &rest kwargs))
-(declare-function claude-code--directory "claude-code" ())
-(declare-function claude-code--prompt-for-instance-name
-                  "claude-code" (dir existing-instance-names &optional force-prompt))
-(declare-function codex--directory "codex" ())
-(declare-function codex--prompt-for-instance-name
-                  "codex" (dir existing-instance-names &optional force-prompt))
 (declare-function alert "alert")
 
 ;;;; Customization
@@ -373,31 +367,13 @@ conversationally in the agent buffer."
 
 (defun agent-chief--call-backend-start ()
   "Start a backend session in `agent-chief-directory' with chief instance."
-  (pcase agent-chief-backend
-    ('codex (agent-chief--call-codex-start))
-    ('claude-code (agent-chief--call-claude-start))))
-
-(defun agent-chief--call-codex-start ()
-  "Start a Codex chief-of-staff session."
-  (let ((dir (file-name-as-directory
-              (file-truename
-               (expand-file-name agent-chief-directory))))
-        (instance agent-chief-session-instance-name))
-    (cl-letf (((symbol-function 'codex--directory) (lambda () dir))
-              ((symbol-function 'codex--prompt-for-instance-name)
-               (lambda (_dir _existing _force) instance)))
-      (funcall (agent--backend-get 'codex :start) nil nil nil t))))
-
-(defun agent-chief--call-claude-start ()
-  "Start a Claude Code chief-of-staff session."
-  (let ((dir (file-name-as-directory
-              (file-truename
-               (expand-file-name agent-chief-directory))))
-        (instance agent-chief-session-instance-name))
-    (cl-letf (((symbol-function 'claude-code--directory) (lambda () dir))
-              ((symbol-function 'claude-code--prompt-for-instance-name)
-               (lambda (_dir _existing _force) instance)))
-      (funcall (agent--backend-get 'claude-code :start) nil nil nil t))))
+  (agent-start-session
+   (agent-session-create
+    :backend agent-chief-backend
+    :directory (file-name-as-directory
+                (file-truename
+                 (expand-file-name agent-chief-directory)))
+    :instance agent-chief-session-instance-name)))
 
 (defun agent-chief--submit-to-session (prompt &optional buffer)
   "Submit PROMPT to the chief-of-staff session BUFFER."
