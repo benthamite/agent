@@ -902,5 +902,26 @@
           (should (equal captured-dir default-directory)))
       (delete-directory dir t))))
 
+;;;; Session capture
+
+(ert-deftest agent-codex-test-capture-buffer-account-stores-session ()
+  "Replace a stale accountless struct when capturing the buffer account."
+  (with-temp-buffer
+    (rename-buffer "*codex:~/repo/codex-capture-session-test/:default*" t)
+    ;; Simulate lazy backfill running before the start hook.
+    (agent--set-session
+     (current-buffer)
+     (agent-session-create :backend 'codex
+                           :directory "~/repo/codex-capture-session-test/"))
+    (let ((agent-codex--pending-account "personal"))
+      (agent-codex--capture-buffer-account)
+      (let ((session (agent-session (current-buffer))))
+        (should session)
+        (should (eq (agent-session-backend session) 'codex))
+        (should (equal (agent-session-account session) "personal"))
+        (should (equal (agent-session-directory session)
+                       "~/repo/codex-capture-session-test/"))
+        (should (equal (agent-session-instance session) "default"))))))
+
 (provide 'agent-codex-test)
 ;;; agent-codex-test.el ends here

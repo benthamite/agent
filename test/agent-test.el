@@ -932,6 +932,29 @@
                                 (file-truename directory)))))
       (delete-directory directory))))
 
+(ert-deftest agent-test-capture-session-replaces-stale-struct ()
+  "Re-capture session identity over an earlier accountless struct."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/recapture-proj/:tests*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buf))
+                :extract-instance-name
+                (lambda (name)
+                  (when (string-match ":\\([^:/*]+\\)\\*\\'" name)
+                    (match-string 1 name)))
+                :account (lambda (_buffer) "work")))
+        (agent--set-session
+         buf
+         (agent-session-create :backend 'one
+                               :directory "~/repo/recapture-proj/"))
+        (let ((session (agent--capture-session buf)))
+          (should (equal (agent-session-account session) "work"))
+          (should (eq (buffer-local-value 'agent--session buf) session)))))))
+
 ;;;; Backend struct registry
 
 (ert-deftest agent-test-register-backend-rejects-unknown-keyword ()

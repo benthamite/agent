@@ -767,5 +767,26 @@
         (should (= (length entries) 1))
         (should (equal (plist-get (nth 0 entries) :title) "Child task"))))))
 
+;;;; Session capture
+
+(ert-deftest agent-claude-test-capture-buffer-account-stores-session ()
+  "Replace a stale accountless struct when capturing the buffer account."
+  (with-temp-buffer
+    (rename-buffer "*claude:~/repo/claude-capture-session-test/:default*" t)
+    ;; Simulate lazy backfill running before the start hook.
+    (agent--set-session
+     (current-buffer)
+     (agent-session-create :backend 'claude-code
+                           :directory "~/repo/claude-capture-session-test/"))
+    (let ((agent-claude--pending-account "personal"))
+      (agent-claude--capture-buffer-account)
+      (let ((session (agent-session (current-buffer))))
+        (should session)
+        (should (eq (agent-session-backend session) 'claude-code))
+        (should (equal (agent-session-account session) "personal"))
+        (should (equal (agent-session-directory session)
+                       "~/repo/claude-capture-session-test/"))
+        (should (equal (agent-session-instance session) "default"))))))
+
 (provide 'agent-claude-test)
 ;;; agent-claude-test.el ends here

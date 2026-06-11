@@ -1249,15 +1249,18 @@ Also starts status and usage polling if not already active."
       (doom-modeline-set-modeline 'ai-session))))
 
 (defun agent-claude--capture-buffer-account ()
-  "Store the account name as a buffer-local variable.
+  "Store the account name and session identity for the new buffer.
 Called from `claude-code-start-hook'.  Uses the dynamically bound
 `agent-claude--pending-account' when available (set by
 `agent-claude--start-with-account'), otherwise falls back to
 `agent-claude--resolve-account' so that sessions started via
-other code paths (e.g. `agent-log-resume-session') also get an account."
+other code paths (e.g. `agent-log-resume-session') also get an
+account.  Then constructs and stores the buffer's `agent-session'
+struct via `agent--capture-session'."
   (setq agent-claude--buffer-account
         (or agent-claude--pending-account
-            (agent-claude--resolve-account))))
+            (agent-claude--resolve-account)))
+  (agent--capture-session (current-buffer)))
 
 (defun agent-claude-buffer-account ()
   "Return the account name for the current buffer, or nil."

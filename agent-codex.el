@@ -513,10 +513,13 @@ persists the selection.  New sessions will use this account."
     (codex)))
 
 (defun agent-codex--capture-buffer-account ()
-  "Store the account name as a buffer-local variable."
+  "Store the account name and session identity for the new buffer.
+Called from `codex-start-hook'.  Then constructs and stores the
+buffer's `agent-session' struct via `agent--capture-session'."
   (setq agent-codex--buffer-account
         (or agent-codex--pending-account
-            (agent-codex--resolve-account))))
+            (agent-codex--resolve-account)))
+  (agent--capture-session (current-buffer)))
 
 (defun agent-codex-buffer-account ()
   "Return the account name for the current buffer, or nil."
