@@ -6,6 +6,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'agent-account)
 (require 'agent-codex)
 
 ;;;; Account selection
@@ -19,89 +20,18 @@
   (should (member "AGENTS.md" agent-codex--shared-config-items))
   (should-not (member "AGENT.md" agent-codex--shared-config-items)))
 
-(ert-deftest agent-codex-test-account-env-uses-pending-account ()
-  "Set CODEX_HOME from the dynamically bound pending account."
+(ert-deftest agent-codex-test-account-env-uses-starting-account ()
+  "Set CODEX_HOME from the in-flight start binding, without syncing."
   (let* ((dir (make-temp-file "codex-account" t))
          (home (expand-file-name "work" dir))
-         (canonical (expand-file-name ".codex" dir))
-         (process-environment (cons (format "HOME=%s" dir)
-                                    process-environment))
          (agent-codex-accounts `(("work" . ,home)))
-         (agent-codex--pending-account "work"))
+         (agent-account--current (make-hash-table :test #'eq))
+         (agent-account--starting '(codex . "work")))
     (unwind-protect
-        (progn
-          (make-directory canonical t)
-          (with-temp-file (expand-file-name "config.toml" canonical)
-            (insert "model = \"gpt-5.5\"\n"))
+        (cl-letf (((symbol-function 'make-symbolic-link)
+                   (lambda (&rest _) (error "env hook must not sync"))))
           (should (equal (agent-codex-account-env "*codex*" dir)
                          (list (format "CODEX_HOME=%s" home)))))
-      (delete-directory dir t))))
-
-(ert-deftest agent-codex-test-account-env-symlinks-shared-state ()
-  "Share hooks, skills, and history from the canonical Codex home."
-  (let* ((dir (make-temp-file "codex-account" t))
-         (home (expand-file-name "work" dir))
-         (canonical (expand-file-name ".codex" dir))
-         (process-environment (cons (format "HOME=%s" dir)
-                                    process-environment))
-         (agent-codex-accounts `(("work" . ,home)))
-         (agent-codex--pending-account "work"))
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "skills" canonical) t)
-          (with-temp-file (expand-file-name "hooks.json" canonical)
-            (insert "{}\n"))
-          (with-temp-file (expand-file-name "history.jsonl" canonical)
-            (insert "{\"text\":\"old chat\"}\n"))
-          (agent-codex-account-env "*codex*" dir)
-          (dolist (item '("hooks.json" "history.jsonl" "skills"))
-            (let ((target (expand-file-name item home))
-                  (source (expand-file-name item canonical)))
-              (should (file-symlink-p target))
-              (should (equal (file-truename target)
-                             (file-truename source))))))
-      (delete-directory dir t))))
-
-(ert-deftest agent-codex-test-account-env-backs-up-conflicting-state ()
-  "Back up account-local shared state before linking canonical state."
-  (let* ((dir (make-temp-file "codex-account" t))
-         (home (expand-file-name "work" dir))
-         (canonical (expand-file-name ".codex" dir))
-         (process-environment (cons (format "HOME=%s" dir)
-                                    process-environment))
-         (agent-codex-accounts `(("work" . ,home)))
-         (agent-codex--pending-account "work"))
-    (unwind-protect
-        (progn
-          (make-directory home t)
-          (make-directory canonical t)
-          (with-temp-file (expand-file-name "history.jsonl" canonical)
-            (insert "{\"text\":\"canonical\"}\n"))
-          (with-temp-file (expand-file-name "history.jsonl" home)
-            (insert "{\"text\":\"account-local\"}\n"))
-          (agent-codex-account-env "*codex*" dir)
-          (let ((target (expand-file-name "history.jsonl" home))
-                (backups (file-expand-wildcards
-                          (expand-file-name
-                           "history.jsonl.agent-backup-*" home))))
-            (should (file-symlink-p target))
-            (should (equal (length backups) 1))
-            (with-temp-buffer
-              (insert-file-contents (car backups))
-              (should (string-match-p "account-local" (buffer-string))))))
-      (delete-directory dir t))))
-
-(ert-deftest agent-codex-test-load-account-ignores-stale-selection ()
-  "Ignore account-file contents not present in configured accounts."
-  (let* ((dir (make-temp-file "codex-account" t))
-         (file (expand-file-name "current" dir))
-         (agent-codex-account-file file)
-         (agent-codex-accounts `(("work" . ,(expand-file-name "work" dir)))))
-    (unwind-protect
-        (progn
-          (with-temp-file file
-            (insert "missing\n"))
-          (should-not (agent-codex--load-account)))
       (delete-directory dir t))))
 
 (ert-deftest agent-codex-test-read-config-model-uses-account-home ()
@@ -161,16 +91,20 @@
         (with-temp-buffer
           (rename-buffer "*codex:~/project/:default*" t)
           (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
-          (setq-local agent-codex--buffer-account "work")
+          (setq-local agent--session (agent-session-create :backend 'codex
+                                                           :account "work"))
           (let ((agent-codex-accounts
                  `(("work" . ,(expand-file-name "work" dir))))
-                (agent-codex--current-account nil)
+                (agent-account--current (make-hash-table :test #'eq))
                 (agent-codex-account-file (expand-file-name "current" dir)))
             (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
                       ((symbol-function 'agent--force-kill-buffer) #'ignore)
                       ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                      ((symbol-function 'agent-codex--resolve-account)
-                       (lambda () (error "should not resolve active account")))
+                      ((symbol-function 'agent-account-sync) #'ignore)
+                      ((symbol-function 'agent-account-resolve)
+                       (lambda (_backend &optional prompt)
+                         (when prompt
+                           (error "should not resolve active account"))))
                       ((symbol-function 'codex-start-session)
                        (lambda (&rest _keys)
                          (setq captured-account
@@ -188,14 +122,17 @@
         (with-temp-buffer
           (rename-buffer "*codex:~/project/:default*" t)
           (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
-          (setq-local agent-codex--buffer-account "work")
+          (setq-local agent--session (agent-session-create :backend 'codex
+                                                           :account "work"))
           (let ((agent-codex-accounts
                  `(("work" . ,(expand-file-name "work" dir))
                    ("personal" . ,(expand-file-name "personal" dir))))
-                (agent-codex--current-account "personal"))
+                (agent-account--current (make-hash-table :test #'eq)))
+            (puthash 'codex "personal" agent-account--current)
             (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
                       ((symbol-function 'agent--force-kill-buffer) #'ignore)
                       ((symbol-function 'agent-codex--install-hooks) #'ignore)
+                      ((symbol-function 'agent-account-sync) #'ignore)
                       ((symbol-function 'completing-read)
                        (lambda (_prompt choices &rest _args)
                          (setq prompt-choices choices)
@@ -221,10 +158,12 @@
         (with-temp-buffer
           (rename-buffer "*codex:~/project/:default*" t)
           (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
-          (setq-local agent-codex--buffer-account "work")
+          (setq-local agent--session (agent-session-create :backend 'codex
+                                                           :account "work"))
           (let ((agent-codex-accounts
                  `(("work" . ,(expand-file-name "work" dir))))
-                (agent-codex--current-account "personal"))
+                (agent-account--current (make-hash-table :test #'eq)))
+            (puthash 'codex "personal" agent-account--current)
             (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
                       ((symbol-function 'agent--force-kill-buffer)
                        (lambda (_buffer) (setq killed t)))
@@ -246,7 +185,8 @@
       (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
                 ((symbol-function 'agent--force-kill-buffer) #'ignore)
                 ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                ((symbol-function 'agent-codex--resolve-account) (lambda () nil))
+                ((symbol-function 'agent-account-resolve)
+                 (lambda (_backend &optional _prompt) nil))
                 ((symbol-function 'codex-start-session)
                  (lambda (&rest keys)
                    (setq captured-session-id (plist-get keys :resume-id))
@@ -268,7 +208,8 @@
       (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
                 ((symbol-function 'agent--force-kill-buffer) #'ignore)
                 ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                ((symbol-function 'agent-codex--resolve-account) (lambda () nil))
+                ((symbol-function 'agent-account-resolve)
+                 (lambda (_backend &optional _prompt) nil))
                 ((symbol-function 'codex--current-session-identity)
                  (lambda ()
                    '(:id "019eada4-ebff-7721-9df6-642202f1138f"
@@ -289,7 +230,8 @@
       (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
                 ((symbol-function 'agent--force-kill-buffer)
                  (lambda (_buffer) (setq killed t)))
-                ((symbol-function 'agent-codex--resolve-account) (lambda () nil))
+                ((symbol-function 'agent-account-resolve)
+                 (lambda (_backend &optional _prompt) nil))
                 ((symbol-function 'codex--current-session-identity)
                  (lambda () nil))
                 ((symbol-function 'codex-start-session)
@@ -308,8 +250,8 @@
       (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
                 ((symbol-function 'agent--force-kill-buffer) #'ignore)
                 ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                ((symbol-function 'agent-codex--resolve-account)
-                 (lambda () nil))
+                ((symbol-function 'agent-account-resolve)
+                 (lambda (_backend &optional _prompt) nil))
                 ((symbol-function 'codex-start-session)
                  (lambda (&rest keys)
                    (setq captured-backend
@@ -335,8 +277,8 @@
                        (lambda (_buffer-name) nil))
                       ((symbol-function 'agent-codex--handoff-directory)
                        (lambda (_source-buffer) dir))
-                      ((symbol-function 'agent-codex--resolve-account)
-                       (lambda () nil))
+                      ((symbol-function 'agent-account-resolve)
+                       (lambda (_backend &optional _prompt) nil))
                       ((symbol-function 'agent-codex--install-hooks)
                        #'ignore)
                       ((symbol-function 'codex--find-codex-buffers-for-directory)
@@ -356,17 +298,19 @@
         (kill-buffer existing))
       (delete-directory dir t))))
 
-(ert-deftest agent-codex-test-start-with-account-installs-start-hook ()
+(ert-deftest agent-codex-test-start-new-installs-start-hook ()
   "Install Codex start hooks before launching sessions."
   (let ((codex-start-hook nil)
         (agent-codex-accounts '(("work" . "/tmp/codex-work"))))
-    (cl-letf (((symbol-function 'agent-codex--resolve-account)
-               (lambda () "work"))
-              ((symbol-function 'codex)
-               (lambda ()
+    (cl-letf (((symbol-function 'agent-account-resolve)
+               (lambda (_backend &optional _prompt) "work"))
+              ((symbol-function 'agent-account-sync) #'ignore)
+              ((symbol-function 'codex-start-session)
+               (lambda (&rest _keys)
                  (should (memq #'agent-codex--record-start-time
-                               codex-start-hook)))))
-      (agent-codex--start-with-account))))
+                               codex-start-hook))
+                 (generate-new-buffer " *codex-start-target*"))))
+      (kill-buffer (agent-codex--start-new)))))
 
 (ert-deftest agent-codex-test-record-start-time-sets-duration ()
   "Record a start time for Codex buffers."
@@ -675,8 +619,8 @@
                      (buffer-string)))))
       (delete-directory dir t))))
 
-(ert-deftest agent-codex-test-sync-theme-uses-pending-account-home ()
-  "Persist theme changes to the pending account's Codex config."
+(ert-deftest agent-codex-test-sync-theme-uses-starting-account-home ()
+  "Persist theme changes to the starting account's Codex config."
   (let* ((dir (make-temp-file "codex-theme" t))
          (home (expand-file-name "work" dir))
          (canonical (expand-file-name ".codex" dir))
@@ -685,14 +629,14 @@
          (process-environment (cons (format "HOME=%s" dir)
                                     process-environment))
          (agent-codex-accounts `(("work" . ,home)))
-         (agent-codex--pending-account "work"))
+         (agent-account--starting '(codex . "work")))
     (unwind-protect
         (progn
           (make-directory canonical t)
           (with-temp-file canonical-config
             (insert "[tui]\ntheme = \"light\"\n"))
+          (agent-account-sync 'codex "work")
           (should (agent-codex--sync-theme "dark"))
-          (should (file-symlink-p config))
           (should (string-match-p
                    "^\\[tui\\]\ntheme = \"dark\""
                    (with-temp-buffer
@@ -759,7 +703,7 @@
          (process-environment
           (cons (format "CODEX_HOME=%s" env-home) process-environment))
          (agent-codex-accounts `(("work" . ,selected-home)))
-         (agent-codex--pending-account "work")
+         (agent-account--starting '(codex . "work"))
          (agent-codex-skill-directories nil)
          (agent-codex-programmatic-skill-directories nil)
          (default-directory dir))
@@ -796,7 +740,7 @@
            "plugins/cache/openai-curated/browser/newhash/skills/disabled-plugin/SKILL.md"
            codex-home))
          (agent-codex-accounts `(("work" . ,codex-home)))
-         (agent-codex--pending-account "work")
+         (agent-account--starting '(codex . "work"))
          (agent-codex-skill-directories nil)
          (agent-codex-programmatic-skill-directories nil)
          (plugin-list '(((name . "superpowers")
@@ -876,18 +820,17 @@
 
 ;;;; Session capture
 
-(ert-deftest agent-codex-test-capture-buffer-account-stores-session ()
-  "Replace a stale accountless struct when capturing the buffer account."
+(ert-deftest agent-codex-test-capture-session-stores-starting-account ()
+  "Replace a stale accountless struct when capturing the session."
   (with-temp-buffer
     (rename-buffer "*codex:~/repo/codex-capture-session-test/:default*" t)
-    ;; Simulate lazy backfill running before the start hook.
+    ;; Simulate lazy backfill running before the start binding existed.
     (agent--set-session
      (current-buffer)
      (agent-session-create :backend 'codex
                            :directory "~/repo/codex-capture-session-test/"))
-    (let ((agent-codex--pending-account "personal")
-          (agent-account--starting '(codex . "personal")))
-      (agent-codex--capture-buffer-account)
+    (let ((agent-account--starting '(codex . "personal")))
+      (agent--capture-session (current-buffer))
       (let ((session (agent-session (current-buffer))))
         (should session)
         (should (eq (agent-session-backend session) 'codex))

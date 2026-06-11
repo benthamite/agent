@@ -30,6 +30,7 @@
 
 (require 'codex)
 (eval-and-compile (require 'agent))
+(require 'agent-account)
 (require 'cl-lib)
 (require 'json)
 (require 'subr-x)
@@ -179,21 +180,6 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (declare-function codex-prompt-input "codex" (&optional buffer))
 (declare-function gptel-request "gptel")
 
-(defvar agent-codex--current-account nil
-  "Currently active Codex account name.
-Loaded from `agent-codex-account-file' on first use;
-changed by `agent-codex-select-account'.")
-
-(defvar agent-codex--pending-account nil
-  "Account name for the current `codex' invocation.
-Dynamically bound by `agent-codex--start-with-account';
-read by `agent-codex-account-env'.")
-
-(defvar-local agent-codex--buffer-account nil
-  "Account name that was active when this buffer's session started.
-Set by `agent-codex--capture-buffer-account' via
-`codex-start-hook'.")
-
 (defconst agent-codex--shared-config-items
   '("config.toml" "hooks.json" "AGENTS.md" "rules"
     "skills" "programmatic-skills" "plugins" "vendor_imports"
@@ -227,13 +213,16 @@ Source: SVG Repo (CC0).")
                  (with-current-buffer buf
                    (agent-codex-status-duration-ms)))
   :start #'codex--start
-  :start-new #'agent-codex--start-with-account
+  :start-new #'agent-codex--start-new
   :program "codex"
   :icon (lambda (&optional face)
           (let ((svg (agent-svg-icon agent-codex-icon-svg face)))
             (if (string-empty-p svg) "CX" svg)))
-  :account (lambda (buf)
-             (buffer-local-value 'agent-codex--buffer-account buf))
+  :account-env-var "CODEX_HOME"
+  :accounts 'agent-codex-accounts
+  :account-file 'agent-codex-account-file
+  :shared-config-items 'agent-codex--shared-config-items
+  :canonical-home "~/.codex/"
   :waiting-p #'agent-codex--waiting-p
   :background-tasks-p #'agent-codex--has-background-tasks-p
   :busy-p #'agent-codex--busy-p
@@ -289,202 +278,53 @@ Source: SVG Repo (CC0).")
 ;;;;; Account selection
 
 (defun agent-codex-account-env (_buffer-name _dir)
-  "Return environment variables for the session being started.
-Sets `CODEX_HOME' based on `agent-codex-accounts'.  Prefers
-the dynamically bound `agent-codex--pending-account' and falls
-back to the persisted active account via
-`agent-codex--resolve-account', so callers that invoke
-`codex' directly still get the right account."
-  (when-let* ((account (or agent-codex--pending-account
-                           (agent-codex--resolve-account)))
-              (home (agent-codex--account-home account)))
-    (agent-codex--sync-account-home account)
-    (list (format "CODEX_HOME=%s" home))))
-
-(defun agent-codex--account-home (account)
-  "Return the expanded Codex home directory for ACCOUNT, or nil."
-  (when-let* ((home (alist-get account agent-codex-accounts
-                               nil nil #'string=)))
-    (expand-file-name home)))
-
-(defun agent-codex--selected-account-no-prompt ()
-  "Return the selected Codex account without prompting the user."
-  (or agent-codex--pending-account
-      agent-codex--current-account
-      (agent-codex--load-account)))
+  "Return `CODEX_HOME' for the Codex session being started.
+Resolves the account via `agent-account-resolve' (the in-flight
+start binding first, then the persisted selection) and never
+prompts or touches the filesystem.  Config-home syncing happens in
+`agent-account-sync' from selection, initialization, and
+`agent-start-session' -- in particular, `codex exec' batch runs
+never trigger filesystem mutation."
+  (when-let* ((account (agent-account-resolve 'codex)))
+    (agent-account-env 'codex account)))
 
 (defun agent-codex--effective-codex-home ()
   "Return the Codex home for noninteractive helper discovery.
-Prefer the selected account home.  Fall back to `CODEX_HOME' and
+Prefer the resolved account home.  Fall back to `CODEX_HOME' and
 then the ordinary `~/.codex' home.  This function never prompts."
   (expand-file-name
-   (or (when-let* ((account (agent-codex--selected-account-no-prompt)))
-         (agent-codex--account-home account))
+   (or (when-let* ((account (agent-account-resolve 'codex)))
+         (agent-account-home 'codex account))
        (getenv "CODEX_HOME")
        "~/.codex")))
 
 (defun agent-codex--config-file (&optional account)
   "Return the config.toml path for ACCOUNT or the default Codex config."
-  (if-let* ((home (and account (agent-codex--account-home account))))
+  (if-let* ((home (and account (agent-account-home 'codex account))))
       (expand-file-name "config.toml" home)
     (expand-file-name codex-hooks-config-path)))
 
-(defun agent-codex--sync-account-home (account)
-  "Sync shared Codex state into ACCOUNT's home directory."
-  (when-let* ((home (agent-codex--account-home account)))
-    (make-directory home t)
-    (condition-case err
-        (agent-codex--ensure-shared-symlinks home)
-      (error
-       (message "agent-codex: failed to sync account home: %S" err)))))
-
-(defun agent-codex--ensure-shared-symlinks (home)
-  "Ensure shared config symlinks exist in account HOME."
-  (let ((canonical-home (expand-file-name ".codex/" "~")))
-    (dolist (item agent-codex--shared-config-items)
-      (agent-codex--ensure-shared-symlink
-       (expand-file-name item canonical-home)
-       (expand-file-name item home)))))
-
-(defun agent-codex--ensure-shared-symlink (source target)
-  "Ensure TARGET is a symlink pointing to SOURCE.
-Create the symlink if TARGET is missing, replace TARGET if it is a
-virgin-state file or empty directory, and back up TARGET before
-replacing it if it has real content."
-  (when (file-exists-p source)
-    (cond
-     ((file-symlink-p target)
-      (unless (equal (file-truename target) (file-truename source))
-        (agent-codex--backup-item target)
-        (make-symbolic-link source target)
-        (message "agent-codex: replaced %s with symlink to %s"
-                 target source)))
-     ((not (file-exists-p target))
-      (make-symbolic-link source target)
-      (message "agent-codex: symlinked %s -> %s" target source))
-     ((agent-codex--item-virgin-p target)
-      (agent-codex--delete-item target)
-      (make-symbolic-link source target)
-      (message "agent-codex: replaced virgin %s with symlink to %s"
-               target source))
-     (t
-      (agent-codex--backup-item target)
-      (make-symbolic-link source target)
-      (message "agent-codex: backed up and symlinked %s -> %s"
-               target source)))))
-
-(defun agent-codex--item-virgin-p (path)
-  "Return non-nil if PATH is a virgin-state file or empty directory.
-An empty directory is virgin.  A zero-byte file is virgin.  A small
-JSON file containing only `{}' or `[]' is virgin."
-  (cond
-   ((file-directory-p path)
-    (null (directory-files path nil directory-files-no-dot-files-regexp)))
-   ((file-regular-p path)
-    (agent-codex--file-virgin-p path))))
-
-(defun agent-codex--file-virgin-p (path)
-  "Return non-nil if regular file PATH has empty or placeholder content."
-  (let ((size (file-attribute-size (file-attributes path))))
-    (or (zerop size)
-        (and (< size 16)
-             (member (string-trim
-                      (with-temp-buffer
-                        (insert-file-contents path)
-                        (buffer-string)))
-                     '("" "{}" "[]"))))))
-
-(defun agent-codex--delete-item (path)
-  "Delete PATH, whether it is a file or a directory."
-  (if (file-directory-p path)
-      (delete-directory path t)
-    (delete-file path)))
-
-(defun agent-codex--backup-item (path)
-  "Move PATH to a timestamped backup path."
-  (let* ((timestamp (format-time-string "%Y%m%d%H%M%S"))
-         (backup (format "%s.agent-backup-%s" path timestamp))
-         (candidate backup)
-         (counter 0))
-    (while (file-exists-p candidate)
-      (setq counter (1+ counter)
-            candidate (format "%s.%d" backup counter)))
-    (rename-file path candidate)
-    (message "agent-codex: backed up %s to %s" path candidate)))
-
-(defun agent-codex--load-account ()
-  "Load the current account from `agent-codex-account-file'.
-Return the account name, or nil if the file is missing or stale."
-  (when (file-exists-p agent-codex-account-file)
-    (let ((name (string-trim
-                 (with-temp-buffer
-                   (insert-file-contents agent-codex-account-file)
-                   (buffer-string)))))
-      (when (alist-get name agent-codex-accounts nil nil #'string=)
-        name))))
-
-(defun agent-codex--save-account (name)
-  "Persist NAME as the active account to `agent-codex-account-file'."
-  (with-temp-file agent-codex-account-file
-    (insert name "\n"))
-  (setq agent-codex--current-account name))
-
-(defun agent-codex--prompt-account ()
-  "Prompt for an account from `agent-codex-accounts'.
-Return the account name, or nil."
-  (when agent-codex-accounts
-    (let ((names (mapcar #'car agent-codex-accounts)))
-      (if (= (length names) 1)
-          (car names)
-        (completing-read "Account: " names nil t)))))
-
-(defun agent-codex--resolve-account ()
-  "Return the active account, loading from disk or prompting as needed.
-On first use, loads from `agent-codex-account-file'.  If no
-persisted account exists, prompts once and saves the selection."
-  (when agent-codex-accounts
-    (unless agent-codex--current-account
-      (setq agent-codex--current-account
-            (agent-codex--load-account)))
-    (or agent-codex--current-account
-        (let ((account (agent-codex--prompt-account)))
-          (when account
-            (agent-codex--save-account account))
-          account))))
+(defun agent-codex--session-account (&optional buffer)
+  "Return the account recorded for BUFFER's Codex session, or nil."
+  (when-let* ((session (agent-session buffer)))
+    (agent-session-account session)))
 
 ;;;###autoload
 (defun agent-codex-select-account ()
   "Switch the active Codex account.
-Prompts for an account from `agent-codex-accounts' and
-persists the selection.  New sessions will use this account."
+Prompts for an account from `agent-codex-accounts', persists the
+selection, and syncs the account's home.  New sessions will use
+this account."
   (interactive)
-  (unless agent-codex-accounts
-    (user-error "No accounts configured in `agent-codex-accounts'"))
-  (let ((account (agent-codex--prompt-account)))
-    (when account
-      (agent-codex--save-account account)
-      (message "Switched to account: %s" account))))
+  (agent-account-select 'codex))
 
-(defun agent-codex--start-with-account ()
-  "Start a new Codex session using the active account."
+(defun agent-codex--start-new ()
+  "Start a new Codex session using the current account."
   (interactive)
   (agent-codex--install-hooks)
-  (let* ((account (agent-codex--resolve-account))
-         (agent-codex--pending-account account))
-    (codex)))
-
-(defun agent-codex--capture-buffer-account ()
-  "Store the account name and session identity for the new buffer.
-Called from `codex-start-hook'.  Then constructs and stores the
-buffer's `agent-session' struct via `agent--capture-session'."
-  (setq agent-codex--buffer-account
-        (or agent-codex--pending-account
-            (agent-codex--resolve-account)))
-  (agent--capture-session (current-buffer)))
-
-(defun agent-codex-buffer-account ()
-  "Return the account name for the current buffer, or nil."
-  agent-codex--buffer-account)
+  (agent-start-session
+   (agent-session-create :backend 'codex
+                         :account (agent-account-resolve 'codex t))))
 
 ;;;;; Parameterized session start
 
@@ -511,7 +351,7 @@ The session account is bound as `agent-account--starting' by
   (when-let* ((identity (codex-session-identity buffer)))
     (agent-session-create
      :backend 'codex
-     :account (buffer-local-value 'agent-codex--buffer-account buffer)
+     :account (agent-codex--session-account buffer)
      :directory (plist-get identity :directory)
      :instance (plist-get identity :instance)
      :id (plist-get identity :session-id))))
@@ -586,12 +426,12 @@ segment does not perform disk I/O on every redisplay."
 
 (defun agent-codex-status-model ()
   "Return the model name for the current Codex session."
-  (agent-codex--read-config-model agent-codex--buffer-account))
+  (agent-codex--read-config-model (agent-codex--session-account)))
 
 (defun agent-codex-status-effort ()
   "Return the reasoning effort for the current Codex session."
   (or codex-reasoning-effort
-      (agent-codex--read-config-effort agent-codex--buffer-account)
+      (agent-codex--read-config-effort (agent-codex--session-account))
       "medium"))
 
 (defun agent-codex-status-duration-ms ()
@@ -614,10 +454,9 @@ config file changed."
 When THEME is nil, use the current Emacs AI theme.  Only writes
 the file when the theme value actually changes."
   (let* ((theme (or theme (agent--theme)))
-         (account (or agent-codex--pending-account
-                      agent-codex--buffer-account))
-         (_ (when account
-              (agent-codex--sync-account-home account)))
+         (account (or (and (eq (car-safe agent-account--starting) 'codex)
+                           (cdr agent-account--starting))
+                      (agent-codex--session-account)))
          (config-file (agent-codex--config-file account))
          (new-line (format "theme = \"%s\"" theme)))
     (make-directory (file-name-directory config-file) t)
@@ -1215,8 +1054,7 @@ via `codex exec'."
                    (string-trim (buffer-string))))
          (source-buffer (agent-codex--handoff-source-buffer buffer-name))
          (account (when source-buffer
-                    (buffer-local-value 'agent-codex--buffer-account
-                                        source-buffer)))
+                    (agent-codex--session-account source-buffer)))
          (dir (agent-codex--handoff-directory source-buffer)))
     (when (string-empty-p prompt)
       (user-error "Handoff file is empty"))
@@ -1295,7 +1133,7 @@ account to use."
   (let* ((identity (codex-session-identity))
          (session-id (or (plist-get identity :session-id)
                          (user-error "Current Codex buffer has no session id")))
-         (account (agent-codex--restart-account agent-codex--buffer-account))
+         (account (agent-codex--restart-account (agent-codex--session-account)))
          (session (agent-session-create
                    :backend 'codex
                    :account account
@@ -1309,7 +1147,7 @@ account to use."
 
 (defun agent-codex--restart-account (session-account)
   "Return the account to use when restarting SESSION-ACCOUNT."
-  (let ((selected-account (agent-codex--selected-account-no-prompt)))
+  (let ((selected-account (agent-account-resolve 'codex)))
     (agent-codex--ensure-restart-account selected-account)
     (cond
      ((and session-account selected-account
@@ -1319,7 +1157,8 @@ account to use."
      (session-account
       (agent-codex--ensure-restart-account session-account))
      (t
-      (agent-codex--ensure-restart-account (agent-codex--resolve-account))))))
+      (agent-codex--ensure-restart-account
+       (agent-account-resolve 'codex t))))))
 
 (defun agent-codex--prompt-restart-account (session-account selected-account)
   "Prompt for restart account between SESSION-ACCOUNT and SELECTED-ACCOUNT."
@@ -1330,7 +1169,7 @@ account to use."
 
 (defun agent-codex--ensure-restart-account (account)
   "Return ACCOUNT after checking that named restart accounts exist."
-  (when (and account (not (agent-codex--account-home account)))
+  (when (and account (not (agent-account-home 'codex account)))
     (user-error "Codex account `%s' is not configured" account))
   account)
 
@@ -1343,7 +1182,7 @@ If no Codex sessions exist, start a new one.  Otherwise, show the
 unified session switcher."
   (interactive)
   (if (null (codex--find-all-codex-buffers))
-      (agent-codex--start-with-account)
+      (agent-codex--start-new)
     (agent--ensure-all-session-keys)
     (transient-setup 'agent--session-switcher)))
 
@@ -1377,7 +1216,6 @@ With prefix ARG, use Codex CLI's `--last' flag."
   (add-hook 'codex-start-hook #'agent-disable-scrollback-truncation)
   (add-hook 'codex-start-hook #'agent-setup-snippet-keys)
   (add-hook 'codex-start-hook #'agent-fix-rendering)
-  (add-hook 'codex-start-hook #'agent-codex--capture-buffer-account)
   (add-hook 'codex-start-hook #'agent-codex--record-start-time)
   (add-hook 'codex-start-hook #'agent-codex-set-modeline)
   (add-hook 'codex-process-environment-functions
@@ -1437,31 +1275,10 @@ Emacs side to match Claude Code's behavior."
 
 ;;;;; Account menu infix
 
-(eval-and-compile
-  (defclass agent-codex--account-variable (transient-lisp-variable)
-    ()
-    "An infix that displays and selects the active Codex account."))
-
-(cl-defmethod transient-infix-read ((_obj agent-codex--account-variable))
-  "Prompt for a Codex account."
-  (agent-codex--prompt-account))
-
-(cl-defmethod transient-infix-set ((obj agent-codex--account-variable) value)
-  "Set the account variable and persist VALUE to disk."
-  (set (oref obj variable) value)
-  (when value
-    (agent-codex--save-account value)))
-
-(cl-defmethod transient-init-value ((obj agent-codex--account-variable))
-  "Initialize Codex account infix from persisted state."
-  (unless (oref obj value)
-    (set (oref obj variable) (agent-codex--load-account)))
-  (cl-call-next-method obj))
-
 (transient-define-infix agent-codex--infix-account ()
   "Select the active Codex account."
-  :class 'agent-codex--account-variable
-  :variable 'agent-codex--current-account
+  :class 'agent-account-variable
+  :backend 'codex
   :description "codex account")
 
 ;;;;; Extend unified menu
