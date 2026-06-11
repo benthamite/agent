@@ -81,17 +81,6 @@ These directories are not loaded by ordinary Codex sessions."
   :type '(repeat directory)
   :group 'agent-codex)
 
-(defcustom agent-codex-audit-skills
-  '("/code-audit" "/design-audit" "/interpretability-audit")
-  "Skills to run when performing a project audit."
-  :type '(repeat string)
-  :group 'agent-codex)
-
-(defcustom agent-codex-audit-project-directories nil
-  "Directories available for selection in `agent-codex-audit-project'."
-  :type '(repeat directory)
-  :group 'agent-codex)
-
 (defcustom agent-codex-exec-approval-policy 'never
   "Approval policy used for non-interactive `codex exec' runs.
 When nil, use `codex-approval-policy' or the CLI default."
@@ -210,7 +199,6 @@ Source: SVG Repo (CC0).")
   :run-prompt #'agent-codex-run-prompt
   :skill-roots #'agent-codex-skill-roots
   :skill-command-prefix "$"
-  :audit-project #'agent-codex-audit-project
   :debug-backtrace #'agent-codex-debug-backtrace
   :act-on-slack-message #'agent-codex-act-on-slack-message
   :start-session #'agent-codex--start-session
@@ -758,97 +746,8 @@ This is the `run-prompt' backend slot implementation."
 
 ;;;;; Project audit
 
-;;;###autoload
-(defun agent-codex-audit-project ()
-  "Run a comprehensive audit of a project via Codex.
-Sequentially runs each skill in `agent-codex-audit-skills'
-via `codex exec'."
-  (interactive)
-  (let* ((dir (agent-codex--read-audit-directory))
-         (skills agent-codex-audit-skills))
-    (when (yes-or-no-p
-           (format "Run %d audit(s) on %s?" (length skills) dir))
-      (agent-codex--audit-run-next
-       (list :queue skills
-             :results nil
-             :dir dir
-             :start-time (current-time))))))
-
-(defun agent-codex--audit-run-next (state)
-  "Run the next audit task in STATE."
-  (if (null (plist-get state :queue))
-      (agent-codex--audit-finish state)
-    (let* ((queue (plist-get state :queue))
-           (skill-name (string-remove-prefix "/" (car queue)))
-           (skill (or (cl-find skill-name (agent-discover-skills 'codex)
-                               :key (lambda (s) (plist-get s :name))
-                               :test #'equal)
-                      (list :name skill-name :style 'slash)))
-           (prompt (agent--skill-prompt skill "--accept")))
-      (message "Running Codex audit %s..." skill-name)
-      (agent-codex--run-prompt
-       prompt
-       :dir (plist-get state :dir)
-       :callback
-       (lambda (result)
-         (plist-put state :results
-                    (cons (append (list :skill skill-name) result)
-                          (plist-get state :results)))
-         (plist-put state :queue (cdr queue))
-         (agent-codex--audit-run-next state))))))
-
-(defun agent-codex--audit-finish (state)
-  "Display the audit results from STATE."
-  (let* ((results (reverse (plist-get state :results)))
-         (total (length results))
-         (successes (cl-count 0 results :key
-                              (lambda (result)
-                                (plist-get result :exit-code))))
-         (failures (- total successes))
-         (duration (float-time
-                    (time-subtract (current-time)
-                                   (plist-get state :start-time))))
-         (buf (get-buffer-create "*Codex Audit Results*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (format "#+title: Codex audit results — %s\n\n"
-                        (format-time-string "%Y-%m-%d %H:%M:%S")))
-        (insert (format "- Directory: [[file:%s]]\n" (plist-get state :dir)))
-        (insert (format "- Total: %d | Success: %d | Failed: %d\n" total successes failures))
-        (insert (format "- Time: %.1f seconds\n\n" duration))
-        (dolist (result results)
-          (insert (format "* %s %s\n"
-                          (if (zerop (plist-get result :exit-code)) "DONE" "FAIL")
-                          (plist-get result :skill)))
-          (insert (format ":PROPERTIES:\n:EXIT_CODE: %s\n:DURATION: %.1fs\n:END:\n\n"
-                          (plist-get result :exit-code)
-                          (plist-get result :duration)))
-          (insert "#+begin_example\n")
-          (insert (or (plist-get result :text) "(no output)"))
-          (unless (string-suffix-p "\n" (or (plist-get result :text) ""))
-            (insert "\n"))
-          (insert "#+end_example\n\n")))
-      (org-mode)
-      (goto-char (point-min)))
-    (pop-to-buffer buf)
-    (message "Codex audit complete: %d/%d succeeded (%.1fs)"
-             successes total duration)))
-
-(defun agent-codex--read-audit-directory ()
-  "Prompt for a project directory with completion."
-  (let* ((candidates (mapcar #'abbreviate-file-name
-                             agent-codex-audit-project-directories))
-         (input (completing-read "Project directory: " candidates nil nil))
-         (dir (file-truename (expand-file-name input))))
-    (unless (file-directory-p dir)
-      (user-error "Not a directory: %s" dir))
-    (unless (member dir (mapcar #'file-truename
-                                agent-codex-audit-project-directories))
-      (customize-save-variable 'agent-codex-audit-project-directories
-                               (append agent-codex-audit-project-directories
-                                       (list dir))))
-    dir))
+(define-obsolete-function-alias 'agent-codex-audit-project
+  #'agent-audit-project "0.2")
 
 ;;;;; Debug backtrace
 

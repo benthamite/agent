@@ -456,6 +456,29 @@ that function is available."
   :type '(alist :key-type symbol :value-type file)
   :group 'agent)
 
+(define-obsolete-variable-alias 'agent-claude-audit-skills
+  'agent-audit-skills "0.2")
+(make-obsolete-variable 'agent-codex-audit-skills 'agent-audit-skills "0.2")
+
+(defcustom agent-audit-skills
+  '("code-audit" "design-audit" "interpretability-audit")
+  "Skills to run when performing an integral project audit.
+Each entry is a skill name without prefix; each is invoked with
+`--accept'."
+  :type '(repeat string)
+  :group 'agent)
+
+(define-obsolete-variable-alias 'agent-claude-audit-project-directories
+  'agent-audit-project-directories "0.2")
+(define-obsolete-variable-alias 'agent-codex-audit-project-directories
+  'agent-audit-project-directories "0.2")
+
+(defcustom agent-audit-project-directories nil
+  "Directories available for selection in `agent-audit-project'.
+New directories entered by the user are automatically added."
+  :type '(repeat directory)
+  :group 'agent)
+
 (defconst agent--epoch-project-registry-file-default
   "/Users/pablostafforini/My Drive/Epoch/projects/shared/project-registry.json"
   "Default canonical Epoch project registry file.")
@@ -2184,9 +2207,127 @@ When COMMIT is nil, use the current Git HEAD."
 
 ;;;###autoload
 (defun agent-audit-project ()
-  "Run a comprehensive project audit via the appropriate backend."
+  "Run a comprehensive project audit via the selected backend.
+Sequentially runs each skill in `agent-audit-skills' with
+`--accept' through the backend's run-prompt slot, auto-committing
+after each successful skill, and displays a summary when done."
   (interactive)
-  (agent--dispatch :audit-project))
+  (let* ((backend (agent--resolve-backend))
+         (dir (agent--read-audit-directory)))
+    (when (yes-or-no-p
+           (format "Run %d audit(s) on %s?" (length agent-audit-skills) dir))
+      (agent--audit-ensure-clean-worktree dir)
+      (agent--audit-run-next
+       (list :backend backend :queue agent-audit-skills :results nil
+             :dir dir :start-time (current-time))))))
+
+(defun agent--audit-run-next (state)
+  "Run the next audit skill in STATE, or finish."
+  (if (null (plist-get state :queue))
+      (agent--audit-finish state)
+    (let* ((backend (plist-get state :backend))
+           (queue (plist-get state :queue))
+           (name (car queue))
+           (skill (or (cl-find name (agent-discover-skills backend)
+                               :key (lambda (s) (plist-get s :name))
+                               :test #'equal)
+                      (list :name name :style 'slash)))
+           (run (agent--backend-get backend :run-prompt)))
+      (message "Running audit %s..." name)
+      (funcall run (agent--skill-prompt skill "--accept")
+               :directory (plist-get state :dir)
+               :callback
+               (cl-function
+                (lambda (text &key error)
+                  (plist-put state :results
+                             (cons (list :skill name :text text :error error)
+                                   (plist-get state :results)))
+                  (plist-put state :queue (cdr queue))
+                  (unless error
+                    (ignore-errors
+                      (agent--audit-commit-changes (plist-get state :dir) name)))
+                  (agent--audit-run-next state)))))))
+
+(defun agent--audit-finish (state)
+  "Display the audit results from STATE."
+  (let* ((results (reverse (plist-get state :results)))
+         (total (length results))
+         (successes (cl-count-if (lambda (result)
+                                   (null (plist-get result :error)))
+                                 results))
+         (failures (- total successes))
+         (duration (float-time
+                    (time-subtract (current-time)
+                                   (plist-get state :start-time))))
+         (buf (get-buffer-create "*Agent audit results*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "#+title: Agent audit results — %s\n\n"
+                        (format-time-string "%Y-%m-%d %H:%M:%S")))
+        (insert (format "- Directory: [[file:%s]]\n" (plist-get state :dir)))
+        (insert (format "- Total: %d | Success: %d | Failed: %d\n" total successes failures))
+        (insert (format "- Time: %.1f seconds\n\n" duration))
+        (dolist (result results)
+          (insert (format "* %s %s\n"
+                          (if (plist-get result :error) "FAIL" "DONE")
+                          (plist-get result :skill)))
+          (insert (format ":PROPERTIES:\n:ERROR: %s\n:END:\n\n"
+                          (or (plist-get result :error) "none")))
+          (insert "#+begin_example\n")
+          (insert (or (plist-get result :text) "(no output)"))
+          (unless (string-suffix-p "\n" (or (plist-get result :text) ""))
+            (insert "\n"))
+          (insert "#+end_example\n\n")))
+      (org-mode)
+      (goto-char (point-min)))
+    (pop-to-buffer buf)
+    (message "Agent audit complete: %d/%d succeeded (%.1fs)"
+             successes total duration)))
+
+(defun agent--audit-commit-changes (dir title)
+  "Commit uncommitted work in DIR after an audit skill completes.
+TITLE is the skill name, used to derive the commit message scope."
+  (let ((default-directory dir))
+    (with-temp-buffer
+      (call-process "git" nil t nil "status" "--porcelain")
+      (when (> (buffer-size) 0)
+        (call-process "git" nil nil nil "add" "-A")
+        (let ((scope (replace-regexp-in-string
+                      "^/" ""
+                      (car (split-string title " ")))))
+          (call-process "git" nil nil nil "commit" "-m"
+                        (format "%s: apply audit recommendations" scope)))))))
+
+(defun agent--read-audit-directory ()
+  "Prompt for a project directory with completion."
+  (let* ((candidates (mapcar #'abbreviate-file-name
+                             agent-audit-project-directories))
+         (input (completing-read "Project directory: " candidates nil nil))
+         (dir (file-truename (expand-file-name input))))
+    (unless (file-directory-p dir)
+      (user-error "Not a directory: %s" dir))
+    (unless (member dir (mapcar #'file-truename
+                                agent-audit-project-directories))
+      (customize-save-variable 'agent-audit-project-directories
+                               (append agent-audit-project-directories
+                                       (list dir))))
+    dir))
+
+(defun agent--audit-ensure-clean-worktree (dir)
+  "Signal a user error unless DIR is a clean git worktree."
+  (let ((default-directory dir))
+    (with-temp-buffer
+      (let ((exit (call-process "git" nil t nil
+                                "status" "--porcelain")))
+        (cond
+         ((not (zerop exit))
+          (user-error "Cannot inspect git worktree in %s: %s"
+                      dir (string-trim (buffer-string))))
+         ((> (buffer-size) 0)
+          (user-error
+           "Refusing audit auto-commit because %s has uncommitted changes"
+           dir)))))))
 
 ;;;###autoload
 (defun agent-debug-backtrace ()

@@ -240,7 +240,6 @@ Source: lobehub/lobe-icons (MIT).")
   :notify #'agent-claude-notify
   :skill-roots #'agent-claude-skill-roots
   :skill-command-prefix "/"
-  :audit-project #'agent-claude-audit-project
   :debug-backtrace #'agent-claude-debug-backtrace
   :act-on-slack-message #'agent-claude-act-on-slack-message
   :before-kill-check (lambda (_buffer) (agent-claude--confirm-kill-branches))
@@ -1193,20 +1192,6 @@ capable model.  Supports aliases like \"opus\", \"sonnet\",
                  string)
   :group 'agent-claude)
 
-(defcustom agent-claude-audit-skills
-  '("/code-audit" "/design-audit" "/interpretability-audit")
-  "Skills to run when performing an integral project audit.
-Each entry is a skill name (with leading slash) that will be
-invoked with `--accept'."
-  :type '(repeat string)
-  :group 'agent-claude)
-
-(defcustom agent-claude-audit-project-directories nil
-  "Directories available for selection in `agent-claude-audit-project'.
-New directories entered by the user are automatically added to this list."
-  :type '(repeat directory)
-  :group 'agent-claude)
-
 (defcustom agent-claude-org-todo-in-progress-keyword nil
   "Org TODO keyword to set when sending a heading to Claude Code.
 When non-nil, `agent-claude-send-todo-at-point' changes the
@@ -1671,41 +1656,8 @@ programmatic directories are pointed at by file."
 
 ;;;;; Project audit
 
-(defun agent-claude-audit-project ()
-  "Run a comprehensive audit of a project.
-Prompt the user to select a project directory from
-`agent-claude-audit-project-directories' or enter a new one.
-New directories are persisted to the list for future use.
-Sequentially invokes each skill in `agent-claude-audit-skills'
-with `--accept', each in a separate non-interactive Claude session.
-Results are displayed in a summary buffer when all audits complete."
-  (interactive)
-  (let* ((dir (agent-claude--read-audit-project-directory))
-         (entries (mapcar (lambda (skill)
-                            (list :title (format "%s --accept" skill)
-                                  :body ""))
-                          agent-claude-audit-skills)))
-    (when (yes-or-no-p
-           (format "Run %d audit(s) on %s?" (length entries) dir))
-      (agent-claude--batch-start entries dir t))))
-
-(defun agent-claude--read-audit-project-directory ()
-  "Prompt the user for a project directory, with completion.
-Offer `agent-claude-audit-project-directories' as candidates but allow
-free input.  When the entered directory is not already in the list, add it and
-persist via `customize-save-variable'."
-  (let* ((candidates (mapcar #'abbreviate-file-name
-                             agent-claude-audit-project-directories))
-         (input (completing-read "Project directory: " candidates nil nil))
-         (dir (file-truename (expand-file-name input))))
-    (unless (file-directory-p dir)
-      (user-error "Not a directory: %s" dir))
-    (unless (member dir (mapcar #'file-truename
-                                agent-claude-audit-project-directories))
-      (customize-save-variable 'agent-claude-audit-project-directories
-                               (append agent-claude-audit-project-directories
-                                       (list dir))))
-    dir))
+(define-obsolete-function-alias 'agent-claude-audit-project
+  #'agent-audit-project "0.2")
 
 ;;;;; Theme sync
 

@@ -397,6 +397,31 @@
       (when-let* ((buf (get-buffer result-buffer)))
         (kill-buffer buf)))))
 
+;;;; Project audit
+
+(ert-deftest agent-test-audit-commits-after-successful-skill ()
+  "Auto-commit after each successful audit skill and not after failures."
+  (let ((agent-backends nil)
+        (agent-audit-skills '("a" "b"))
+        commits)
+    (apply #'agent-register-backend
+     'one
+     (agent-test--backend
+      :skill-roots (lambda () nil)
+      :run-prompt (cl-function
+                   (lambda (prompt &key directory callback)
+                     (ignore directory)
+                     (funcall callback "out"
+                              :error (when (string-match-p "/b" prompt)
+                                       "exit code 1"))))))
+    (cl-letf (((symbol-function 'agent--audit-commit-changes)
+               (lambda (_dir title) (push title commits)))
+              ((symbol-function 'agent--audit-finish) #'ignore))
+      (agent--audit-run-next (list :backend 'one :queue agent-audit-skills
+                                   :results nil :dir "/tmp/"
+                                   :start-time (current-time))))
+    (should (equal commits '("a")))))
+
 (ert-deftest agent-test-force-kill-buffer-ignores-query-functions ()
   "Kill buffers even when unrelated query functions would veto it."
   (let ((buf (generate-new-buffer "agent-force-kill-test")))
