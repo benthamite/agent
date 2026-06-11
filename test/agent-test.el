@@ -789,7 +789,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :exit (lambda () (interactive) (setq ran t))))
-        (setq-local agent--before-exit '(:queue nil :state running))
+        (setq-local agent--before-exit (list :queue nil :state 'running))
         (cl-letf (((symbol-function 'run-at-time)
                    (lambda (_time _repeat function &rest args)
                      (apply function args))))
@@ -843,7 +843,8 @@
           :submit-command (lambda (cmd &optional _buffer) (push cmd events))
           :exit (lambda () (interactive) (setq ran t))))
         (setq-local agent--before-exit
-                    '(:queue (("update-log" :args "--auto")) :state running))
+                    (list :queue (list (list "update-log" :args "--auto"))
+                          :state 'running))
         (should (agent--before-exit-transition buf 'step))
         (should (equal events '("/update-log --auto")))
         (should-not ran)

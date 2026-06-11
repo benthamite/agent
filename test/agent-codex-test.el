@@ -511,7 +511,8 @@
                    (lambda () (interactive) (setq ran t))))
           (with-current-buffer buf
             (setq-local agent--backend 'codex)
-            (setq-local agent--before-exit '(:queue nil :state running)))
+            (setq-local agent--before-exit
+                        (list :queue nil :state 'running)))
           (agent-codex--handle-notification
            (list :type "Stop" :buffer-name (buffer-name buf)))
           (should ran)
