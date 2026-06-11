@@ -915,5 +915,55 @@
             (should (eq (agent-session buffer) session))))
       (kill-buffer buffer))))
 
+;;;; Minor mode
+
+(ert-deftest agent-claude-test-mode-symmetric ()
+  "Enabling then disabling the mode leaves global state untouched."
+  (let ((claude-code-notification-function #'ignore)
+        (claude-code-start-hook nil)
+        (claude-code-event-hook nil)
+        (claude-code-process-environment-functions nil)
+        (kill-buffer-query-functions kill-buffer-query-functions))
+    (agent-claude-mode 1)
+    (should (memq #'agent-claude--handle-stop claude-code-event-hook))
+    (should (memq #'agent-claude-account-env
+                  claude-code-process-environment-functions))
+    (should (eq claude-code-notification-function
+                #'claude-code-default-notification))
+    (should (advice-member-p #'agent-claude--note-submission
+                             'claude-code--do-send-command))
+    (should (advice-member-p #'agent-claude--send-escape-in-current-buffer
+                             'claude-code-send-escape))
+    (agent-claude-mode -1)
+    (should-not (memq #'agent-claude--handle-stop claude-code-event-hook))
+    (should-not claude-code-start-hook)
+    (should-not claude-code-process-environment-functions)
+    (should (eq claude-code-notification-function #'ignore))
+    (should-not (advice-member-p #'agent-claude--note-submission
+                                 'claude-code--do-send-command))
+    (should-not (advice-member-p #'agent-claude--send-escape-in-current-buffer
+                                 'claude-code-send-escape))
+    (should-not agent-claude--monet-gc-timer)))
+
+(ert-deftest agent-claude-test-usage-polling-refcount ()
+  "Stop usage polling only when the last Claude session is torn down."
+  (let ((buf-a (generate-new-buffer " *claude-usage-a*"))
+        (buf-b (generate-new-buffer " *claude-usage-b*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude--fetch-usage) #'ignore)
+                  ((symbol-function 'claude-code--find-all-claude-buffers)
+                   (lambda () (list buf-a buf-b))))
+          (agent-claude-start-usage-polling)
+          (should agent-claude--usage-timer)
+          (agent-claude--maybe-stop-usage-polling buf-a)
+          (should agent-claude--usage-timer)
+          (cl-letf (((symbol-function 'claude-code--find-all-claude-buffers)
+                     (lambda () (list buf-b))))
+            (agent-claude--maybe-stop-usage-polling buf-b)
+            (should-not agent-claude--usage-timer)))
+      (agent-claude-stop-usage-polling)
+      (kill-buffer buf-a)
+      (kill-buffer buf-b))))
+
 (provide 'agent-claude-test)
 ;;; agent-claude-test.el ends here

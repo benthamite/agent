@@ -177,6 +177,7 @@ Used to detect when `/branch' creates a new session.")
 (defvar agent-claude--usage-current-interval nil
   "Current polling interval in seconds, possibly increased by backoff.")
 
+(defvar agent-codex-mode)
 (defvar eat-terminal)
 (defvar url-http-end-of-headers)
 (defvar url-http-attempt-keepalives)
@@ -294,9 +295,6 @@ escape sequence directly to it."
   (if (claude-code--buffer-p (current-buffer))
       (claude-code--term-send-string claude-code-terminal-backend (kbd "ESC"))
     (funcall orig-fn)))
-
-(advice-add 'claude-code-send-escape :around
-            #'agent-claude--send-escape-in-current-buffer)
 
 ;;;;; Buffer protection
 
@@ -611,6 +609,8 @@ any code path."
                                    (process-name p))
                    (eq (process-status p) 'listen)
                    (not (memq p active-servers)))
+          (agent--report-leak "monet server" "%s escaped session teardown"
+                              (process-name p))
           (delete-process p))))))
 
 (defun agent-claude--diff-file-in-session-p (diff-buffer session)
@@ -637,12 +637,31 @@ the diff is suppressed entirely; the terminal approval prompt suffices."
                       (window-height . 0.3)
                       (preserve-size . (nil . t))))))
 
-(with-eval-after-load 'monet
+(defvar agent-claude--monet-gc-timer nil
+  "Repeating timer that reports and reaps leaked monet servers.
+Owned by `agent-claude-mode': started on enable, cancelled on
+disable.")
+
+(defun agent-claude--monet-install ()
+  "Install monet advice and the leak-reporting GC timer.
+Idempotent, so deferred installs after re-enables are safe."
   (advice-add 'monet-start-server-in-directory :around
               #'agent-claude--monet-cleanup-before-start)
   (advice-add 'monet--display-diff-buffer :override
               #'agent-claude--display-diff-buffer)
-  (run-with-timer 60 60 #'agent-claude--monet-gc-orphaned-servers))
+  (unless agent-claude--monet-gc-timer
+    (setq agent-claude--monet-gc-timer
+          (run-with-timer 60 60 #'agent-claude--monet-gc-orphaned-servers))))
+
+(defun agent-claude--monet-remove ()
+  "Remove monet advice and cancel the GC timer."
+  (advice-remove 'monet-start-server-in-directory
+                 #'agent-claude--monet-cleanup-before-start)
+  (advice-remove 'monet--display-diff-buffer
+                 #'agent-claude--display-diff-buffer)
+  (when agent-claude--monet-gc-timer
+    (cancel-timer agent-claude--monet-gc-timer)
+    (setq agent-claude--monet-gc-timer nil)))
 
 (defun agent-claude-stop-status-polling ()
   "Stop status polling and clean up the status file."
@@ -657,7 +676,9 @@ the diff is suppressed entirely; the terminal approval prompt suffices."
 TIMER-CELL is a cons whose car is the timer that triggered this
 call; it is canceled automatically when BUFFER is no longer live."
   (if (not (buffer-live-p buffer))
-      (cancel-timer (car timer-cell))
+      (progn
+        (agent--report-leak "status timer" "poll timer outlived %s" buffer)
+        (cancel-timer (car timer-cell)))
     (with-current-buffer buffer
       (when-let* ((data (agent-claude--parse-status-file)))
         (agent-claude--detect-branch data)
@@ -896,6 +917,32 @@ Does nothing if the timer is already running."
     (cancel-timer agent-claude--usage-timer)
     (setq agent-claude--usage-timer nil
           agent-claude--usage-current-interval nil)))
+
+(defun agent-claude--register-session-teardown ()
+  "Register per-session cleanup for a freshly started Claude session.
+Pushes one closure that cancels the status timer, deletes the
+status file, stops the monet session, and stops usage polling
+when this was the last live Claude session.  Also ensures the
+account-wide usage poller is running."
+  (when (claude-code--buffer-p (current-buffer))
+    (agent--install-session-teardown)
+    (let ((buffer (current-buffer)))
+      (push (lambda ()
+              (when agent-claude--status-timer
+                (cancel-timer agent-claude--status-timer)
+                (setq agent-claude--status-timer nil))
+              (agent-claude--cleanup-status-file)
+              (agent-claude--cleanup-monet-session)
+              (agent-claude--maybe-stop-usage-polling buffer))
+            agent--teardown-functions))
+    (agent-claude-start-usage-polling)))
+
+(defun agent-claude--maybe-stop-usage-polling (buffer)
+  "Stop usage polling when BUFFER was the last live Claude session."
+  (when (null (cl-remove buffer
+                         (cl-remove-if-not #'buffer-live-p
+                                           (claude-code--find-all-claude-buffers))))
+    (agent-claude-stop-usage-polling)))
 
 ;;;;; Status accessors
 
@@ -1970,10 +2017,8 @@ TIMEOUT, when non-nil, is written as the hook command timeout."
 ;;    can miss recenters when display state is stale.
 ;;
 ;; We fix both by re-including any desynchronized windows and always
-;; recentering with `(recenter -1)'.
-(advice-add 'claude-code--eat-synchronize-scroll :override
-            #'agent-claude--eat-synchronize-scroll)
-
+;; recentering with `(recenter -1)'.  The override advice is installed
+;; by `agent-claude-mode'.
 (defun agent-claude--eat-synchronize-scroll (windows)
   "Keep the terminal cursor at the bottom of WINDOWS.
 Re-include any windows showing this buffer that were excluded from
@@ -2004,32 +2049,6 @@ unconditionally recenter with `(recenter -1)'."
   'agent-claude-act-on-slack-message #'agent-act-on-slack-message "0.2")
 (define-obsolete-function-alias
   'agent-claude-debug-slack-message #'agent-act-on-slack-message "0.2")
-
-(setq claude-code-notification-function #'claude-code-default-notification)
-(add-hook 'claude-code-event-hook #'agent-claude--handle-notification)
-(add-hook 'claude-code-event-hook #'agent-claude--handle-stop)
-(add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
-(add-hook 'claude-code-start-hook #'agent-setup-kill-on-exit)
-(add-hook 'claude-code-start-hook #'agent-claude-start-status-polling)
-(add-hook 'claude-code-start-hook #'agent-claude-set-modeline)
-(add-hook 'claude-code-start-hook #'agent--refresh-display-names)
-(add-hook 'kill-buffer-hook #'agent-claude-stop-status-polling)
-(add-hook 'kill-buffer-hook #'agent--refresh-display-names-deferred)
-(add-hook 'kill-buffer-hook #'agent-claude--cleanup-monet-session)
-(add-hook 'claude-code-start-hook #'agent-disable-scrollback-truncation)
-(add-hook 'claude-code-start-hook #'agent-setup-snippet-keys)
-(add-hook 'claude-code-start-hook #'agent--assign-session-key)
-(add-hook 'claude-code-process-environment-functions
-          #'agent-claude--sync-theme-before-start)
-(add-hook 'claude-code-process-environment-functions
-          #'agent-claude-account-env)
-(add-hook 'kill-buffer-hook #'agent--release-session-key)
-(advice-add 'claude-code--eat-send-return :before
-            #'agent-claude--note-submission)
-(advice-add 'claude-code--vterm-send-return :before
-            #'agent-claude--note-submission)
-(advice-add 'claude-code--do-send-command :before
-            #'agent-claude--note-submission)
 
 ;;;;; Handoff
 
@@ -2508,6 +2527,87 @@ Signals an error if the status file is missing or incomplete."
 
 (with-eval-after-load 'agent
   (agent-claude--append-menu-suffixes))
+
+;;;; Minor mode
+
+(defvar agent-claude--saved-notification-function nil
+  "Value of `claude-code-notification-function' before enabling the mode.")
+
+(defconst agent-claude--start-hook-functions
+  '(agent-setup-kill-on-exit
+    agent-claude-start-status-polling
+    agent-claude-set-modeline
+    agent--refresh-display-names
+    agent-disable-scrollback-truncation
+    agent-setup-snippet-keys
+    agent--assign-session-key
+    agent-claude--register-session-teardown)
+  "Functions `agent-claude-mode' adds to `claude-code-start-hook'.")
+
+;;;###autoload
+(define-minor-mode agent-claude-mode
+  "Global minor mode wiring `claude-code' sessions into agent.
+Owns every hook, advice, and timer the Claude backend installs;
+nothing is installed at load time.  Disabling removes them
+symmetrically and restores `claude-code-notification-function'."
+  :global t
+  :group 'agent-claude
+  (if agent-claude-mode
+      (agent-claude--mode-enable)
+    (agent-claude--mode-disable)))
+
+(defun agent-claude--mode-enable ()
+  "Install Claude backend hooks, advice, and timers."
+  (setq agent-claude--saved-notification-function
+        claude-code-notification-function)
+  (setq claude-code-notification-function #'claude-code-default-notification)
+  (add-hook 'claude-code-event-hook #'agent-claude--handle-notification)
+  (add-hook 'claude-code-event-hook #'agent-claude--handle-stop)
+  (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
+  (dolist (fn agent-claude--start-hook-functions)
+    (add-hook 'claude-code-start-hook fn))
+  (add-hook 'claude-code-process-environment-functions
+            #'agent-claude-account-env)
+  (add-hook 'claude-code-process-environment-functions
+            #'agent-claude--sync-theme-before-start)
+  (advice-add 'claude-code--eat-send-return :before
+              #'agent-claude--note-submission)
+  (advice-add 'claude-code--vterm-send-return :before
+              #'agent-claude--note-submission)
+  (advice-add 'claude-code--do-send-command :before
+              #'agent-claude--note-submission)
+  (advice-add 'claude-code-send-escape :around
+              #'agent-claude--send-escape-in-current-buffer)
+  (advice-add 'claude-code--eat-synchronize-scroll :override
+              #'agent-claude--eat-synchronize-scroll)
+  (if (featurep 'monet)
+      (agent-claude--monet-install)
+    (with-eval-after-load 'monet
+      (when agent-claude-mode (agent-claude--monet-install)))))
+
+(defun agent-claude--mode-disable ()
+  "Remove Claude backend hooks, advice, and timers."
+  (setq claude-code-notification-function
+        agent-claude--saved-notification-function)
+  (remove-hook 'claude-code-event-hook #'agent-claude--handle-notification)
+  (remove-hook 'claude-code-event-hook #'agent-claude--handle-stop)
+  (unless (bound-and-true-p agent-codex-mode)
+    (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer))
+  (dolist (fn agent-claude--start-hook-functions)
+    (remove-hook 'claude-code-start-hook fn))
+  (remove-hook 'claude-code-process-environment-functions
+               #'agent-claude-account-env)
+  (remove-hook 'claude-code-process-environment-functions
+               #'agent-claude--sync-theme-before-start)
+  (advice-remove 'claude-code--eat-send-return #'agent-claude--note-submission)
+  (advice-remove 'claude-code--vterm-send-return #'agent-claude--note-submission)
+  (advice-remove 'claude-code--do-send-command #'agent-claude--note-submission)
+  (advice-remove 'claude-code-send-escape
+                 #'agent-claude--send-escape-in-current-buffer)
+  (advice-remove 'claude-code--eat-synchronize-scroll
+                 #'agent-claude--eat-synchronize-scroll)
+  (agent-claude--monet-remove)
+  (agent-claude-stop-usage-polling))
 
 (provide 'agent-claude)
 ;;; agent-claude.el ends here
