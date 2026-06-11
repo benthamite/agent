@@ -240,7 +240,8 @@ Source: lobehub/lobe-icons (MIT).")
   :before-kill-check (lambda (_buffer) (agent-claude--confirm-kill-branches))
   :start-session #'agent-claude--start-session
   :session-identity #'agent-claude--session-identity
-  :sync-theme #'agent-claude--sync-theme)
+  :sync-theme #'agent-claude--sync-theme
+  :menu-suffixes #'agent-claude--menu-suffixes)
 
 ;;;; Functions
 
@@ -2482,51 +2483,17 @@ Signals an error if the status file is missing or incomplete."
     (user-error "Package `agent-log' is required for log browsing"))
   (call-interactively #'agent-log-menu))
 
-(defun agent-claude--remove-menu-suffixes ()
-  "Remove Claude menu suffixes before appending them."
-  (dolist (command '(agent-claude-switch-branch
-                     agent-claude-create-branch
-                     agent-claude-batch-todos
-                     agent-claude-send-todo-at-point
-                     agent-claude-agent-log-menu
-                     agent-claude-start-status-polling
-                     agent-claude-stop-status-polling
-                     agent-claude--infix-account
-                     "-c"
-                     agent-claude--infix-warn-kill-with-branches))
-    (while (ignore-errors
-             (transient-get-suffix 'agent-menu command)
-             t)
-      (transient-remove-suffix 'agent-menu command))))
-
-(defun agent-claude--append-menu-suffixes ()
-  "Append Claude suffixes to `agent-menu' in a stable order."
-  (agent-claude--remove-menu-suffixes)
-  ;; Sessions: after "exit session"
-  (transient-append-suffix 'agent-menu "x"
-    '("B" "switch branch" agent-claude-switch-branch))
-  (transient-append-suffix 'agent-menu "B"
-    '("N" "new branch" agent-claude-create-branch))
-  ;; Tools: after "debug backtrace"
-  (transient-append-suffix 'agent-menu "d"
-    '("b" "batch todos" agent-claude-batch-todos))
-  (transient-append-suffix 'agent-menu "b"
-    '("t" "send todo at point" agent-claude-send-todo-at-point))
-  (transient-append-suffix 'agent-menu "t"
-    '("l" "logs" agent-claude-agent-log-menu))
-  ;; Alerts: after "toggle alert"
-  (transient-append-suffix 'agent-menu "T"
-    '("u" "start status polling" agent-claude-start-status-polling))
-  (transient-append-suffix 'agent-menu "u"
-    '("U" "stop status polling" agent-claude-stop-status-polling))
-  ;; Options: after "protect buffers"
-  (transient-append-suffix 'agent-menu "-p"
-    '("-c" agent-claude--infix-account))
-  (transient-append-suffix 'agent-menu "-c"
-    '("-w" agent-claude--infix-warn-kill-with-branches)))
-
-(with-eval-after-load 'agent
-  (agent-claude--append-menu-suffixes))
+(defun agent-claude--menu-suffixes ()
+  "Return Claude Code suffix specs for the unified agent menu."
+  '(("B" "switch branch" agent-claude-switch-branch)
+    ("N" "new branch" agent-claude-create-branch)
+    ("b" "batch todos" agent-claude-batch-todos)
+    ("t" "send todo at point" agent-claude-send-todo-at-point)
+    ("l" "logs" agent-claude-agent-log-menu)
+    ("u" "start status polling" agent-claude-start-status-polling)
+    ("U" "stop status polling" agent-claude-stop-status-polling)
+    ("-c" agent-claude--infix-account)
+    ("-w" agent-claude--infix-warn-kill-with-branches)))
 
 ;;;; Minor mode
 

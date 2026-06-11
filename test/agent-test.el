@@ -1864,5 +1864,13 @@ timestamp."
         (agent--session-teardown (current-buffer)))
       (should ran))))
 
+(ert-deftest agent-test-menu-backend-children ()
+  "Backend menu sections are built from registry slots."
+  (require 'agent-claude)
+  (require 'agent-codex)
+  (let ((children (agent-menu--backend-children nil)))
+    (should children)
+    (should (= (length children) 2))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here

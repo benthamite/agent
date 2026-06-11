@@ -164,7 +164,8 @@ Source: SVG Repo (CC0).")
   :start-session #'agent-codex--start-session
   :session-identity #'agent-codex--session-identity
   :restart-options #'agent-codex--restart-options
-  :sync-theme #'agent-codex--sync-theme)
+  :sync-theme #'agent-codex--sync-theme
+  :menu-suffixes #'agent-codex--menu-suffixes)
 
 ;;;; Functions
 
@@ -807,44 +808,11 @@ the Emacs side to match Claude Code's behavior."
 
 ;;;;; Extend unified menu
 
-(defun agent-codex--remove-menu-suffixes ()
-  "Remove Codex menu suffixes before appending them.
-`transient-append-suffix' mutates the prefix definition, so
-reloading this file can otherwise leave stale or duplicate
-entries in `agent-menu'."
-  (dolist (command '(agent-codex-resume
-                     agent-codex-fork
-                     agent-codex--infix-account))
-    (while (ignore-errors
-             (transient-get-suffix 'agent-menu command)
-             t)
-      (transient-remove-suffix 'agent-menu command))))
-
-(defun agent-codex--account-menu-location ()
-  "Return the menu location after which to insert the Codex account infix."
-  (if (ignore-errors
-        (transient-get-suffix 'agent-menu
-                              'agent-claude--infix-account)
-        t)
-      'agent-claude--infix-account
-    "-t"))
-
-(defun agent-codex--append-menu-suffixes ()
-  "Append Codex suffixes to `agent-menu' in a stable order."
-  (agent-codex--remove-menu-suffixes)
-  (transient-append-suffix 'agent-menu "x"
-    '("R" "codex resume" agent-codex-resume))
-  (transient-append-suffix 'agent-menu "R"
-    '("F" "codex fork" agent-codex-fork))
-  (transient-append-suffix 'agent-menu
-    (agent-codex--account-menu-location)
-    '("-x" agent-codex--infix-account)))
-
-(with-eval-after-load 'agent
-  (agent-codex--append-menu-suffixes))
-
-(with-eval-after-load 'agent-claude
-  (agent-codex--append-menu-suffixes))
+(defun agent-codex--menu-suffixes ()
+  "Return Codex suffix specs for the unified agent menu."
+  '(("R" "codex resume" agent-codex-resume)
+    ("F" "codex fork" agent-codex-fork)
+    ("-x" agent-codex--infix-account)))
 
 ;;;; Minor mode
 

@@ -2932,7 +2932,29 @@ selected account."
    ["Options"
     ("-A" agent--infix-alert-on-ready)
     ("-p" agent--infix-protect-buffers)
-    ("-t" agent--infix-sync-theme)]])
+    ("-t" agent--infix-sync-theme)]]
+  [:class transient-columns
+   :setup-children agent-menu--backend-children])
+
+(defun agent-menu--backend-children (_)
+  "Build one menu column per registered backend from its menu-suffixes slot."
+  (transient-parse-suffixes
+   'agent-menu
+   (apply #'vector
+          (delq nil (mapcar (lambda (entry)
+                              (agent-menu--backend-column (cdr entry)))
+                            (agent-menu--sorted-backends))))))
+
+(defun agent-menu--sorted-backends ()
+  "Return `agent-backends' sorted by name, independent of load order."
+  (sort (copy-sequence agent-backends)
+        (lambda (a b) (string< (car a) (car b)))))
+
+(defun agent-menu--backend-column (backend)
+  "Return a transient column vector for BACKEND, or nil when it has no suffixes."
+  (when-let* ((fn (agent-backend-menu-suffixes backend))
+              (specs (funcall fn)))
+    (apply #'vector (agent-backend-label backend) specs)))
 
 (transient-define-infix agent--infix-alert-on-ready ()
   "Toggle `agent-alert-on-ready'."
