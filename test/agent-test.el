@@ -1072,5 +1072,100 @@
                (lambda (_backend _key) nil)))
       (should-error (agent-start-session session) :type 'user-error))))
 
+;;;; Session state machine
+
+(ert-deftest agent-test-session-event-stop-marks-awaiting-input ()
+  "Transition sessions to awaiting-input on stop events."
+  (let ((agent-backends nil)
+        (agent-alert-on-ready nil))
+    (with-temp-buffer
+      (agent-session-event (current-buffer) 'stop)
+      (should (eq agent--session-state 'awaiting-input))
+      (should (floatp agent--session-state-changed-at)))))
+
+(ert-deftest agent-test-session-event-idle-prompt-alerts ()
+  "Fire the ready alert on idle-prompt events."
+  (let ((agent-backends nil)
+        notified)
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (cl-letf (((symbol-function 'agent-notify)
+                 (lambda (title message)
+                   (setq notified (list title message)))))
+        (agent-session-event (current-buffer) 'idle-prompt))
+      (should (eq agent--session-state 'awaiting-input))
+      (should (equal notified
+                     '("Session ready"
+                       "project: waiting for your response"))))))
+
+(ert-deftest agent-test-session-event-stop-does-not-alert ()
+  "Do not fire the ready alert on bare stop events."
+  (let ((agent-backends nil)
+        notified)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'agent-notify)
+                 (lambda (&rest args) (setq notified args))))
+        (agent-session-event (current-buffer) 'stop))
+      (should-not notified))))
+
+(ert-deftest agent-test-session-event-submit-marks-busy ()
+  "Return sessions to busy when input is submitted while awaiting input."
+  (with-temp-buffer
+    (setq-local agent--session-state 'awaiting-input)
+    (agent-session-event (current-buffer) 'submit)
+    (should (eq agent--session-state 'busy))))
+
+(ert-deftest agent-test-session-event-exit-request-marks-closing ()
+  "Mark sessions closing on exit-request events."
+  (with-temp-buffer
+    (agent-session-event (current-buffer) 'exit-request)
+    (should (eq agent--session-state 'closing))))
+
+(ert-deftest agent-test-session-event-records-transition-times ()
+  "Record a fresh timestamp on every session event."
+  (let ((agent-backends nil)
+        (agent-alert-on-ready nil))
+    (with-temp-buffer
+      (agent-session-event (current-buffer) 'stop)
+      (let ((first agent--session-state-changed-at))
+        (should (floatp first))
+        (agent-session-event (current-buffer) 'submit)
+        (should (>= agent--session-state-changed-at first))))))
+
+(ert-deftest agent-test-session-event-rejects-unknown-events ()
+  "Signal an error for unknown session events."
+  (with-temp-buffer
+    (should-error (agent-session-event (current-buffer) 'bogus))))
+
+(ert-deftest agent-test-session-event-ignores-dead-buffers ()
+  "Ignore session events delivered for killed buffers."
+  (let ((buf (generate-new-buffer "agent-dead-test")))
+    (kill-buffer buf)
+    (should-not (agent-session-event buf 'stop))))
+
+(ert-deftest agent-test-session-event-chain-suppresses-ready-alert ()
+  "Suppress the ready alert when the before-exit chain consumes the event."
+  (let ((agent-backends nil)
+        notified)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'agent-notify)
+                 (lambda (&rest args) (setq notified args)))
+                ((symbol-function 'agent-exit-after-before-exit-skill)
+                 (lambda (_backend _buffer) t)))
+        (agent-session-event (current-buffer) 'idle-prompt))
+      (should (eq agent--session-state 'awaiting-input))
+      (should-not notified))))
+
+(ert-deftest agent-test-session-event-submit-when-busy-is-noop ()
+  "Ignore submit events when the session is already busy.
+Backend submission hooks can multi-fire and fire on no-turn
+submissions; a redundant submit must not refresh the transition
+timestamp."
+  (with-temp-buffer
+    (setq-local agent--session-state 'busy)
+    (agent-session-event (current-buffer) 'submit)
+    (should (eq agent--session-state 'busy))
+    (should-not agent--session-state-changed-at)))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here

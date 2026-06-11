@@ -501,6 +501,14 @@ Excludes \"w\" and \"e\", which are reserved for actions in
 Set to the time (via `current-time') by the notification handler
 and cleared when input is sent.")
 
+(defvar-local agent--session-state 'busy
+  "Lifecycle state of this AI session buffer.
+One of the symbols `busy', `awaiting-input', and `closing'.
+Only `agent-session-event' may set this variable.")
+
+(defvar-local agent--session-state-changed-at nil
+  "Value of `float-time' at this session's last state transition.")
+
 (defvar agent--sync-theme-timer nil
   "Pending timer for deferred theme sync, or nil.")
 
@@ -941,6 +949,58 @@ configured alert style."
   "Clear the waiting-for-input flag in the current buffer."
   (when (bound-and-true-p agent--waiting-for-input)
     (setq agent--waiting-for-input nil)))
+
+;;;; Session state machine
+
+(defun agent-session-event (buffer event)
+  "Apply session EVENT to BUFFER's state machine.
+EVENT is one of the symbols `stop', `idle-prompt', `submit', and
+`exit-request'.  This function is the single owner of
+`agent--session-state'; backends translate raw CLI events into
+calls to it and never set session state directly.  A `submit'
+event delivered while BUFFER is already busy is ignored, because
+backend submission hooks can fire multiple times per submission
+and on submissions that start no turn."
+  (when (buffer-live-p buffer)
+    (pcase event
+      ((or 'stop 'idle-prompt)
+       (agent--session-event-awaiting-input buffer event))
+      ('submit
+       (unless (eq (buffer-local-value 'agent--session-state buffer) 'busy)
+         (agent--session-set-state buffer 'busy)))
+      ('exit-request
+       (agent--session-set-state buffer 'closing))
+      (_ (error "Unknown agent session event: %s" event)))))
+
+(defun agent--session-event-awaiting-input (buffer event)
+  "Transition BUFFER to `awaiting-input' and run the ready side effects.
+EVENT is `stop' or `idle-prompt'.  The before-exit chain is
+advanced first; when it consumes the event, the ready alert,
+scrolling, and display-name refresh are suppressed.  The ready
+alert fires only for `idle-prompt' events."
+  (agent--session-set-state buffer 'awaiting-input)
+  (unless (agent-exit-after-before-exit-skill
+           (agent--detect-backend buffer) buffer)
+    (when (eq event 'idle-prompt)
+      (agent--session-notify-ready buffer))
+    (agent--scroll-to-bottom buffer)
+    (agent--refresh-display-names-deferred)))
+
+(defun agent--session-set-state (buffer state)
+  "Set BUFFER's session state to STATE and record the transition time."
+  (with-current-buffer buffer
+    (setq agent--session-state state)
+    (setq agent--session-state-changed-at (float-time))))
+
+(defun agent--session-notify-ready (buffer)
+  "Fire the ready alert for session BUFFER via `agent-notify'."
+  (let* ((backend (agent--detect-backend buffer))
+         (label (or (and backend (agent--backend-get backend :label))
+                    "Session"))
+         (name (agent--session-name (buffer-name buffer))))
+    (agent-notify
+     (format "%s ready" label)
+     (format "%s: waiting for your response" name))))
 
 ;;;###autoload
 (defun agent-jump-to-waiting ()
@@ -2123,6 +2183,7 @@ terminate the CLI process and kill the buffer."
     (unless fn
       (user-error "Backend `%s' does not support `:exit'" backend))
     (when (agent--run-before-exit-functions backend buffer)
+      (agent-session-event buffer 'exit-request)
       (call-interactively fn))))
 
 ;;;###autoload
