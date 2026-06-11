@@ -394,14 +394,16 @@
                    '((string "$session-learning-capture")
                      (action :return))))))
 
-(ert-deftest agent-codex-test-send-return-clears-waiting-flag ()
-  "Clear stale waiting state when submitting the current Codex prompt."
-  (with-temp-buffer
-    (setq-local agent--waiting-for-input (current-time))
-    (cl-letf (((symbol-function 'codex--term-send-action) #'ignore)
-              ((symbol-function 'display-buffer) #'ignore))
-      (agent-codex-send-return (current-buffer)))
-    (should-not agent--waiting-for-input)))
+(ert-deftest agent-codex-test-send-return-sends-return-action ()
+  "Send the Codex return action when submitting the current prompt."
+  (let (actions)
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'codex--term-send-action)
+                 (lambda (_backend action &optional _payload)
+                   (push action actions)))
+                ((symbol-function 'display-buffer) #'ignore))
+        (agent-codex-send-return (current-buffer))))
+    (should (equal actions '(:return)))))
 
 (ert-deftest agent-codex-test-submit-command-delegates-to-codex-buffer-submit ()
   "Submit Codex command text through Codex's target-buffer primitive."
@@ -417,19 +419,40 @@
                    (list (list "$session-learning-capture"
                                expected-buffer))))))
 
-(ert-deftest agent-codex-test-on-command-submitted-clears-waiting-flag ()
-  "Clear stale waiting state in the buffer that received a submission."
+(ert-deftest agent-codex-test-install-hooks-registers-submitted-hook ()
+  "Register the submit-event translator on the upstream submitted hook."
+  (agent-codex--install-hooks)
+  (should (memq #'agent-codex--note-submission
+                codex-command-submitted-hook)))
+
+;;;; Session event translation
+
+(ert-deftest agent-codex-test-stop-marks-awaiting-input-and-alerts ()
+  "Mark Codex sessions awaiting input and alert on CLI Stop events."
+  (let ((buf (generate-new-buffer "*codex:/tmp/project/:default*"))
+        notified)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-notify)
+                   (lambda (title message)
+                     (setq notified (list title message)))))
+          (with-current-buffer buf
+            (setq-local agent--backend 'codex))
+          (agent-codex--handle-notification
+           (list :type "Stop" :buffer-name (buffer-name buf)))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input))
+          (should (equal notified
+                         '("Codex ready"
+                           "project: waiting for your response"))))
+      (kill-buffer buf))))
+
+(ert-deftest agent-codex-test-submitted-hook-emits-submit-event ()
+  "Return Codex sessions to busy when a command is submitted."
   (with-temp-buffer
     (let ((buf (current-buffer)))
-      (setq-local agent--waiting-for-input (current-time))
-      (agent-codex--on-command-submitted buf)
-      (should-not agent--waiting-for-input))))
-
-(ert-deftest agent-codex-test-install-hooks-registers-submitted-hook ()
-  "Register the waiting-state consumer on the upstream submitted hook."
-  (agent-codex--install-hooks)
-  (should (memq #'agent-codex--on-command-submitted
-                codex-command-submitted-hook)))
+      (setq-local agent--session-state 'awaiting-input)
+      (agent-codex--note-submission buf)
+      (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))))
 
 ;;;; Slack message action routing
 

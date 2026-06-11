@@ -266,7 +266,6 @@ Source: SVG Repo (CC0).")
   (when-let* ((codex-buffer (agent-codex--target-buffer buffer)))
     (with-current-buffer codex-buffer
       (sit-for 0.1)
-      (agent--clear-waiting-for-input)
       (codex--term-send-action codex-terminal-backend :return)
       (display-buffer codex-buffer))
     codex-buffer))
@@ -724,24 +723,20 @@ indicator, e.g. \"1 background terminal running\"."
 (defun agent-codex--handle-notification (message)
   "Handle a notification event from Codex CLI.
 MESSAGE is a plist with :type, :buffer-name, :json-data, and :args.
-The :type field is a string from the hook wrapper (e.g. \"Stop\")."
+The :type field is a string from the hook wrapper (e.g. \"Stop\").
+Codex's Stop fires when the CLI is back at its prompt, so it is
+translated into an `idle-prompt' session event."
   (let ((hook-type (plist-get message :type)))
     (when (member hook-type '("Stop" "Notification" "SessionStart"))
       (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
-        (with-current-buffer buf
-          (let ((name (agent--session-name (buffer-name))))
-            (pcase hook-type
-              ("Stop"
-               (setq agent--waiting-for-input (current-time))
-               (unless (agent-exit-after-before-exit-skill 'codex buf)
-                 (agent-notify
-                  "Codex ready"
-                  (format "%s: waiting for your response" name))
-                 (agent--scroll-to-bottom buf)))
-              ("Notification"
-               (agent-notify
-                "Codex"
-                (format "%s: needs your attention" name)))))))))
+        (pcase hook-type
+          ("Stop"
+           (agent-session-event buf 'idle-prompt))
+          ("Notification"
+           (agent-notify
+            "Codex"
+            (format "%s: needs your attention"
+                    (agent--session-name (buffer-name buf)))))))))
   nil)
 
 ;;;;; Skill runner
@@ -1394,17 +1389,12 @@ With prefix ARG, use Codex CLI's `--last' flag."
             #'agent-codex--sync-theme-before-start)
   (add-hook 'kill-buffer-hook #'agent--release-session-key)
   (add-hook 'kill-buffer-hook #'agent--refresh-display-names-deferred)
-  (add-hook 'codex-command-submitted-hook #'agent-codex--on-command-submitted))
+  (add-hook 'codex-command-submitted-hook #'agent-codex--note-submission))
 
-(defun agent-codex--on-command-submitted (buffer)
-  "Clear stale waiting state when input is submitted in BUFFER.
-Runs on `codex-command-submitted-hook', which may fire more than once
-per submission and also fires for submissions that start no turn, such
-as a local slash command or an empty Return; clearing the flag is
-idempotent, so repeated runs are harmless."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (agent--clear-waiting-for-input))))
+(defun agent-codex--note-submission (buffer)
+  "Emit a `submit' session event for Codex session BUFFER.
+Runs on `codex-command-submitted-hook' for every submission path."
+  (agent-session-event buffer 'submit))
 
 (agent-codex--install-hooks)
 
