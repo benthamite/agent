@@ -152,7 +152,7 @@ under `~/.claude/projects/<encoded-cwd>/'."
       (make-symbolic-link src dst))))
 
 (defun agent-claude-cli-project-dir (cwd)
-  "Return the `~/.claude/projects/' directory that Claude Code uses for CWD."
+  "Return the `~/.claude/projects/' directory Claude Code derives from CWD."
   (expand-file-name (agent-claude-cli-encode-project-cwd cwd)
                     "~/.claude/projects/"))
 
@@ -309,10 +309,10 @@ plist.  Only reads the first line of each file (fast)."
 (defconst agent-claude-cli-shared-claude-json-keys
   '("theme" "claudeInChromeDefaultEnabled"
     "hasCompletedClaudeInChromeOnboarding")
-  "Keys copied verbatim from canonical `~/.claude.json' into each
-account copy.  The `mcpServers' key is handled separately via
-per-server deep merge.  The `projects' key is handled separately
-via trust-aware merge logic.")
+  "Keys copied verbatim from canonical `~/.claude.json' to account copies.
+The `mcpServers' key is handled separately via per-server deep
+merge.  The `projects' key is handled separately via trust-aware
+merge logic.")
 
 (defun agent-claude-cli-merge-mcp-servers (canonical target)
   "Merge CANONICAL MCP servers into TARGET, preserving per-account env.

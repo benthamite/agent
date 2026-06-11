@@ -120,10 +120,11 @@ prompt for review without submitting it."
 PROJECT is an Epoch registry project plist.  Return the new session
 buffer with SLACK-URL inserted into its prompt, unsubmitted."
   (let ((dir (file-name-as-directory
-              (expand-file-name (plist-get project :directory)))))
+              (expand-file-name (plist-get project :directory))))
+        (label (when-let* ((struct (agent-backend backend)))
+                 (agent-backend-label struct))))
     (message "Starting %s for `%s' in %s..."
-             (agent--backend-get backend :label)
-             (plist-get project :id) dir)
+             label (plist-get project :id) dir)
     (let ((buffer (agent-start-session
                    (agent-session-create :backend backend :directory dir))))
       (agent-send-string slack-url buffer)
@@ -255,7 +256,9 @@ called with the selected project plist and Slack URL."
 
 (defun agent-slack--read-epoch-project-from-response
     (response projects slack-url callback)
-  "Read a project from RESPONSE and call CALLBACK with SLACK-URL."
+  "Read a project from RESPONSE and call CALLBACK with SLACK-URL.
+PROJECTS is the full Epoch registry project list used to resolve
+the ids extracted from RESPONSE."
   (let* ((ids (mapcar #'string-trim (split-string response "," t)))
          (candidates (agent-slack--ordered-epoch-project-candidates ids projects))
          (labels (mapcar #'agent-slack--epoch-project-label candidates))

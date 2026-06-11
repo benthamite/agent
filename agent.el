@@ -180,7 +180,7 @@ must include every key in `agent--required-backend-keys'."
     (while rest
       (let ((key (car rest)))
         (unless (and (keywordp key)
-                     (memq (agent--backend-keyword-slot key)
+                     (memq (intern (substring (symbol-name key) 1))
                            agent--backend-slot-names))
           (error "AI backend `%s' has unknown slot keyword `%S'" name key))
         (setq rest (cddr rest)))))
@@ -207,29 +207,14 @@ backend name symbol or nil."
               (setq agent--backend (car found)))
             (car found))))))
 
-(defun agent--backend-get (backend key)
-  "Return the slot named by keyword KEY in BACKEND's struct.
-BACKEND is a backend name symbol.  KEY is a keyword whose name,
-minus the leading colon, matches an `agent-backend' slot name.
-This is a compatibility shim during the struct migration; new
-code should call `agent-backend' slot accessors directly.
-Return nil when BACKEND is not registered."
-  (when-let* ((struct (agent-backend backend)))
-    (cl-struct-slot-value 'agent-backend
-                          (agent--backend-keyword-slot key)
-                          struct)))
-
-(defun agent--backend-keyword-slot (key)
-  "Return the `agent-backend' slot symbol named by keyword KEY."
-  (intern (substring (symbol-name key) 1)))
-
 (defun agent-backend-icon-string (backend &optional face)
   "Return the icon string for the backend named BACKEND.
 BACKEND is a backend name symbol.  FACE is passed to the icon
 function to control the rendering color; see `agent-svg-icon'.
 The icon slot can be a string or a function; if a function, it is
 called with FACE to produce the icon."
-  (let ((icon (agent--backend-get backend :icon)))
+  (let ((icon (when-let* ((struct (agent-backend backend)))
+                (agent-backend-icon struct))))
     (if (functionp icon) (funcall icon face) (or icon ""))))
 
 (defun agent-svg-icon (svg-data &optional face)
@@ -329,14 +314,15 @@ fresh.  Remaining OPTIONS are passed through to the backend, which may
 support extras such as `:fork' (Claude Code) or `:terminal-backend'
 \(Codex).  When SESSION carries an account, defensively sync its config
 home with `agent-account-sync' and bind `agent-account--starting'
-around the backend call so process-environment hooks see the account
+around the backend call so `process-environment' hooks see the account
 at spawn time.  Return the new session buffer."
   (ignore initial-prompt resume-id)
   (let* ((backend (agent-session-backend session))
          (account (or (agent-session-account session)
                       (setf (agent-session-account session)
                             (agent-account-resolve backend))))
-         (start (agent--backend-get backend :start-session)))
+         (start (when-let* ((struct (agent-backend backend)))
+                  (agent-backend-start-session struct))))
     (unless start
       (user-error "Backend `%s' does not support parameterized session start"
                   backend))
@@ -762,8 +748,8 @@ falling back to parsing the buffer name."
 (defun agent--qualified-session-name (buffer)
   "Return a qualified session name for BUFFER.
 Includes the instance name when present for disambiguation.
-Prefers BUFFER's `agent-session' fields, falling back to
-buffer-name parsing."
+Prefers BUFFER's `agent-session' fields, falling back to parsing
+the buffer's name."
   (let* ((session (agent-session buffer))
          (project (agent--buffer-session-name buffer))
          (instance
@@ -789,7 +775,8 @@ Returns the cached value when available."
   (let* ((name (agent--buffer-session-name buffer))
          (backend (agent--detect-backend buffer))
          (all-bufs (if backend
-                       (funcall (agent--backend-get backend :find-all-buffers))
+                       (funcall (agent-backend-find-all-buffers
+                                 (agent-backend backend)))
                      (agent--find-all-buffers)))
          (others (cl-remove buffer all-bufs))
          (sibling-names (mapcar #'agent--buffer-session-name others))
@@ -800,9 +787,8 @@ Returns the cached value when available."
 
 (defun agent--display-name-with-suffix (buffer backend base)
   "Return BASE plus BACKEND's display suffix for BUFFER, when any."
-  (if-let* ((suffix-fn (and backend
-                            (agent--backend-get backend
-                                                    :display-name-suffix)))
+  (if-let* ((struct (and backend (agent-backend backend)))
+            (suffix-fn (agent-backend-display-name-suffix struct))
             (suffix (funcall suffix-fn buffer)))
       (format "%s:%s" base suffix)
     base))
@@ -892,7 +878,8 @@ the backend's :label or symbol name."
   (let ((backend (agent--detect-backend buffer)))
     (or (when-let* ((session (agent-session buffer)))
           (agent-session-account session))
-        (agent--backend-get backend :label)
+        (when-let* ((struct (and backend (agent-backend backend))))
+          (agent-backend-label struct))
         (and backend (symbol-name backend))
         "Sessions")))
 
@@ -944,21 +931,21 @@ stale.  Waiting sessions whose backend reports work via
 
 (defun agent--backend-waiting-p (buffer backend)
   "Return non-nil when BACKEND reports BUFFER is accepting input."
-  (and backend
-       (when-let* ((fn (agent--backend-get backend :waiting-p)))
-         (funcall fn buffer))))
+  (when-let* ((struct (and backend (agent-backend backend)))
+              (fn (agent-backend-waiting-p struct)))
+    (funcall fn buffer)))
 
 (defun agent--backend-busy-p (buffer backend)
   "Return non-nil when BACKEND reports BUFFER is actively responding."
-  (and backend
-       (when-let* ((fn (agent--backend-get backend :busy-p)))
-         (funcall fn buffer))))
+  (when-let* ((struct (and backend (agent-backend backend)))
+              (fn (agent-backend-busy-p struct)))
+    (funcall fn buffer)))
 
 (defun agent--backend-background-tasks-p (buffer backend)
   "Return non-nil when BACKEND reports background work in BUFFER."
-  (and backend
-       (when-let* ((fn (agent--backend-get backend :background-tasks-p)))
-         (funcall fn buffer))))
+  (when-let* ((struct (and backend (agent-backend backend)))
+              (fn (agent-backend-background-tasks-p struct)))
+    (funcall fn buffer)))
 
 (defun agent--hash-to-sorted-alist (groups)
   "Convert GROUPS hash table to an alist sorted by key.
@@ -982,7 +969,7 @@ sessions appear without a heading."
   (let (labels)
     (dolist (entry agent-backends labels)
       (unless (agent-account-list (car entry))
-        (when-let* ((label (agent--backend-get (car entry) :label)))
+        (when-let* ((label (agent-backend-label (cdr entry))))
           (push label labels))))))
 
 (defun agent--interleave-group-headers (groups)
@@ -1121,10 +1108,11 @@ alert fires only for `idle-prompt' events."
 Dispatch through the backend's `:notify' function when one is
 registered, falling back to `agent-notify'."
   (let* ((backend (agent--detect-backend buffer))
-         (label (or (and backend (agent--backend-get backend :label))
+         (struct (and backend (agent-backend backend)))
+         (label (or (and struct (agent-backend-label struct))
                     "Session"))
          (name (agent--session-name (buffer-name buffer)))
-         (notify (or (and backend (agent--backend-get backend :notify))
+         (notify (or (and struct (agent-backend-notify struct))
                      #'agent-notify)))
     (funcall notify
              (format "%s ready" label)
@@ -1230,11 +1218,13 @@ BUFFER defaults to the current session buffer.  Prefer the
 backend's atomic `:submit'; fall back to `:send-string' followed
 by `:send-return' when the backend registers none."
   (let* ((buf (agent--resolve-session-buffer buffer))
-         (backend (agent--detect-backend buf)))
-    (if (agent--backend-get backend :submit)
+         (backend (agent--detect-backend buf))
+         (struct (and backend (agent-backend backend))))
+    (if (and struct (agent-backend-submit struct))
         (agent--dispatch-send :submit (list string) buf)
       (agent--dispatch-send :send-string (list string) buf)
-      (when-let* ((send-return-fn (agent--backend-get backend :send-return)))
+      (when-let* ((send-return-fn (and struct
+                                       (agent-backend-send-return struct))))
         (funcall send-return-fn buf)))))
 
 (defun agent-send-return (&optional buffer)
@@ -1250,7 +1240,11 @@ BUFFER is resolved with `agent--resolve-session-buffer' and
 appended to ARGS."
   (let* ((buf (agent--resolve-session-buffer buffer))
          (backend (agent--detect-backend buf))
-         (fn (and backend (agent--backend-get backend slot))))
+         (fn (when-let* ((struct (and backend (agent-backend backend))))
+               (pcase slot
+                 (:send-string (agent-backend-send-string struct))
+                 (:submit (agent-backend-submit struct))
+                 (:send-return (agent-backend-send-return struct))))))
     (unless fn
       (user-error "Backend `%s' does not support `%s'" backend slot))
     (agent-session-event buf 'submit)
@@ -1288,7 +1282,8 @@ appended to ARGS."
 (defun agent--session-candidate-label (buffer)
   "Return a completion label for session BUFFER."
   (let* ((backend (agent--detect-backend buffer))
-         (label (agent--backend-get backend :label))
+         (label (when-let* ((struct (and backend (agent-backend backend))))
+                  (agent-backend-label struct)))
          (account (when-let* ((session (agent-session buffer)))
                     (agent-session-account session))))
     (string-join (delq nil (list label account (agent-display-name buffer)))
@@ -1464,9 +1459,10 @@ starts."
 
 (defun agent--before-exit-ready-to-close-p (backend buffer)
   "Return non-nil when BUFFER can close after a before-exit skill.
-Backends may veto closing while the submitted command is still
+BACKEND may veto closing while the submitted command is still
 unaccepted at the prompt."
-  (if-let* ((fn (agent--backend-get backend :before-exit-ready-to-close-p)))
+  (if-let* ((struct (agent-backend backend))
+            (fn (agent-backend-before-exit-ready-to-close-p struct)))
       (funcall fn buffer)
     t))
 
@@ -1520,7 +1516,8 @@ A nil DIRECTORIES matches every session."
 
 (defun agent--before-exit-skill-duration-p (backend buffer)
   "Return non-nil if BACKEND session BUFFER is old enough."
-  (let* ((duration-ms-fn (agent--backend-get backend :duration-ms))
+  (let* ((duration-ms-fn (when-let* ((struct (agent-backend backend)))
+                           (agent-backend-duration-ms struct)))
          (duration-ms (when duration-ms-fn
                         (funcall duration-ms-fn buffer))))
     (or (not agent-before-exit-skill-min-duration-seconds)
@@ -1541,7 +1538,8 @@ _BACKEND is unused; the directory comes from BUFFER's
 (defun agent--before-exit-skill-command (backend entry)
   "Return the interactive command string for before-exit ENTRY on BACKEND.
 Append ENTRY's `:args' when present."
-  (when-let* ((prefix (agent--backend-get backend :skill-command-prefix)))
+  (when-let* ((struct (agent-backend backend))
+              (prefix (agent-backend-skill-command-prefix struct)))
     (let ((args (agent--before-exit-skill-entry-args entry)))
       (concat prefix (agent--before-exit-skill-entry-name entry)
               (and args (concat " " args))))))
@@ -1630,7 +1628,8 @@ skill plists, each augmented with `:backend'."
 (defun agent--skill-candidate (skill)
   "Return a unique completion candidate for SKILL."
   (let* ((backend (plist-get skill :backend))
-         (label (or (agent--backend-get backend :label)
+         (label (or (when-let* ((struct (agent-backend backend)))
+                      (agent-backend-label struct))
                     (symbol-name backend))))
     (propertize (format "%s [%s]" (plist-get skill :name) label)
                 'agent-skill skill)))
@@ -1718,7 +1717,8 @@ would trigger an instance-name prompt and break unattended loops."
 
 (defun agent--single-session-buffer-for-dir (backend dir)
   "Return the only BACKEND session buffer for DIR, or signal on ambiguity."
-  (let* ((find-fn (agent--backend-get backend :find-buffers-for-dir))
+  (let* ((find-fn (when-let* ((struct (agent-backend backend)))
+                    (agent-backend-find-buffers-for-dir struct)))
          (buffers (and find-fn (funcall find-fn dir))))
     (pcase buffers
       ('nil nil)
@@ -1794,7 +1794,8 @@ the backend next to each."
 
 (defun agent--run-skill (backend skill arguments)
   "Run SKILL plist with ARGUMENTS through BACKEND's run-prompt slot."
-  (let ((run (or (agent--backend-get backend :run-prompt)
+  (let ((run (or (when-let* ((struct (agent-backend backend)))
+                   (agent-backend-run-prompt struct))
                  (user-error "Backend `%s' does not register run-prompt"
                              backend)))
         (name (plist-get skill :name)))
@@ -1851,7 +1852,8 @@ file directly."
 Return a list of skill plists with :name, :description, :path,
 :style, and the argument metadata recognized by
 `agent-parse-skill-frontmatter'.  Later roots shadow earlier ones."
-  (let ((roots-fn (agent--backend-get backend :skill-roots))
+  (let ((roots-fn (when-let* ((struct (agent-backend backend)))
+                    (agent-backend-skill-roots struct)))
         (skills (make-hash-table :test #'equal)))
     (dolist (root (and roots-fn (funcall roots-fn)))
       (let ((dir (car root))
@@ -1917,7 +1919,8 @@ after each successful skill, and displays a summary when done."
                                :key (lambda (s) (plist-get s :name))
                                :test #'equal)
                       (list :name name :style 'slash)))
-           (run (agent--backend-get backend :run-prompt)))
+           (run (when-let* ((struct (agent-backend backend)))
+                  (agent-backend-run-prompt struct))))
       (message "Running audit %s..." name)
       (funcall run (agent--skill-prompt skill "--accept")
                :directory (plist-get state :dir)
@@ -2113,9 +2116,10 @@ session there with the backtrace prompt as the initial message."
   (let* ((dir (or (agent--package-source-directory package)
                   (user-error "Package `%s' not found" package)))
          (prompt (format "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
-                         backtrace-file)))
-    (message "Starting %s for `%s' in %s..."
-             (agent--backend-get backend :label) package dir)
+                         backtrace-file))
+         (label (when-let* ((struct (agent-backend backend)))
+                  (agent-backend-label struct))))
+    (message "Starting %s for `%s' in %s..." label package dir)
     (agent-start-session
      (agent-session-create :backend backend :directory dir)
      :initial-prompt prompt)))
@@ -2137,8 +2141,9 @@ prompt before the buffer is killed."
          (ignore-errors (kill-buffer buffer)))))))
 
 (defun agent--before-kill-allowed-p (backend buffer)
-  "Return non-nil when BACKEND allows killing session BUFFER."
-  (let ((check (agent--backend-get backend :before-kill-check)))
+  "Return non-nil when killing session BUFFER is allowed by BACKEND."
+  (let ((check (when-let* ((struct (agent-backend backend)))
+                 (agent-backend-before-kill-check struct))))
     (or (null check)
         (with-current-buffer buffer
           (funcall check buffer)))))
@@ -2187,11 +2192,13 @@ which one to use."
          (backend (agent-session-backend session))
          (buffer (current-buffer)))
     (when (agent--confirm-no-captured-prompts backend buffer "Restart")
-      (let* ((identity-fn (agent--backend-get backend :session-identity))
+      (let* ((struct (agent-backend backend))
+             (identity-fn (and struct (agent-backend-session-identity struct)))
              (session-id (or (and identity-fn (funcall identity-fn buffer))
                              (user-error "Current session has no session id")))
              (extra-options
-              (when-let* ((fn (agent--backend-get backend :restart-options)))
+              (when-let* ((fn (and struct
+                                   (agent-backend-restart-options struct))))
                 (funcall fn buffer)))
              (account (agent-restart--account
                        backend (agent-session-account session))))

@@ -93,9 +93,10 @@ already been inserted."
   (interactive (list nil current-prefix-arg))
   (let* ((session-buffer (agent--resolve-session-buffer buffer))
          (backend (agent--detect-backend session-buffer))
+         (struct (and backend (agent-backend backend)))
          (prompts (agent-capture--prompts
                    backend session-buffer include-inserted)))
-    (unless (agent--backend-get backend :send-string)
+    (unless (and struct (agent-backend-send-string struct))
       (user-error "Backend `%s' does not support prompt insertion" backend))
     (unless prompts
       (user-error "No captured prompts for this session"))
@@ -201,7 +202,7 @@ Return non-nil when ACTION may proceed."
         (save-buffer)))))
 
 (defun agent-capture--prompts (backend buffer &optional include-inserted)
-  "Return nonempty captured prompts for BACKEND session BUFFER.
+  "Return each nonempty captured prompt for BACKEND session BUFFER.
 When INCLUDE-INSERTED is non-nil, include prompts already marked
 as inserted."
   (let ((file (agent-capture--file backend buffer)))
@@ -258,7 +259,8 @@ non-nil, include prompts already marked as inserted."
     (point)))
 
 (defun agent-capture--select-prompt (prompts)
-  "Prompt for one of PROMPTS and return its plist."
+  "Select one captured entry via completion and return its plist.
+PROMPTS is the list of prompt plists offered as candidates."
   (let* ((candidates (mapcar #'agent-capture--prompt-candidate prompts))
          (choice (completing-read "Prompt: " candidates nil t)))
     (or (get-text-property 0 'agent-prompt choice)

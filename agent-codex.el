@@ -514,7 +514,7 @@ translated into an `idle-prompt' session event."
            (agent-session-event buf 'idle-prompt))
           ("Notification"
            (agent-notify
-            (agent--backend-get 'codex :label)
+            (agent-backend-label (agent-backend 'codex))
             (format "%s: needs your attention"
                     (agent--session-name (buffer-name buf)))))))))
   nil)
@@ -661,7 +661,7 @@ Codex exec has no slash expansion, so every root is file-style."
            append (list "--image" image)))
 
 (defun agent-codex--exec-process-environment (dir)
-  "Return the process environment for non-interactive Codex runs in DIR."
+  "Return the process environment for a non-interactive Codex run in DIR."
   (let* ((buffer-name (format "*codex-exec:%s*"
                               (file-name-nondirectory
                                (directory-file-name dir))))

@@ -152,29 +152,6 @@
     (should (equal captured-account "work"))
     (should (equal captured-resume-id "0c5e1c5e-claude-session"))))
 
-;;;; Sanitize buffer name
-
-(ert-deftest agent-claude-test-sanitize-buffer-name-replaces-special ()
-  "Non-alphanumeric characters (except _ and -) are replaced with underscores."
-  (with-temp-buffer
-    (rename-buffer "*claude:~/foo/bar/:default*" t)
-    (should (equal (agent-claude--sanitize-buffer-name)
-                   "_claude___foo_bar__default_"))))
-
-(ert-deftest agent-claude-test-sanitize-buffer-name-preserves-safe ()
-  "Alphanumeric characters, underscores, and hyphens are preserved."
-  (with-temp-buffer
-    (rename-buffer "hello_world-123" t)
-    (should (equal (agent-claude--sanitize-buffer-name)
-                   "hello_world-123"))))
-
-(ert-deftest agent-claude-test-sanitize-buffer-name-spaces ()
-  "Spaces are replaced with underscores."
-  (with-temp-buffer
-    (rename-buffer "my buffer name" t)
-    (should (equal (agent-claude--sanitize-buffer-name)
-                   "my_buffer_name"))))
-
 (ert-deftest agent-claude-test-status-file-name-avoids-sanitizer-collisions ()
   "Distinct buffer names get distinct status files in the UUID-less fallback."
   (let (file-a file-b)

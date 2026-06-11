@@ -15,17 +15,17 @@
 (defvar native-comp-enable-subr-trampolines)
 
 (defmacro agent-account-test--with-backend (spec &rest body)
-  "Run BODY with `agent--backend-get' serving SPEC for backend `stub'.
-SPEC is an expression evaluating to a plist of backend slot keywords.
-Also isolates the account cache and the starting binding."
+  "Run BODY with backend `stub' registered from SPEC.
+SPEC is an expression evaluating to a plist of `agent-backend' slot
+keywords, passed to the struct constructor.  Also isolates the
+account cache and the starting binding."
   (declare (indent 1))
-  `(let ((agent-account-test--spec ,spec)
+  `(let ((agent-backends
+          (list (cons 'stub
+                      (apply #'agent-backend--create :name 'stub ,spec))))
          (agent-account--current (make-hash-table :test #'eq))
          (agent-account--starting nil))
-     (cl-letf (((symbol-function 'agent--backend-get)
-                (lambda (_backend key)
-                  (plist-get agent-account-test--spec key))))
-       ,@body)))
+     ,@body))
 
 ;;;; Resolution order
 

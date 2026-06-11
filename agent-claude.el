@@ -473,10 +473,6 @@ show the unified session switcher."
       (when (and original current (not (string= original current)))
         (substring current 0 8)))))
 
-(defun agent-claude--refresh-display-names ()
-  "Recompute and cache display names for all Claude buffers."
-  (agent--refresh-display-names))
-
 ;;;;; Status polling
 
 (defun agent-claude-start-status-polling ()
@@ -632,7 +628,7 @@ the modeline reflects the new branch."
           (setq agent-claude--original-session-id new-id)
         (let ((old-id (plist-get agent-claude--status-data :session_id)))
           (when (and old-id (not (string= new-id old-id)))
-            (agent-claude--refresh-display-names)))))))
+            (agent--refresh-display-names)))))))
 
 (defun agent-claude--parse-status-file ()
   "Parse the status JSON file for the current buffer.
@@ -683,13 +679,6 @@ buffer name for sessions started before the UUID existed."
    (concat (secure-hash 'sha256 (or agent-claude--status-uuid (buffer-name)))
            ".json")
    agent-claude-status-directory))
-
-(defun agent-claude--sanitize-buffer-name ()
-  "Sanitize the current buffer name for use as a filename.
-Replaces every character that is not alphanumeric, underscore,
-or hyphen with an underscore, mirroring the shell script's
-`tr -c' invocation."
-  (replace-regexp-in-string "[^a-zA-Z0-9_-]" "_" (buffer-name)))
 
 (defun agent-claude--cleanup-status-file ()
   "Delete the status file for the current buffer."
@@ -1032,7 +1021,7 @@ alerts for permission_prompt and elicitation_dialog notifications."
   (when (eq (plist-get message :type) 'notification)
     (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
       (let ((name (agent--session-name (buffer-name buf)))
-            (label (agent--backend-get 'claude-code :label))
+            (label (agent-backend-label (agent-backend 'claude-code)))
             (ntype (agent-claude--notification-type
                     (plist-get message :json-data))))
         (pcase ntype
@@ -1585,7 +1574,7 @@ This is the `run-prompt' backend slot implementation."
                          (format "claude exited with exit code %s" code)))))))
 
 (defun agent-claude--batch-process-environment ()
-  "Return the process environment for non-interactive Claude runs."
+  "Return the process environment for a non-interactive Claude run."
   (if-let* ((account (agent-account-resolve 'claude-code))
             (env (agent-account-env 'claude-code account)))
       (append env
@@ -2261,7 +2250,7 @@ Returns a cons (PATH . BRANCH-NAME).  Signals an error on failure."
                                 "worktree" "add" "-b" branch-name
                                 (directory-file-name worktree-path))))
         (unless (zerop exit)
-          (error "git worktree add failed: %s"
+          (error "Git worktree add failed: %s"
                  (string-trim (buffer-string))))))))
 
 (defun agent-claude--current-session-id ()

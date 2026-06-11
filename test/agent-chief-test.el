@@ -101,16 +101,6 @@
     (should (equal (file-name-as-directory agent-chief-directory)
                    "/Users/pablostafforini/My Drive/Epoch/"))))
 
-(ert-deftest agent-chief-test-normalizes-legacy-json-system-prompt ()
-  "Replace the old JSON-only prompt when building current prompts."
-  (let ((agent-chief-system-prompt agent-chief--legacy-json-system-prompt)
-        (agent-chief-state-file "/tmp/missing-agent-chief-state"))
-    (let ((prompt (agent-chief--build-prompt)))
-      (should (equal agent-chief-system-prompt
-                     agent-chief--default-system-prompt))
-      (should (string-match-p "Return exactly this JSON shape" prompt))
-      (should-not (string-match-p "Return exactly one JSON object" prompt)))))
-
 (ert-deftest agent-chief-test-state-context-labels-old-plans-historical ()
   "Tell the model not to treat stale plan headings as active obligations."
   (let ((agent-chief-state-file (make-temp-file "agent-chief" nil ".org")))
@@ -128,16 +118,17 @@
 
 (ert-deftest agent-chief-test-run-backend-dispatches-to-codex ()
   "Dispatch a chief tick through the codex run-prompt slot."
-  (let ((agent-chief-backend 'codex)
+  (let ((agent-backends nil)
+        (agent-chief-backend 'codex)
         (agent-chief-directory "/tmp/")
         called)
-    (cl-letf (((symbol-function 'require) #'ignore)
-              ((symbol-function 'agent--backend-get)
-               (lambda (_backend key)
-                 (when (eq key :run-prompt)
-                   (cl-function
-                    (lambda (prompt &key directory callback)
-                      (setq called (list prompt directory callback))))))))
+    (apply #'agent-register-backend
+     'codex
+     (agent-chief-test--backend
+      :run-prompt (cl-function
+                   (lambda (prompt &key directory callback)
+                     (setq called (list prompt directory callback))))))
+    (cl-letf (((symbol-function 'require) #'ignore))
       (agent-chief--run-backend "Prompt" #'ignore)
       (should (equal (car called) "Prompt"))
       (should (equal (cadr called) "/tmp/")))))
@@ -153,17 +144,18 @@
 
 (ert-deftest agent-chief-test-stateless-tick-clears-flag-on-sync-error ()
   "Clear the in-flight flag when dispatch signals synchronously."
-  (let ((agent-chief-backend 'codex)
+  (let ((agent-backends nil)
+        (agent-chief-backend 'codex)
         (agent-chief-directory "/tmp/")
         (agent-chief--stateless-in-flight nil))
+    (apply #'agent-register-backend
+     'codex
+     (agent-chief-test--backend
+      :run-prompt (lambda (&rest _)
+                    (error "Codex program not found"))))
     (cl-letf (((symbol-function 'agent-chief--build-prompt)
                (lambda () "Prompt"))
-              ((symbol-function 'require) #'ignore)
-              ((symbol-function 'agent--backend-get)
-               (lambda (_backend key)
-                 (when (eq key :run-prompt)
-                   (lambda (&rest _)
-                     (error "Codex program not found"))))))
+              ((symbol-function 'require) #'ignore))
       (should-error (agent-chief-stateless-tick))
       (should-not agent-chief--stateless-in-flight))))
 

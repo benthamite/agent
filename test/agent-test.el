@@ -1327,19 +1327,12 @@
       (should (equal (agent-backend-label struct) "Spread"))
       (should (eq (agent-backend-start-session struct) #'ignore)))))
 
-(ert-deftest agent-test-backend-get-maps-keywords-to-slots ()
-  "Map legacy keyword lookups onto struct slots."
+(ert-deftest agent-test-backend-lookup-returns-nil-when-unregistered ()
+  "Return nil from `agent-backend' for unregistered backend names."
   (let ((agent-backends nil))
     (apply #'agent-register-backend 'one (agent-test--backend :program "one-cli"))
-    (should (equal (agent--backend-get 'one :program) "one-cli"))
-    (should (equal (agent--backend-get 'one :label) "Test"))
-    (should-not (agent--backend-get 'unregistered :label))))
-
-(ert-deftest agent-test-backend-get-rejects-unknown-slot-keyword ()
-  "Signal an error for shim lookups naming no struct slot."
-  (let ((agent-backends nil))
-    (apply #'agent-register-backend 'one (agent-test--backend))
-    (should-error (agent--backend-get 'one :not-a-slot))))
+    (should (equal (agent-backend-program (agent-backend 'one)) "one-cli"))
+    (should-not (agent-backend 'unregistered))))
 
 (ert-deftest agent-test-detect-backend-resolves-with-struct-registry ()
   "Resolve a buffer's backend through struct-based registrations."
@@ -1354,16 +1347,18 @@
 
 (ert-deftest agent-test-start-session-dispatches-to-backend ()
   "Dispatch session starts to the backend's start-session function."
-  (let* ((buffer (generate-new-buffer " *agent-test-session*"))
-         (session (agent-session-create :backend 'codex :directory "/tmp/"))
+  (let* ((agent-backends nil)
+         (buffer (generate-new-buffer " *agent-test-session*"))
+         (session (agent-session-create :backend 'one :directory "/tmp/"))
          captured)
     (unwind-protect
-        (cl-letf (((symbol-function 'agent--backend-get)
-                   (lambda (_backend key)
-                     (when (eq key :start-session)
-                       (lambda (sess &rest options)
-                         (setq captured (cons sess options))
-                         buffer)))))
+        (progn
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :start-session (lambda (sess &rest options)
+                             (setq captured (cons sess options))
+                             buffer)))
           (should (eq (agent-start-session session :resume-id "abc") buffer))
           (should (eq (car captured) session))
           (should (equal (plist-get (cdr captured) :resume-id) "abc")))
@@ -1371,10 +1366,9 @@
 
 (ert-deftest agent-test-start-session-rejects-unsupported-backend ()
   "Signal a user error for backends without start-session support."
-  (let ((session (agent-session-create :backend 'codex :directory "/tmp/")))
-    (cl-letf (((symbol-function 'agent--backend-get)
-               (lambda (_backend _key) nil)))
-      (should-error (agent-start-session session) :type 'user-error))))
+  (let ((agent-backends nil)
+        (session (agent-session-create :backend 'codex :directory "/tmp/")))
+    (should-error (agent-start-session session) :type 'user-error)))
 
 (ert-deftest agent-test-start-session-binds-starting-account ()
   "Bind `agent-account--starting' and sync before the backend start call."

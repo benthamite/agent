@@ -124,16 +124,6 @@ enter the state file through `agent-chief-set-day-plan' and
   :type 'boolean
   :group 'agent-chief)
 
-(defconst agent-chief--legacy-json-system-prompt
-  (concat
-   "You are Pablo's chief-of-staff agent. Your job is to decide whether "
-   "to contact him now based only on the supplied auditable context. Be "
-   "selective: contact him only when a timely nudge would help him stay "
-   "on track, avoid missing a commitment, or recover from drift. Never "
-   "invent obligations. Never claim to have checked a source that was not "
-   "included in the prompt. Return exactly one JSON object and no prose.")
-  "Old default prompt that incorrectly leaked the stateless JSON contract.")
-
 (defconst agent-chief--default-system-prompt
   (concat
    "You are Pablo's chief-of-staff agent. Your job is to help him follow "
@@ -344,8 +334,8 @@ slot, so the live session buffer stays reserved for conversation."
 
 (defun agent-chief--backend-buffers ()
   "Return buffers for `agent-chief-backend' in `agent-chief-directory'."
-  (when-let* ((fn (agent--backend-get agent-chief-backend
-                                      :find-buffers-for-dir)))
+  (when-let* ((struct (agent-backend agent-chief-backend))
+              (fn (agent-backend-find-buffers-for-dir struct)))
     (funcall fn (file-name-as-directory
                  (file-truename
                   (expand-file-name agent-chief-directory))))))
@@ -382,8 +372,9 @@ slot, so the live session buffer stays reserved for conversation."
   "Submit PROMPT to the chief-of-staff session BUFFER."
   (let* ((target (or buffer (agent-chief--session-buffer)
                      (agent-chief--ensure-session)))
-         (backend (buffer-local-value 'agent-chief--session-backend target)))
-    (unless (agent--backend-get backend :submit)
+         (backend (buffer-local-value 'agent-chief--session-backend target))
+         (struct (and backend (agent-backend backend))))
+    (unless (and struct (agent-backend-submit struct))
       (user-error "Backend %S cannot submit chief prompts" backend))
     (with-current-buffer target
       (setq agent--backend backend))
@@ -400,7 +391,6 @@ slot, so the live session buffer stays reserved for conversation."
 
 (defun agent-chief--session-heartbeat-prompt ()
   "Return the heartbeat prompt for the interactive chief session."
-  (agent-chief--normalize-system-prompt)
   (string-join
    (delq nil
          (list
@@ -454,7 +444,6 @@ contract."
 
 (defun agent-chief--build-prompt ()
   "Build the prompt for one chief-of-staff tick."
-  (agent-chief--normalize-system-prompt)
   (string-join
    (delq nil
          (list agent-chief-system-prompt
@@ -475,12 +464,6 @@ contract."
    "Use notify=false when no contact is warranted. Keep message under 700 "
    "characters. Leave state_update empty unless explicitly asked to draft "
    "a durable state note."))
-
-(defun agent-chief--normalize-system-prompt ()
-  "Replace stale JSON-oriented default prompt values in live sessions."
-  (when (equal agent-chief-system-prompt
-               agent-chief--legacy-json-system-prompt)
-    (setq agent-chief-system-prompt agent-chief--default-system-prompt)))
 
 (defun agent-chief--time-context ()
   "Return current time context for the chief-of-staff model."
@@ -533,7 +516,8 @@ contract."
 CALLBACK is called as (TEXT &key ERROR) per the normalized
 `run-prompt' backend slot contract."
   (agent-chief--require-backend)
-  (let ((run (agent--backend-get agent-chief-backend :run-prompt)))
+  (let ((run (when-let* ((struct (agent-backend agent-chief-backend)))
+               (agent-backend-run-prompt struct))))
     (unless run
       (user-error "Backend `%s' does not register a run-prompt slot"
                   agent-chief-backend))
@@ -624,7 +608,7 @@ CALLBACK is called as (TEXT &key ERROR) per the normalized
       (substring text start pos))))
 
 (defun agent-chief--decision-json-p (object)
-  "Return non-nil when OBJECT parses as a chief decision."
+  "Return non-nil when OBJECT is parseable as a chief decision."
   (condition-case nil
       (let ((decision (json-parse-string object :object-type 'plist)))
         (plist-member decision :notify))

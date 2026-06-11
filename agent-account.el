@@ -44,7 +44,13 @@
 (require 'transient)
 
 (defvar agent-backends)
-(declare-function agent--backend-get "agent" (backend key))
+(declare-function agent-backend "agent" (name))
+(declare-function agent-backend-account-env-var "agent" (struct))
+(declare-function agent-backend-account-file "agent" (struct))
+(declare-function agent-backend-account-init "agent" (struct))
+(declare-function agent-backend-accounts "agent" (struct))
+(declare-function agent-backend-canonical-home "agent" (struct))
+(declare-function agent-backend-shared-config-items "agent" (struct))
 
 ;;;; Variables
 
@@ -176,7 +182,7 @@ not configured."
 
 (defun agent-account--file (backend)
   "Return BACKEND's account persistence file, or nil."
-  (agent-account--backend-value backend :account-file))
+  (agent-account--backend-value backend #'agent-backend-account-file))
 
 ;;;; Environment
 
@@ -187,7 +193,8 @@ has no configured home.  This function is pure: it never touches
 the filesystem.  Config-home syncing happens in
 `agent-account-sync', which runs from selection, initialization,
 and `agent-start-session' -- never from process-environment hooks."
-  (when-let* ((var (agent--backend-get backend :account-env-var))
+  (when-let* ((struct (agent-backend backend))
+              (var (agent-backend-account-env-var struct))
               (home (agent-account-home backend account)))
     (list (format "%s=%s" var home))))
 
@@ -203,13 +210,16 @@ Return nil when ACCOUNT is nil or not configured."
 Each entry is (NAME . HOME-DIRECTORY).  The backend's accounts
 slot may hold an alist, a function returning one, or a symbol
 naming a variable holding one."
-  (agent-account--backend-value backend :accounts))
+  (agent-account--backend-value backend #'agent-backend-accounts))
 
-(defun agent-account--backend-value (backend key)
-  "Return BACKEND's KEY slot value, resolving indirections.
-Bound symbols are dereferenced and functions are called, so
-backend registrations can point at live defcustoms."
-  (let ((value (agent--backend-get backend key)))
+(defun agent-account--backend-value (backend accessor)
+  "Return BACKEND's slot read by ACCESSOR, resolving indirections.
+ACCESSOR is an `agent-backend' struct accessor function.  Bound
+symbols are dereferenced and functions are called, so backend
+registrations can point at live defcustoms.  Return nil when
+BACKEND is not registered."
+  (let ((value (when-let* ((struct (agent-backend backend)))
+                 (funcall accessor struct))))
     (cond
      ((and value (symbolp value) (boundp value)) (symbol-value value))
      ((functionp value) (funcall value))
@@ -229,7 +239,8 @@ failure."
     (condition-case err
         (progn
           (agent-account--ensure-shared-symlinks backend home)
-          (when-let* ((fn (agent--backend-get backend :account-init)))
+          (when-let* ((struct (agent-backend backend))
+                      (fn (agent-backend-account-init struct)))
             (funcall fn account)))
       (error
        (message "agent-account: failed to sync %s account %s: %S"
@@ -238,14 +249,16 @@ failure."
 (defun agent-account--ensure-shared-symlinks (backend home)
   "Ensure shared config symlinks exist in BACKEND's account HOME."
   (when-let* ((canonical (agent-account--canonical-home backend)))
-    (dolist (item (agent-account--backend-value backend :shared-config-items))
+    (dolist (item (agent-account--backend-value
+                   backend #'agent-backend-shared-config-items))
       (agent-account--ensure-shared-symlink
        (expand-file-name item canonical)
        (expand-file-name item home)))))
 
 (defun agent-account--canonical-home (backend)
   "Return BACKEND's canonical config home directory, or nil."
-  (when-let* ((dir (agent-account--backend-value backend :canonical-home)))
+  (when-let* ((dir (agent-account--backend-value
+                    backend #'agent-backend-canonical-home)))
     (expand-file-name dir)))
 
 (defun agent-account--ensure-shared-symlink (source target)
@@ -325,11 +338,11 @@ JSON file containing only `{}' or `[]' is virgin."
 The `backend' slot names the registered backend symbol."))
 
 (cl-defmethod transient-infix-read ((obj agent-account-variable))
-  "Prompt for one of the backend's accounts."
+  "Prompt for one of the accounts of OBJ's backend."
   (agent-account--prompt (oref obj backend)))
 
 (cl-defmethod transient-infix-set ((obj agent-account-variable) value)
-  "Persist VALUE as the backend's current account and sync its home."
+  "Persist VALUE as the current account of OBJ's backend and sync its home."
   (oset obj value value)
   (when value
     (agent-account-set (oref obj backend) value)
