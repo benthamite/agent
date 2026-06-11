@@ -96,13 +96,6 @@ session open."
   :type 'number
   :group 'agent)
 
-(defcustom agent-skill-command-prefix-alist
-  '((claude-code . "/")
-    (codex . "$"))
-  "Alist mapping backend symbols to interactive skill command prefixes."
-  :type '(alist :key-type symbol :value-type string)
-  :group 'agent)
-
 (defvar-local agent--before-exit nil
   "State of the before-exit skill chain in this session buffer.
 Nil when no chain has started.  Otherwise a plist with keys
@@ -1840,7 +1833,7 @@ _BACKEND is unused; the directory comes from BUFFER's
 (defun agent--before-exit-skill-command (backend entry)
   "Return the interactive command string for before-exit ENTRY on BACKEND.
 Append ENTRY's `:args' when present."
-  (when-let* ((prefix (alist-get backend agent-skill-command-prefix-alist)))
+  (when-let* ((prefix (agent--backend-get backend :skill-command-prefix)))
     (let ((args (agent--before-exit-skill-entry-args entry)))
       (concat prefix (agent--before-exit-skill-entry-name entry)
               (and args (concat " " args))))))
@@ -1912,17 +1905,17 @@ Recognizes :name, :description, :argument-hint, :argument-source,
     (_ plist)))
 
 (defun agent--discover-all-skills ()
-  "Discover skills from all registered backends.
-Calls each backend's `:discover-skills' function and returns a
-combined list of skill plists, each augmented with `:backend'."
+  "Discover user-invocable skills from all registered backends.
+Calls `agent-discover-skills' for each backend, filters out skills
+marked `user-invocable: false', and returns a combined list of
+skill plists, each augmented with `:backend'."
   (let (all-skills)
     (dolist (entry agent-backends)
-      (when-let* ((discover-fn (agent-backend-discover-skills (cdr entry))))
-        (dolist (skill (funcall discover-fn))
-          (unless (and (plist-member skill :user-invocable)
-                       (not (plist-get skill :user-invocable)))
-            (push (plist-put (copy-sequence skill) :backend (car entry))
-                  all-skills)))))
+      (dolist (skill (agent-discover-skills (car entry)))
+        (unless (and (plist-member skill :user-invocable)
+                     (not (plist-get skill :user-invocable)))
+          (push (plist-put (copy-sequence skill) :backend (car entry))
+                all-skills))))
     (sort all-skills (lambda (a b)
                        (string< (plist-get a :name) (plist-get b :name))))))
 
@@ -2088,25 +2081,99 @@ the backend next to each."
                    (unless (string-empty-p selected) selected)))
                 (hint
                  (let ((input (read-string (format "Arguments %s: " hint))))
-                   (unless (string-empty-p input) input)))))
-         (run-fn (agent--backend-get backend :run-skill)))
-    (unless run-fn
-      (user-error "Backend `%s' does not support `:run-skill'" backend))
-    (funcall run-fn (plist-get skill :name) args)))
+                   (unless (string-empty-p input) input))))))
+    (agent--run-skill backend skill args)))
+
+(defun agent--run-skill (backend skill arguments)
+  "Run SKILL plist with ARGUMENTS through BACKEND's run-prompt slot."
+  (let ((run (or (agent--backend-get backend :run-prompt)
+                 (user-error "Backend `%s' does not register run-prompt"
+                             backend)))
+        (name (plist-get skill :name)))
+    (message "Running skill %s..." name)
+    (funcall run (agent--skill-prompt skill arguments)
+             :directory default-directory
+             :callback
+             (cl-function
+              (lambda (text &key error)
+                (agent--display-skill-result name text error))))))
+
+(defun agent--skill-prompt (skill arguments)
+  "Return the CLI prompt for SKILL plist with ARGUMENTS.
+Skills from `slash' roots use the backend CLI's native slash
+expansion; skills from `file' roots point the CLI at the skill
+file directly."
+  (let ((name (plist-get skill :name))
+        (args (and arguments (not (string-empty-p arguments)) arguments)))
+    (if (eq (plist-get skill :style) 'slash)
+        (if args (format "/%s %s" name args) (format "/%s" name))
+      (format (string-join
+               '("Run the skill `%s`%s."
+                 ""
+                 "Skill file: %s"
+                 ""
+                 "Read the skill file first and follow its instructions exactly."
+                 "Resolve relative paths mentioned by the skill relative to the skill file's directory.%s")
+               "\n")
+              name
+              (if args (format " with these arguments: %s" args) "")
+              (plist-get skill :path)
+              (if args (format "\n\nArguments: %s" args) "")))))
+
+(defun agent--display-skill-result (name text error)
+  "Display skill NAME output TEXT, noting ERROR when non-nil."
+  (let ((buf (get-buffer-create (format "*Agent skill: %s*" name))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "#+title: %s — %s\n" name
+                        (format-time-string "%Y-%m-%d %H:%M:%S")))
+        (when error
+          (insert (format "#+error: %s\n" error)))
+        (insert "\n")
+        (insert (or text "(no output)"))
+        (unless (string-suffix-p "\n" (or text "")) (insert "\n")))
+      (org-mode)
+      (goto-char (point-min)))
+    (pop-to-buffer buf)
+    (message "Skill %s %s" name (if error (format "failed: %s" error) "complete"))))
+
+(defun agent-discover-skills (backend)
+  "Discover all skills for BACKEND from its registered skill roots.
+Return a list of skill plists with :name, :description, :path,
+:style, and the argument metadata recognized by
+`agent-parse-skill-frontmatter'.  Later roots shadow earlier ones."
+  (let ((roots-fn (agent--backend-get backend :skill-roots))
+        (skills (make-hash-table :test #'equal)))
+    (dolist (root (and roots-fn (funcall roots-fn)))
+      (let ((dir (car root))
+            (style (cdr root)))
+        (when (file-directory-p dir)
+          (dolist (file (file-expand-wildcards
+                         (expand-file-name "*/SKILL.md" dir)))
+            (when-let* ((meta (agent-parse-skill-frontmatter file))
+                        (name (plist-get meta :name)))
+              (puthash name (append meta (list :path file :style style))
+                       skills))))))
+    (let (result)
+      (maphash (lambda (_name skill) (push skill result)) skills)
+      (sort result (lambda (a b)
+                     (string< (plist-get a :name) (plist-get b :name)))))))
 
 ;;;###autoload
 (defun agent-post-push-ci (&optional commit)
   "Run the post-push CI closeout skill for COMMIT.
-When COMMIT is nil, use the current Git HEAD.  The selected backend
-must support `:run-skill'."
+When COMMIT is nil, use the current Git HEAD."
   (interactive)
   (let* ((backend (agent--resolve-backend))
-         (run-fn (agent--backend-get backend :run-skill))
-         (sha (or commit (agent--git-head)))
-         (args (format "--no-push --commit %s" sha)))
-    (unless run-fn
-      (user-error "Backend `%s' does not support `:run-skill'" backend))
-    (funcall run-fn "post-push-ci" args)))
+         (skill (or (cl-find "post-push-ci" (agent-discover-skills backend)
+                             :key (lambda (s) (plist-get s :name))
+                             :test #'equal)
+                    (user-error "Skill `post-push-ci' not found for `%s'"
+                                backend)))
+         (sha (or commit (agent--git-head))))
+    (agent--run-skill backend skill
+                      (format "--no-push --commit %s" sha))))
 
 (defun agent--git-head ()
   "Return the current Git HEAD SHA."

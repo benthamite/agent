@@ -314,39 +314,88 @@
 
 (ert-deftest agent-test-run-skill-distinguishes-backends ()
   "Run the selected backend skill when names collide."
-  (let ((agent-backends nil)
-        (ran nil))
-    (apply #'agent-register-backend
-     'one
-     (agent-test--backend
-      :label "One"
-      :discover-skills (lambda () (list (list :name "audit")))
-      :run-skill (lambda (name args) (setq ran (list 'one name args)))))
-    (apply #'agent-register-backend
-     'two
-     (agent-test--backend
-      :label "Two"
-      :discover-skills (lambda () (list (list :name "audit")))
-      :run-skill (lambda (name args) (setq ran (list 'two name args)))))
-    (cl-letf (((symbol-function 'completing-read)
-               (lambda (&rest _args) "audit [Two]")))
-      (agent-run-skill)
-      (should (equal ran '(two "audit" nil))))))
+  (let* ((agent-backends nil)
+         (dir-one (make-temp-file "agent-skills-one" t))
+         (dir-two (make-temp-file "agent-skills-two" t))
+         ran)
+    (unwind-protect
+        (progn
+          (dolist (dir (list dir-one dir-two))
+            (make-directory (expand-file-name "audit" dir) t)
+            (with-temp-file (expand-file-name "audit/SKILL.md" dir)
+              (insert "---\nname: audit\n---\nAudit.\n")))
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :label "One"
+            :skill-roots (lambda () (list (cons dir-one 'file)))
+            :run-prompt (cl-function
+                         (lambda (prompt &key directory callback)
+                           (ignore directory callback)
+                           (setq ran (list 'one prompt))))))
+          (apply #'agent-register-backend
+           'two
+           (agent-test--backend
+            :label "Two"
+            :skill-roots (lambda () (list (cons dir-two 'file)))
+            :run-prompt (cl-function
+                         (lambda (prompt &key directory callback)
+                           (ignore directory callback)
+                           (setq ran (list 'two prompt))))))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _args) "audit [Two]")))
+            (agent-run-skill)
+            (should (eq (car ran) 'two))
+            (should (string-match-p "audit" (cadr ran)))))
+      (delete-directory dir-one t)
+      (delete-directory dir-two t))))
 
 (ert-deftest agent-test-post-push-ci-runs-skill-for-head ()
   "Run post-push CI through the selected backend with the current HEAD."
-  (let ((agent-backends nil)
-        ran)
-    (apply #'agent-register-backend
-     'one
-     (agent-test--backend
-      :run-skill (lambda (name args) (setq ran (list name args)))))
-    (cl-letf (((symbol-function 'process-file)
-               (lambda (&rest _args)
-                 (insert "abc123\n")
-                 0)))
-      (agent-post-push-ci)
-      (should (equal ran '("post-push-ci" "--no-push --commit abc123"))))))
+  (let* ((agent-backends nil)
+         (root (make-temp-file "agent-skills" t))
+         (skill-file (expand-file-name "post-push-ci/SKILL.md" root))
+         ran)
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory skill-file) t)
+          (with-temp-file skill-file
+            (insert "---\nname: post-push-ci\n---\nClose the loop.\n"))
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :skill-roots (lambda () (list (cons root 'file)))
+            :run-prompt (cl-function
+                         (lambda (prompt &key directory callback)
+                           (ignore directory callback)
+                           (setq ran prompt)))))
+          (cl-letf (((symbol-function 'process-file)
+                     (lambda (&rest _args)
+                       (insert "abc123\n")
+                       0)))
+            (agent-post-push-ci)
+            (should (string-match-p (regexp-quote skill-file) ran))
+            (should (string-match-p "--no-push --commit abc123" ran))))
+      (delete-directory root t))))
+
+(ert-deftest agent-test-skill-result-does-not-modify-new-user-buffer ()
+  "Display skill output in a result buffer, not an unrelated new buffer."
+  (let ((unrelated (get-buffer-create "*agent-unrelated*"))
+        (result-buffer "*Agent skill: proofread*"))
+    (unwind-protect
+        (progn
+          (with-current-buffer unrelated
+            (erase-buffer)
+            (insert "#+title: User buffer\nBody\n"))
+          (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+            (agent--display-skill-result "proofread" "ok" nil))
+          (with-current-buffer unrelated
+            (should (equal (buffer-string) "#+title: User buffer\nBody\n")))
+          (should (get-buffer result-buffer)))
+      (when (buffer-live-p unrelated)
+        (kill-buffer unrelated))
+      (when-let* ((buf (get-buffer result-buffer)))
+        (kill-buffer buf)))))
 
 (ert-deftest agent-test-force-kill-buffer-ignores-query-functions ()
   "Kill buffers even when unrelated query functions would veto it."
@@ -654,6 +703,7 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "$"
           :send-command (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
@@ -671,7 +721,6 @@
         (agent-before-exit-skill-names '("update-log" "session-retro"))
         (agent-before-exit-skill-name nil)
         (agent-before-exit-skill-directories nil)
-        (agent-skill-command-prefix-alist '((codex . "$")))
         (events nil)
         exited)
     (with-temp-buffer
@@ -680,6 +729,7 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "$"
           :submit-command (lambda (cmd &optional _buffer) (push cmd events))))
         (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
                    (lambda (_buffer) nil))
@@ -711,6 +761,7 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "$"
           :submit-command (lambda (_cmd &optional _buffer))
           :before-exit-ready-to-close-p (lambda (_buffer) ready)))
         (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
@@ -743,6 +794,7 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "$"
           :submit-command (lambda (_cmd &optional _buffer))))
         (cl-letf (((symbol-function 'agent--exit-session)
                    (lambda (_buffer) (setq exited t)))
@@ -776,6 +828,7 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "$"
           :send-command (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
@@ -796,6 +849,7 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "$"
           :submit-command (lambda (cmd &optional _buffer)
                             (push (list 'submit cmd) events))
           :send-command (lambda (cmd &optional _buffer)
@@ -818,6 +872,7 @@
          'claude-code
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
           :send-command (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
@@ -896,6 +951,7 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "$"
           :duration-ms (lambda (_buffer) 60000)
           :send-command (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
@@ -917,6 +973,7 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "$"
           :send-command (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
@@ -1001,7 +1058,6 @@
 (ert-deftest agent-test-before-exit-step-advances-to-next-skill ()
   "Submit the next queued skill instead of exiting while the chain has more."
   (let ((agent-backends nil)
-        (agent-skill-command-prefix-alist '((one . "/")))
         (events nil)
         ran)
     (with-temp-buffer
@@ -1010,6 +1066,7 @@
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
           :submit-command (lambda (cmd &optional _buffer) (push cmd events))))
         (setq-local agent--before-exit
                     (list :queue (list (list "update-log" :args "--auto"))
@@ -1023,18 +1080,28 @@
         (should (eq (plist-get agent--before-exit :state) 'running))))))
 
 (ert-deftest agent-test-discover-all-skills-skips-non-invocable ()
-  "Do not expose skills marked `user-invocable: false'."
-  (let ((agent-backends nil))
-    (apply #'agent-register-backend
-     'one
-     (agent-test--backend
-      :discover-skills (lambda ()
-                         (list (list :name "visible")
-                               (list :name "hidden"
-                                     :user-invocable nil)))))
-    (should (equal (mapcar (lambda (skill) (plist-get skill :name))
-                           (agent--discover-all-skills))
-                   '("visible")))))
+  "Do not expose skills marked `user-invocable: false' interactively."
+  (let* ((agent-backends nil)
+         (root (make-temp-file "agent-skills" t)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "visible" root) t)
+          (with-temp-file (expand-file-name "visible/SKILL.md" root)
+            (insert "---\nname: visible\n---\n"))
+          (make-directory (expand-file-name "hidden" root) t)
+          (with-temp-file (expand-file-name "hidden/SKILL.md" root)
+            (insert "---\nname: hidden\nuser-invocable: false\n---\n"))
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :skill-roots (lambda () (list (cons root 'file)))))
+          (should (equal (mapcar (lambda (skill) (plist-get skill :name))
+                                 (agent-discover-skills 'one))
+                         '("hidden" "visible")))
+          (should (equal (mapcar (lambda (skill) (plist-get skill :name))
+                                 (agent--discover-all-skills))
+                         '("visible"))))
+      (delete-directory root t))))
 
 ;;;; Prompt capture
 

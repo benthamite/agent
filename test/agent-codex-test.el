@@ -678,7 +678,7 @@
             (insert "argument-hint: FILE\n")
             (insert "argument-source: references/*.org\n")
             (insert "---\n"))
-          (let ((meta (agent-codex--parse-skill-frontmatter file)))
+          (let ((meta (agent-parse-skill-frontmatter file)))
             (should (equal (plist-get meta :name) "proofread"))
             (should (equal (plist-get meta :argument-hint) "FILE"))
             (should (equal (plist-get meta :argument-source)
@@ -686,13 +686,14 @@
       (delete-file file))))
 
 (ert-deftest agent-codex-test-discover-skills-skips-non-invocable ()
-  "Do not expose Codex skills marked `user-invocable: false'."
+  "Discover non-invocable Codex skills but hide them from completion."
   (let* ((dir (make-temp-file "codex-skills" t))
          (codex-home (make-temp-file "codex-home" t))
          (visible (expand-file-name "visible/SKILL.md" dir))
          (hidden (expand-file-name "hidden/SKILL.md" dir))
          (process-environment
           (cons (format "CODEX_HOME=%s" codex-home) process-environment))
+         (agent-backends (list (assq 'codex agent-backends)))
          (agent-codex-skill-directories (list dir))
          (agent-codex-programmatic-skill-directories nil)
          (default-directory dir))
@@ -707,7 +708,10 @@
           (with-temp-file hidden
             (insert "---\nname: hidden\nuser-invocable: false\n---\n"))
           (should (equal (mapcar (lambda (skill) (plist-get skill :name))
-                                 (agent-codex--discover-skills))
+                                 (agent-discover-skills 'codex))
+                         '("hidden" "visible")))
+          (should (equal (mapcar (lambda (skill) (plist-get skill :name))
+                                 (agent--discover-all-skills))
                          '("visible"))))
       (delete-directory dir t)
       (delete-directory codex-home t))))
@@ -739,7 +743,7 @@
                     ((symbol-function 'agent-codex--codex-plugin-list)
                      (lambda (_codex-home) nil)))
             (should (equal (mapcar (lambda (skill) (plist-get skill :name))
-                                   (agent-codex--discover-skills))
+                                   (agent-discover-skills 'codex))
                            '("selected-only")))))
       (delete-directory dir t))))
 
@@ -788,7 +792,7 @@
                     ((symbol-function 'agent-codex--codex-plugin-list)
                      (lambda (_codex-home) plugin-list)))
             (should (equal (mapcar (lambda (skill) (plist-get skill :name))
-                                   (agent-codex--discover-skills))
+                                   (agent-discover-skills 'codex))
                            '("new-plugin")))))
       (delete-directory dir t))))
 
@@ -815,8 +819,13 @@
 (ert-deftest agent-codex-test-run-skill-uses-codex-exec ()
   "Run discovered skills through the non-interactive Codex path."
   (let* ((dir (make-temp-file "codex-skills" t))
+         (codex-home (make-temp-file "codex-home" t))
          (skill-file (expand-file-name "proofread/SKILL.md" dir))
+         (process-environment
+          (cons (format "CODEX_HOME=%s" codex-home) process-environment))
          (agent-codex-skill-directories (list dir))
+         (agent-codex-programmatic-skill-directories nil)
+         (default-directory dir)
          captured-prompt
          captured-dir)
     (unwind-protect
@@ -824,19 +833,24 @@
           (make-directory (file-name-directory skill-file) t)
           (with-temp-file skill-file
             (insert "---\nname: proofread\n---\nProofread the file.\n"))
-          (cl-letf (((symbol-function 'agent-codex--run-prompt)
-                     (lambda (prompt &rest kwargs)
-                       (setq captured-prompt prompt
-                             captured-dir (plist-get kwargs :dir))
-                       (funcall (plist-get kwargs :callback)
-                                '(:exit-code 0 :duration 0.1 :text "ok"))))
-                    ((symbol-function 'agent-codex--display-result)
-                     #'ignore))
-            (agent-codex-run-skill "proofread" "file.org"))
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                    ((symbol-function 'agent-codex--codex-plugin-list)
+                     (lambda (_codex-home) nil))
+                    ((symbol-function 'agent-codex-run-prompt)
+                     (cl-function
+                      (lambda (prompt &key directory callback)
+                        (ignore callback)
+                        (setq captured-prompt prompt
+                              captured-dir directory)))))
+            (let ((skill (cl-find "proofread" (agent-discover-skills 'codex)
+                                  :key (lambda (s) (plist-get s :name))
+                                  :test #'equal)))
+              (agent--run-skill 'codex skill "file.org")))
           (should (string-match-p (regexp-quote skill-file) captured-prompt))
           (should (string-match-p "Arguments: file.org" captured-prompt))
           (should (equal captured-dir default-directory)))
-      (delete-directory dir t))))
+      (delete-directory dir t)
+      (delete-directory codex-home t))))
 
 (ert-deftest agent-codex-test-run-prompt-slot-normalizes-success ()
   "Translate the rich codex result plist into the normalized callback."

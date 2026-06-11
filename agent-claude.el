@@ -238,8 +238,8 @@ Source: lobehub/lobe-icons (MIT).")
   :label "Claude Code"
   :run-prompt #'agent-claude-run-prompt
   :notify #'agent-claude-notify
-  :discover-skills #'agent-claude--discover-skills
-  :run-skill #'agent-claude-run-skill
+  :skill-roots #'agent-claude-skill-roots
+  :skill-command-prefix "/"
   :audit-project #'agent-claude-audit-project
   :debug-backtrace #'agent-claude-debug-backtrace
   :act-on-slack-message #'agent-claude-act-on-slack-message
@@ -1605,205 +1605,27 @@ This is the `run-prompt' backend slot implementation."
 
 ;;;;; Skill runner
 
-(defun agent-claude--discover-skills ()
-  "Discover available Claude Code skills.
-Scans `~/.claude/skills/' for global skills and the current
-project's `.claude/skills/' for project-local skills.  Also scans
-the current project's `.claude/programmatic-skills/' and
-`agent-claude-programmatic-skill-directories' for skills that
-should only be invoked through `agent-run-skill'.  Returns a
-list of plists, each with keys :name, :description,
-:argument-hint, :user-invocable, :path, :source.  Project skills
-shadow global skills with the same name."
-  (let* ((skills (make-hash-table :test #'equal))
-         (global-dir (expand-file-name "~/.claude/skills"))
-         (project-root (or (when-let* ((proj (project-current)))
+(defun agent-claude-skill-roots ()
+  "Return Claude skill roots as (DIRECTORY . STYLE) conses.
+Global and project skills run via native slash expansion;
+programmatic directories are pointed at by file."
+  (let* ((project-root (or (when-let* ((proj (project-current)))
                              (project-root proj))
                            (locate-dominating-file default-directory ".claude")
-                           (locate-dominating-file default-directory ".git")))
-         (project-dir (when project-root
-                        (expand-file-name ".claude/skills" project-root)))
-         (project-programmatic-dir
-          (when project-root
-            (expand-file-name ".claude/programmatic-skills" project-root))))
-    ;; Scan global skills first
-    (when (file-directory-p global-dir)
-      (dolist (file (file-expand-wildcards
-                     (expand-file-name "*/SKILL.md" global-dir)))
-        (when-let* ((meta (agent-parse-skill-frontmatter file))
-                    (name (plist-get meta :name)))
-          (puthash name (append meta (list :path file :source "global"))
-                   skills))))
-    ;; Project skills shadow global ones
-    (when (and project-dir (file-directory-p project-dir))
-      (dolist (file (file-expand-wildcards
-                     (expand-file-name "*/SKILL.md" project-dir)))
-        (when-let* ((meta (agent-parse-skill-frontmatter file))
-                    (name (plist-get meta :name)))
-          (puthash name (append meta (list :path file :source "project"))
-                   skills))))
-    (dolist (dir (append (when project-programmatic-dir
-                           (list project-programmatic-dir))
-                         agent-claude-programmatic-skill-directories))
-      (when (file-directory-p dir)
-        (dolist (file (file-expand-wildcards
-                       (expand-file-name "*/SKILL.md" dir)))
-          (when-let* ((meta (agent-parse-skill-frontmatter file))
-                      (name (plist-get meta :name)))
-            (puthash name
-                     (append meta (list :path file :source "programmatic"))
-                     skills)))))
-    ;; Filter to user-invocable and collect
-    (let (result)
-      (maphash (lambda (_name skill)
-                 ;; Include unless explicitly marked non-invocable
-                 (unless (and (plist-member skill :user-invocable)
-                              (not (plist-get skill :user-invocable)))
-                   (push skill result)))
-               skills)
-      (sort result (lambda (a b)
-                     (string< (plist-get a :name) (plist-get b :name)))))))
+                           (locate-dominating-file default-directory ".git"))))
+    (append
+     (list (cons (expand-file-name "~/.claude/skills") 'slash))
+     (when project-root
+       (list (cons (expand-file-name ".claude/skills" project-root) 'slash)
+             (cons (expand-file-name ".claude/programmatic-skills"
+                                     project-root)
+                   'file)))
+     (mapcar (lambda (dir) (cons dir 'file))
+             agent-claude-programmatic-skill-directories))))
 
-(defun agent-claude--skill-display-result (skill-name result
-                                                              &optional _buffers-before)
-  "Display RESULT plist in a buffer for SKILL-NAME.
-BUFFERS-BEFORE is ignored; results are always written to a
-dedicated buffer so unrelated user buffers are never modified."
-  (let ((meta-text (concat
-                     (format "#+cost: $%.4f\n" (plist-get result :cost))
-                     (format "#+duration: %.1fs\n" (plist-get result :duration))
-                     (if-let* ((sid (plist-get result :session-id)))
-                         (format "#+session: %s\n" sid)
-                       "")))
-        (buf (get-buffer-create (format "*Claude Skill: %s*" skill-name))))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (format "#+title: /%s — %s\n"
-                        skill-name
-                        (format-time-string "%Y-%m-%d %H:%M:%S")))
-        (insert meta-text)
-        (insert "\n")
-        (insert (or (plist-get result :text) "(no output)"))
-        (unless (string-suffix-p "\n" (or (plist-get result :text) ""))
-          (insert "\n")))
-      (org-mode)
-      (goto-char (point-min)))
-    (pop-to-buffer buf)
-    (message "/%s complete (%.1fs, $%.4f)"
-             skill-name
-             (plist-get result :duration)
-             (plist-get result :cost))))
-
-;;;###autoload
-(defun agent-claude-run-skill (skill-name &optional arguments dir)
-  "Run Claude Code skill SKILL-NAME non-interactively.
-ARGUMENTS is an optional string of arguments appended to the
-skill invocation.  DIR is the working directory for the process;
-defaults to `default-directory'.
-
-Interactively, prompts for the skill with completion, then for
-arguments if the skill declares an argument-hint or
-argument-source."
-  (interactive
-   (let* ((skills (agent-claude--discover-skills))
-          (_ (unless skills (user-error "No user-invocable skills found")))
-          (max-len (apply #'max (mapcar (lambda (s)
-                                          (length (plist-get s :name)))
-                                        skills)))
-          (annotate (lambda (cand)
-                      (when-let* ((skill (cl-find cand skills
-                                                  :key (lambda (s) (plist-get s :name))
-                                                  :test #'equal))
-                                  (desc (plist-get skill :description))
-                                  (source (plist-get skill :source)))
-                        (concat (make-string (- (+ max-len 2) (length cand)) ?\s)
-                                (propertize (format "[%s] " source)
-                                            'face 'font-lock-comment-face)
-                                (propertize desc 'face 'completions-annotations)))))
-          (name (completing-read
-                 "Skill: "
-                 (lambda (str pred action)
-                   (if (eq action 'metadata)
-                       `(metadata (annotation-function . ,annotate))
-                     (complete-with-action
-                      action
-                      (mapcar (lambda (s) (plist-get s :name)) skills)
-                      str pred)))))
-          (skill (cl-find name skills
-                          :key (lambda (s) (plist-get s :name))
-                          :test #'equal))
-          (hint (and skill (plist-get skill :argument-hint)))
-          (candidates (and skill
-                           (agent--skill-argument-candidates skill)))
-          (default (and skill (plist-get skill :argument-default)))
-          (multiple-p (and skill (plist-get skill :argument-multiple)))
-          (args (cond
-                 ;; Completion candidates available
-                 ((and candidates multiple-p)
-                  (let ((selected (completing-read-multiple
-                                   (format "Arguments %s: " (or hint ""))
-                                   candidates)))
-                    (when selected (string-join selected " "))))
-                 (candidates
-                  (let ((selected (completing-read
-                                   (format "Arguments%s: "
-                                           (cond
-                                            ((and hint default)
-                                             (format " %s (default %s)" hint default))
-                                            (hint (format " %s" hint))
-                                            (default (format " (default %s)" default))
-                                            (t "")))
-                                   candidates nil nil nil nil default)))
-                    (unless (string-empty-p selected) selected)))
-                 ;; No candidates but has a hint — free-form input
-                 (hint
-                  (let ((input (read-string (format "Arguments %s: " hint))))
-                    (unless (string-empty-p input) input))))))
-     (list name args nil)))
-  (let* ((skill (cl-find skill-name (agent-claude--discover-skills)
-                         :key (lambda (s) (plist-get s :name))
-                         :test #'equal))
-         (model (or (and skill (plist-get skill :model))
-                    agent-claude-run-skill-model))
-         (prompt (agent-claude--skill-prompt skill skill-name arguments))
-         (buffers-before (buffer-list)))
-    (message "Running /%s%s..." skill-name
-             (if (and skill (plist-get skill :model))
-                 (format " [%s]" model) ""))
-    (agent-claude--run-prompt
-     prompt
-     :dir (or dir default-directory)
-     :model model
-     :callback
-     (lambda (result)
-       (agent-claude--skill-display-result
-       skill-name result buffers-before)))))
-
-(defun agent-claude--skill-prompt (skill skill-name arguments)
-  "Return a Claude prompt for SKILL-NAME with ARGUMENTS.
-When SKILL comes from a programmatic-only directory, point Claude
-at the skill file directly instead of using a slash invocation."
-  (if (and skill (equal (plist-get skill :source) "programmatic"))
-      (format (string-join
-               '("Run the Claude skill `%s`%s."
-                 ""
-                 "Skill file: %s"
-                 ""
-                 "Read the skill file first and follow its instructions exactly."
-                 "Resolve relative paths mentioned by the skill relative to the skill file's directory.%s")
-               "\n")
-              (plist-get skill :name)
-              (if (and arguments (not (string-empty-p arguments)))
-                  (format " with these arguments: %s" arguments)
-                "")
-              (plist-get skill :path)
-              (if (and arguments (not (string-empty-p arguments)))
-                  (format "\n\nArguments: %s" arguments)
-                ""))
-    (if (and arguments (not (string-empty-p arguments)))
-        (format "/%s %s" skill-name arguments)
-      (format "/%s" skill-name))))
+(define-obsolete-function-alias 'agent-claude-run-skill #'agent-run-skill "0.2")
+(make-obsolete-variable 'agent-claude-run-skill-model
+                        'agent-claude-batch-model "0.2")
 
 ;;;;; Batch TODO processing
 

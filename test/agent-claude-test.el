@@ -547,31 +547,6 @@
     (should (= (plist-get result :cost) 0))
     (should (string-match-p "No assistant text captured" (plist-get result :text)))))
 
-(ert-deftest agent-claude-test-skill-result-does-not-modify-new-user-buffer ()
-  "Display skill output in a result buffer, not an unrelated new buffer."
-  (let ((existing (get-buffer-create "*agent-existing*"))
-        (unrelated (get-buffer-create "*agent-unrelated*"))
-        (result-buffer "*Claude Skill: proofread*"))
-    (unwind-protect
-        (progn
-          (with-current-buffer unrelated
-            (erase-buffer)
-            (insert "#+title: User buffer\nBody\n"))
-          (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
-            (agent-claude--skill-display-result
-             "proofread"
-             '(:cost 0.0 :duration 0.1 :text "ok")
-             (list existing)))
-          (with-current-buffer unrelated
-            (should (equal (buffer-string) "#+title: User buffer\nBody\n")))
-          (should (get-buffer result-buffer)))
-      (when (buffer-live-p unrelated)
-        (kill-buffer unrelated))
-      (when (buffer-live-p existing)
-        (kill-buffer existing))
-      (when-let* ((buf (get-buffer result-buffer)))
-        (kill-buffer buf)))))
-
 ;;;; Batch build args
 
 (ert-deftest agent-claude-test-batch-build-args-minimal ()

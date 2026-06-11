@@ -208,8 +208,8 @@ Source: SVG Repo (CC0).")
   :busy-p #'agent-codex--busy-p
   :label "Codex"
   :run-prompt #'agent-codex-run-prompt
-  :discover-skills #'agent-codex--discover-skills
-  :run-skill #'agent-codex-run-skill
+  :skill-roots #'agent-codex-skill-roots
+  :skill-command-prefix "$"
   :audit-project #'agent-codex-audit-project
   :debug-backtrace #'agent-codex-debug-backtrace
   :act-on-slack-message #'agent-codex-act-on-slack-message
@@ -554,6 +554,26 @@ translated into an `idle-prompt' session event."
 
 ;;;;; Skill runner
 
+(defun agent-codex-skill-roots ()
+  "Return Codex skill roots as (DIRECTORY . STYLE) conses.
+Codex exec has no slash expansion, so every root is file-style."
+  (let* ((codex-home (agent-codex--effective-codex-home))
+         (project-root (or (when-let* ((proj (project-current)))
+                             (project-root proj))
+                           (locate-dominating-file default-directory ".codex")
+                           (locate-dominating-file default-directory ".git"))))
+    (mapcar (lambda (dir) (cons dir 'file))
+            (append
+             (list (expand-file-name "skills" codex-home))
+             (when project-root
+               (list (expand-file-name ".agent/skills" project-root)
+                     (expand-file-name ".codex/skills" project-root)
+                     (expand-file-name ".codex/programmatic-skills"
+                                       project-root)))
+             (agent-codex--codex-plugin-skill-roots codex-home)
+             agent-codex-skill-directories
+             agent-codex-programmatic-skill-directories))))
+
 (defun agent-codex--codex-plugin-list (codex-home)
   "Return enabled-plugin metadata from `codex plugin list --json' for CODEX-HOME."
   (when-let* ((program (or codex-program (executable-find "codex"))))
@@ -629,108 +649,7 @@ translated into an `idle-prompt' session event."
           (push root roots))))
     (nreverse roots)))
 
-(defun agent-codex--discover-skills ()
-  "Discover available Codex skills.
-Scans the standard Codex skill directories, project-local skill
-directories, and any custom ones from
-`agent-codex-skill-directories' and
-`agent-codex-programmatic-skill-directories'."
-  (let* ((skills (make-hash-table :test #'equal))
-         (codex-home (agent-codex--effective-codex-home))
-         (project-root (or (when-let* ((proj (project-current)))
-                             (project-root proj))
-                           (locate-dominating-file default-directory ".codex")
-                           (locate-dominating-file default-directory ".git")))
-         (dirs (append
-                ;; Standard Codex skill locations
-                (list (expand-file-name "skills"
-                                        codex-home))
-                ;; Project-local
-                (when project-root
-                  (list (expand-file-name ".agent/skills" project-root)
-                        (expand-file-name ".codex/skills" project-root)
-                        (expand-file-name ".codex/programmatic-skills"
-                                          project-root)))
-                ;; Enabled plugin skills for the selected account.
-                (agent-codex--codex-plugin-skill-roots codex-home)
-                ;; Custom
-                agent-codex-skill-directories
-                agent-codex-programmatic-skill-directories)))
-    (dolist (dir dirs)
-      (when (file-directory-p dir)
-        (dolist (file (file-expand-wildcards
-                       (expand-file-name "*/SKILL.md" dir)))
-          (when-let* ((meta (agent-codex--parse-skill-frontmatter file))
-                      (name (plist-get meta :name)))
-            (unless (and (plist-member meta :user-invocable)
-                         (not (plist-get meta :user-invocable)))
-              (puthash name (append meta (list :path file :source dir))
-                       skills))))))
-    (let (result)
-      (maphash (lambda (_name skill) (push skill result)) skills)
-      (sort result (lambda (a b)
-                     (string< (plist-get a :name) (plist-get b :name)))))))
-
-(defun agent-codex--parse-skill-frontmatter (file)
-  "Parse YAML frontmatter from skill FILE and return a plist."
-  (agent-parse-skill-frontmatter file))
-
-(defun agent-codex--find-skill (skill-name)
-  "Return discovered metadata for SKILL-NAME, or nil."
-  (let ((name (string-remove-prefix "/" skill-name)))
-    (cl-find name (agent-codex--discover-skills)
-             :key (lambda (skill) (plist-get skill :name))
-             :test #'equal)))
-
-(defun agent-codex--skill-prompt (skill skill-name arguments)
-  "Return a prompt for running SKILL-NAME with ARGUMENTS.
-When SKILL metadata is available, point Codex at the skill file.
-Otherwise return a slash invocation for Codex-native skill lookup."
-  (if skill
-      (format (string-join
-               '("Run the Codex skill `%s`%s."
-                 ""
-                 "Skill file: %s"
-                 ""
-                 "Read the skill file first and follow its instructions exactly."
-                 "Resolve relative paths mentioned by the skill relative to the skill file's directory.%s")
-               "\n")
-              (plist-get skill :name)
-              (if (and arguments (not (string-empty-p arguments)))
-                  (format " with these arguments: %s" arguments)
-                "")
-              (plist-get skill :path)
-              (if (and arguments (not (string-empty-p arguments)))
-                  (format "\n\nArguments: %s" arguments)
-                ""))
-    (agent-codex--slash-invocation skill-name arguments)))
-
-(defun agent-codex--slash-invocation (skill-name arguments)
-  "Return a Codex slash invocation for SKILL-NAME and ARGUMENTS."
-  (let ((command (if (string-prefix-p "/" skill-name)
-                     skill-name
-                   (concat "/" skill-name))))
-    (if (and arguments (not (string-empty-p arguments)))
-        (format "%s %s" command arguments)
-      command)))
-
-(defun agent-codex--display-result (buffer-name title result)
-  "Display RESULT in BUFFER-NAME with TITLE."
-  (let ((buf (get-buffer-create buffer-name)))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (format "#+title: %s — %s\n"
-                        title
-                        (format-time-string "%Y-%m-%d %H:%M:%S")))
-        (insert (format "#+exit-code: %s\n" (plist-get result :exit-code)))
-        (insert (format "#+duration: %.1fs\n\n" (plist-get result :duration)))
-        (insert (or (plist-get result :text) "(no output)"))
-        (unless (string-suffix-p "\n" (or (plist-get result :text) ""))
-          (insert "\n")))
-      (org-mode)
-      (goto-char (point-min)))
-    (pop-to-buffer buf)))
+(define-obsolete-function-alias 'agent-codex-run-skill #'agent-run-skill "0.2")
 
 (defun agent-codex--build-exec-command (prompt dir)
   "Return the `codex exec' command for PROMPT in DIR."
@@ -837,32 +756,6 @@ This is the `run-prompt' backend slot implementation."
                 :error (unless (eq code 0)
                          (format "codex exited with exit code %s" code)))))))
 
-;;;###autoload
-(defun agent-codex-run-skill (skill-name &optional arguments)
-  "Run Codex skill SKILL-NAME with optional ARGUMENTS.
-Runs the skill non-interactively via `codex exec'."
-  (interactive
-   (let* ((skills (agent-codex--discover-skills))
-          (_ (unless skills (user-error "No skills found")))
-          (name (completing-read
-                 "Skill: "
-                 (mapcar (lambda (s) (plist-get s :name)) skills)
-                 nil t))
-          (args (read-string (format "Arguments for %s: " name))))
-     (list name (unless (string-empty-p args) args))))
-  (let* ((skill (agent-codex--find-skill skill-name))
-         (prompt (agent-codex--skill-prompt skill skill-name arguments)))
-    (message "Running Codex skill %s..." (agent-codex--slash-invocation skill-name nil))
-    (agent-codex--run-prompt
-     prompt
-     :dir default-directory
-     :callback
-     (lambda (result)
-       (agent-codex--display-result
-        (format "*Codex Skill: %s*" (string-remove-prefix "/" skill-name))
-        (format "Codex %s" (agent-codex--slash-invocation skill-name nil))
-        result)))))
-
 ;;;;; Project audit
 
 ;;;###autoload
@@ -886,9 +779,12 @@ via `codex exec'."
   (if (null (plist-get state :queue))
       (agent-codex--audit-finish state)
     (let* ((queue (plist-get state :queue))
-           (skill-name (car queue))
-           (skill (agent-codex--find-skill skill-name))
-           (prompt (agent-codex--skill-prompt skill skill-name "--accept")))
+           (skill-name (string-remove-prefix "/" (car queue)))
+           (skill (or (cl-find skill-name (agent-discover-skills 'codex)
+                               :key (lambda (s) (plist-get s :name))
+                               :test #'equal)
+                      (list :name skill-name :style 'slash)))
+           (prompt (agent--skill-prompt skill "--accept")))
       (message "Running Codex audit %s..." skill-name)
       (agent-codex--run-prompt
        prompt
