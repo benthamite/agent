@@ -591,23 +591,23 @@
       (kill-buffer buf))))
 
 (ert-deftest agent-codex-test-working-status-is-not-waiting ()
-  "Do not render stale Codex waiting flags while Codex is working."
+  "Do not display stale Codex waiting state while Codex is working."
   (let ((buf (generate-new-buffer "*codex-test*")))
     (unwind-protect
         (with-current-buffer buf
-          (setq-local agent--waiting-for-input (current-time))
+          (setq-local agent--session-state 'awaiting-input)
           (insert "• Working (20m 58s • esc to interrupt)\n")
-          (should-not (agent--session-waiting-p buf 'codex)))
+          (should (eq (agent-session-display-state buf 'codex) 'busy)))
       (kill-buffer buf))))
 
 (ert-deftest agent-codex-test-app-server-active-turn-is-not-waiting ()
-  "Do not render stale Codex waiting flags during app-server turns."
+  "Do not display stale Codex waiting state during app-server turns."
   (let ((buf (generate-new-buffer "*codex-test*")))
     (unwind-protect
         (with-current-buffer buf
-          (setq-local agent--waiting-for-input (current-time))
+          (setq-local agent--session-state 'awaiting-input)
           (setq-local codex--app-server-turn-active-p t)
-          (should-not (agent--session-waiting-p buf 'codex)))
+          (should (eq (agent-session-display-state buf 'codex) 'busy)))
       (kill-buffer buf))))
 
 (ert-deftest agent-codex-test-app-server-active-prompt-is-background-waiting ()
@@ -617,21 +617,21 @@
         (with-current-buffer buf
           (insert "❯ ")
           (setq-local codex--app-server-turn-active-p t)
-          (setq-local codex--app-server-input-marker (copy-marker (point-max) nil))
-          (should (agent--session-waiting-p buf 'codex))
-          (should (eq (agent--waiting-face buf 'codex)
-                      'agent-waiting-with-background)))
+          (setq-local codex--app-server-input-marker
+                      (copy-marker (point-max) nil))
+          (should (eq (agent-session-display-state buf 'codex)
+                      'background-waiting)))
       (kill-buffer buf))))
 
-(ert-deftest agent-codex-test-waiting-face-uses-background-work ()
-  "Show Codex waiting sessions with background work as background-work."
+(ert-deftest agent-codex-test-waiting-with-background-work-is-amber ()
+  "Show waiting Codex sessions with background work as background waiting."
   (let ((buf (generate-new-buffer "*codex-test*")))
     (unwind-protect
-        (progn
-          (with-current-buffer buf
-            (insert "• Working (13m 19s) · 2 background terminals running\n"))
-          (should (eq (agent--waiting-face buf 'codex)
-                      'agent-waiting-with-background)))
+        (with-current-buffer buf
+          (setq-local agent--session-state 'awaiting-input)
+          (insert "  · 2 background terminals running\n")
+          (should (eq (agent-session-display-state buf 'codex)
+                      'background-waiting)))
       (kill-buffer buf))))
 
 (ert-deftest agent-codex-test-notify-uses-agent-alert ()

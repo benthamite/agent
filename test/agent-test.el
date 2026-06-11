@@ -211,8 +211,91 @@
         (should (equal (mapcar #'car (agent--group-sessions-by-account))
                        '("work")))))))
 
-(ert-deftest agent-test-waiting-face-detects-background-work ()
-  "Use the background-work face when the backend reports work."
+;;;; Display state
+
+(ert-deftest agent-test-display-state-busy-by-default ()
+  "Report busy for sessions without waiting state."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (should (eq (agent-session-display-state (current-buffer)) 'busy)))))
+
+(ert-deftest agent-test-display-state-waiting-after-awaiting-input ()
+  "Report waiting once the session state machine awaits input."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (setq-local agent--session-state 'awaiting-input)
+      (should (eq (agent-session-display-state (current-buffer)) 'waiting)))))
+
+(ert-deftest agent-test-display-state-busy-backend-suppresses-stale-waiting ()
+  "Suppress stale waiting state while the backend reports busy."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :busy-p (lambda (_buffer) t)))
+        (setq-local agent--session-state 'awaiting-input)
+        (should (eq (agent-session-display-state buf) 'busy))))))
+
+(ert-deftest agent-test-display-state-background-tasks-mark-amber ()
+  "Report background-waiting for waiting sessions with background work."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :background-tasks-p (lambda (_buffer) t)))
+        (setq-local agent--session-state 'awaiting-input)
+        (should (eq (agent-session-display-state buf)
+                    'background-waiting))))))
+
+(ert-deftest agent-test-display-state-steering-overrides-busy ()
+  "Report background-waiting for busy sessions accepting steering input."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :waiting-p (lambda (_buffer) t)
+          :busy-p (lambda (_buffer) t)
+          :background-tasks-p (lambda (_buffer) t)))
+        (should (eq (agent-session-display-state buf)
+                    'background-waiting))))))
+
+(ert-deftest agent-test-jump-to-waiting-picks-most-recent ()
+  "Jump to the session that most recently started waiting."
+  (let ((agent-backends nil)
+        (a (generate-new-buffer "agent-wait-a"))
+        (b (generate-new-buffer "agent-wait-b"))
+        switched)
+    (unwind-protect
+        (progn
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :buffer-p (lambda (candidate) (memq candidate (list a b)))
+            :find-all-buffers (lambda () (list a b))))
+          (with-current-buffer a
+            (setq-local agent--session-state 'awaiting-input)
+            (setq-local agent--session-state-changed-at 100.0))
+          (with-current-buffer b
+            (setq-local agent--session-state 'awaiting-input)
+            (setq-local agent--session-state-changed-at 200.0))
+          (cl-letf (((symbol-function 'switch-to-buffer)
+                     (lambda (buffer) (setq switched buffer))))
+            (agent-jump-to-waiting))
+          (should (eq switched b)))
+      (kill-buffer a)
+      (kill-buffer b))))
+
+(ert-deftest agent-test-waiting-with-background-work-displays-amber ()
+  "Use the background-waiting state when the backend reports work."
   (let ((agent-backends nil))
     (with-temp-buffer
       (let ((buf (current-buffer)))
@@ -222,8 +305,9 @@
           :buffer-p (lambda (candidate) (eq candidate buf))
           :find-all-buffers (lambda () (list buf))
           :background-tasks-p (lambda (_buffer) t)))
-        (should (eq (agent--waiting-face buf 'one)
-                    'agent-waiting-with-background))))))
+        (setq-local agent--session-state 'awaiting-input)
+        (should (eq (agent-session-display-state buf 'one)
+                    'background-waiting))))))
 
 ;;;; Skills
 
@@ -1099,6 +1183,46 @@
       (should (equal notified
                      '("Session ready"
                        "project: waiting for your response"))))))
+
+(ert-deftest agent-test-notify-ready-dispatches-backend-notify ()
+  "Dispatch the ready alert through the backend's notify slot."
+  (let ((agent-backends nil)
+        notified fallback)
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :notify (lambda (title message)
+                    (setq notified (list title message)))))
+        (cl-letf (((symbol-function 'agent-notify)
+                   (lambda (&rest args) (setq fallback args))))
+          (agent--session-notify-ready buf))
+        (should (equal notified
+                       '("Test ready"
+                         "project: waiting for your response")))
+        (should-not fallback)))))
+
+(ert-deftest agent-test-notify-ready-falls-back-to-agent-notify ()
+  "Fall back to `agent-notify' when the backend lacks a notify slot."
+  (let ((agent-backends nil)
+        notified)
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))))
+        (cl-letf (((symbol-function 'agent-notify)
+                   (lambda (title message)
+                     (setq notified (list title message)))))
+          (agent--session-notify-ready buf))
+        (should (equal notified
+                       '("Test ready"
+                         "project: waiting for your response")))))))
 
 (ert-deftest agent-test-session-event-stop-does-not-alert ()
   "Do not fire the ready alert on bare stop events."

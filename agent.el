@@ -497,11 +497,6 @@ Excludes \"w\" and \"e\", which are reserved for actions in
 (defvar-local agent--display-name-cache nil
   "Cached display name for the modeline.")
 
-(defvar-local agent--waiting-for-input nil
-  "Non-nil when this AI session is waiting for user input.
-Set to the time (via `current-time') by the notification handler
-and cleared when input is sent.")
-
 (defvar-local agent--session-state 'busy
   "Lifecycle state of this AI session buffer.
 One of the symbols `busy', `awaiting-input', and `closing'.
@@ -795,27 +790,44 @@ name."
          (name (agent-display-name buf))
          (label (if (and icon (not (string-empty-p icon)))
                     (format "%s %s" icon name) name))
-         (waiting (agent--session-waiting-p buf backend))
+         (state (agent-session-display-state buf backend))
          (cmd (make-symbol (format "ai-switch-%s" key)))
          (spec (list key label cmd)))
-    (when waiting
+    (unless (eq state 'busy)
       (setq spec (append spec
-                         (list :face (agent--waiting-face buf backend)))))
+                         (list :face (if (eq state 'background-waiting)
+                                         'agent-waiting-with-background
+                                       'agent-waiting)))))
     (fset cmd (lambda () (interactive) (switch-to-buffer buf)))
     spec))
 
-(defun agent--session-waiting-p (buffer backend)
+(defun agent--session-waiting-p (buffer &optional backend)
   "Return non-nil when BUFFER is waiting for input.
-BACKEND may provide `:busy-p' to suppress a stale waiting flag
-while the session is actively responding.  BACKEND may provide
-`:waiting-p' to report input readiness directly."
-  (let ((backend-waiting (agent--backend-waiting-p buffer backend)))
-    (and (or backend-waiting
-             (buffer-local-value 'agent--waiting-for-input buffer))
-         (or backend-waiting
-             (not (and backend
-                       (when-let* ((fn (agent--backend-get backend :busy-p)))
-                         (funcall fn buffer))))))))
+BACKEND defaults to the detected backend."
+  (not (eq (agent-session-display-state buffer backend) 'busy)))
+
+(defun agent-session-display-state (buffer &optional backend)
+  "Return the switcher display state for session BUFFER.
+BACKEND defaults to the detected backend.  The result is one of
+the symbols `busy', `waiting', and `background-waiting'.  A
+session counts as waiting when its backend reports an input
+prompt directly via `:waiting-p' (an active turn that accepts
+steering input), or when `agent--session-state' is
+`awaiting-input' and the backend's `:busy-p' does not veto it as
+stale.  Waiting sessions whose backend reports work via
+`:background-tasks-p' display as `background-waiting'."
+  (let* ((backend (or backend (agent--detect-backend buffer)))
+         (backend-waiting (agent--backend-waiting-p buffer backend))
+         (awaiting (eq (buffer-local-value 'agent--session-state buffer)
+                       'awaiting-input)))
+    (cond
+     ((and (not backend-waiting)
+           (or (not awaiting)
+               (agent--backend-busy-p buffer backend)))
+      'busy)
+     ((agent--backend-background-tasks-p buffer backend)
+      'background-waiting)
+     (t 'waiting))))
 
 (defun agent--backend-waiting-p (buffer backend)
   "Return non-nil when BACKEND reports BUFFER is accepting input."
@@ -823,17 +835,17 @@ while the session is actively responding.  BACKEND may provide
        (when-let* ((fn (agent--backend-get backend :waiting-p)))
          (funcall fn buffer))))
 
-(defun agent--waiting-face (buffer backend)
-  "Return the face for BUFFER's waiting indicator.
-Uses `agent-waiting-with-background' when BACKEND reports
-that BUFFER has active background tasks, `agent-waiting'
-otherwise."
-  (if (and backend
-           (when-let* ((fn (agent--backend-get
-                            backend :background-tasks-p)))
-             (funcall fn buffer)))
-      'agent-waiting-with-background
-    'agent-waiting))
+(defun agent--backend-busy-p (buffer backend)
+  "Return non-nil when BACKEND reports BUFFER is actively responding."
+  (and backend
+       (when-let* ((fn (agent--backend-get backend :busy-p)))
+         (funcall fn buffer))))
+
+(defun agent--backend-background-tasks-p (buffer backend)
+  "Return non-nil when BACKEND reports background work in BUFFER."
+  (and backend
+       (when-let* ((fn (agent--backend-get backend :background-tasks-p)))
+         (funcall fn buffer))))
 
 (defun agent--hash-to-sorted-alist (groups)
   "Convert GROUPS hash table to an alist sorted by key.
@@ -946,11 +958,6 @@ configured alert style."
          (t
           (message "No Emacs sound support or `agent-alert-sound-player'")))))))
 
-(defun agent--clear-waiting-for-input (&rest _)
-  "Clear the waiting-for-input flag in the current buffer."
-  (when (bound-and-true-p agent--waiting-for-input)
-    (setq agent--waiting-for-input nil)))
-
 ;;;; Session state machine
 
 (defun agent-session-event (buffer event)
@@ -994,14 +1001,18 @@ alert fires only for `idle-prompt' events."
     (setq agent--session-state-changed-at (float-time))))
 
 (defun agent--session-notify-ready (buffer)
-  "Fire the ready alert for session BUFFER via `agent-notify'."
+  "Fire the ready alert for session BUFFER.
+Dispatch through the backend's `:notify' function when one is
+registered, falling back to `agent-notify'."
   (let* ((backend (agent--detect-backend buffer))
          (label (or (and backend (agent--backend-get backend :label))
                     "Session"))
-         (name (agent--session-name (buffer-name buffer))))
-    (agent-notify
-     (format "%s ready" label)
-     (format "%s: waiting for your response" name))))
+         (name (agent--session-name (buffer-name buffer)))
+         (notify (or (and backend (agent--backend-get backend :notify))
+                     #'agent-notify)))
+    (funcall notify
+             (format "%s ready" label)
+             (format "%s: waiting for your response" name))))
 
 ;;;###autoload
 (defun agent-jump-to-waiting ()
@@ -1010,11 +1021,10 @@ alert fires only for `idle-prompt' events."
   (let (best-buf best-time)
     (dolist (buf (agent--find-all-buffers))
       (when (buffer-live-p buf)
-        (let* ((backend (agent--detect-backend buf))
-               (ts (and backend
-                        (agent--session-waiting-p buf backend)
-                        (buffer-local-value 'agent--waiting-for-input buf))))
-          (when (and ts (or (null best-time) (time-less-p best-time ts)))
+        (let ((ts (and (agent--session-waiting-p buf)
+                       (buffer-local-value 'agent--session-state-changed-at
+                                           buf))))
+          (when (and ts (or (null best-time) (> ts best-time)))
             (setq best-buf buf best-time ts)))))
     (if best-buf
         (switch-to-buffer best-buf)
