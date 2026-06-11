@@ -8,6 +8,7 @@
 (require 'json)
 (require 'agent-account)
 (require 'agent-claude)
+(require 'agent-capture)
 
 ;;;; Handoff
 

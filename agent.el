@@ -469,34 +469,6 @@ that function is available."
   :type 'string
   :group 'agent)
 
-(define-obsolete-variable-alias 'agent-claude-debug-slack-message-model
-  'agent-act-on-slack-message-model "0.2")
-(define-obsolete-variable-alias 'agent-claude-act-on-slack-message-model
-  'agent-act-on-slack-message-model "0.2")
-(make-obsolete-variable 'agent-codex-debug-slack-message-model
-                        'agent-act-on-slack-message-model "0.2")
-(make-obsolete-variable 'agent-codex-act-on-slack-message-model
-                        'agent-act-on-slack-message-model "0.2")
-
-(defcustom agent-act-on-slack-message-model 'gemini-flash-lite-latest
-  "GPtel model for selecting an Epoch project from a Slack message."
-  :type 'symbol
-  :group 'agent)
-
-(define-obsolete-variable-alias 'agent-claude-debug-slack-message-backend
-  'agent-act-on-slack-message-backend "0.2")
-(define-obsolete-variable-alias 'agent-claude-act-on-slack-message-backend
-  'agent-act-on-slack-message-backend "0.2")
-(make-obsolete-variable 'agent-codex-debug-slack-message-backend
-                        'agent-act-on-slack-message-backend "0.2")
-(make-obsolete-variable 'agent-codex-act-on-slack-message-backend
-                        'agent-act-on-slack-message-backend "0.2")
-
-(defcustom agent-act-on-slack-message-backend "Gemini"
-  "GPtel backend name for Slack message project selection."
-  :type 'string
-  :group 'agent)
-
 (defcustom agent-handoff-files
   '((claude-code . "/tmp/claude-code-handoff.md")
     (codex . "/tmp/codex-handoff.md"))
@@ -525,34 +497,6 @@ Each entry is a skill name without prefix; each is invoked with
   "Directories available for selection in `agent-audit-project'.
 New directories entered by the user are automatically added."
   :type '(repeat directory)
-  :group 'agent)
-
-(defconst agent--epoch-project-registry-file-default
-  "/Users/pablostafforini/My Drive/Epoch/projects/shared/project-registry.json"
-  "Default canonical Epoch project registry file.")
-
-(defcustom agent-epoch-project-registry-file
-  agent--epoch-project-registry-file-default
-  "JSON registry of canonical Epoch projects."
-  :type 'file
-  :group 'agent)
-
-(defcustom agent-epoch-projects-root
-  "/Users/pablostafforini/My Drive/Epoch/projects/"
-  "Root directory containing canonical Epoch automation project files."
-  :type 'directory
-  :group 'agent)
-
-(defcustom agent-prompt-capture-directory
-  (expand-file-name "agent/prompts/" user-emacs-directory)
-  "Directory where session-specific prompt capture files are stored."
-  :type 'directory
-  :group 'agent)
-
-(defcustom agent-prompt-capture-auto-save-delay 1
-  "Idle seconds before prompt capture buffers are saved.
-Set to nil to disable automatic saving of capture buffers."
-  :type '(choice (const :tag "Disabled" nil) number)
   :group 'agent)
 
 (defcustom agent-alert-on-ready nil
@@ -622,17 +566,10 @@ Only `agent-session-event' may set this variable.")
 (defvar agent--sync-theme-timer nil
   "Pending timer for deferred theme sync, or nil.")
 
-(defvar-local agent--prompt-capture-save-timer nil
-  "Idle timer used to save prompt capture buffers.")
-
-(defconst agent--captured-prompt-preview-width 100
-  "Maximum width for prompt body previews in completion candidates.")
-
 ;;;; Forward declarations
 
 (defvar eat-terminal)
 (defvar eat-term-scrollback-size)
-(declare-function eat-self-input "eat" (n &optional e))
 (declare-function eat-term-send-string "eat" (terminal string))
 (declare-function eat-term-display-cursor "eat" (terminal))
 (declare-function eat-term-set-scrollback-size "eat" (terminal size))
@@ -640,33 +577,8 @@ Only `agent-session-event' may set this variable.")
 (declare-function elpaca-get "elpaca")
 (declare-function elpaca-source-dir "elpaca")
 (declare-function find-library-name "find-func")
-(declare-function org-back-to-heading "org" (&optional invisible-ok))
-(declare-function org-entry-get "org" (pom property &optional inherit literal-nil))
-(declare-function org-get-heading "org" (&optional no-tags no-todo no-priority no-comment))
-(declare-function org-set-property "org" (property value))
-(declare-function outline-next-heading "outline" ())
-
-(declare-function consult--read "consult")
-(declare-function consult--prefix-group "consult")
-(declare-function consult--lookup-cdr "consult")
-(declare-function consult-yasnippet--candidates "consult-yasnippet")
-(declare-function consult-yasnippet--annotate "consult-yasnippet")
-
-(declare-function yas--template-content "yasnippet")
-(declare-function yas--template-expand-env "yasnippet")
-(declare-function yas--template-key "yasnippet")
-(declare-function yas--all-templates "yasnippet")
-(declare-function yas--get-snippet-tables "yasnippet")
-(declare-function yas-minor-mode "yasnippet")
-(declare-function yas-expand-snippet "yasnippet")
-(declare-function yas-active-snippets "yasnippet")
-(declare-function yas--commit-snippet "yasnippet")
-(declare-function map-values "map")
-
-(defvar yas-minor-mode)
-(defvar yas-prompt-functions)
-(defvar yas--tables)
-(defvar org-heading-regexp)
+(declare-function agent-capture-confirm-no-pending "agent-capture"
+                  (backend buffer action))
 
 ;;;; Theme sync
 
@@ -1258,109 +1170,6 @@ to vanish."
         (eat-term-set-scrollback-size eat-terminal most-positive-fixnum)
       (setq-local eat-term-scrollback-size nil))))
 
-;;;; Snippet insertion
-
-(defun agent--expand-snippet-to-text (template)
-  "Expand yasnippet TEMPLATE to plain text in a temporary buffer."
-  (with-temp-buffer
-    (yas-minor-mode 1)
-    (let ((yas-prompt-functions '(yas-no-prompt)))
-      (yas-expand-snippet (yas--template-content template)
-                          nil nil
-                          (yas--template-expand-env template)))
-    (mapc #'yas--commit-snippet (yas-active-snippets))
-    (buffer-string)))
-
-(defun agent--consult-yasnippet (orig-fn arg)
-  "In eat-mode buffers, send snippet content via the terminal.
-ORIG-FN is `consult-yasnippet'; ARG is the prefix argument."
-  (if (not (derived-mode-p 'eat-mode))
-      (funcall orig-fn arg)
-    (let* ((candidates
-            (consult-yasnippet--candidates
-             (if arg
-                 (progn (require 'map)
-                        (yas--all-templates (map-values yas--tables)))
-               (yas--all-templates (yas--get-snippet-tables)))))
-           (template
-            (consult--read
-             candidates
-             :prompt "Choose a snippet: "
-             :annotate (consult-yasnippet--annotate candidates)
-             :lookup 'consult--lookup-cdr
-             :require-match t
-             :group 'consult--prefix-group
-             :category 'yasnippet)))
-      (when template
-        (let* ((expanded (agent--expand-snippet-to-text template))
-               (text (replace-regexp-in-string "\n" "\e\r" expanded)))
-          (eat-term-send-string eat-terminal text))))))
-
-(with-eval-after-load 'consult-yasnippet
-  (advice-add 'consult-yasnippet :around #'agent--consult-yasnippet))
-
-(defun agent--try-expand-snippet-at-prompt ()
-  "Try to expand a yasnippet key at the eat terminal prompt.
-Search backward from `point-max' for a prompt marker, extract the
-user's input, and check whether it ends with a snippet key.  If
-found, erase the key and send the expanded text.  Return non-nil
-if a snippet was expanded."
-  (when (and (derived-mode-p 'eat-mode)
-             (bound-and-true-p eat-terminal)
-             (bound-and-true-p yas-minor-mode))
-    (save-excursion
-      (goto-char (point-max))
-      (when (re-search-backward "^[❯>$][[:space:]]" nil t)
-        (let* ((prompt-start (match-end 0))
-               (prompt-end (progn (end-of-line) (point)))
-               (input (string-trim-right
-                       (buffer-substring-no-properties prompt-start prompt-end)))
-               (templates (yas--all-templates (yas--get-snippet-tables)))
-               (best-match nil)
-               (best-key nil))
-          (dolist (template templates)
-            (let ((key (yas--template-key template)))
-              (when (and key
-                         (> (length key) 0)
-                         (<= (length key) (length input))
-                         (string= key (substring input (- (length input) (length key))))
-                         (or (null best-key)
-                             (> (length key) (length best-key))))
-                (setq best-match template
-                      best-key key))))
-          (when best-match
-            (eat-term-send-string eat-terminal
-                                  (make-string (length best-key) ?\x7f))
-            (let* ((expanded (agent--expand-snippet-to-text best-match))
-                   (text (replace-regexp-in-string "\n" "\e\r" expanded)))
-              (eat-term-send-string eat-terminal text))
-            t))))))
-
-(defun agent-snippet-tab ()
-  "Try snippet expansion at prompt, otherwise send TAB to eat."
-  (interactive)
-  (unless (agent--try-expand-snippet-at-prompt)
-    (eat-self-input 1 ?\t)))
-
-(defvar agent--snippet-keys-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "TAB") #'agent-snippet-tab)
-    (define-key map [tab] #'agent-snippet-tab)
-    map)
-  "Keymap for `agent--snippet-keys-mode'.")
-
-(define-minor-mode agent--snippet-keys-mode
-  "Minor mode providing yasnippet TAB expansion in AI session buffers."
-  :keymap agent--snippet-keys-mode-map)
-
-(defun agent-setup-snippet-keys ()
-  "Enable yasnippet TAB expansion in the current AI session buffer."
-  (when (and (agent--detect-backend (current-buffer))
-             (bound-and-true-p eat-terminal)
-             (require 'yasnippet nil t))
-    (yas-minor-mode 1)
-    (agent--snippet-keys-mode 1)))
-
 ;;;; Escape key fix
 
 (defun agent--send-escape-in-current-buffer (orig-fn)
@@ -1412,44 +1221,6 @@ appended to ARGS."
     (agent-session-event buf 'submit)
     (apply fn (append args (list buf)))))
 
-;;;; Prompt capture
-
-;;;###autoload
-(defun agent-capture-prompt (&optional buffer)
-  "Open a persisted Org capture entry for an AI session BUFFER.
-When BUFFER is nil, use the current AI session buffer or prompt
-for a session.  The capture file is specific to the resolved
-session identity, so prompts survive Emacs restarts and can later
-be retrieved with `agent-insert-captured-prompt'."
-  (interactive)
-  (let* ((session-buffer (agent--resolve-session-buffer buffer))
-         (backend (agent--detect-backend session-buffer))
-         (file (agent--prompt-capture-file backend session-buffer)))
-    (agent--open-prompt-capture-file file backend session-buffer)))
-
-;;;###autoload
-(defun agent-insert-captured-prompt (&optional buffer include-inserted)
-  "Insert a captured prompt into an AI session BUFFER.
-Prompts are loaded from the current session's persisted Org
-capture file.  The selected prompt is inserted into the CLI input
-field but is not submitted.  After successful insertion, the Org
-entry is removed from the capture file.
-
-With prefix argument INCLUDE-INSERTED, include prompts that have
-already been inserted."
-  (interactive (list nil current-prefix-arg))
-  (let* ((session-buffer (agent--resolve-session-buffer buffer))
-         (backend (agent--detect-backend session-buffer))
-         (prompts (agent--captured-prompts
-                   backend session-buffer include-inserted)))
-    (unless (agent--backend-get backend :send-string)
-      (user-error "Backend `%s' does not support prompt insertion" backend))
-    (unless prompts
-      (user-error "No captured prompts for this session"))
-    (let ((prompt (agent--select-captured-prompt prompts)))
-      (agent-send-string (plist-get prompt :text) session-buffer)
-      (agent--delete-captured-prompt prompt))))
-
 (defun agent--resolve-session-buffer (&optional buffer)
   "Return an AI session buffer from BUFFER, current context, or prompt."
   (cond
@@ -1488,216 +1259,7 @@ already been inserted."
     (string-join (delq nil (list label account (agent-display-name buffer)))
                  " ")))
 
-(defun agent--prompt-capture-file (backend buffer)
-  "Return the Org capture file for BACKEND session BUFFER."
-  (expand-file-name
-   (concat (agent--prompt-session-slug backend buffer) ".org")
-   agent-prompt-capture-directory))
-
-(defun agent--prompt-session-slug (backend buffer)
-  "Return a stable file slug for BACKEND session BUFFER."
-  (format "%s-%s"
-          backend
-          (secure-hash 'sha1 (agent--prompt-session-identity backend buffer))))
-
-(defun agent--prompt-session-identity (backend buffer)
-  "Return the stable prompt capture identity for BACKEND session BUFFER."
-  (let* ((directory (or (agent--buffer-directory backend buffer) ""))
-         (session (agent-session buffer))
-         (account (when session (agent-session-account session)))
-         (instance (if session
-                       (agent-session-instance session)
-                     (agent--session-instance-from-buffer-name
-                      (buffer-name buffer)))))
-    (prin1-to-string (list backend account directory instance))))
-
-(defun agent--open-prompt-capture-file (file backend buffer)
-  "Open FILE and append a prompt entry for BACKEND session BUFFER."
-  (require 'org)
-  (make-directory (file-name-directory file) t)
-  (let ((capture-buffer (find-file-noselect file)))
-    (with-current-buffer capture-buffer
-      (org-mode)
-      (agent-prompt-capture-mode 1)
-      (agent--ensure-prompt-capture-header backend buffer)
-      (agent--append-prompt-capture-entry)
-      (save-buffer))
-    (pop-to-buffer capture-buffer)))
-
-(defun agent--ensure-prompt-capture-header (backend buffer)
-  "Insert the prompt capture file header for BACKEND session BUFFER."
-  (when (zerop (buffer-size))
-    (insert "#+title: Agent prompt captures\n")
-    (insert "#+agent_backend: " (symbol-name backend) "\n")
-    (insert "#+agent_session: " (agent-display-name buffer) "\n\n")))
-
-(defun agent--append-prompt-capture-entry ()
-  "Append a new prompt capture entry at the end of the current buffer."
-  (goto-char (point-max))
-  (unless (bolp) (insert "\n"))
-  (insert "* Prompt " (format-time-string "%Y-%m-%d %H:%M") "\n")
-  (insert ":PROPERTIES:\n")
-  (insert ":CREATED: " (format-time-string "[%Y-%m-%d %a %H:%M]") "\n")
-  (insert ":END:\n\n")
-  (point))
-
-(define-minor-mode agent-prompt-capture-mode
-  "Automatically save persisted Agent prompt capture buffers."
-  :lighter " AgentCapture"
-  (if agent-prompt-capture-mode
-      (add-hook 'after-change-functions
-                #'agent--prompt-capture-after-change nil t)
-    (remove-hook 'after-change-functions
-                 #'agent--prompt-capture-after-change t)
-    (agent--cancel-prompt-capture-save)))
-
-(defun agent--prompt-capture-after-change (&rest _)
-  "Schedule an automatic save for the current prompt capture buffer."
-  (when agent-prompt-capture-auto-save-delay
-    (agent--cancel-prompt-capture-save)
-    (setq agent--prompt-capture-save-timer
-          (run-with-idle-timer agent-prompt-capture-auto-save-delay
-                               nil
-                               #'agent--save-prompt-capture-buffer
-                               (current-buffer)))))
-
-(defun agent--cancel-prompt-capture-save ()
-  "Cancel the pending prompt capture save timer, if any."
-  (when (timerp agent--prompt-capture-save-timer)
-    (cancel-timer agent--prompt-capture-save-timer))
-  (setq agent--prompt-capture-save-timer nil))
-
-(defun agent--save-prompt-capture-buffer (buffer)
-  "Save prompt capture BUFFER when it is still live and modified."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (setq agent--prompt-capture-save-timer nil)
-      (when (and buffer-file-name (buffer-modified-p))
-        (save-buffer)))))
-
-(defun agent--captured-prompts (backend buffer &optional include-inserted)
-  "Return nonempty captured prompts for BACKEND session BUFFER.
-When INCLUDE-INSERTED is non-nil, include prompts already marked
-as inserted."
-  (let ((file (agent--prompt-capture-file backend buffer)))
-    (when (file-exists-p file)
-      (agent--read-captured-prompts file include-inserted))))
-
-(defun agent--read-captured-prompts (file &optional include-inserted)
-  "Read captured prompt entries from Org FILE.
-When INCLUDE-INSERTED is non-nil, include prompts already marked
-as inserted."
-  (require 'org)
-  (with-temp-buffer
-    (insert-file-contents file)
-    (org-mode)
-    (let (prompts)
-      (goto-char (point-min))
-      (while (re-search-forward org-heading-regexp nil t)
-        (goto-char (match-beginning 0))
-        (when-let* ((prompt (agent--captured-prompt-at-point
-                             file include-inserted)))
-          (push prompt prompts))
-        (or (outline-next-heading) (goto-char (point-max))))
-      (nreverse prompts))))
-
-(defun agent--captured-prompt-at-point (file include-inserted)
-  "Return the captured prompt at point as a plist, or nil.
-FILE is the Org file being parsed.  When INCLUDE-INSERTED is
-non-nil, include prompts already marked as inserted."
-  (org-back-to-heading t)
-  (let* ((title (org-get-heading t t t t))
-         (created (org-entry-get (point) "CREATED"))
-         (inserted (org-entry-get (point) "INSERTED"))
-         (body-start (agent--captured-prompt-body-start))
-         (body-end (save-excursion
-                     (or (outline-next-heading) (goto-char (point-max)))
-                     (point)))
-         (text (string-trim
-                (buffer-substring-no-properties body-start body-end))))
-    (when (and (not (string-empty-p text))
-               (or include-inserted (not inserted)))
-      (list :file file
-            :title title
-            :created created
-            :inserted inserted
-            :text text))))
-
-(defun agent--captured-prompt-body-start ()
-  "Return the content start for the Org heading at point."
-  (save-excursion
-    (forward-line 1)
-    (when (looking-at-p "[ \t]*:PROPERTIES:[ \t]*$")
-      (when (re-search-forward "^[ \t]*:END:[ \t]*$" nil t)
-        (forward-line 1)))
-    (point)))
-
-(defun agent--select-captured-prompt (prompts)
-  "Prompt for one of PROMPTS and return its plist."
-  (let* ((candidates (mapcar #'agent--captured-prompt-candidate prompts))
-         (choice (completing-read "Prompt: " candidates nil t)))
-    (or (get-text-property 0 'agent-prompt choice)
-        (get-text-property
-         0 'agent-prompt
-         (cl-find choice candidates :test #'string=)))))
-
-(defun agent--captured-prompt-candidate (prompt)
-  "Return a completion candidate for captured PROMPT."
-  (let ((label (agent--captured-prompt-candidate-label prompt)))
-    (propertize label 'agent-prompt prompt)))
-
-(defun agent--captured-prompt-candidate-label (prompt)
-  "Return the completion label for captured PROMPT."
-  (let ((heading (if-let* ((created (plist-get prompt :created)))
-                     (format "%s %s" created (plist-get prompt :title))
-                   (plist-get prompt :title)))
-        (preview (agent--captured-prompt-preview prompt)))
-    (if (string-empty-p preview)
-        heading
-      (format "%s: %s" heading preview))))
-
-(defun agent--captured-prompt-preview (prompt)
-  "Return a single-line truncated preview for captured PROMPT."
-  (truncate-string-to-width
-   (replace-regexp-in-string
-    "[[:space:]\n]+" " " (string-trim (or (plist-get prompt :text) "")))
-   agent--captured-prompt-preview-width nil nil "..."))
-
-(defun agent--delete-captured-prompt (prompt)
-  "Remove PROMPT's Org entry from its capture file."
-  (when-let* ((file (plist-get prompt :file)))
-    (let ((buffer (find-file-noselect file)))
-      (with-current-buffer buffer
-        (org-mode)
-        (when (agent--find-captured-prompt prompt)
-          (delete-region
-           (point)
-           (save-excursion
-             (or (outline-next-heading) (goto-char (point-max)))
-             (point)))
-          (save-buffer))))))
-
-(defun agent--find-captured-prompt (prompt)
-  "Move point to PROMPT's matching Org heading in the current buffer."
-  (goto-char (point-min))
-  (catch 'found
-    (while (re-search-forward org-heading-regexp nil t)
-      (goto-char (match-beginning 0))
-      (when (agent--captured-prompt-match-p prompt)
-        (throw 'found t))
-      (or (outline-next-heading) (goto-char (point-max))))
-    nil))
-
-(defun agent--captured-prompt-match-p (prompt)
-  "Return non-nil when the current Org heading matches PROMPT."
-  (when-let* ((candidate (agent--captured-prompt-at-point
-                          (plist-get prompt :file) t)))
-    (and (equal (plist-get candidate :title)
-                (plist-get prompt :title))
-         (equal (plist-get candidate :created)
-                (plist-get prompt :created))
-         (equal (plist-get candidate :text)
-                (plist-get prompt :text)))))
+;;;; Orchestration
 
 (defun agent--resolve-backend ()
   "Return the backend for the current context.
@@ -1740,15 +1302,13 @@ registered, use it.  Otherwise, prompt."
              (throw 'abort nil))))))
 
 (defun agent--confirm-no-captured-prompts (backend buffer action)
-  "Confirm ACTION for BUFFER when it has pending captured prompts."
-  (let ((count (length (agent--captured-prompts backend buffer))))
-    (or (zerop count)
-        (yes-or-no-p
-         (format "%s has %d captured prompt%s.  %s anyway? "
-                 (agent-display-name buffer)
-                 count
-                 (if (= count 1) "" "s")
-                 action)))))
+  "Confirm ACTION for BACKEND session BUFFER when captures are pending.
+Return non-nil when ACTION may proceed.  Defer to `agent-capture' when
+it is installed; otherwise allow ACTION, since no prompts can have
+been captured without it."
+  (if (require 'agent-capture nil t)
+      (agent-capture-confirm-no-pending backend buffer action)
+    t))
 
 (defun agent-run-skill-before-exit (backend buffer)
   "Submit the before-exit skills for BUFFER before BACKEND exits it.
@@ -2437,38 +1997,6 @@ backtrace file path as the initial prompt."
     (agent-save-backtrace)))
 
 ;;;###autoload
-(defun agent-act-on-slack-message ()
-  "Route the Slack message at point to an Epoch project session.
-Identifies the project with `gptel', starts a session in the
-project directory, and inserts the Slack message URL into the
-prompt for review without submitting it."
-  (interactive)
-  (let ((backend (agent--resolve-backend)))
-    (agent--act-on-slack-message
-     agent-act-on-slack-message-model
-     agent-act-on-slack-message-backend
-     (lambda (project slack-url)
-       (agent--act-on-slack-start-session backend project slack-url)))))
-
-;;;###autoload
-(define-obsolete-function-alias
-  'agent-debug-slack-message #'agent-act-on-slack-message "0.2")
-
-(defun agent--act-on-slack-start-session (backend project slack-url)
-  "Start a BACKEND session for PROJECT and insert SLACK-URL.
-PROJECT is an Epoch registry project plist.  Return the new session
-buffer with SLACK-URL inserted into its prompt, unsubmitted."
-  (let ((dir (file-name-as-directory
-              (expand-file-name (plist-get project :directory)))))
-    (message "Starting %s for `%s' in %s..."
-             (agent--backend-get backend :label)
-             (plist-get project :id) dir)
-    (let ((buffer (agent-start-session
-                   (agent-session-create :backend backend :directory dir))))
-      (agent-send-string slack-url buffer)
-      buffer)))
-
-;;;###autoload
 (defun agent-save-backtrace ()
   "Save the current Emacs backtrace and return its file path."
   (interactive)
@@ -2500,18 +2028,7 @@ buffer with SLACK-URL inserted into its prompt, unsubmitted."
 (defvar gptel-model)
 (defvar gptel-use-tools)
 (defvar gptel--known-backends)
-(defvar slack-current-buffer)
-(defvar slack-get-permalink-url)
 (declare-function gptel-request "gptel")
-(declare-function slack-buffer-copy-link "slack-room-buffer")
-(declare-function slack-buffer-room "slack-buffer")
-(declare-function slack-buffer-team "slack-buffer")
-(declare-function slack-get-ts "slack-util")
-(declare-function slack-message-body "slack-message")
-(declare-function slack-room-find "slack-room")
-(declare-function slack-room-find-message "slack-room")
-(declare-function slack-request "slack-request")
-(declare-function slack-request-create "slack-request")
 
 (defun agent--gptel-response-text (response)
   "Return final text from gptel RESPONSE, or nil.
@@ -2567,220 +2084,6 @@ session there with the backtrace prompt as the initial message."
     (agent-start-session
      (agent-session-create :backend backend :directory dir)
      :initial-prompt prompt)))
-
-(defun agent--act-on-slack-message (model backend start-function)
-  "Route the Slack message at point using MODEL, BACKEND, and START-FUNCTION.
-START-FUNCTION is called with the selected project plist and the
-Slack message URL."
-  (agent--with-slack-message-context
-   (lambda (context)
-     (agent--identify-epoch-project-for-slack-message
-      context model backend start-function))))
-
-(defun agent--with-slack-message-context (callback)
-  "Call CALLBACK with the Slack message context at point."
-  (unless (require 'slack nil t)
-    (user-error "Package `slack' is required"))
-  (let* ((ts (agent--slack-message-ts-at-point))
-         (team (agent--slack-team-at-point))
-         (room (agent--slack-room-at-point team))
-         (message (and room ts (slack-room-find-message room ts)))
-         (text (agent--slack-message-text message team)))
-    (unless (and team room ts text)
-      (user-error "No Slack message at point"))
-    (agent--slack-message-url
-     team room ts
-     (lambda (url)
-       (funcall callback
-                (list :text text :url url :ts ts
-                      :room-id (agent--slot-value room 'id)))))))
-
-(defun agent--slack-message-ts-at-point ()
-  "Return the Slack message timestamp at point."
-  (or (and (fboundp 'slack-get-ts) (slack-get-ts))
-      (get-text-property (point) 'ts)
-      (get-text-property (line-beginning-position) 'ts)))
-
-(defun agent--slack-team-at-point ()
-  "Return the Slack team for the current buffer."
-  (and (boundp 'slack-current-buffer)
-       slack-current-buffer
-       (slack-buffer-team slack-current-buffer)))
-
-(defun agent--slack-room-at-point (team)
-  "Return the Slack room at point for TEAM."
-  (or (ignore-errors (slack-buffer-room slack-current-buffer))
-      (when-let* ((room-id (get-text-property (point) 'room-id)))
-        (slack-room-find room-id team))))
-
-(defun agent--slack-message-text (message team)
-  "Return plain text for Slack MESSAGE in TEAM."
-  (string-trim
-   (cond
-    (message (substring-no-properties (slack-message-body message team)))
-    (t (buffer-substring-no-properties
-        (line-beginning-position) (line-end-position))))))
-
-(defun agent--slack-message-url (team room ts callback)
-  "Call CALLBACK with a Slack permalink for TS in ROOM on TEAM."
-  (if (and (fboundp 'slack-buffer-copy-link)
-           (ignore-errors
-             (slack-buffer-copy-link slack-current-buffer ts callback)
-             t))
-      nil
-    (funcall callback (agent--slack-message-url-fallback team room ts))))
-
-(defun agent--slack-message-url-fallback (team room ts)
-  "Return a best-effort Slack permalink for TS in ROOM on TEAM."
-  (let ((domain (or (and (slot-boundp team 'domain)
-                         (agent--slot-value team 'domain))
-                    (and (slot-boundp team 'name)
-                         (agent--slot-value team 'name)))))
-    (unless domain
-      (user-error "Slack team has no domain"))
-    (format "https://%s.slack.com/archives/%s/p%s"
-            domain (agent--slot-value room 'id)
-            (replace-regexp-in-string "\\." "" ts))))
-
-(defun agent--slot-value (object slot)
-  "Return OBJECT's dynamic EIEIO SLOT value."
-  (eieio-oref object slot))
-
-(defun agent--identify-epoch-project-for-slack-message
-    (context model backend callback)
-  "Identify the Epoch project for Slack CONTEXT and call CALLBACK.
-MODEL and BACKEND configure the `gptel' request.  CALLBACK is
-called with the selected project plist and Slack URL."
-  (unless (and (require 'gptel nil t) (fboundp 'gptel-request))
-    (user-error "Package `gptel' is required for Slack message routing"))
-  (let* ((projects (agent-epoch-project-candidates))
-         (prompt (agent--slack-project-selection-prompt context projects))
-         (gptel-backend (alist-get backend gptel--known-backends nil nil
-                                   #'string=))
-         (gptel-model model)
-         (gptel-include-reasoning nil)
-         (gptel-use-tools nil))
-    (message "Identifying Epoch project from Slack message...")
-    (gptel-request
-     prompt
-     :system (concat
-              "You route Slack messages to existing Epoch automation "
-              "projects. Return ONLY a comma-separated list of project IDs "
-              "from the provided registry, ordered from most likely to least "
-              "likely. Do not invent project IDs.")
-     :callback
-     (lambda (response info)
-       (if (not response)
-           (message "gptel request failed: %s" (plist-get info :status))
-         (when-let* ((text (agent--gptel-response-text response)))
-           (agent--read-epoch-project-from-response
-            text projects (plist-get context :url) callback)))))))
-
-(defun agent--slack-project-selection-prompt (context projects)
-  "Return a project-selection prompt from Slack CONTEXT and PROJECTS."
-  (format "Slack message URL: %s\n\nSlack message text:\n%s\n\nProjects:\n%s"
-          (plist-get context :url)
-          (plist-get context :text)
-          (string-join (mapcar #'agent--format-epoch-project projects) "\n")))
-
-(defun agent--format-epoch-project (project)
-  "Format PROJECT as one compact registry line."
-  (format "- %s | %s | %s | outputs: %s | notes: %s"
-          (plist-get project :id)
-          (plist-get project :title)
-          (plist-get project :summary)
-          (or (plist-get project :outputs) "")
-          (or (plist-get project :comments) "")))
-
-(defun agent--read-epoch-project-from-response
-    (response projects slack-url callback)
-  "Read a project from RESPONSE and call CALLBACK with SLACK-URL."
-  (let* ((ids (mapcar #'string-trim (split-string response "," t)))
-         (candidates (agent--ordered-epoch-project-candidates ids projects))
-         (labels (mapcar #'agent--epoch-project-label candidates))
-         (selected (completing-read "Project: " labels nil t nil nil
-                                    (car labels)))
-         (project (nth (cl-position selected labels :test #'string=)
-                       candidates)))
-    (funcall callback project slack-url)))
-
-(defun agent--ordered-epoch-project-candidates (ids projects)
-  "Return PROJECTS ordered by candidate IDS, with remaining projects appended."
-  (let ((matched (delq nil
-                       (mapcar (lambda (id)
-                                 (cl-find id projects :key
-                                          (lambda (project)
-                                            (plist-get project :id))
-                                          :test #'string=))
-                               ids))))
-    (append matched (cl-set-difference projects matched :test #'eq))))
-
-(defun agent--epoch-project-label (project)
-  "Return a completion label for PROJECT."
-  (format "%s - %s" (plist-get project :id) (plist-get project :title)))
-
-(defun agent-epoch-project-candidates ()
-  "Return canonical Epoch project candidates from the registry file."
-  (unless (file-exists-p agent-epoch-project-registry-file)
-    (user-error "Epoch project registry not found: %s"
-                agent-epoch-project-registry-file))
-  (with-temp-buffer
-    (insert-file-contents agent-epoch-project-registry-file)
-    (agent--epoch-projects-from-json (buffer-string))))
-
-(defun agent--epoch-projects-from-json (json)
-  "Return project plists parsed from registry JSON."
-  (let* ((data (json-parse-string json :object-type 'alist
-                                  :array-type 'list))
-         (projects (alist-get 'projects data)))
-    (mapcar #'agent--epoch-project-from-project-registry projects)))
-
-(defun agent--epoch-project-from-project-registry (project)
-  "Return an internal project plist from canonical PROJECT registry entry."
-  (let* ((repo (car (agent--json-list (alist-get 'repo_paths project))))
-         (doc (car (agent--json-list (alist-get 'project_doc_paths project)))))
-    (list :id (alist-get 'id project)
-          :title (alist-get 'title project)
-          :summary (agent--epoch-project-registry-summary project)
-          :comments (agent--epoch-project-registry-notes project)
-          :outputs (string-join
-                    (agent--json-list (alist-get 'slack_channels project))
-                    ", ")
-          :directory (agent--epoch-project-directory-from-paths doc repo)
-          :repo repo
-          :doc doc)))
-
-(defun agent--epoch-project-registry-summary (project)
-  "Return a compact summary for canonical PROJECT registry entry."
-  (or (alist-get 'summary project)
-      (let ((aliases (agent--json-list (alist-get 'aliases project))))
-        (if aliases
-            (format "Aliases: %s" (string-join aliases ", "))
-          ""))))
-
-(defun agent--epoch-project-registry-notes (project)
-  "Return matching notes for canonical PROJECT registry entry."
-  (let ((keywords (agent--json-list (alist-get 'browser_keywords project))))
-    (if keywords
-        (format "keywords: %s" (string-join keywords ", "))
-      "")))
-
-(defun agent--epoch-project-directory-from-paths (doc repo)
-  "Return the best local working directory for relative DOC and REPO paths."
-  (cond
-   (doc (file-name-directory (agent--epoch-project-path doc)))
-   (repo (file-name-directory
-          (directory-file-name (agent--epoch-project-path repo))))
-   (t agent-epoch-projects-root)))
-
-(defun agent--epoch-project-path (path)
-  "Return PATH expanded relative to `agent-epoch-projects-root'."
-  (when path
-    (expand-file-name path agent-epoch-projects-root)))
-
-(defun agent--json-list (value)
-  "Return VALUE when it is a list, otherwise nil."
-  (and (listp value) value))
 
 ;;;###autoload
 (defun agent-setup-kill-on-exit ()

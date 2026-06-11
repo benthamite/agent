@@ -8,6 +8,7 @@
 (require 'cl-lib)
 (require 'agent-account)
 (require 'agent-codex)
+(require 'agent-capture)
 
 ;;;; Account selection
 

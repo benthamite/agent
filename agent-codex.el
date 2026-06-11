@@ -111,6 +111,7 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar codex--app-server-thread-id)
 (defvar codex--app-server-turn-active-p)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
+(declare-function agent-act-on-slack-message "agent-slack" ())
 (declare-function codex-start-session "codex")
 (declare-function codex-session-identity "codex" (&optional buffer))
 (declare-function codex-prompt-input "codex" (&optional buffer))

@@ -7,6 +7,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'agent)
+(require 'agent-capture)
 
 (defun agent-test--backend (&rest keys)
   "Return a minimal valid backend plist extended with KEYS."
@@ -57,53 +58,7 @@
     (should-error
      (apply #'agent-register-backend 'bad (list :buffer-p #'ignore)))))
 
-(ert-deftest agent-test-act-on-slack-message-uses-unified-defcustoms ()
-  "Route Slack-message action through the unified core defcustom pair."
-  (let ((agent-backends nil)
-        (agent-act-on-slack-message-model 'test-model)
-        (agent-act-on-slack-message-backend "TestBackend")
-        (captured nil))
-    (apply #'agent-register-backend 'one (agent-test--backend))
-    (cl-letf (((symbol-function 'agent--act-on-slack-message)
-               (lambda (model backend _start-function)
-                 (setq captured (list model backend)))))
-      (agent-act-on-slack-message)
-      (should (equal captured '(test-model "TestBackend"))))))
-
-(ert-deftest agent-test-act-on-slack-start-session-inserts-url-for-review ()
-  "Start a backend session and insert the Slack URL without submitting it."
-  (let ((agent-backends nil)
-        (project '(:id "project" :directory "/tmp/project"))
-        (url "https://example.slack.com/archives/C1/p123")
-        (buffer (generate-new-buffer " *agent-test*"))
-        started
-        sent)
-    (apply #'agent-register-backend 'one (agent-test--backend))
-    (unwind-protect
-        (cl-letf (((symbol-function 'agent-start-session)
-                   (lambda (session &rest options)
-                     (setq started (list session options))
-                     buffer))
-                  ((symbol-function 'agent-send-string)
-                   (lambda (cmd target)
-                     (setq sent (list cmd target))
-                     target))
-                  ((symbol-function 'agent-submit)
-                   (lambda (&rest _) (ert-fail "agent-submit was called")))
-                  ((symbol-function 'agent-send-return)
-                   (lambda (&rest _)
-                     (ert-fail "agent-send-return was called"))))
-          (should (eq (agent--act-on-slack-start-session 'one project url)
-                      buffer))
-          (let ((session (car started)))
-            (should (eq (agent-session-backend session) 'one))
-            (should (equal (agent-session-directory session) "/tmp/project/"))
-            (should-not (agent-session-instance session)))
-          (should-not (cadr started))
-          (should (equal sent (list url buffer))))
-      (kill-buffer buffer))))
-
-;;;; Epoch project registry
+;;;; gptel response handling
 
 (ert-deftest agent-test-gptel-response-text-accepts-final-response ()
   "Return final gptel response text unchanged."
@@ -112,51 +67,6 @@
 (ert-deftest agent-test-gptel-response-text-ignores-reasoning-event ()
   "Ignore gptel reasoning events sent before final response text."
   (should-not (agent--gptel-response-text '(reasoning . "thinking"))))
-
-(ert-deftest agent-test-epoch-project-candidates-read-project-registry ()
-  "Read candidates from the canonical project registry schema."
-  (let* ((root (file-name-as-directory (make-temp-file "agent-projects" t)))
-         (registry (expand-file-name "project_registry.json" root))
-         (project-dir (expand-file-name "slack-emoji-to-asana" root))
-         (repo-dir (expand-file-name "repo" project-dir))
-         (agent-epoch-projects-root root)
-         (agent-epoch-project-registry-file registry))
-    (unwind-protect
-        (progn
-          (make-directory repo-dir t)
-          (with-temp-file registry
-            (insert (json-serialize
-                     '((schema_version . 1)
-                       (projects
-                        . [((id . "slack-emoji-to-asana")
-                             (title . "Slack Emoji To Asana")
-                             (aliases . ["slack-emoji-to-asana"
-                                         "slack emoji to asana"])
-                             (browser_keywords . ["slack-emoji-to-asana"])
-                             (project_doc_paths . [])
-                             (repo_paths . ["slack-emoji-to-asana/repo"])
-                             (slack_channels . []))])))))
-          (let* ((projects (agent-epoch-project-candidates))
-                 (project (cl-find "slack-emoji-to-asana" projects
-                                   :key (lambda (item)
-                                          (plist-get item :id))
-                                   :test #'string=)))
-            (should project)
-            (should (equal (plist-get project :directory)
-                           (file-name-as-directory project-dir)))
-            (should (equal (plist-get project :repo)
-                           "slack-emoji-to-asana/repo"))
-            (should-not (plist-get project :doc))))
-      (delete-directory root t))))
-
-(ert-deftest agent-test-ordered-epoch-project-candidates-puts-model-first ()
-  "Put model-selected project IDs before the remaining registry entries."
-  (let* ((a (list :id "a"))
-         (b (list :id "b"))
-         (c (list :id "c")))
-    (should (equal (agent--ordered-epoch-project-candidates
-                    '("c" "missing" "a") (list a b c))
-                   (list c a b)))))
 
 ;;;; Session keys and display names
 
@@ -588,7 +498,7 @@
              'one
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))))
-            (let ((file (agent--prompt-capture-file 'one buf)))
+            (let ((file (agent-capture--file 'one buf)))
               (make-directory (file-name-directory file) t)
               (with-temp-file file
                 (insert "* Prompt A\n\nAlpha\n")))
@@ -644,7 +554,7 @@
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
               :session-identity (lambda (_buffer) "sid-123")))
-            (let ((file (agent--prompt-capture-file 'one buf)))
+            (let ((file (agent-capture--file 'one buf)))
               (make-directory (file-name-directory file) t)
               (with-temp-file file
                 (insert "* Prompt A\n\nAlpha\n")))
@@ -1181,99 +1091,6 @@
                                  (agent--discover-all-skills))
                          '("visible"))))
       (delete-directory root t))))
-
-;;;; Prompt capture
-
-(ert-deftest agent-test-prompt-capture-file-is-session-specific ()
-  "Build prompt capture paths from stable session identity."
-  (let ((agent-backends nil)
-        (agent-prompt-capture-directory temporary-file-directory))
-    (with-temp-buffer
-      (rename-buffer "*one:~/repo/project/:default*" t)
-      (let ((buf (current-buffer)))
-        (apply #'agent-register-backend
-         'one
-         (agent-test--backend
-          :buffer-p (lambda (candidate) (eq candidate buf))))
-        (setq-local agent--session
-                    (agent-session-create :backend 'one :account "work"))
-        (should
-         (string-prefix-p
-          (expand-file-name "one-" temporary-file-directory)
-          (agent--prompt-capture-file 'one buf)))))))
-
-(ert-deftest agent-test-read-captured-prompts-skips-empty-and-inserted ()
-  "Read pending nonempty Org prompt capture entries."
-  (let ((file (make-temp-file "agent-prompts" nil ".org")))
-    (unwind-protect
-        (progn
-          (with-temp-file file
-            (insert "* Empty\n")
-            (insert ":PROPERTIES:\n:CREATED: [2026-05-17 Sun 10:00]\n:END:\n\n")
-            (insert "* Inserted\n")
-            (insert ":PROPERTIES:\n")
-            (insert ":CREATED: [2026-05-17 Sun 10:01]\n")
-            (insert ":INSERTED: [2026-05-17 Sun 10:02]\n")
-            (insert ":END:\n\n")
-            (insert "Already used\n")
-            (insert "* Use this\n")
-            (insert ":PROPERTIES:\n:CREATED: [2026-05-17 Sun 10:03]\n:END:\n\n")
-            (insert "First line\nSecond line\n"))
-          (let ((prompts (agent--read-captured-prompts file)))
-            (should (= (length prompts) 1))
-            (should (equal (plist-get (car prompts) :title) "Use this"))
-            (should (equal (plist-get (car prompts) :text)
-                           "First line\nSecond line"))))
-      (delete-file file))))
-
-(ert-deftest agent-test-insert-captured-prompt-sends-selected-text ()
-  "Insert the selected persisted prompt into the session."
-  (let ((agent-backends nil)
-        (agent-prompt-capture-directory
-         (make-temp-file "agent-prompts" t))
-        sent)
-    (unwind-protect
-        (with-temp-buffer
-          (rename-buffer "*one:~/repo/project/:default*" t)
-          (let ((buf (current-buffer)))
-            (apply #'agent-register-backend
-             'one
-             (agent-test--backend
-              :buffer-p (lambda (candidate) (eq candidate buf))
-              :find-all-buffers (lambda () (list buf))
-              :send-string (lambda (text target)
-                              (setq sent (list text target)))))
-            (let ((file (agent--prompt-capture-file 'one buf)))
-              (make-directory (file-name-directory file) t)
-              (with-temp-file file
-                (insert "* Prompt A\n\nAlpha\n")
-                (insert "* Prompt B\n\nBeta\n")))
-            (cl-letf (((symbol-function 'completing-read)
-                       (lambda (_prompt candidates &rest _)
-                         (cadr candidates))))
-              (agent-insert-captured-prompt buf)
-              (should (equal sent (list "Beta" buf)))
-              (let ((pending (agent--captured-prompts 'one buf)))
-                (should (= (length pending) 1))
-                (should (equal (plist-get (car pending) :text) "Alpha")))
-              (let ((all (agent--captured-prompts 'one buf t)))
-                (should (= (length all) 1))
-                (should (equal (plist-get (car all) :text) "Alpha"))))))
-      (delete-directory agent-prompt-capture-directory t))))
-
-(ert-deftest agent-test-captured-prompt-candidate-previews-body ()
-  "Show a truncated prompt body preview in completion candidates."
-  (let* ((text (concat "First line\nSecond line with extra spacing "
-                       (make-string 120 ?x)))
-         (prompt (list :title "Prompt A"
-                       :created "[2026-05-17 Sun 10:03]"
-                       :text text))
-         (candidate (agent--captured-prompt-candidate prompt)))
-    (should (string-prefix-p
-             "[2026-05-17 Sun 10:03] Prompt A: First line Second line"
-             candidate))
-    (should (string-suffix-p "..." candidate))
-    (should (eq (get-text-property 0 'agent-prompt candidate) prompt))))
 
 ;;;; Alerts
 
