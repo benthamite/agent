@@ -6,6 +6,7 @@
 
 (require 'ert)
 (require 'json)
+(require 'agent-account)
 (require 'agent-claude)
 
 ;;;; Prompt submission
@@ -603,7 +604,7 @@
   "Preserve `ANTHROPIC_API_KEY' when no account config is active."
   (let ((process-environment '("ANTHROPIC_API_KEY=key" "CLAUDE_CODE=1"))
         (agent-claude-accounts nil)
-        (agent-claude--current-account nil))
+        (agent-account--current (make-hash-table :test #'eq)))
     (should (member "ANTHROPIC_API_KEY=key"
                     (agent-claude--batch-process-environment)))))
 
@@ -611,7 +612,8 @@
   "Strip conflicting auth when `CLAUDE_CONFIG_DIR' is set."
   (let ((process-environment '("ANTHROPIC_API_KEY=key" "CLAUDE_CODE=1"))
         (agent-claude-accounts '(("work" . "/tmp/claude-work")))
-        (agent-claude--current-account "work"))
+        (agent-account--current (make-hash-table :test #'eq)))
+    (puthash 'claude-code "work" agent-account--current)
     (let ((env (agent-claude--batch-process-environment)))
       (should (member "CLAUDE_CONFIG_DIR=/tmp/claude-work" env))
       (should-not (member "ANTHROPIC_API_KEY=key" env))
@@ -813,18 +815,17 @@
 
 ;;;; Session capture
 
-(ert-deftest agent-claude-test-capture-buffer-account-stores-session ()
-  "Replace a stale accountless struct when capturing the buffer account."
+(ert-deftest agent-claude-test-capture-session-stores-account ()
+  "Replace a stale accountless struct when re-capturing the session."
   (with-temp-buffer
     (rename-buffer "*claude:~/repo/claude-capture-session-test/:default*" t)
-    ;; Simulate lazy backfill running before the start hook.
+    ;; Simulate lazy backfill running before the start binding existed.
     (agent--set-session
      (current-buffer)
      (agent-session-create :backend 'claude-code
                            :directory "~/repo/claude-capture-session-test/"))
-    (let ((agent-claude--pending-account "personal")
-          (agent-account--starting '(claude-code . "personal")))
-      (agent-claude--capture-buffer-account)
+    (let ((agent-account--starting '(claude-code . "personal")))
+      (agent--capture-session (current-buffer))
       (let ((session (agent-session (current-buffer))))
         (should session)
         (should (eq (agent-session-backend session) 'claude-code))

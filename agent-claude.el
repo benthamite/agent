@@ -30,6 +30,7 @@
 
 (require 'claude-code)
 (eval-and-compile (require 'agent))
+(require 'agent-account)
 (require 'consult)
 (require 'subr-x)
 (require 'transient)
@@ -119,21 +120,6 @@ Written by `agent-claude-select-account', read at session start."
   '((t :inherit warning))
   "Face for sessions waiting for user input in the session switcher."
   :group 'agent-claude)
-
-(defvar agent-claude--current-account nil
-  "Currently active Claude account name.
-Loaded from `agent-claude-account-file' on first use;
-changed by `agent-claude-select-account'.")
-
-(defvar agent-claude--pending-account nil
-  "Account name for the current `claude-code' invocation.
-Dynamically bound by `agent-claude--start-with-account';
-read by `agent-claude-account-env'.")
-
-(defvar-local agent-claude--buffer-account nil
-  "Account name that was active when this buffer's session started.
-Set by `agent-claude--capture-buffer-account' via
-`claude-code-start-hook'.")
 
 (defcustom agent-claude-settings-file
   (expand-file-name "settings.json" "~/.claude/")
@@ -232,14 +218,18 @@ Source: lobehub/lobe-icons (MIT).")
   :send-command #'agent-claude-send-command
   :submit-command #'agent-claude-submit-command
   :start #'claude-code--start
-  :start-new #'agent-claude--start-with-account
+  :start-new #'agent-claude--start-new
   :program "claude"
   :send-return #'agent-claude-send-return
   :icon (lambda (&optional face)
           (let ((svg (agent-svg-icon agent-claude-icon-svg face)))
             (if (string-empty-p svg) "CC" svg)))
-  :account (lambda (buf)
-             (buffer-local-value 'agent-claude--buffer-account buf))
+  :account-env-var "CLAUDE_CONFIG_DIR"
+  :accounts 'agent-claude-accounts
+  :account-file 'agent-claude-account-file
+  :shared-config-items 'agent-claude--shared-config-items
+  :canonical-home "~/.claude/"
+  :account-init #'agent-claude--sync-account-json
   :background-tasks-p #'agent-claude--has-background-tasks-p
   :duration-ms (lambda (buf)
                  (with-current-buffer buf
@@ -378,20 +368,12 @@ the session has branches, prompts for confirmation before killing."
 ;;;;; Smart start
 
 (defun agent-claude-account-env (_buffer-name _dir)
-  "Return environment variables for the session being started.
-Sets `CLAUDE_CONFIG_DIR' based on `agent-claude-accounts'.
-Prefers the dynamically bound `agent-claude--pending-account'
-\(set by `agent-claude--start-with-account' and
-`agent-claude-restart') and falls back to the persisted active
-account via `agent-claude--resolve-account', so callers that
-invoke `claude-code--start' directly (handoff, branch navigation,
-debug sessions) still get the right account's `CLAUDE_CONFIG_DIR'."
-  (when-let* ((account (or agent-claude--pending-account
-                           (agent-claude--resolve-account)))
-              (config-dir (alist-get account agent-claude-accounts
-                                     nil nil #'string=)))
-    (list (format "CLAUDE_CONFIG_DIR=%s"
-                  (expand-file-name config-dir)))))
+  "Return `CLAUDE_CONFIG_DIR' for the Claude session being started.
+Resolves the account via `agent-account-resolve' (the in-flight
+start binding first, then the persisted selection) and never
+prompts or touches the filesystem."
+  (when-let* ((account (agent-account-resolve 'claude-code)))
+    (agent-account-env 'claude-code account)))
 
 (defconst agent-claude--shared-config-items
   '("settings.json" "settings.local.json"
@@ -410,14 +392,15 @@ account copy.  The `mcpServers' key is handled separately via
 per-server deep merge.  The `projects' key is handled separately
 via trust-aware merge logic.")
 
-(defun agent-claude--sync-account-config (account)
-  "Sync shared state into ACCOUNT's config directory.
+(defun agent-claude--sync-account-json (account)
+  "Sync shared `.claude.json' state into ACCOUNT's config directory.
 Deep-merges `mcpServers' per-server from canonical, preserving
 per-account `env' entries (e.g. account-specific API keys).
 Copies theme and chrome settings verbatim.  Merges the `projects'
 key from all account configs so folder trust decisions are
-available everywhere.  Also symlinks settings, skills, plugins,
-projects, memory, and history from `~/.claude/'.
+available everywhere.  Directory creation and shared symlinks are
+handled by `agent-account-sync', which calls this function as the
+backend's account-init step.
 
 Only writes `.claude.json' when actual changes are detected, to
 avoid triggering file-change detection in running Claude Code
@@ -426,8 +409,6 @@ sessions."
                                      nil nil #'string=))
               (target-path (expand-file-name
                             ".claude.json" (expand-file-name config-dir))))
-    (make-directory (expand-file-name config-dir) t)
-    (agent-claude--ensure-shared-symlinks (expand-file-name config-dir))
     (condition-case err
         (let* ((target (agent-claude--read-claude-json target-path))
                (canonical (agent-claude--read-claude-json
@@ -491,68 +472,6 @@ Modifies TARGET-ENV in place."
              (> (hash-table-count account-env) 0))
     (maphash (lambda (k v) (puthash k v target-env)) account-env)))
 
-(defun agent-claude--ensure-shared-symlinks (config-dir)
-  "Ensure shared config symlinks exist in CONFIG-DIR.
-For each item in `agent-claude--shared-config-items', create a
-symlink pointing to the canonical file or directory in `~/.claude/'.
-If the target is a virgin-state file or empty directory (typically
-created by `claude' on first authentication), it is replaced with a
-symlink.  Targets with real content are left alone and a warning is
-logged."
-  (let ((canonical-dir (expand-file-name ".claude/" "~")))
-    (dolist (item agent-claude--shared-config-items)
-      (agent-claude--ensure-shared-symlink
-       (expand-file-name item canonical-dir)
-       (expand-file-name item config-dir)))))
-
-(defun agent-claude--ensure-shared-symlink (source target)
-  "Ensure TARGET is a symlink pointing to SOURCE.
-Create the symlink if TARGET is missing, replace TARGET if it is a
-virgin-state file or empty directory, warn and skip if TARGET has
-real content."
-  (when (file-exists-p source)
-    (cond
-     ((file-symlink-p target))
-     ((not (file-exists-p target))
-      (make-symbolic-link source target)
-      (message "agent-claude: symlinked %s -> %s" target source))
-     ((agent-claude--item-virgin-p target)
-      (agent-claude--delete-item target)
-      (make-symbolic-link source target)
-      (message "agent-claude: replaced virgin %s with symlink to %s"
-               target source))
-     (t
-      (lwarn 'agent-claude :warning
-             "%s has real content; cannot replace with symlink to %s"
-             target source)))))
-
-(defun agent-claude--item-virgin-p (path)
-  "Return non-nil if PATH is a virgin-state file or empty directory.
-An empty directory is virgin.  A zero-byte file is virgin.  A small
-JSON file containing only `{}' or `[]' is virgin."
-  (cond
-   ((file-directory-p path)
-    (null (directory-files path nil directory-files-no-dot-files-regexp)))
-   ((file-regular-p path)
-    (agent-claude--file-virgin-p path))))
-
-(defun agent-claude--file-virgin-p (path)
-  "Return non-nil if regular file PATH has empty or placeholder content."
-  (let ((size (file-attribute-size (file-attributes path))))
-    (or (zerop size)
-        (and (< size 16)
-             (member (string-trim
-                      (with-temp-buffer
-                        (insert-file-contents path)
-                        (buffer-string)))
-                     '("" "{}" "[]"))))))
-
-(defun agent-claude--delete-item (path)
-  "Delete PATH, whether it is a file or a directory."
-  (if (file-directory-p path)
-      (delete-directory path t)
-    (delete-file path)))
-
 (defun agent-claude--read-claude-json (path)
   "Read and parse the JSON file at PATH.
 Return a hash table, or nil if PATH does not exist or is invalid."
@@ -606,88 +525,34 @@ Prefers entries where `hasTrustDialogAccepted' is true."
     (insert (json-serialize data))
     (json-pretty-print-buffer)))
 
-(defun agent-claude--load-account ()
-  "Load the current account from `agent-claude-account-file'.
-Return the account name, or nil if the file is missing or stale."
-  (when (file-exists-p agent-claude-account-file)
-    (let ((name (string-trim
-                 (with-temp-buffer
-                   (insert-file-contents agent-claude-account-file)
-                   (buffer-string)))))
-      (when (alist-get name agent-claude-accounts nil nil #'string=)
-        name))))
-
-(defun agent-claude--save-account (name)
-  "Persist NAME as the active account to `agent-claude-account-file'."
-  (with-temp-file agent-claude-account-file
-    (insert name "\n"))
-  (setq agent-claude--current-account name))
-
-(defun agent-claude--prompt-account ()
-  "Prompt for an account from `agent-claude-accounts'.
-Return the account name, or nil."
-  (when agent-claude-accounts
-    (let ((names (mapcar #'car agent-claude-accounts)))
-      (if (= (length names) 1)
-          (car names)
-        (completing-read "Account: " names nil t)))))
-
-(defun agent-claude--resolve-account ()
-  "Return the active account, loading from disk or prompting as needed.
-On first use, loads from `agent-claude-account-file'.  If no
-persisted account exists, prompts once and saves the selection."
-  (when agent-claude-accounts
-    (unless agent-claude--current-account
-      (setq agent-claude--current-account
-            (agent-claude--load-account)))
-    (or agent-claude--current-account
-        (let ((account (agent-claude--prompt-account)))
-          (when account
-            (agent-claude--save-account account))
-          account))))
-
 ;;;###autoload
 (defun agent-claude-select-account ()
   "Switch the active Claude account.
-Prompts for an account from `agent-claude-accounts' and
-persists the selection.  New sessions will use this account."
+Prompts for an account from `agent-claude-accounts', persists the
+selection, and syncs the account's config directory.  New sessions
+will use this account."
   (interactive)
-  (unless agent-claude-accounts
-    (user-error "No accounts configured in `agent-claude-accounts'"))
-  (let ((account (agent-claude--prompt-account)))
-    (when account
-      (agent-claude--save-account account)
-      (agent-claude--sync-account-config account)
-      (message "Switched to account: %s" account))))
+  (agent-account-select 'claude-code))
 
 ;;;###autoload
 (defun agent-claude-init-account (account)
   "Initialize ACCOUNT's config directory without switching to it.
 Creates the config directory and all shared symlinks pointing at
-`~/.claude/'.  Safe to call on an already-initialized account: it heals
-virgin-state files that `claude' may have created on first
-authentication, and leaves real content alone with a warning.
-
-Use this before a new account's first `claude' run, or to repair an
-account whose shared files got reset.  Does not change the persisted
-active account."
+`~/.claude/', then merges shared `.claude.json' state.  Safe to
+call on an already-initialized account.  Does not change the
+persisted active account."
   (interactive
    (list (completing-read "Initialize account: "
                           (mapcar #'car agent-claude-accounts)
                           nil t)))
-  (unless (alist-get account agent-claude-accounts nil nil #'string=)
-    (user-error "Account %S not in `agent-claude-accounts'" account))
-  (agent-claude--sync-account-config account)
-  (message "Initialized account: %s" account))
+  (agent-account-init 'claude-code account))
 
-(defun agent-claude--start-with-account ()
-  "Start a new Claude session using the active account."
+(defun agent-claude--start-new ()
+  "Start a new Claude session using the current account."
   (interactive)
-  (let* ((account (agent-claude--resolve-account))
-         (agent-claude--pending-account account))
-    (when account
-      (agent-claude--sync-account-config account))
-    (claude-code)))
+  (agent-start-session
+   (agent-session-create :backend 'claude-code
+                         :account (agent-account-resolve 'claude-code t))))
 
 ;;;###autoload
 (defun agent-claude-start-or-switch ()
@@ -696,7 +561,7 @@ If no sessions are active, start a new one.  If sessions exist,
 show the unified session switcher."
   (interactive)
   (if (null (claude-code--find-all-claude-buffers))
-      (agent-claude--start-with-account)
+      (agent-claude--start-new)
     (agent--ensure-all-session-keys)
     (transient-setup 'agent--session-switcher)))
 
@@ -1000,15 +865,19 @@ STATUS is the plist passed by `url-retrieve'."
           (run-with-timer interval interval
                           #'agent-claude--fetch-usage))))
 
+(defun agent-claude--session-account (&optional buffer)
+  "Return the account recorded for BUFFER's Claude session, or nil."
+  (when-let* ((session (agent-session buffer)))
+    (agent-session-account session)))
+
 (defun agent-claude--active-accounts ()
   "Return a list of unique account names with active Claude sessions.
 Returns a list containing nil when no multi-account setup exists."
   (let ((accounts nil))
     (dolist (buf (claude-code--find-all-claude-buffers))
       (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (cl-pushnew agent-claude--buffer-account accounts
-                      :test #'equal))))
+        (cl-pushnew (agent-claude--session-account buf) accounts
+                    :test #'equal)))
     (or accounts (list nil))))
 
 (defun agent-claude--get-oauth-token (account)
@@ -1126,8 +995,7 @@ CACHE_READ_INPUT_TOKENS."
 
 (defun agent-claude--usage-for-buffer ()
   "Return the usage plist for the current buffer's account."
-  (gethash agent-claude--buffer-account
-           agent-claude--usage-data))
+  (gethash (agent-claude--session-account) agent-claude--usage-data))
 
 (defun agent-claude-status-session-usage ()
   "Return the 5-hour session utilization percentage."
@@ -1255,24 +1123,6 @@ Also starts status and usage polling if not already active."
     (when (require 'doom-modeline-core nil t)
       (doom-modeline-set-modeline 'ai-session))))
 
-(defun agent-claude--capture-buffer-account ()
-  "Store the account name and session identity for the new buffer.
-Called from `claude-code-start-hook'.  Uses the dynamically bound
-`agent-claude--pending-account' when available (set by
-`agent-claude--start-with-account'), otherwise falls back to
-`agent-claude--resolve-account' so that sessions started via
-other code paths (e.g. `agent-log-resume-session') also get an
-account.  Then constructs and stores the buffer's `agent-session'
-struct via `agent--capture-session'."
-  (setq agent-claude--buffer-account
-        (or agent-claude--pending-account
-            (agent-claude--resolve-account)))
-  (agent--capture-session (current-buffer)))
-
-(defun agent-claude-buffer-account ()
-  "Return the account name for the current buffer, or nil."
-  agent-claude--buffer-account)
-
 ;;;;; Parameterized session start
 
 (cl-defun agent-claude--start-session (session &key initial-prompt resume-id
@@ -1316,7 +1166,7 @@ against claude-code.el elsewhere."
     (with-current-buffer buffer
       (agent-session-create
        :backend 'claude-code
-       :account agent-claude--buffer-account
+       :account (agent-claude--session-account buffer)
        :directory (claude-code--extract-directory-from-buffer-name
                    (buffer-name))
        :instance (claude-code--extract-instance-name-from-buffer-name
@@ -1761,15 +1611,14 @@ Returns the process object."
 
 (defun agent-claude--batch-process-environment ()
   "Return the process environment for non-interactive Claude runs."
-  (if-let* ((account (agent-claude--resolve-account))
-            (config-dir (alist-get account agent-claude-accounts
-                                   nil nil #'string=)))
-      (cons (format "CLAUDE_CONFIG_DIR=%s" (expand-file-name config-dir))
-            (cl-remove-if
-             (lambda (s)
-               (or (string-prefix-p "CLAUDE_CODE" s)
-                   (string-prefix-p "ANTHROPIC_API_KEY=" s)))
-             process-environment))
+  (if-let* ((account (agent-account-resolve 'claude-code))
+            (env (agent-account-env 'claude-code account)))
+      (append env
+              (cl-remove-if
+               (lambda (s)
+                 (or (string-prefix-p "CLAUDE_CODE" s)
+                     (string-prefix-p "ANTHROPIC_API_KEY=" s)))
+               process-environment))
     process-environment))
 
 ;;;;; Skill runner
@@ -2526,7 +2375,6 @@ there with the backtrace prompt passed as a CLI argument."
 (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
 (add-hook 'claude-code-start-hook #'agent-claude-setup-kill-on-exit)
 (add-hook 'claude-code-start-hook #'agent-claude-start-status-polling)
-(add-hook 'claude-code-start-hook #'agent-claude--capture-buffer-account)
 (add-hook 'claude-code-start-hook #'agent-claude-set-modeline)
 (add-hook 'claude-code-start-hook #'agent--refresh-display-names)
 (add-hook 'kill-buffer-hook #'agent-claude-stop-status-polling)
@@ -2537,6 +2385,8 @@ there with the backtrace prompt passed as a CLI argument."
 (add-hook 'claude-code-start-hook #'agent--assign-session-key)
 (add-hook 'claude-code-process-environment-functions
           #'agent-claude--sync-theme-before-start)
+(add-hook 'claude-code-process-environment-functions
+          #'agent-claude-account-env)
 (add-hook 'kill-buffer-hook #'agent--release-session-key)
 (advice-add 'claude-code--eat-send-return :before
             #'agent-claude--note-submission)
@@ -2616,19 +2466,18 @@ Claude buffer that requested the handoff."
 (defun agent-claude-restart ()
   "Kill the current Claude session and resume it in place.
 Useful when a setting change requires relaunching Claude.  Preserves the
-session's directory and instance name, and uses the currently active
-account (from `agent-claude-accounts'), so the result is
+session's directory, instance name, and account (falling back to the
+account resolved by `agent-account-resolve'), so the result is
 equivalent to manually closing the session and reopening it."
   (interactive)
   (unless (claude-code--buffer-p (current-buffer))
     (user-error "Not in a Claude buffer"))
-  (let* ((account (agent-claude--resolve-account))
+  (let* ((account (or (agent-claude--session-account)
+                      (agent-account-resolve 'claude-code t)))
          (session-id (agent-claude--current-session-id))
          (dir default-directory)
          (instance-name (claude-code--extract-instance-name-from-buffer-name
                          (buffer-name))))
-    (when account
-      (agent-claude--sync-account-config account))
     (agent--force-kill-buffer (current-buffer))
     (agent-start-session
      (agent-session-create :backend 'claude-code
@@ -3045,32 +2894,10 @@ Signals an error if the status file is missing or incomplete."
   :variable 'agent-claude-warn-kill-with-branches
   :description "warn kill with branches")
 
-(eval-and-compile
-  (defclass agent-claude--account-variable (transient-lisp-variable)
-    ()
-    "An infix that displays and selects the active Claude account."))
-
-(cl-defmethod transient-infix-read ((_obj agent-claude--account-variable))
-  "Prompt for a Claude account."
-  (agent-claude--prompt-account))
-
-(cl-defmethod transient-infix-set ((obj agent-claude--account-variable) value)
-  "Set the account variable and persist VALUE to disk."
-  (cl-call-next-method obj value)
-  (when value
-    (agent-claude--save-account value)
-    (agent-claude--sync-account-config value)))
-
-(cl-defmethod transient-init-value ((obj agent-claude--account-variable))
-  "Initialize OBJ from disk if the variable is nil."
-  (unless (symbol-value (oref obj variable))
-    (set (oref obj variable) (agent-claude--load-account)))
-  (cl-call-next-method obj))
-
 (transient-define-infix agent-claude--infix-account ()
   "Select the active Claude account."
-  :class 'agent-claude--account-variable
-  :variable 'agent-claude--current-account
+  :class 'agent-account-variable
+  :backend 'claude-code
   :description "claude account")
 
 (defun agent-claude-agent-log-menu ()
