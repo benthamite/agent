@@ -26,8 +26,9 @@
 
 ;; A small, inspectable chief-of-staff loop.  Emacs owns schedule,
 ;; state, and notifications.  In the default mode, Claude Code or
-;; Codex runs as an ordinary long-lived session that receives periodic
-;; heartbeat prompts and remains available for conversation.
+;; Codex runs as an ordinary long-lived session reserved for
+;; conversation, while periodic heartbeat checks run out-of-band
+;; through the backend's run-prompt slot.
 
 ;;; Code:
 
@@ -52,10 +53,11 @@
 
 (defcustom agent-chief-mode 'session
   "Chief-of-staff execution mode.
-When this is `session', `agent-chief-tick' submits heartbeat
-prompts to a long-lived Claude Code or Codex session.  When this
-is `stateless', each tick uses a one-shot non-interactive backend
-call and parses a JSON decision."
+When this is `session', `agent-chief-tick' keeps a long-lived
+Claude Code or Codex session available for conversation and runs
+heartbeat checks out-of-band through the backend's `run-prompt'
+slot.  When this is `stateless', each tick uses a one-shot
+non-interactive backend call and parses a JSON decision."
   :type '(choice (const :tag "Interactive session" session)
                  (const :tag "Stateless one-shot" stateless))
   :group 'agent-chief)
@@ -149,8 +151,8 @@ enter the state file through `agent-chief-set-day-plan' and
 (defvar agent-chief--timer nil
   "Timer object for the active chief-of-staff loop.")
 
-(defvar agent-chief--running nil
-  "Non-nil while a chief-of-staff tick is in progress.")
+(defvar agent-chief--stateless-in-flight nil
+  "Non-nil while a stateless chief tick is in progress.")
 
 (defvar agent-chief--last-result nil
   "Last normalized (:text TEXT :error ERROR) plist from the backend.")
@@ -162,16 +164,13 @@ enter the state file through `agent-chief-set-day-plan' and
   "Active chief-of-staff session buffer, or nil.")
 
 (defvar agent-chief--last-session-response nil
-  "Last heartbeat response extracted from the chief session.")
-
-(defvar-local agent-chief--session-start-marker nil
-  "Marker for the start of the pending heartbeat response.")
+  "Last parsed heartbeat reply for the chief session.")
 
 (defvar-local agent-chief--session-p nil
   "Non-nil when this buffer is the chief-of-staff session.")
 
-(defvar-local agent-chief--session-awaiting-heartbeat nil
-  "Non-nil while this chief session is answering a heartbeat.")
+(defvar-local agent-chief--heartbeat-state nil
+  "Heartbeat state for the chief session buffer: nil or `in-flight'.")
 
 (defvar-local agent-chief--session-backend nil
   "Backend symbol for this chief-of-staff session.")
@@ -199,7 +198,6 @@ The session itself asks for today's plan so the user can reply
 conversationally in the agent buffer."
   (interactive)
   (let ((buffer (agent-chief--ensure-session)))
-    (agent-chief--clear-session-heartbeat-state buffer)
     (agent-chief--submit-to-session
      (agent-chief--session-introduction)
      buffer)
@@ -213,9 +211,10 @@ conversationally in the agent buffer."
   (when (timerp agent-chief--timer)
     (cancel-timer agent-chief--timer))
   (setq agent-chief--timer nil)
-  (setq agent-chief--running nil)
+  (setq agent-chief--stateless-in-flight nil)
   (when-let* ((buffer (agent-chief--session-buffer)))
-    (agent-chief--clear-session-heartbeat-state buffer))
+    (with-current-buffer buffer
+      (setq agent-chief--heartbeat-state nil)))
   (message "Agent chief stopped"))
 
 ;;;###autoload
@@ -231,34 +230,42 @@ conversationally in the agent buffer."
 (defun agent-chief-stateless-tick ()
   "Run one stateless chief-of-staff check."
   (interactive)
-  (if agent-chief--running
+  (if agent-chief--stateless-in-flight
       (message "Agent chief tick skipped; previous tick still running")
-    (setq agent-chief--running t)
+    (setq agent-chief--stateless-in-flight t)
     (condition-case err
         (agent-chief--run-backend
          (agent-chief--build-prompt)
          (cl-function
           (lambda (text &key error)
-            (setq agent-chief--running nil)
+            (setq agent-chief--stateless-in-flight nil)
             (agent-chief--handle-result text :error error))))
       (error
-       (setq agent-chief--running nil)
+       (setq agent-chief--stateless-in-flight nil)
        (signal (car err) (cdr err))))))
 
 ;;;###autoload
 (defun agent-chief-session-heartbeat ()
-  "Submit one heartbeat to the interactive chief-of-staff session."
+  "Run one heartbeat for the interactive chief-of-staff session.
+The heartbeat runs out-of-band through the backend's `run-prompt'
+slot, so the live session buffer stays reserved for conversation."
   (interactive)
-  (if agent-chief--running
-      (message "Agent chief heartbeat skipped; previous heartbeat still running")
-    (let ((buffer (agent-chief--ensure-session)))
-      (setq agent-chief--running t)
+  (let ((buffer (agent-chief--ensure-session)))
+    (if (buffer-local-value 'agent-chief--heartbeat-state buffer)
+        (message "Agent chief heartbeat skipped; previous heartbeat still running")
       (with-current-buffer buffer
-        (setq agent-chief--session-awaiting-heartbeat t)
-        (setq agent-chief--session-start-marker (copy-marker (point-max) t)))
-      (agent-chief--submit-to-session
-       (agent-chief--session-heartbeat-prompt)
-       buffer))))
+        (setq agent-chief--heartbeat-state 'in-flight))
+      (condition-case err
+          (agent-chief--run-backend
+           (agent-chief--session-heartbeat-prompt)
+           (cl-function
+            (lambda (text &key error)
+              (agent-chief--handle-heartbeat-result buffer text error))))
+        (error
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (setq agent-chief--heartbeat-state nil)))
+         (signal (car err) (cdr err)))))))
 
 ;;;###autoload
 (defun agent-chief-switch-to-session ()
@@ -308,14 +315,6 @@ conversationally in the agent buffer."
   "Return the live chief-of-staff session buffer, or nil."
   (when (buffer-live-p agent-chief-session-buffer)
     agent-chief-session-buffer))
-
-(defun agent-chief--clear-session-heartbeat-state (&optional buffer)
-  "Clear pending heartbeat state for BUFFER and the global running flag."
-  (setq agent-chief--running nil)
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (setq agent-chief--session-awaiting-heartbeat nil)
-      (setq agent-chief--session-start-marker nil))))
 
 (defun agent-chief--start-session-buffer ()
   "Start and return a chief-of-staff session buffer."
@@ -408,77 +407,44 @@ conversationally in the agent buffer."
           agent-chief-system-prompt
           (format "[Chief-of-staff heartbeat: %s]"
                   (format-time-string "%Y-%m-%d %A %H:%M:%S %Z"))
-          "Review the current day plan, explicit state, and this conversation."
+          "Review the current day plan and explicit state."
           "If Pablo should be nudged now, respond with `Nudge: ` followed by one concise message."
           "If no nudge is warranted, respond exactly `No nudge.`"
-          "Do not invent obligations; use only supplied state and conversation context."
+          "Do not invent obligations; use only the supplied state."
           (agent-chief--state-context)
           (agent-chief--extra-context)))
    "\n\n"))
 
-(defun agent-chief--handle-backend-event (message)
-  "Handle backend MESSAGE for chief-of-staff session notifications."
-  (when (eq (plist-get message :type) 'notification)
-    (when-let* ((buffer-name (plist-get message :buffer-name))
-                (buffer (get-buffer buffer-name)))
-      (when (eq buffer (agent-chief--session-buffer))
-        (agent-chief--handle-session-ready buffer))))
-  nil)
-
-(defun agent-chief--handle-session-ready (buffer)
-  "Handle BUFFER becoming ready after a heartbeat."
-  (when (and (buffer-live-p buffer)
-             (buffer-local-value 'agent-chief--session-awaiting-heartbeat
-                                 buffer))
+(defun agent-chief--handle-heartbeat-result (buffer text error)
+  "Apply a heartbeat result and clear BUFFER's in-flight state.
+BUFFER is the chief session buffer whose heartbeat completed.
+TEXT is the normalized backend output, possibly nil.  ERROR is
+non-nil when the backend run failed; see the `run-prompt' slot
+contract."
+  (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (setq agent-chief--session-awaiting-heartbeat nil)
-      (setq agent-chief--running nil)
-      (let* ((text (agent-chief--session-response-text buffer))
-             (reply (agent-chief--extract-session-reply text)))
-        (setq agent-chief--last-session-response reply)
-        (pcase (car reply)
-          ('no-nudge nil)
-          ('nudge
-           (funcall agent-chief-notify-function
-                    "Chief of staff"
-                    (cdr reply)))
-          (_
-           (funcall agent-chief-notify-function
-                    "Chief of staff"
-                    (agent-chief--truncate-message text))))))))
+      (setq agent-chief--heartbeat-state nil)))
+  (if error
+      (message "Agent chief heartbeat failed: %s" (or text "(no output)"))
+    (let ((reply (agent-chief--parse-heartbeat-reply (or text ""))))
+      (setq agent-chief--last-session-response reply)
+      (pcase (car reply)
+        ('no-nudge nil)
+        ('nudge
+         (funcall agent-chief-notify-function "Chief of staff" (cdr reply)))
+        (_
+         (funcall agent-chief-notify-function "Chief of staff"
+                  (agent-chief--truncate-message (cdr reply))))))))
 
-(defun agent-chief--session-response-text (buffer)
-  "Return text inserted in BUFFER since the pending heartbeat started."
-  (with-current-buffer buffer
-    (let ((start (if (markerp agent-chief--session-start-marker)
-                     (marker-position agent-chief--session-start-marker)
-                   (point-min))))
-      (buffer-substring-no-properties start (point-max)))))
-
-(defun agent-chief--extract-session-reply (text)
-  "Return a cons describing the chief heartbeat reply in TEXT."
-  (let ((nudge-pos (agent-chief--last-match-position
-                    "\\(?:CHIEF_NUDGE\\|Nudge\\):[ \t]*\\([^\n\r]+\\)" text))
-        (quiet-pos (or (agent-chief--last-match-position "CHIEF_NO_NUDGE" text)
-                       (agent-chief--last-match-position "\\bNo nudge\\." text))))
+(defun agent-chief--parse-heartbeat-reply (text)
+  "Return a cons describing the structured heartbeat reply in TEXT."
+  (let ((trimmed (string-trim text)))
     (cond
-     ((and quiet-pos (or (not nudge-pos) (> quiet-pos nudge-pos)))
+     ((string-match "^Nudge:[ \t]*\\(.+\\)" trimmed)
+      (cons 'nudge (string-trim (match-string 1 trimmed))))
+     ((string-match-p "^No nudge\\.?$" trimmed)
       (cons 'no-nudge nil))
-     (nudge-pos
-      (string-match "\\(?:CHIEF_NUDGE\\|Nudge\\):[ \t]*\\([^\n\r]+\\)"
-                    text nudge-pos)
-      (cons 'nudge (string-trim (match-string 1 text))))
-     (t
-      (cons 'unknown (string-trim text))))))
-
-(defun agent-chief--last-match-position (regexp text)
-  "Return the last match position for REGEXP in TEXT, or nil."
-  (let ((pos 0)
-        last)
-    (while (setq pos (string-match regexp text pos))
-      (setq last pos)
-      (setq pos (match-end 0)))
-    last))
+     (t (cons 'unknown trimmed)))))
 
 (defun agent-chief--truncate-message (text)
   "Return TEXT shortened for notification display."
@@ -690,12 +656,6 @@ CALLBACK is called as (TEXT &key ERROR) per the normalized
   (message "%s: %s" title message)
   (when (and (require 'alert nil t) (fboundp 'alert))
     (alert message :title title)))
-
-(with-eval-after-load 'agent-codex
-  (add-hook 'codex-event-hook #'agent-chief--handle-backend-event))
-
-(with-eval-after-load 'agent-claude
-  (add-hook 'claude-code-event-hook #'agent-chief--handle-backend-event))
 
 ;;;; Provide
 
