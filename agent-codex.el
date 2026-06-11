@@ -174,7 +174,6 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar codex--app-server-thread-id)
 (defvar codex--app-server-turn-active-p)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
-(declare-function codex--current-session-identity "codex" ())
 (declare-function codex--terminal-cursor-position "codex" ())
 (declare-function codex-start-session "codex")
 (declare-function codex-session-identity "codex" (&optional buffer))
@@ -338,7 +337,7 @@ Sets `CODEX_HOME' based on `agent-codex-accounts'.  Prefers
 the dynamically bound `agent-codex--pending-account' and falls
 back to the persisted active account via
 `agent-codex--resolve-account', so callers that invoke
-`codex--start' directly still get the right account."
+`codex' directly still get the right account."
   (when-let* ((account (or agent-codex--pending-account
                            (agent-codex--resolve-account)))
               (home (agent-codex--account-home account)))
@@ -1221,9 +1220,9 @@ via `codex exec'."
          (prompt (format "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
                          backtrace-file)))
     (message "Starting Codex for `%s' in %s..." package dir)
-    (agent-codex--install-hooks)
-    (cl-letf (((symbol-function 'codex--directory) (lambda () dir)))
-      (codex--start nil (list prompt) nil t))))
+    (agent-start-session
+     (agent-session-create :backend 'codex :directory dir)
+     :initial-prompt prompt)))
 
 ;;;###autoload
 (defun agent-codex-act-on-slack-message ()
@@ -1239,15 +1238,13 @@ via `codex exec'."
 
 (defun agent-codex--act-on-slack-message-start-session (project slack-url)
   "Start a Codex session for PROJECT with SLACK-URL."
-  (let* ((dir (file-name-as-directory
-               (expand-file-name (plist-get project :directory))))
-         (default-directory dir))
+  (let ((dir (file-name-as-directory
+              (expand-file-name (plist-get project :directory)))))
     (message "Starting Codex for `%s' in %s..."
              (plist-get project :id) dir)
-    (agent-codex--install-hooks)
-    (cl-letf (((symbol-function 'codex--directory) (lambda () dir)))
-      (let ((buffer (codex--start nil nil nil t)))
-        (agent-codex-send-command slack-url buffer)))))
+    (let ((buffer (agent-start-session
+                   (agent-session-create :backend 'codex :directory dir))))
+      (agent-codex-send-command slack-url buffer))))
 
 (define-obsolete-function-alias
   'agent-codex--debug-slack-message-start-session
@@ -1274,17 +1271,15 @@ via `codex exec'."
     (when (string-empty-p prompt)
       (user-error "Handoff file is empty"))
     (agent-codex--kill-handoff-source source-buffer dir)
-    (let ((agent-codex--pending-account
-           (or account (agent-codex--resolve-account))))
-      (agent-codex--install-hooks)
-      (cl-letf (((symbol-function 'codex--directory) (lambda () dir)))
-        (codex--start nil (list prompt) nil t)))))
+    (agent-start-session
+     (agent-session-create :backend 'codex :account account :directory dir)
+     :initial-prompt prompt)))
 
 (defun agent-codex--kill-handoff-source (source-buffer dir)
   "Kill SOURCE-BUFFER, or the single existing Codex buffer in DIR.
 The fallback handles emacsclient invocations that reach Emacs
 without the requesting buffer name.  Handoff replaces the current
-session, so leaving that buffer alive would make `codex--start'
+session, so leaving that buffer alive would make `codex-start-session'
 prompt for a new instance name and break unattended loops."
   (let ((target (or source-buffer
                     (agent-codex--single-existing-buffer-for-handoff dir))))
@@ -1341,31 +1336,26 @@ buffer that requested the handoff."
 (defun agent-codex-restart ()
   "Kill the current Codex session and resume it in place.
 Useful when a setting change requires relaunching Codex.  Preserves the
-session's directory and instance name.  If the active account differs
-from the session account, prompt for which account to use."
+session's directory, instance name, and terminal backend.  If the
+active account differs from the session account, prompt for which
+account to use."
   (interactive)
   (unless (codex--buffer-p (current-buffer))
     (user-error "Not in a Codex buffer"))
-  (let* ((dir default-directory)
-         (session-account agent-codex--buffer-account)
-         (account (agent-codex--restart-account session-account))
-         (identity (or (codex--current-session-identity)
-                       (user-error "Current Codex buffer has no session id")))
-         (backend (default-value 'codex-terminal-backend))
-         (instance-name (codex--extract-instance-name-from-buffer-name
-                         (buffer-name))))
+  (let* ((identity (codex-session-identity))
+         (session-id (or (plist-get identity :session-id)
+                         (user-error "Current Codex buffer has no session id")))
+         (account (agent-codex--restart-account agent-codex--buffer-account))
+         (session (agent-session-create
+                   :backend 'codex
+                   :account account
+                   :directory (plist-get identity :directory)
+                   :instance (plist-get identity :instance))))
     (agent--force-kill-buffer (current-buffer))
-    (let ((agent-codex--pending-account account))
-      (agent-codex--install-hooks)
-      (cl-letf (((symbol-function 'codex--directory) (lambda () dir)))
-        (agent-codex--resume-session
-         backend (plist-get identity :id) instance-name)))))
-
-(defun agent-codex--resume-session (backend session-id instance-name)
-  "Resume SESSION-ID with BACKEND and INSTANCE-NAME."
-  (if (eq backend 'app-server)
-      (codex--app-server-launch-resume-session session-id instance-name)
-    (codex--start-subcommand "resume" nil (list session-id) instance-name)))
+    (agent-start-session session
+                         :resume-id session-id
+                         :terminal-backend
+                         (plist-get identity :terminal-backend))))
 
 (defun agent-codex--restart-account (session-account)
   "Return the account to use when restarting SESSION-ACCOUNT."
