@@ -549,6 +549,7 @@
         (apply #'agent-register-backend
          'codex
          (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
           :duration-ms (lambda (_buffer) 60000)
           :send-command (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
@@ -659,6 +660,7 @@
         (apply #'agent-register-backend
          'one
          (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
           :submit-command (lambda (cmd &optional _buffer) (push cmd events))
           :exit (lambda () (interactive) (setq ran t))))
         (should (agent-exit-after-before-exit-skill 'one buf))
@@ -1166,6 +1168,85 @@ timestamp."
     (agent-session-event (current-buffer) 'submit)
     (should (eq agent--session-state 'busy))
     (should-not agent--session-state-changed-at)))
+
+;;;; Core send wrappers
+
+(ert-deftest agent-test-send-string-emits-submit-and-dispatches ()
+  "Emit a submit event, then dispatch to the backend send slot."
+  (let ((agent-backends nil)
+        events)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :send-command (lambda (cmd &optional buffer)
+                          (push (list cmd buffer agent--session-state)
+                                events))))
+        (setq-local agent--session-state 'awaiting-input)
+        (agent-send-string "hello" buf)
+        (should (equal events (list (list "hello" buf 'busy))))))))
+
+(ert-deftest agent-test-submit-prefers-atomic-submit-command ()
+  "Dispatch through the backend's atomic submit slot when present."
+  (let ((agent-backends nil)
+        events)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :submit-command (lambda (cmd &optional _buffer)
+                            (push (list 'submit cmd) events))
+          :send-command (lambda (cmd &optional _buffer)
+                          (push (list 'command cmd) events))))
+        (agent-submit "/retro" buf)
+        (should (equal events '((submit "/retro"))))))))
+
+(ert-deftest agent-test-submit-falls-back-to-send-and-return ()
+  "Compose send-command and send-return when no atomic submit exists."
+  (let ((agent-backends nil)
+        events)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :send-command (lambda (cmd &optional _buffer)
+                          (push (list 'command cmd) events))
+          :send-return (lambda (&optional _buffer) (push 'return events))))
+        (agent-submit "/retro" buf)
+        (should (equal (nreverse events) '((command "/retro") return)))))))
+
+(ert-deftest agent-test-send-return-emits-submit-event ()
+  "Return sessions to busy when the pending prompt is submitted."
+  (let ((agent-backends nil)
+        sent)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :send-return (lambda (&optional _buffer) (setq sent t))))
+        (setq-local agent--session-state 'awaiting-input)
+        (agent-send-return buf)
+        (should sent)
+        (should (eq agent--session-state 'busy))))))
+
+(ert-deftest agent-test-send-string-rejects-slotless-backends ()
+  "Signal a user error when the backend lacks the send slot."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))))
+        (should-error (agent-send-string "hello" buf) :type 'user-error)))))
 
 (provide 'agent-test)
 ;;; agent-test.el ends here

@@ -379,11 +379,12 @@ conversationally in the agent buffer."
   "Submit PROMPT to the chief-of-staff session BUFFER."
   (let* ((target (or buffer (agent-chief--session-buffer)
                      (agent-chief--ensure-session)))
-         (backend (buffer-local-value 'agent-chief--session-backend target))
-         (submit (agent--backend-get backend :submit-command)))
-    (unless submit
+         (backend (buffer-local-value 'agent-chief--session-backend target)))
+    (unless (agent--backend-get backend :submit-command)
       (user-error "Backend %S cannot submit chief prompts" backend))
-    (funcall submit prompt target)))
+    (with-current-buffer target
+      (setq agent--backend backend))
+    (agent-submit prompt target)))
 
 (defun agent-chief--session-introduction ()
   "Return the initial prompt for an interactive chief session."

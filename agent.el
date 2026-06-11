@@ -1193,6 +1193,47 @@ ORIG-FN is the original escape command."
 
 ;;;; Command dispatchers
 
+;;;; Core send wrappers
+
+(defun agent-send-string (string &optional buffer)
+  "Insert STRING into session BUFFER's prompt without submitting it.
+BUFFER defaults to the current session buffer, prompting for one
+when the current buffer is not a session.  Emits a `submit'
+session event before dispatching so stale waiting state clears."
+  (agent--dispatch-send :send-command (list string) buffer))
+
+(defun agent-submit (string &optional buffer)
+  "Insert STRING into session BUFFER's prompt and submit it.
+BUFFER defaults to the current session buffer.  Prefer the
+backend's atomic `:submit-command'; fall back to `:send-command'
+followed by `:send-return' when the backend registers none."
+  (let* ((buf (agent--resolve-session-buffer buffer))
+         (backend (agent--detect-backend buf)))
+    (if (agent--backend-get backend :submit-command)
+        (agent--dispatch-send :submit-command (list string) buf)
+      (agent--dispatch-send :send-command (list string) buf)
+      (when-let* ((send-return-fn (agent--backend-get backend :send-return)))
+        (funcall send-return-fn buf)))))
+
+(defun agent-send-return (&optional buffer)
+  "Submit the pending prompt in session BUFFER.
+BUFFER defaults to the current session buffer.  Emits a `submit'
+session event before dispatching to the backend's `:send-return'."
+  (agent--dispatch-send :send-return nil buffer))
+
+(defun agent--dispatch-send (slot args buffer)
+  "Emit a `submit' event for BUFFER and call its backend SLOT with ARGS.
+SLOT is one of `:send-command', `:submit-command', and
+`:send-return'.  BUFFER is resolved with
+`agent--resolve-session-buffer' and appended to ARGS."
+  (let* ((buf (agent--resolve-session-buffer buffer))
+         (backend (agent--detect-backend buf))
+         (fn (and backend (agent--backend-get backend slot))))
+    (unless fn
+      (user-error "Backend `%s' does not support `%s'" backend slot))
+    (agent-session-event buf 'submit)
+    (apply fn (append args (list buf)))))
+
 ;;;; Prompt capture
 
 ;;;###autoload
@@ -1221,15 +1262,14 @@ already been inserted."
   (interactive (list nil current-prefix-arg))
   (let* ((session-buffer (agent--resolve-session-buffer buffer))
          (backend (agent--detect-backend session-buffer))
-         (send-fn (agent--backend-get backend :send-command))
          (prompts (agent--captured-prompts
                    backend session-buffer include-inserted)))
-    (unless send-fn
+    (unless (agent--backend-get backend :send-command)
       (user-error "Backend `%s' does not support prompt insertion" backend))
     (unless prompts
       (user-error "No captured prompts for this session"))
     (let ((prompt (agent--select-captured-prompt prompts)))
-      (funcall send-fn (plist-get prompt :text) session-buffer)
+      (agent-send-string (plist-get prompt :text) session-buffer)
       (agent--delete-captured-prompt prompt))))
 
 (defun agent--resolve-session-buffer (&optional buffer)
@@ -1593,15 +1633,11 @@ Skip entries that yield no command, and return non-nil when one is submitted."
     (let (sent)
       (while (and (not sent) agent--before-exit-skill-remaining)
         (let* ((entry (pop agent--before-exit-skill-remaining))
-               (command (agent--before-exit-skill-command backend entry))
-               (submit-command-fn (agent--backend-get backend :submit-command))
-               (send-command-fn (agent--backend-get backend :send-command)))
-          (when (and command (or submit-command-fn send-command-fn))
-            (if submit-command-fn
-                (funcall submit-command-fn command buffer)
-              (funcall send-command-fn command buffer)
-              (when-let* ((send-return-fn (agent--backend-get backend :send-return)))
-                (funcall send-return-fn buffer)))
+               (command (agent--before-exit-skill-command backend entry)))
+          (when (and command
+                     (or (agent--backend-get backend :submit-command)
+                         (agent--backend-get backend :send-command)))
+            (agent-submit command buffer)
             (message "Started %s; this session will close when the before-exit skills finish"
                      command)
             (setq sent t))))

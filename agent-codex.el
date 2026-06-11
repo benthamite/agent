@@ -1202,7 +1202,7 @@ via `codex exec'."
              (plist-get project :id) dir)
     (let ((buffer (agent-start-session
                    (agent-session-create :backend 'codex :directory dir))))
-      (agent-codex-send-command slack-url buffer))))
+      (agent-send-string slack-url buffer))))
 
 (define-obsolete-function-alias
   'agent-codex--debug-slack-message-start-session

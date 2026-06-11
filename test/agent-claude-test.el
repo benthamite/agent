@@ -45,7 +45,7 @@
                    (lambda (session &rest options)
                      (setq started (list session options))
                      buffer))
-                  ((symbol-function 'agent-claude-send-command)
+                  ((symbol-function 'agent-send-string)
                    (lambda (cmd target)
                      (setq sent (list cmd target))
                      target)))

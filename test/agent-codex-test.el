@@ -446,7 +446,7 @@
                    (lambda (&rest keys)
                      (setq started keys)
                      buffer))
-                  ((symbol-function 'agent-codex-send-command)
+                  ((symbol-function 'agent-send-string)
                    (lambda (cmd target)
                      (setq sent (list cmd target))
                      target)))

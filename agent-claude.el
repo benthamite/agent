@@ -1486,8 +1486,7 @@ after sending."
   (let* ((entry (agent-claude--collect-todo-at-point))
          (prompt (agent-claude--batch-format-prompt entry))
          (buf (agent-claude--resolve-session-for-file)))
-    (with-current-buffer buf
-      (claude-code--do-send-command prompt))
+    (agent-submit prompt buf)
     (when agent-claude-org-todo-in-progress-keyword
       (org-todo agent-claude-org-todo-in-progress-keyword))
     (display-buffer buf)))
@@ -2515,7 +2514,7 @@ there with the backtrace prompt passed as a CLI argument."
     (let ((buffer (agent-start-session
                    (agent-session-create :backend 'claude-code
                                          :directory dir))))
-      (agent-claude-send-command slack-url buffer))))
+      (agent-send-string slack-url buffer))))
 
 (define-obsolete-function-alias
   'agent-claude--debug-slack-message-start-session
