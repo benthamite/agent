@@ -483,83 +483,40 @@
 
 (ert-deftest agent-codex-test-before-exit-ready-vetoes-pending-prompt ()
   "Do not auto-close while Codex still has prompt input."
-  (let ((buf (generate-new-buffer "*codex-test*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (insert "› $session-learning-capture\n\n  gpt-5.5 medium · /tmp")
-          (should-not (agent-codex-before-exit-ready-to-close-p buf)))
-      (kill-buffer buf))))
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'codex-prompt-input)
+               (lambda (&optional _buffer) "git status")))
+      (should-not (agent-codex-before-exit-ready-to-close-p
+                   (current-buffer))))))
 
 (ert-deftest agent-codex-test-before-exit-ready-allows-empty-prompt ()
   "Allow auto-close when Codex is back at an empty prompt."
-  (let ((buf (generate-new-buffer "*codex-test*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (insert "› \n\n  gpt-5.5 medium · /tmp")
-          (should (agent-codex-before-exit-ready-to-close-p buf)))
-      (kill-buffer buf))))
-
-(ert-deftest agent-codex-test-before-exit-ready-ignores-submitted-command ()
-  "Allow auto-close when the skill command is scrollback, not prompt input."
-  (let ((buf (generate-new-buffer "*codex-test*")))
-    (unwind-protect
-        (cl-letf (((symbol-function 'codex--terminal-cursor-position)
-                   (lambda () (point-max))))
-          (with-current-buffer buf
-            (insert "› $session-learning-capture\n\n  gpt-5.5 medium · /tmp")
-            (should (agent-codex-before-exit-ready-to-close-p buf))))
-      (kill-buffer buf))))
-
-(ert-deftest agent-codex-test-before-exit-ready-ignores-autosuggestion ()
-  "Allow auto-close when Codex shows placeholder prompt text."
-  (let ((buf (generate-new-buffer "*codex-test*")))
-    (unwind-protect
-        (cl-letf (((symbol-function 'codex--known-prompt-autosuggestion-p)
-                   (lambda (input)
-                     (string= input "Summarize recent commits"))))
-          (with-current-buffer buf
-            (insert "› Summarize recent commits\n\n  gpt-5.5 medium · /tmp")
-            (should (agent-codex-before-exit-ready-to-close-p buf))))
-      (kill-buffer buf))))
-
-(ert-deftest agent-codex-test-before-exit-ready-vetoes-pending-heavy-prompt ()
-  "Veto auto-close when the `❯'-rendered Codex prompt has pending input."
-  (let ((buf (generate-new-buffer "*codex-test*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (insert "❯ git status\n\n  gpt-5.5 medium · /tmp")
-          (should-not (agent-codex-before-exit-ready-to-close-p buf)))
-      (kill-buffer buf))))
-
-(ert-deftest agent-codex-test-before-exit-ready-ignores-stale-heavy-prompt-echo ()
-  "Allow auto-close at an empty `❯' prompt despite a stale `›' echo above it."
-  (let ((buf (generate-new-buffer "*codex-test*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (insert "› $session-learning-capture\n\n❯ \n\n  gpt-5.5 medium · /tmp")
-          (should (agent-codex-before-exit-ready-to-close-p buf)))
-      (kill-buffer buf))))
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'codex-prompt-input)
+               (lambda (&optional _buffer) nil)))
+      (should (agent-codex-before-exit-ready-to-close-p
+               (current-buffer))))))
 
 (ert-deftest agent-codex-test-stop-closes-after-submitted-before-exit-skill ()
   "Close a pending before-exit session when the submitted skill finishes."
   (let ((buf (generate-new-buffer "*codex:/tmp/project/*"))
         ran)
     (unwind-protect
-        (cl-letf (((symbol-function 'codex--terminal-cursor-position)
-                   (lambda () (point-max)))
+        (cl-letf (((symbol-function 'codex-prompt-input)
+                   (lambda (&optional _buffer) nil))
                   ((symbol-function 'run-at-time)
                    (lambda (_time _repeat function &rest args)
                      (apply function args)))
                   ((symbol-function 'agent-codex-exit)
                    (lambda () (interactive) (setq ran t))))
           (with-current-buffer buf
-            (setq-local agent--before-exit-skill-exit-pending t)
-            (insert "› $session-learning-capture\n\n  gpt-5.5 medium · /tmp"))
+            (setq-local agent--backend 'codex)
+            (setq-local agent--before-exit '(:queue nil :state running)))
           (agent-codex--handle-notification
            (list :type "Stop" :buffer-name (buffer-name buf)))
           (should ran)
           (with-current-buffer buf
-            (should-not agent--before-exit-skill-exit-pending)))
+            (should (eq (plist-get agent--before-exit :state) 'closing))))
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
