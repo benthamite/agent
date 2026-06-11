@@ -405,11 +405,14 @@ in their native buffer names."
 
 (defun agent--set-session (buffer session)
   "Store SESSION as BUFFER's `agent--session' and return SESSION.
-Also cache SESSION's backend symbol in `agent--backend'."
+Also cache SESSION's backend symbol in `agent--backend' and
+install `agent--session-teardown' so every captured or started
+session releases its resources exactly once."
   (with-current-buffer buffer
     (setq agent--session session)
-    (setq agent--backend (agent-session-backend session))
-    session))
+    (setq agent--backend (agent-session-backend session)))
+  (agent--install-session-teardown buffer)
+  session)
 
 ;;;; Customization
 
@@ -704,14 +707,69 @@ When FORCE is non-nil, sync even if `agent-sync-theme' is nil."
   "Return \"light\" or \"dark\" based on the current frame background mode."
   (if (eq (frame-parameter nil 'background-mode) 'dark) "dark" "light"))
 
+;;;; Session teardown
+
+(defvar-local agent--teardown-functions nil
+  "Functions run once when this session buffer is torn down.
+Backends push closures onto this list at session start.  Each
+closure is called with no arguments, inside the session buffer,
+by `agent--session-teardown'.")
+
+(defvar-local agent--teardown-done nil
+  "Non-nil once `agent--session-teardown' has run for this buffer.")
+
+(defun agent--install-session-teardown (&optional buffer)
+  "Arrange for session BUFFER to be torn down exactly once.
+BUFFER defaults to the current buffer.  Installs a buffer-local
+`kill-buffer-hook' entry and a process-exit hook so teardown runs
+whether the buffer is killed first or the CLI process exits first."
+  (let ((buf (or buffer (current-buffer))))
+    (with-current-buffer buf
+      (add-hook 'kill-buffer-hook #'agent--session-teardown-current nil t))
+    (agent--add-process-exit-hook buf #'agent--session-teardown)))
+
+(defun agent--session-teardown-current ()
+  "Run `agent--session-teardown' for the current buffer."
+  (agent--session-teardown (current-buffer)))
+
+(defun agent--session-teardown (buffer)
+  "Release every per-session resource owned by session BUFFER.
+Runs BUFFER's `agent--teardown-functions', releases its session
+key, and schedules a display-name refresh.  Idempotent: only the
+first call has any effect."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (unless agent--teardown-done
+        (setq agent--teardown-done t)
+        (dolist (fn agent--teardown-functions)
+          (condition-case err
+              (funcall fn)
+            (error
+             (agent--report-leak "teardown function" "%S signaled: %S" fn err))))
+        (setq agent--teardown-functions nil)
+        (remhash buffer agent--session-keys)
+        (agent--refresh-display-names-deferred)))))
+
+(defun agent--report-leak (kind format &rest args)
+  "Report a leaked KIND resource described by FORMAT and ARGS.
+Primary cleanup is owned by `agent--session-teardown'; safety
+nets call this so escaping resources surface as warnings instead
+of being silently mopped up."
+  (display-warning
+   'agent (format "leaked %s: %s" kind (apply #'format format args))
+   :warning))
+
 ;;;; Home-row session keys
 
 (defun agent--purge-dead-session-keys ()
-  "Remove entries for buffers that are no longer live."
+  "Drop dead buffers from `agent--session-keys', reporting each as a leak.
+`agent--session-teardown' owns key release; a dead entry here
+means a session escaped teardown."
   (let (dead)
     (maphash (lambda (buf _) (unless (buffer-live-p buf) (push buf dead)))
              agent--session-keys)
     (dolist (buf dead)
+      (agent--report-leak "session key" "dead buffer %s still held a key" buf)
       (remhash buf agent--session-keys))))
 
 (defun agent--assign-session-key ()
@@ -1726,6 +1784,7 @@ the chain, no skill applies, or nothing could be submitted."
     (let* ((backend (agent--detect-backend buffer))
            (queue (agent--before-exit-skill-queue backend buffer)))
       (when queue
+        (cl-pushnew #'agent--before-exit-teardown agent--teardown-functions)
         (setq agent--before-exit
               (list :queue queue
                     :state 'running
@@ -1807,7 +1866,9 @@ is submitted."
     (setq agent--before-exit (plist-put agent--before-exit :timer nil))))
 
 (defun agent--before-exit-teardown ()
-  "Cancel the before-exit watchdog when a session buffer is killed."
+  "Cancel the before-exit watchdog at session teardown.
+Member of `agent--teardown-functions', registered when a chain
+starts."
   (agent--before-exit-cancel-watchdog))
 
 (defun agent--before-exit-ready-to-close-p (backend buffer)
@@ -2908,8 +2969,6 @@ selected account."
 
 (add-hook 'enable-theme-functions #'agent-sync-theme)
 (add-hook 'agent-before-exit-functions #'agent-run-skill-before-exit)
-;; Phase 7 moves this into the agent minor mode's teardown.
-(add-hook 'kill-buffer-hook #'agent--before-exit-teardown)
 
 ;;;; Provide
 

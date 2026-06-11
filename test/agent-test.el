@@ -1843,5 +1843,26 @@ timestamp."
           :buffer-p (lambda (candidate) (eq candidate buf))))
         (should-error (agent-send-string "hello" buf) :type 'user-error)))))
 
+(ert-deftest agent-test-session-teardown-runs-once ()
+  "Teardown runs registered closures exactly once and releases the key."
+  (let ((calls 0))
+    (with-temp-buffer
+      (push (lambda () (setq calls (1+ calls))) agent--teardown-functions)
+      (puthash (current-buffer) "a" agent--session-keys)
+      (agent--session-teardown (current-buffer))
+      (agent--session-teardown (current-buffer))
+      (should (= calls 1))
+      (should-not (gethash (current-buffer) agent--session-keys)))))
+
+(ert-deftest agent-test-session-teardown-survives-erroring-closure ()
+  "An erroring closure does not abort the rest of teardown."
+  (let ((ran nil))
+    (with-temp-buffer
+      (push (lambda () (setq ran t)) agent--teardown-functions)
+      (push (lambda () (error "boom")) agent--teardown-functions)
+      (let ((warning-minimum-log-level :emergency))
+        (agent--session-teardown (current-buffer)))
+      (should ran))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here
