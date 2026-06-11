@@ -1,0 +1,68 @@
+;;; agent-claude-cli-test.el --- Tests for agent-claude-cli -*- lexical-binding: t -*-
+
+;;; Commentary:
+
+;; Tests for the Claude Code CLI conventions in agent-claude-cli.el.
+
+;;; Code:
+
+(require 'ert)
+(require 'cl-lib)
+(require 'agent-claude-cli)
+
+;;;; Loading
+
+(ert-deftest agent-claude-cli-test-loads ()
+  "Loading the test file provides the `agent-claude-cli' feature."
+  (should (featurep 'agent-claude-cli)))
+
+;;;; Projects directory
+
+(ert-deftest agent-claude-cli-test-encode-project-cwd ()
+  "Encode a cwd by replacing non-alphanumeric characters with dashes."
+  (should (equal (agent-claude-cli-encode-project-cwd "/a/b c/d")
+                 "-a-b-c-d")))
+
+;;;; Keychain
+
+(ert-deftest agent-claude-cli-test-keychain-service-for-config-dir ()
+  "Derive a suffixed Keychain service name from a config directory."
+  (should (string-prefix-p "Claude Code-credentials-"
+                           (agent-claude-cli-keychain-service "/tmp/x"))))
+
+(ert-deftest agent-claude-cli-test-keychain-service-default ()
+  "Return the default Keychain service name when no config dir is given."
+  (should (equal (agent-claude-cli-keychain-service nil)
+                 "Claude Code-credentials")))
+
+;;;; Warn-once
+
+(ert-deftest agent-claude-cli-test-warn-once-memoizes-keys ()
+  "Report a key once, then stay silent on repeated calls."
+  (let ((agent-claude-cli--warned nil)
+        (warnings nil))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (&rest args) (push args warnings))))
+      (agent-claude-cli--warn-once (list 'test "key") "boom %s" "x")
+      (agent-claude-cli--warn-once (list 'test "key") "boom %s" "x"))
+    (should (= (length agent-claude-cli--warned) 1))
+    (should (= (length warnings) 1))))
+
+;;;; Transcript JSONL
+
+(ert-deftest agent-claude-cli-test-read-session-header-round-trip ()
+  "Parse session and fork identifiers from a transcript's first line."
+  (let ((file (make-temp-file
+               "agent-claude-cli-test" nil ".jsonl"
+               (concat "{\"sessionId\":\"s1\",\"forkedFrom\":"
+                       "{\"sessionId\":\"s0\",\"messageUuid\":\"u0\"}}\n"))))
+    (unwind-protect
+        (let ((header (agent-claude-cli-read-session-header file)))
+          (should (equal (plist-get header :session-id) "s1"))
+          (should (equal (plist-get header :forked-from) "s0"))
+          (should (equal (plist-get header :fork-uuid) "u0"))
+          (should (equal (plist-get header :file-path) file)))
+      (delete-file file))))
+
+(provide 'agent-claude-cli-test)
+;;; agent-claude-cli-test.el ends here

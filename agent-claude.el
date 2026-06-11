@@ -31,6 +31,7 @@
 (require 'claude-code)
 (eval-and-compile (require 'agent))
 (require 'agent-account)
+(require 'agent-claude-cli)
 (require 'consult)
 (require 'subr-x)
 (require 'transient)
@@ -180,9 +181,6 @@ Used to detect when `/branch' creates a new session.")
 (defvar agent-codex-mode)
 (defvar eat-terminal)
 (defvar url-http-end-of-headers)
-(defvar url-http-attempt-keepalives)
-(defvar url-request-method)
-(defvar url-request-extra-headers)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
 (declare-function agent-act-on-slack-message "agent-slack" ())
 (declare-function claude-code--get-or-prompt-for-buffer "claude-code" ())
@@ -190,7 +188,6 @@ Used to detect when `/branch' creates a new session.")
 (declare-function claude-code--directory "claude-code" ())
 (declare-function claude-code--prompt-for-instance-name
                   "claude-code" (dir existing-instance-names &optional force-prompt))
-(declare-function json-pretty-print-buffer "json" ())
 (declare-function org-back-to-heading "org" (&optional invisible-ok))
 (declare-function org-map-entries "org" (func &optional match scope &rest skip))
 (declare-function org-get-todo-state "org" ())
@@ -315,7 +312,7 @@ if the status file is unavailable, or if the user confirms."
             (if (not (and sid transcript))
                 t
               (let* ((project-dir (file-name-directory transcript))
-                     (headers (agent-claude--scan-session-headers project-dir))
+                     (headers (agent-claude-cli-scan-session-headers project-dir))
                      (children-map (agent-claude--build-children-map headers))
                      (members (agent-claude--collect-tree-members sid children-map))
                      (branch-count (1- (hash-table-count members))))
@@ -349,14 +346,6 @@ project trust, memory, session history, permissions, and hooks are
 available regardless of which account is active.  Only OAuth
 credentials remain account-specific.")
 
-(defconst agent-claude--shared-claude-json-keys
-  '("theme" "claudeInChromeDefaultEnabled"
-    "hasCompletedClaudeInChromeOnboarding")
-  "Keys copied verbatim from canonical `~/.claude.json' into each
-account copy.  The `mcpServers' key is handled separately via
-per-server deep merge.  The `projects' key is handled separately
-via trust-aware merge logic.")
-
 (defun agent-claude--sync-account-json (account)
   "Sync shared `.claude.json' state into ACCOUNT's config directory.
 Deep-merges `mcpServers' per-server from canonical, preserving
@@ -375,15 +364,15 @@ sessions."
               (target-path (expand-file-name
                             ".claude.json" (expand-file-name config-dir))))
     (condition-case err
-        (let* ((target (agent-claude--read-claude-json target-path))
-               (canonical (agent-claude--read-claude-json
+        (let* ((target (agent-claude-cli-read-claude-json target-path))
+               (canonical (agent-claude-cli-read-claude-json
                            (expand-file-name ".claude.json" "~")))
                (merged-projects (agent-claude--collect-all-projects))
                (changed nil))
           (when target
             ;; Sync shared keys from canonical config.
             (when canonical
-              (dolist (key agent-claude--shared-claude-json-keys)
+              (dolist (key agent-claude-cli-shared-claude-json-keys)
                 (let ((val (gethash key canonical)))
                   (when (and val
                              (not (equal (json-serialize
@@ -393,7 +382,7 @@ sessions."
                     (setq changed t))))
               ;; Deep-merge mcpServers per-server, preserving per-account env.
               (when-let* ((canonical-servers (gethash "mcpServers" canonical)))
-                (let ((merged (agent-claude--merge-mcp-servers
+                (let ((merged (agent-claude-cli-merge-mcp-servers
                                canonical-servers
                                (gethash "mcpServers" target))))
                   (unless (equal (json-serialize (gethash "mcpServers" target))
@@ -407,45 +396,9 @@ sessions."
                 (puthash "projects" merged-projects target)
                 (setq changed t)))
             (when changed
-              (agent-claude--write-claude-json target-path target))))
+              (agent-claude-cli-write-claude-json target-path target))))
       (error
        (message "agent-claude: failed to sync account config: %S" err)))))
-
-(defun agent-claude--merge-mcp-servers (canonical target)
-  "Merge CANONICAL MCP servers into TARGET, preserving per-account env.
-For each server in CANONICAL, copy all keys into TARGET's entry
-but deep-merge the `env' hash table so per-account entries
-survive.  Returns the merged result."
-  (let ((result (or target (make-hash-table :test #'equal))))
-    (maphash
-     (lambda (name config)
-       (let ((existing (gethash name result)))
-         (if (not (and existing (hash-table-p existing)))
-             (puthash name config result)
-           (let ((account-env (copy-hash-table (gethash "env" existing
-                                                        (make-hash-table)))))
-             (maphash (lambda (k v) (puthash k v existing)) config)
-             (agent-claude--deep-merge-env account-env
-                                                 (gethash "env" existing))))))
-     canonical)
-    result))
-
-(defun agent-claude--deep-merge-env (account-env target-env)
-  "Merge ACCOUNT-ENV entries into TARGET-ENV, account wins on conflict.
-Modifies TARGET-ENV in place."
-  (when (and (hash-table-p account-env)
-             (> (hash-table-count account-env) 0))
-    (maphash (lambda (k v) (puthash k v target-env)) account-env)))
-
-(defun agent-claude--read-claude-json (path)
-  "Read and parse the JSON file at PATH.
-Return a hash table, or nil if PATH does not exist or is invalid."
-  (when (file-exists-p path)
-    (condition-case nil
-        (with-temp-buffer
-          (insert-file-contents path)
-          (json-parse-buffer))
-      (error nil))))
 
 (defun agent-claude--collect-all-projects ()
   "Collect and merge `projects' from all `.claude.json' sources.
@@ -455,11 +408,11 @@ config.  For duplicate keys, prefers entries where
   (let ((merged (make-hash-table :test #'equal))
         (paths (agent-claude--all-claude-json-paths)))
     (dolist (path paths)
-      (when-let* ((data (agent-claude--read-claude-json path))
+      (when-let* ((data (agent-claude-cli-read-claude-json path))
                   (projects (gethash "projects" data)))
         (when (hash-table-p projects)
           (maphash (lambda (key val)
-                     (agent-claude--merge-project merged key val))
+                     (agent-claude-cli-merge-project merged key val))
                    projects))))
     merged))
 
@@ -470,25 +423,6 @@ config.  For duplicate keys, prefers entries where
                   (expand-file-name ".claude.json"
                                     (expand-file-name (cdr entry))))
                 agent-claude-accounts)))
-
-(defun agent-claude--merge-project (table key val)
-  "Merge project VAL under KEY into TABLE.
-Prefers entries where `hasTrustDialogAccepted' is true."
-  (let ((existing (gethash key table)))
-    (cond
-     ((not existing)
-      (puthash key val table))
-     ((and (hash-table-p val)
-           (eq (gethash "hasTrustDialogAccepted" val) t)
-           (not (eq (gethash "hasTrustDialogAccepted" existing) t)))
-      (puthash key val table)))))
-
-(defun agent-claude--write-claude-json (path data)
-  "Write DATA as pretty-printed JSON to PATH."
-  (require 'json)
-  (with-temp-file path
-    (insert (json-serialize data))
-    (json-pretty-print-buffer)))
 
 ;;;###autoload
 (defun agent-claude-select-account ()
@@ -748,8 +682,19 @@ or hyphen with an underscore, mirroring the shell script's
 Reads the OAuth token from the macOS Keychain and queries the
 undocumented `api/oauth/usage' endpoint.  Stores the parsed
 response in `agent-claude--usage-data' keyed by ACCOUNT."
-  (when-let* ((token (agent-claude--get-oauth-token account)))
+  (when-let* ((token (agent-claude-cli-oauth-token
+                      (agent-claude--account-config-dir account))))
     (agent-claude--fetch-usage-with-token account token t)))
+
+(defun agent-claude--account-config-dir (account)
+  "Return the expanded `CLAUDE_CONFIG_DIR' for ACCOUNT, or nil.
+Nil means ACCOUNT uses the default `~/.claude' configuration,
+either because ACCOUNT is nil or because it has no entry in
+`agent-claude-accounts'."
+  (when-let* ((config-dir (and (stringp account)
+                               (alist-get account agent-claude-accounts
+                                          nil nil #'string=))))
+    (expand-file-name config-dir)))
 
 (defun agent-claude--fetch-usage-with-token (account token retry)
   "Fetch usage data for ACCOUNT with TOKEN.
@@ -761,15 +706,8 @@ If RETRY is non-nil, retry stale URL process write failures once."
 
 (defun agent-claude--url-retrieve-usage (account token)
   "Start the async usage request for ACCOUNT with TOKEN."
-  (let ((url-http-attempt-keepalives nil)
-        (url-request-method "GET")
-        (url-request-extra-headers
-         `(("Authorization" . ,(concat "Bearer " token))
-           ("anthropic-beta" . "oauth-2025-04-20"))))
-    (url-retrieve
-     "https://api.anthropic.com/api/oauth/usage"
-     #'agent-claude--handle-usage-response
-     (list account) t t)))
+  (agent-claude-cli-fetch-usage
+   token #'agent-claude--handle-usage-response (list account)))
 
 (defun agent-claude--handle-usage-retrieve-error (account token err retry)
   "Handle synchronous usage request error ERR for ACCOUNT.
@@ -867,36 +805,6 @@ Returns a list containing nil when no multi-account setup exists."
         (cl-pushnew (agent-claude--session-account buf) accounts
                     :test #'equal)))
     (or accounts (list nil))))
-
-(defun agent-claude--get-oauth-token (account)
-  "Extract the OAuth access token from the macOS Keychain for ACCOUNT.
-Returns the token string, or nil if unavailable."
-  (let ((service (agent-claude--keychain-service account)))
-    (when-let* ((raw (with-output-to-string
-                       (with-current-buffer standard-output
-                         (call-process "security" nil t nil
-                                       "find-generic-password"
-                                       "-s" service "-w"))))
-                (json (condition-case nil
-                          (json-parse-string (string-trim raw)
-                                             :object-type 'plist)
-                        (json-parse-error nil)))
-                (oauth (plist-get json :claudeAiOauth)))
-      (plist-get oauth :accessToken))))
-
-(defun agent-claude--keychain-service (account)
-  "Return the macOS Keychain service name for ACCOUNT.
-Computes the SHA-256 prefix of the expanded config directory
-path, matching Claude Code's credential storage convention.
-When ACCOUNT is nil or not in `agent-claude-accounts',
-returns the default service name."
-  (if-let* ((name (and (stringp account) account))
-            (config-dir (alist-get name agent-claude-accounts
-                                   nil nil #'string=)))
-      (concat "Claude Code-credentials-"
-              (substring (secure-hash 'sha256 (expand-file-name config-dir))
-                         0 8))
-    "Claude Code-credentials"))
 
 (defun agent-claude-start-usage-polling ()
   "Start polling the usage API.
@@ -1772,13 +1680,13 @@ changed."
   "Write KEY to VALUE in Claude JSON file PATH if it changed.
 Return non-nil when PATH was written."
   (let ((data (if (file-exists-p path)
-                  (or (agent-claude--read-claude-json path)
+                  (or (agent-claude-cli-read-claude-json path)
                       (error "Invalid JSON in %s" path))
                 (make-hash-table :test #'equal))))
     (unless (equal (gethash key data) value)
       (puthash key value data)
       (make-directory (file-name-directory path) t)
-      (agent-claude--write-claude-json path data)
+      (agent-claude-cli-write-claude-json path data)
       t)))
 
 (defun agent-claude--sync-theme-before-start (&rest _)
@@ -1828,7 +1736,7 @@ FILE defaults to `agent-claude-settings-file'."
     (funcall updater settings)
     (unless (equal before (json-serialize settings))
       (make-directory (file-name-directory file) t)
-      (agent-claude--write-claude-json file settings)
+      (agent-claude-cli-write-claude-json file settings)
       t)))
 
 (defun agent-claude--read-json-object (file)
@@ -2079,128 +1987,6 @@ unconditionally recenter with `(recenter -1)'."
 
 (require 'iso8601)
 
-(defun agent-claude--read-session-header (jsonl-file)
-  "Read first line of JSONL-FILE and return a lightweight metadata plist.
-Returns (:session-id :forked-from :fork-uuid :file-path) or nil.
-This is fast (reads only first few KB) and is used for the initial
-scan to build the branch tree."
-  (condition-case nil
-      (with-temp-buffer
-        (let ((coding-system-for-read 'utf-8))
-          (insert-file-contents jsonl-file nil 0 65536))
-        (goto-char (point-min))
-        (let* ((line (buffer-substring-no-properties
-                      (point) (line-end-position)))
-               (json (json-parse-string line :object-type 'plist))
-               (forked (plist-get json :forkedFrom)))
-          (list :session-id (plist-get json :sessionId)
-                :forked-from (when forked (plist-get forked :sessionId))
-                :fork-uuid (when forked (plist-get forked :messageUuid))
-                :file-path jsonl-file)))
-    (error nil)))
-
-(defun agent-claude--read-session-prompt (header)
-  "Enrich HEADER plist with :first-prompt and :timestamp.
-Reads the full JSONL file referenced by HEADER's :file-path."
-  (let ((file (plist-get header :file-path))
-        (fork-uuid (plist-get header :fork-uuid))
-        (session-id (plist-get header :session-id))
-        (forked-from (plist-get header :forked-from)))
-    (condition-case nil
-        (with-temp-buffer
-          (let ((coding-system-for-read 'utf-8))
-            (insert-file-contents file))
-          (goto-char (point-min))
-          (if fork-uuid
-              (agent-claude--branch-prompt
-               session-id forked-from fork-uuid)
-            (agent-claude--root-prompt session-id)))
-      (error (list :session-id session-id
-                   :forked-from forked-from
-                   :first-prompt "(error reading session)"
-                   :timestamp nil)))))
-
-(defun agent-claude--user-message-prompt-p (json)
-  "Return non-nil if JSON is a user message with text content."
-  (and (equal (plist-get json :type) "user")
-       (let* ((msg (plist-get json :message))
-              (content (when msg (plist-get msg :content))))
-         (and (stringp content)
-              (not (string-empty-p (string-trim content)))))))
-
-(defun agent-claude--root-prompt (session-id)
-  "Find the first user prompt in the current buffer for SESSION-ID."
-  (goto-char (point-min))
-  (let ((result nil))
-    (while (and (not result) (not (eobp)))
-      (let ((json (agent-claude--parse-jsonl-line)))
-        (when (and json (agent-claude--user-message-prompt-p json))
-          (setq result (agent-claude--meta-from-json
-                        session-id nil json))))
-      (forward-line 1))
-    (or result
-        (list :session-id session-id :forked-from nil
-              :first-prompt "(no prompt)" :timestamp nil))))
-
-(defun agent-claude--branch-prompt (session-id forked-from fork-uuid)
-  "Find the first new user prompt after FORK-UUID in the current buffer.
-SESSION-ID and FORKED-FROM are passed through to the result."
-  (goto-char (point-min))
-  (let ((found-fork nil)
-        (result nil))
-    (while (and (not result) (not (eobp)))
-      (let ((json (agent-claude--parse-jsonl-line)))
-        (when json
-          (if (not found-fork)
-              (when (string= (plist-get json :uuid) fork-uuid)
-                (setq found-fork t))
-            (when (agent-claude--user-message-prompt-p json)
-              (setq result (agent-claude--meta-from-json
-                            session-id forked-from json))))))
-      (forward-line 1))
-    (or result
-        (list :session-id session-id
-              :forked-from forked-from
-              :first-prompt "(branch)"
-              :timestamp nil))))
-
-(defun agent-claude--parse-jsonl-line ()
-  "Parse the current line as JSON, returning a plist or nil."
-  (let ((line (buffer-substring-no-properties
-               (line-beginning-position) (line-end-position))))
-    (unless (string-empty-p line)
-      (condition-case nil
-          (json-parse-string line :object-type 'plist)
-        (error nil)))))
-
-(defun agent-claude--meta-from-json (session-id forked-from json)
-  "Build metadata plist from SESSION-ID, FORKED-FROM id, and message JSON."
-  (let* ((msg (plist-get json :message))
-         (content (when msg (plist-get msg :content))))
-    (list :session-id session-id
-          :forked-from forked-from
-          :first-prompt (agent-claude--truncate-prompt content)
-          :timestamp (plist-get json :timestamp))))
-
-(defun agent-claude--truncate-prompt (content)
-  "Truncate CONTENT to a short display string."
-  (if (stringp content)
-      (truncate-string-to-width
-       (replace-regexp-in-string "[\n\r\t]+" " " (string-trim content))
-       60 nil nil "…")
-    "(no prompt)"))
-
-(defun agent-claude--scan-session-headers (project-dir)
-  "Scan JSONL files in PROJECT-DIR and return session headers.
-Returns a hash table mapping session ID to a lightweight header
-plist.  Only reads the first line of each file (fast)."
-  (let ((table (make-hash-table :test 'equal)))
-    (dolist (file (directory-files project-dir t "\\.jsonl\\'"))
-      (let ((header (agent-claude--read-session-header file)))
-        (when (and header (plist-get header :session-id))
-          (puthash (plist-get header :session-id) header table))))
-    table))
-
 (defun agent-claude--enrich-sessions (headers member-ids)
   "Enrich session HEADERS with full prompt text for MEMBER-IDS.
 HEADERS is a hash table of session ID to header plist.  MEMBER-IDS
@@ -2209,7 +1995,7 @@ with :first-prompt and :timestamp populated."
   (let ((table (make-hash-table :test 'equal)))
     (maphash (lambda (id header)
                (when (gethash id member-ids)
-                 (puthash id (agent-claude--read-session-prompt header)
+                 (puthash id (agent-claude-cli-read-session-prompt header)
                           table)))
              headers)
     table))
@@ -2331,7 +2117,7 @@ select one to switch to or resume."
       (unless (and session-id transcript)
         (user-error "Status file missing session_id or transcript_path"))
       (let* ((project-dir (file-name-directory transcript))
-             (headers (agent-claude--scan-session-headers project-dir))
+             (headers (agent-claude-cli-scan-session-headers project-dir))
              (children-map (agent-claude--build-children-map headers))
              (root-id (agent-claude--find-branch-root session-id headers))
              (members (agent-claude--collect-tree-members root-id children-map)))
@@ -2393,7 +2179,7 @@ concern; otherwise the default is what you want."
                              (user-error "Not in a git repo; cannot isolate"))
                          fork-id))))
     (when worktree
-      (agent-claude--link-session-into-project
+      (agent-claude-cli-link-session-into-project
        session-id parent-cwd (car worktree)))
     (agent-start-session
      (agent-session-create
@@ -2437,34 +2223,6 @@ Returns a cons (PATH . BRANCH-NAME).  Signals an error on failure."
         (unless (zerop exit)
           (error "git worktree add failed: %s"
                  (string-trim (buffer-string))))))))
-
-(defun agent-claude--link-session-into-project (session-id source-cwd target-cwd)
-  "Symlink SESSION-ID's JSONL from SOURCE-CWD's project dir into TARGET-CWD's.
-Lets `--resume SESSION-ID' find the session when the CLI runs from
-TARGET-CWD instead of SOURCE-CWD, since Claude Code stores sessions
-under `~/.claude/projects/<encoded-cwd>/'."
-  (let* ((filename (concat session-id ".jsonl"))
-         (src (expand-file-name
-               filename
-               (agent-claude--project-dir-for source-cwd)))
-         (dst-dir (agent-claude--project-dir-for target-cwd))
-         (dst (expand-file-name filename dst-dir)))
-    (unless (file-exists-p src)
-      (error "Session JSONL not found: %s" src))
-    (make-directory dst-dir t)
-    (unless (file-exists-p dst)
-      (make-symbolic-link src dst))))
-
-(defun agent-claude--project-dir-for (cwd)
-  "Return the `~/.claude/projects/' directory that Claude Code uses for CWD."
-  (expand-file-name (agent-claude--encode-project-cwd cwd)
-                    "~/.claude/projects/"))
-
-(defun agent-claude--encode-project-cwd (path)
-  "Encode PATH the way Claude Code names dirs under `~/.claude/projects/'."
-  (replace-regexp-in-string
-   "[^A-Za-z0-9-]" "-"
-   (directory-file-name (expand-file-name path))))
 
 (defun agent-claude--current-session-id ()
   "Return the session ID of the current Claude buffer.

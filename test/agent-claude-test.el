@@ -404,8 +404,8 @@
         deleted
         backed-off)
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude--get-oauth-token)
-                   (lambda (_account) "token"))
+        (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
+                   (lambda (_config-dir) "token"))
                   ((symbol-function 'delete-process)
                    (lambda (process)
                      (setq deleted process)))
@@ -435,8 +435,8 @@
         (calls 0)
         backed-off)
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude--get-oauth-token)
-                   (lambda (_account) "token"))
+        (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
+                   (lambda (_config-dir) "token"))
                   ((symbol-function 'agent-claude--usage-backoff)
                    (lambda ()
                      (setq backed-off t)
@@ -459,8 +459,8 @@
   "Do not keep idle URL connections open for periodic usage polling."
   (let ((url-http-attempt-keepalives t)
         observed)
-    (cl-letf (((symbol-function 'agent-claude--get-oauth-token)
-               (lambda (_account) "token"))
+    (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
+               (lambda (_config-dir) "token"))
               ((symbol-function 'url-retrieve)
                (lambda (&rest _args)
                  (setq observed url-http-attempt-keepalives)
