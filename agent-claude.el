@@ -919,24 +919,36 @@ Does nothing if the timer is already running."
     (setq agent-claude--usage-timer nil
           agent-claude--usage-current-interval nil)))
 
+(defvar-local agent-claude--session-teardown-registered nil
+  "Non-nil when this Claude buffer has registered session teardown.")
+
 (defun agent-claude--register-session-teardown ()
-  "Register per-session cleanup for a freshly started Claude session.
-Pushes one closure that cancels the status timer, deletes the
-status file, stops the monet session, and stops usage polling
-when this was the last live Claude session.  Also ensures the
-account-wide usage poller is running."
+  "Register per-session cleanup for the current Claude session.
+Idempotently pushes one closure that cancels the status timer,
+deletes the status file, stops the monet session, and stops usage
+polling when this was the last live Claude session.  Also ensures
+the account-wide usage poller is running."
   (when (claude-code--buffer-p (current-buffer))
-    (agent--install-session-teardown)
-    (let ((buffer (current-buffer)))
-      (push (lambda ()
-              (when agent-claude--status-timer
-                (cancel-timer agent-claude--status-timer)
-                (setq agent-claude--status-timer nil))
-              (agent-claude--cleanup-status-file)
-              (agent-claude--cleanup-monet-session)
-              (agent-claude--maybe-stop-usage-polling buffer))
-            agent--teardown-functions))
+    (if (agent-claude--session-teardown-registered-p)
+        (setq agent-claude--session-teardown-registered t)
+      (setq agent-claude--session-teardown-registered t)
+      (agent--install-session-teardown)
+      (let ((buffer (current-buffer)))
+        (push (lambda ()
+                (when agent-claude--status-timer
+                  (cancel-timer agent-claude--status-timer)
+                  (setq agent-claude--status-timer nil))
+                (agent-claude--cleanup-status-file)
+                (agent-claude--cleanup-monet-session)
+                (agent-claude--maybe-stop-usage-polling buffer))
+              agent--teardown-functions)))
     (agent-claude-start-usage-polling)))
+
+(defun agent-claude--session-teardown-registered-p ()
+  "Return non-nil when current Claude buffer already has teardown."
+  (or agent-claude--session-teardown-registered
+      (and agent--teardown-functions
+           (memq #'agent--session-teardown-current kill-buffer-hook))))
 
 (defun agent-claude--maybe-stop-usage-polling (buffer)
   "Stop usage polling when BUFFER was the last live Claude session."
@@ -2550,7 +2562,15 @@ symmetrically and restores `claude-code-notification-function'."
   (if (featurep 'monet)
       (agent-claude--monet-install)
     (with-eval-after-load 'monet
-      (when agent-claude-mode (agent-claude--monet-install)))))
+      (when agent-claude-mode (agent-claude--monet-install))))
+  (agent-claude--register-existing-session-teardowns))
+
+(defun agent-claude--register-existing-session-teardowns ()
+  "Register teardown for Claude buffers that predate mode enablement."
+  (dolist (buf (claude-code--find-all-claude-buffers))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (agent-claude--register-session-teardown)))))
 
 (defun agent-claude--mode-disable ()
   "Remove Claude backend hooks, advice, and timers."

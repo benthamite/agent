@@ -945,6 +945,54 @@
                                  'claude-code-send-escape))
     (should-not agent-claude--monet-gc-timer)))
 
+(ert-deftest agent-claude-test-mode-registers-existing-session-teardown ()
+  "Enabling the mode registers teardown for already-live Claude buffers."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*"))
+        (claude-code-notification-function #'ignore)
+        (claude-code-start-hook nil)
+        (claude-code-event-hook nil)
+        (claude-code-process-environment-functions nil)
+        (kill-buffer-query-functions kill-buffer-query-functions))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude--fetch-usage) #'ignore)
+                  ((symbol-function 'agent-claude--monet-install) #'ignore)
+                  ((symbol-function 'agent-claude--monet-remove) #'ignore)
+                  ((symbol-function 'claude-code--find-all-claude-buffers)
+                   (lambda () (list buf))))
+          (agent-claude-mode -1)
+          (agent-claude-mode 1)
+          (with-current-buffer buf
+            (should (memq #'agent--session-teardown-current
+                          kill-buffer-hook))
+            (should (= (length agent--teardown-functions) 1))))
+      (agent-claude-mode -1)
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-mode-does-not-duplicate-existing-teardown ()
+  "Mode re-enable does not duplicate teardown registered before reload."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*"))
+        (claude-code-notification-function #'ignore)
+        (claude-code-start-hook nil)
+        (claude-code-event-hook nil)
+        (claude-code-process-environment-functions nil)
+        (kill-buffer-query-functions kill-buffer-query-functions))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude--fetch-usage) #'ignore)
+                  ((symbol-function 'agent-claude--monet-install) #'ignore)
+                  ((symbol-function 'agent-claude--monet-remove) #'ignore)
+                  ((symbol-function 'claude-code--find-all-claude-buffers)
+                   (lambda () (list buf))))
+          (with-current-buffer buf
+            (add-hook 'kill-buffer-hook
+                      #'agent--session-teardown-current nil t)
+            (push #'ignore agent--teardown-functions))
+          (agent-claude-mode -1)
+          (agent-claude-mode 1)
+          (with-current-buffer buf
+            (should (= (length agent--teardown-functions) 1))))
+      (agent-claude-mode -1)
+      (kill-buffer buf))))
+
 (ert-deftest agent-claude-test-usage-polling-refcount ()
   "Stop usage polling only when the last Claude session is torn down."
   (let ((buf-a (generate-new-buffer " *claude-usage-a*"))
