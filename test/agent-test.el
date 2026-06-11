@@ -832,5 +832,106 @@
             (should (equal (plist-get meta :model) "gpt-5.5"))))
       (delete-file file))))
 
+;;;; Session identity
+
+(ert-deftest agent-test-session-buffer-name-claude-directory-only ()
+  "Derive a Claude buffer name from a session without an instance."
+  (should (equal (agent-session-buffer-name
+                  (agent-session-create :backend 'claude-code
+                                        :directory "~/repos/proj/"))
+                 "*claude:~/repos/proj/*")))
+
+(ert-deftest agent-test-session-buffer-name-claude-with-instance ()
+  "Derive a Claude buffer name from a session with an instance."
+  (should (equal (agent-session-buffer-name
+                  (agent-session-create :backend 'claude-code
+                                        :directory "~/repos/proj/"
+                                        :instance "tests"))
+                 "*claude:~/repos/proj/:tests*")))
+
+(ert-deftest agent-test-session-buffer-name-codex-directory-only ()
+  "Derive a Codex buffer name from a session without an instance."
+  (should (equal (agent-session-buffer-name
+                  (agent-session-create :backend 'codex
+                                        :directory "~/repos/proj/"))
+                 "*codex:~/repos/proj/*")))
+
+(ert-deftest agent-test-session-buffer-name-codex-with-instance ()
+  "Derive a Codex buffer name from a session with an instance."
+  (should (equal (agent-session-buffer-name
+                  (agent-session-create :backend 'codex
+                                        :directory "~/repos/proj/"
+                                        :instance "tests"))
+                 "*codex:~/repos/proj/:tests*")))
+
+(ert-deftest agent-test-session-lazily-backfills-from-buffer-name ()
+  "Backfill a session struct by parsing a legacy buffer name."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/backfill-proj/:tests*" t)
+      (let ((buf (current-buffer)))
+        (agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :extract-instance-name
+          (lambda (name)
+            (when (string-match ":\\([^:/*]+\\)\\*\\'" name)
+              (match-string 1 name)))
+          :account (lambda (_buffer) "work")))
+        (let ((session (agent-session buf)))
+          (should session)
+          (should (eq (agent-session-backend session) 'one))
+          (should (equal (agent-session-directory session)
+                         "~/repo/backfill-proj/"))
+          (should (equal (agent-session-instance session) "tests"))
+          (should (equal (agent-session-account session) "work"))
+          (should (eq (buffer-local-value 'agent--session buf) session))
+          (should (eq (buffer-local-value 'agent--backend buf) 'one)))))))
+
+(ert-deftest agent-test-session-returns-nil-for-non-session-buffer ()
+  "Return nil for buffers that belong to no registered backend."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (should-not (agent-session (current-buffer))))))
+
+(ert-deftest agent-test-session-round-trips-native-buffer-name ()
+  "Round-trip a native session buffer name through the session struct."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (rename-buffer "*claude:~/repo/roundtrip-proj/:tests*" t)
+      (let ((buf (current-buffer)))
+        (agent-register-backend
+         'claude-code
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :extract-instance-name
+          (lambda (name)
+            (when (string-match ":\\([^:/*]+\\)\\*\\'" name)
+              (match-string 1 name)))))
+        (should (equal (agent-session-buffer-name (agent-session buf))
+                       (buffer-name buf)))))))
+
+(ert-deftest agent-test-session-prefers-explicitly-set-struct ()
+  "Return the explicitly stored struct instead of re-deriving one."
+  (with-temp-buffer
+    (let ((session (agent-session-create :backend 'codex
+                                         :directory "~/repos/proj/")))
+      (agent--set-session (current-buffer) session)
+      (should (eq (agent-session (current-buffer)) session)))))
+
+(ert-deftest agent-test-session-buffer-name-normalizes-directory ()
+  "Normalize raw session directories when deriving the buffer name."
+  (let ((directory "/tmp/agent-test-dir"))
+    (make-directory directory t)
+    (unwind-protect
+        (should (equal (agent-session-buffer-name
+                        (agent-session-create :backend 'codex
+                                              :directory directory))
+                       (format "*codex:%s*"
+                               (file-name-as-directory
+                                (file-truename directory)))))
+      (delete-directory directory))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here

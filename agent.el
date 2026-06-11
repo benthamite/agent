@@ -268,6 +268,81 @@ Given \"*claude:~/path/to/project/:default*\" or
                 separator nil))))
     separator))
 
+;;;; Session identity
+
+(cl-defstruct (agent-session (:constructor agent-session-create) (:copier nil))
+  "Canonical identity of one AI agent session."
+  (backend nil :documentation "Backend symbol: `claude-code' or `codex'.")
+  (account nil :documentation "Account name string, or nil for default.")
+  (directory nil :documentation "Abbreviated absolute project directory,
+with a trailing slash.")
+  (instance nil :documentation "Instance name string, or nil for default.")
+  (id nil :documentation "CLI session id string, or nil until known."))
+
+(defvar-local agent--session nil
+  "The `agent-session' struct for this buffer, or nil.")
+
+(defun agent-session (&optional buffer)
+  "Return the `agent-session' struct for BUFFER, or nil.
+BUFFER defaults to the current buffer.  When BUFFER has no stored
+struct yet, lazily backfill one with `agent--capture-session' so
+sessions created before the struct existed keep working during
+the migration."
+  (let ((buf (or buffer (current-buffer))))
+    (when (buffer-live-p buf)
+      (or (buffer-local-value 'agent--session buf)
+          (agent--capture-session buf)))))
+
+(defun agent--capture-session (buffer)
+  "Construct, store, and return the `agent-session' struct for BUFFER.
+Derive the backend with `agent--detect-backend', the directory
+and instance by parsing BUFFER's name, and the account from the
+backend's account function.  Return nil when BUFFER belongs to no
+registered backend or its name encodes no directory."
+  (when-let* ((backend (agent--detect-backend buffer))
+              (name (buffer-name buffer))
+              (directory (agent--session-directory-from-buffer-name name)))
+    (let* ((instance-fn (agent--backend-get backend :extract-instance-name))
+           (instance (when instance-fn (funcall instance-fn name)))
+           (account-fn (agent--backend-get backend :account))
+           (account (when account-fn (funcall account-fn buffer))))
+      (agent--set-session
+       buffer
+       (agent-session-create :backend backend
+                             :account account
+                             :directory directory
+                             :instance instance)))))
+
+(defun agent-session-buffer-name (session)
+  "Return the buffer name encoding SESSION's identity.
+SESSION is an `agent-session' struct.  Follows the CLI packages'
+naming convention: \"*claude:DIR*\" or \"*claude:DIR:INSTANCE*\"
+for the `claude-code' backend, and \"*codex:DIR*\" or
+\"*codex:DIR:INSTANCE*\" for the `codex' backend."
+  (let ((prefix (pcase (agent-session-backend session)
+                  ('claude-code "claude")
+                  (backend (symbol-name backend))))
+        (instance (agent-session-instance session)))
+    (format "*%s:%s%s*" prefix
+            (agent-session--normalize-directory
+             (agent-session-directory session))
+            (if instance (format ":%s" instance) ""))))
+
+(defun agent-session--normalize-directory (directory)
+  "Return DIRECTORY normalized for session identity.
+Resolves symlinks, abbreviates the home directory, and ensures a
+trailing slash, matching the directory form the backend CLIs encode
+in their native buffer names."
+  (abbreviate-file-name (file-name-as-directory (file-truename directory))))
+
+(defun agent--set-session (buffer session)
+  "Store SESSION as BUFFER's `agent--session' and return SESSION.
+Also cache SESSION's backend symbol in `agent--backend'."
+  (with-current-buffer buffer
+    (setq agent--session session)
+    (setq agent--backend (agent-session-backend session))
+    session))
+
 ;;;; Customization
 
 (defcustom agent-protect-buffers t
