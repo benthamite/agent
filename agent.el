@@ -122,6 +122,7 @@ call sites."
   start-session session-identity
   send-string send-return submit target-buffer
   waiting-p busy-p background-tasks-p duration-ms display-name-suffix
+  notify
   account-env-var accounts account-file shared-config-items account-init
   run-prompt skill-roots skill-command-prefix
   sync-theme modeline-status menu-suffixes
@@ -1190,8 +1191,6 @@ ORIG-FN is the original escape command."
       (when (bound-and-true-p eat-terminal)
         (eat-term-send-string eat-terminal (kbd "ESC")))
     (funcall orig-fn)))
-
-;;;; Command dispatchers
 
 ;;;; Core send wrappers
 

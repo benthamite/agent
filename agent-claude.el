@@ -246,6 +246,7 @@ Source: lobehub/lobe-icons (MIT).")
                    (agent-claude-status-duration-ms)))
   :display-name-suffix #'agent-claude--branch-suffix
   :label "Claude Code"
+  :notify #'agent-claude-notify
   :discover-skills #'agent-claude--discover-skills
   :handoff #'agent-claude-handoff
   :run-skill #'agent-claude-run-skill
@@ -1177,36 +1178,39 @@ nil if the type cannot be determined."
               (alist-get 'type parsed)))
       (error nil))))
 
+(defun agent-claude--note-submission (&rest _)
+  "Emit a `submit' session event for the current Claude buffer.
+Installed as advice on claude-code.el's send paths because that
+package is third-party and exposes no submission hook.  Phase 7
+moves the installation into a minor mode."
+  (when (claude-code--buffer-p (current-buffer))
+    (agent-session-event (current-buffer) 'submit)))
+
 (defun agent-claude--handle-notification (message)
   "Handle a notification event from the Claude Code CLI.
 MESSAGE is a plist with :type, :buffer-name, :json-data, and
-:args.  Fires OS alerts for idle_prompt, permission_prompt, and
-elicitation_dialog notifications."
+:args.  Translates idle_prompt into a session event and fires OS
+alerts for permission_prompt and elicitation_dialog notifications."
   (when (eq (plist-get message :type) 'notification)
     (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
-      (with-current-buffer buf
-        (let* ((name (agent--session-name (buffer-name)))
-               (ntype (agent-claude--notification-type
-                       (plist-get message :json-data))))
-          (pcase ntype
-            ("idle_prompt"
-             (setq agent--waiting-for-input (current-time))
-             (unless (agent-exit-after-before-exit-skill 'claude-code buf)
-               (agent-claude-notify
-                "Claude ready"
-                (format "%s: waiting for your response" name))))
-            ("permission_prompt"
-             (agent-claude-notify
-              "Claude needs approval"
-              (format "%s: permission request pending" name)))
-            ("elicitation_dialog"
-             (agent-claude-notify
-              "Claude needs input"
-              (format "%s: waiting for your input" name)))
-            (_
-             (agent-claude-notify
-              "Claude Code"
-              (format "%s: needs your attention" name))))))))
+      (let ((name (agent--session-name (buffer-name buf)))
+            (ntype (agent-claude--notification-type
+                    (plist-get message :json-data))))
+        (pcase ntype
+          ("idle_prompt"
+           (agent-session-event buf 'idle-prompt))
+          ("permission_prompt"
+           (agent-claude-notify
+            "Claude needs approval"
+            (format "%s: permission request pending" name)))
+          ("elicitation_dialog"
+           (agent-claude-notify
+            "Claude needs input"
+            (format "%s: waiting for your input" name)))
+          (_
+           (agent-claude-notify
+            "Claude Code"
+            (format "%s: needs your attention" name)))))))
   nil)
 
 (defconst agent-claude--background-tasks-regexp
@@ -1231,12 +1235,10 @@ status-line indicator (e.g. \"· 3 shells\" or \"· 5 monitors\")."
 (defun agent-claude--handle-stop (message)
   "Handle a stop event from the Claude Code CLI.
 MESSAGE is a plist with :type, :buffer-name, :json-data, and
-:args.  Scrolls the corresponding terminal buffer to bottom."
+:args.  Translates the event into a `stop' session event."
   (when (eq (plist-get message :type) 'stop)
     (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
-      (with-current-buffer buf
-        (unless (agent-exit-after-before-exit-skill 'claude-code buf)
-          (agent--scroll-to-bottom buf)))))
+      (agent-session-event buf 'stop)))
   nil)
 
 ;;;;; Modeline
@@ -2540,11 +2542,11 @@ there with the backtrace prompt passed as a CLI argument."
           #'agent-claude--sync-theme-before-start)
 (add-hook 'kill-buffer-hook #'agent--release-session-key)
 (advice-add 'claude-code--eat-send-return :before
-            #'agent--clear-waiting-for-input)
+            #'agent-claude--note-submission)
 (advice-add 'claude-code--vterm-send-return :before
-            #'agent--clear-waiting-for-input)
+            #'agent-claude--note-submission)
 (advice-add 'claude-code--do-send-command :before
-            #'agent--clear-waiting-for-input)
+            #'agent-claude--note-submission)
 
 ;;;;; Handoff
 

@@ -31,6 +31,53 @@
                          (list (list buf "/session-retro")
                                (list buf (kbd "RET"))))))))))
 
+;;;; Session event translation
+
+(ert-deftest agent-claude-test-handle-stop-marks-awaiting-input ()
+  "Mark Claude sessions awaiting input on CLI stop events."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*"))
+        (agent-alert-on-ready nil))
+    (unwind-protect
+        (progn
+          (agent-claude--handle-stop
+           (list :type 'stop :buffer-name (buffer-name buf)))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-idle-prompt-emits-idle-prompt-event ()
+  "Translate idle_prompt notifications into idle-prompt session events."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*"))
+        emitted)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-session-event)
+                   (lambda (buffer event) (setq emitted (list buffer event)))))
+          (agent-claude--handle-notification
+           (list :type 'notification
+                 :buffer-name (buffer-name buf)
+                 :json-data "{\"notification_type\":\"idle_prompt\"}"))
+          (should (equal emitted (list buf 'idle-prompt))))
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-note-submission-emits-submit-event ()
+  "Return Claude sessions to busy when a prompt is sent."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent--session-state 'awaiting-input)
+      (cl-letf (((symbol-function 'claude-code--buffer-p)
+                 (lambda (candidate) (eq candidate buf))))
+        (agent-claude--note-submission))
+      (should (eq agent--session-state 'busy)))))
+
+(ert-deftest agent-claude-test-note-submission-ignores-other-buffers ()
+  "Do not emit submit events from non-Claude buffers."
+  (with-temp-buffer
+    (setq-local agent--session-state 'awaiting-input)
+    (cl-letf (((symbol-function 'claude-code--buffer-p)
+               (lambda (_candidate) nil)))
+      (agent-claude--note-submission))
+    (should (eq agent--session-state 'awaiting-input))))
+
 ;;;; Slack message action routing
 
 (ert-deftest agent-claude-test-act-on-slack-message-inserts-url-for-review ()
