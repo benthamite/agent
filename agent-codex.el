@@ -176,6 +176,9 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
 (declare-function codex--current-session-identity "codex" ())
 (declare-function codex--terminal-cursor-position "codex" ())
+(declare-function codex-start-session "codex")
+(declare-function codex-session-identity "codex" (&optional buffer))
+(declare-function codex-prompt-input "codex" (&optional buffer))
 (declare-function gptel-request "gptel")
 
 (defvar agent-codex--current-account nil
@@ -246,6 +249,8 @@ Source: SVG Repo (CC0).")
   :setup-kill-on-exit #'agent-codex-setup-kill-on-exit
   :exit #'agent-codex-exit
   :restart #'agent-codex-restart
+  :start-session #'agent-codex--start-session
+  :session-identity #'agent-codex--session-identity
   :sync-theme #'agent-codex--sync-theme)
 
 ;;;; Functions
@@ -524,6 +529,39 @@ buffer's `agent-session' struct via `agent--capture-session'."
 (defun agent-codex-buffer-account ()
   "Return the account name for the current buffer, or nil."
   agent-codex--buffer-account)
+
+;;;;; Parameterized session start
+
+(cl-defun agent-codex--start-session (session &key initial-prompt resume-id
+                                              terminal-backend)
+  "Start the Codex session described by SESSION; return its buffer.
+SESSION is an `agent-session'.  INITIAL-PROMPT is submitted as the
+first user message.  RESUME-ID resumes that session id.
+TERMINAL-BACKEND overrides `codex-terminal-backend' for this session.
+The session account (or the resolved active account) is bound as the
+pending account so `agent-codex-account-env' sees it."
+  (agent-codex--install-hooks)
+  (let* ((agent-codex--pending-account
+          (or (agent-session-account session)
+              (agent-codex--resolve-account)))
+         (buffer (codex-start-session
+                  :directory (agent-session-directory session)
+                  :instance-name (agent-session-instance session)
+                  :initial-prompt initial-prompt
+                  :resume-id resume-id
+                  :terminal-backend terminal-backend)))
+    (agent--set-session buffer session)
+    buffer))
+
+(defun agent-codex--session-identity (buffer)
+  "Return BUFFER's session identity as an `agent-session', or nil."
+  (when-let* ((identity (codex-session-identity buffer)))
+    (agent-session-create
+     :backend 'codex
+     :account (buffer-local-value 'agent-codex--buffer-account buffer)
+     :directory (plist-get identity :directory)
+     :instance (plist-get identity :instance)
+     :id (plist-get identity :session-id))))
 
 ;;;;; Mode line
 

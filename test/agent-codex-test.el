@@ -923,5 +923,34 @@
                        "~/repo/codex-capture-session-test/"))
         (should (equal (agent-session-instance session) "default"))))))
 
+(ert-deftest agent-codex-test-start-session-binds-account-and-records-session ()
+  "Bind the pending account and attach the session to the new buffer."
+  (let ((buffer (generate-new-buffer " *codex-test-session*"))
+        captured)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-codex--install-hooks) #'ignore)
+                  ((symbol-function 'agent-codex--resolve-account)
+                   (lambda () nil))
+                  ((symbol-function 'codex-start-session)
+                   (lambda (&rest keys)
+                     (setq captured
+                           (append keys
+                                   (list :account
+                                         agent-codex--pending-account)))
+                     buffer)))
+          (let ((session (agent-session-create
+                          :backend 'codex
+                          :account "work"
+                          :directory "/tmp/project/"
+                          :instance "fix")))
+            (should (eq (agent-codex--start-session session :resume-id "abc")
+                        buffer))
+            (should (equal (plist-get captured :directory) "/tmp/project/"))
+            (should (equal (plist-get captured :instance-name) "fix"))
+            (should (equal (plist-get captured :resume-id) "abc"))
+            (should (equal (plist-get captured :account) "work"))
+            (should (eq (agent-session buffer) session))))
+      (kill-buffer buffer))))
+
 (provide 'agent-codex-test)
 ;;; agent-codex-test.el ends here
