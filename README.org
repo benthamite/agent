@@ -19,11 +19,80 @@ This manual describes the features and customization options for the Emacs Lisp 
 
 =agent.el= collects the Emacs integration layer for AI coding command-line tools. It provides a shared session model, a unified transient menu, notification handling, terminal helpers, backend modules for Claude Code and Codex, and an optional chief-of-staff loop.
 
-The package is split into a small core and backend modules. The core file, =agent.el=, is backend-agnostic: it knows how to register AI tools, find their buffers, render backend icons, assign stable session keys, and present a single menu, and it implements the shared orchestration workflows (handoff, restart, exit, skill execution, project audits, backtrace debugging, and Slack-message routing) once against the backend primitives. =agent-account.el= implements multi-account support (selection, persistence, per-account config homes, and symlinked shared state) once for all backends. =agent-claude.el= integrates =claude-code.el= with Claude-specific status polling, usage polling, branch navigation, batch TODO processing, and hook setup. =agent-codex.el= integrates =codex.el= with Codex-specific theme sync, =codex exec= execution, and modeline helpers. =agent-chief.el= implements an inspectable chief-of-staff loop: Emacs owns timers, state, context collection, and notifications, while Claude Code or Codex provides one-shot judgment on each tick.
+The package is split into a small backend-agnostic core and focused modules:
 
-The main workflow is to load =agent.el=, then require the backend modules you use. Once the Claude and Codex modules are loaded, =M-x agent-menu= and =M-x agent-start-or-switch= operate across both tools. Sessions are grouped by account when the backend exposes account metadata, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
+| Module               | Role                                                                                                                                                                                                                        |
+|----------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =agent.el=           | Core: backend registry, session identity and state machine, session keys and teardown, unified orchestration commands (handoff, restart, exit, skills, audits, backtrace debugging), transient menu, alerts, theme sync    |
+| =agent-account.el=   | Multi-account support shared by all backends: selection, persistence, per-account config homes, symlinked shared state                                                                                                      |
+| =agent-capture.el=   | Persisted Org prompt capture, keyed to the session it targets                                                                                                                                                               |
+| =agent-slack.el=     | Slack-message-to-project routing: classifies a Slack message with =gptel= and starts a session in the matching project                                                                                                      |
+| =agent-snippet.el=   | Yasnippet TAB expansion and snippet insertion in eat-based session buffers                                                                                                                                                  |
+| =agent-claude.el=    | Claude Code backend: integrates =claude-code.el= with status and usage polling, branch navigation, batch TODO processing, hook setup, and ~agent-claude-mode~                                                               |
+| =agent-claude-cli.el= | Quarantined undocumented Claude CLI conventions: Keychain credential naming, the usage API endpoint, the =~/.claude/projects/= directory encoding, transcript JSONL parsing, and the =.claude.json= merge engine            |
+| =agent-codex.el=     | Codex backend: integrates =codex.el= with theme sync, =codex exec= execution, =config.toml= helpers, modeline helpers, and ~agent-codex-mode~                                                                               |
+| =agent-chief.el=     | Inspectable chief-of-staff loop: Emacs owns timers, state, context collection, and notifications, while Claude Code or Codex provides one-shot judgment on each tick                                                        |
+
+The main workflow is to load =agent.el=, require the backend modules you use, and enable their minor modes (see [[#h:minor-modes][Backend minor modes]]); loading a backend module installs nothing by itself. Once the Claude and Codex modules are active, =M-x agent-menu= and =M-x agent-start-or-switch= operate across both tools. Sessions are grouped by account when the backend exposes account metadata, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
 
 The package depends on =transient= for menus and =consult= for completion. The Claude backend expects =claude-code.el=. The Codex backend expects =codex.el=. Optional integrations use packages such as =yasnippet=, =doom-modeline=, =gptel=, =agent-log=, and =monet= when those are available.
+
+* Architecture
+:PROPERTIES:
+:CUSTOM_ID: h:architecture
+:END:
+
+** Session identity
+:PROPERTIES:
+:CUSTOM_ID: h:session-identity
+:END:
+
+#+findex: agent-session
+#+findex: agent-session-buffer-name
+Every live session buffer carries a buffer-local ~agent-session~ struct, captured once when the session starts. Its slots are ~backend~ (the backend symbol), ~account~ (the account name, or nil for the default), ~directory~ (the abbreviated project directory), ~instance~ (the instance name, or nil), and ~id~ (the CLI session id, or nil until known). The function ~agent-session~ returns the struct for a buffer, and ~agent-session-buffer-name~ derives the canonical buffer name from the identity. All orchestration code reads identity from this struct; nothing parses buffer names.
+
+** Session state machine
+:PROPERTIES:
+:CUSTOM_ID: h:session-state-machine
+:END:
+
+#+findex: agent-session-event
+Each session buffer tracks its readiness in the buffer-local variable ~agent--session-state~, which is one of ~busy~, ~awaiting-input~, or ~closing~. All transitions go through ~agent-session-event~, which accepts the events ~stop~, ~idle-prompt~, ~submit~, and ~exit-request~. Backends translate raw CLI notifications into these events and never set session state directly. A ~stop~ or ~idle-prompt~ event first offers the transition to the before-exit chain; when the chain consumes it, ready alerts and display refreshes are suppressed. Ready alerts fire only for ~idle-prompt~ events, and a ~submit~ event delivered while the session is already busy is ignored, because backend submission hooks can fire more than once per submission.
+
+** Session teardown and leak policy
+:PROPERTIES:
+:CUSTOM_ID: h:session-teardown
+:END:
+
+Session resource cleanup has a single owner: ~agent--session-teardown~ runs a session buffer's ~agent--teardown-functions~ exactly once, whether the buffer is killed first or the CLI process exits first, then releases the session's home-row key. Backends and features register their per-session resources (status poll timers, monet servers, before-exit chains) as teardown functions instead of installing their own kill-buffer hooks. Resources that escape teardown are not silently reaped: safety nets report each one through a =Warnings= buffer entry tagged =agent=, naming the leaked resource. A leak warning therefore indicates a lifecycle bug worth reporting, not routine noise.
+
+** Account model
+:PROPERTIES:
+:CUSTOM_ID: h:account-model
+:END:
+
+#+findex: agent-account-select
+#+findex: agent-account-init
+Multi-account state lives in =agent-account.el= and is keyed by backend. Each backend declares an accounts alist mapping account names to per-account configuration homes (~agent-claude-accounts~, ~agent-codex-accounts~), a persisted selection file that survives Emacs restarts (~agent-claude-account-file~, ~agent-codex-account-file~), and the environment variable that points the CLI at the selected home: =CLAUDE_CONFIG_DIR= for Claude Code and =CODEX_HOME= for Codex. Account homes keep credentials separate, while shared state (settings, hooks, skills, sessions, history) is symlinked from the backend's canonical home so it remains available after switching accounts; conflicting account-local files are backed up to timestamped =*.agent-backup-*= siblings first. ~agent-account-select~ persists a choice and syncs the account home, and ~agent-account-init~ prepares or repairs a home. The account a session was started under is recorded in its ~agent-session~ struct, so restart and handoff preserve it even after the global selection changes.
+
+** Backend minor modes
+:PROPERTIES:
+:CUSTOM_ID: h:minor-modes
+:END:
+
+#+findex: agent-claude-mode
+#+findex: agent-codex-mode
+The global minor modes ~agent-claude-mode~ and ~agent-codex-mode~ own every hook, advice, timer, and notification handler their backend installs. Loading =agent-claude.el= or =agent-codex.el= installs nothing; the modes must be enabled explicitly. Disabling a mode removes its hooks and advice symmetrically and restores the backend's previous notification function, leaving running sessions untouched. A typical setup:
+
+#+begin_src emacs-lisp
+(use-package agent
+  :config
+  (require 'agent-claude)
+  (require 'agent-codex)
+  (require 'agent-chief)
+  (agent-claude-mode 1)
+  (agent-codex-mode 1))
+#+end_src
 
 * User options
 :PROPERTIES:
@@ -62,7 +131,7 @@ The user option ~agent-backtrace-file~ controls where ~agent-save-backtrace~ and
 
 The unified orchestration commands share one set of options across backends. ~agent-handoff-files~ maps backend symbols to the handoff files read by ~agent-handoff~. ~agent-audit-skills~ lists the audit skills run by ~agent-audit-project~, and ~agent-audit-project-directories~ stores completion candidates for the audit directory prompt. ~agent-debug-backtrace-model~ and ~agent-debug-backtrace-backend~ configure the =gptel= request used by ~agent-debug-backtrace~ to identify likely culprit packages from an Emacs backtrace. ~agent-act-on-slack-message-model~ and ~agent-act-on-slack-message-backend~ configure the =gptel= request used by ~agent-act-on-slack-message~ to select an Epoch project from the Slack message at point.
 
-The user options ~agent-epoch-project-registry-file~ and ~agent-epoch-projects-root~ configure Slack-message project routing. The default registry is the shared tracked project registry at =shared/project-registry.json=. It contains the Epoch project taxonomy used for project matching.
+The user options ~agent-epoch-project-registry-file~ and ~agent-epoch-projects-root~ configure Slack-message project routing. Both default to nil; Slack routing is unavailable until they point at a JSON project registry and the root directory containing the canonical project files.
 
 The user option ~agent-prompt-capture-directory~ controls where ~agent-capture-prompt~ stores per-session Org files. Each file is keyed by backend, account, project directory, and session instance, so prompts are linked to the session they target and remain available after Emacs restarts. ~agent-prompt-capture-auto-save-delay~ controls the idle delay before capture buffers are saved automatically.
 
@@ -328,7 +397,7 @@ When ~agent-restart~ operates on a Codex session, it resumes codex.el's canonica
 
 #+findex: agent-register-backend
 #+findex: agent-start-session
-#+findex: agent-backend-icon
+#+findex: agent-backend-icon-string
 #+findex: agent-svg-icon
 #+findex: agent-display-name
 #+findex: agent-parse-skill-frontmatter
@@ -337,7 +406,7 @@ When ~agent-restart~ operates on a Codex session, it resumes codex.el's canonica
 #+findex: agent-kill-session-buffer
 The function ~agent-register-backend~ registers an AI tool by constructing an ~agent-backend~ struct from keyword arguments. Backend modules call it at load time. Keywords are validated against the struct's slot names, and the required slots ~:buffer-p~, ~:find-all-buffers~, and ~:start-session~ are checked so the shared session layer can rely on a consistent interface.
 
-The full slot set is: identity and presentation (~name~, ~label~, ~icon~, ~program~), buffer discovery (~buffer-p~, ~find-all-buffers~, ~find-buffers-for-dir~), session lifecycle (~start-session~, ~session-identity~, ~restart-options~), send primitives (~send-string~, ~send-return~, ~submit~, ~target-buffer~), session state probes (~waiting-p~, ~busy-p~, ~background-tasks-p~, ~duration-ms~, ~display-name-suffix~, ~notify~), accounts (~account-env-var~, ~accounts~, ~account-file~, ~shared-config-items~, ~canonical-home~, ~account-init~), skills (~run-prompt~, ~skill-roots~, ~skill-command-prefix~), integration hooks (~sync-theme~, ~modeline-status~, ~menu-suffixes~), and exit safety (~before-exit-ready-to-close-p~, ~before-kill-check~).
+The full slot set is: identity and presentation (~name~, ~label~, ~icon~, ~program~), buffer discovery (~buffer-p~, ~find-all-buffers~, ~find-buffers-for-dir~), session lifecycle (~start-session~, ~session-identity~, ~restart-options~), send primitives (~send-string~, ~send-return~, ~submit~), session state probes (~waiting-p~, ~busy-p~, ~background-tasks-p~, ~duration-ms~, ~display-name-suffix~, ~notify~), accounts (~account-env-var~, ~accounts~, ~account-file~, ~shared-config-items~, ~canonical-home~, ~account-init~), skills (~run-prompt~, ~skill-roots~, ~skill-command-prefix~), integration hooks (~sync-theme~, ~menu-suffixes~), and exit safety (~before-exit-ready-to-close-p~, ~before-kill-check~).
 
 The ~:start-session~ slot starts a new session parameterized by an ~agent-session~ identity struct, optionally with an initial prompt or a resume id. The ~:session-identity~ slot returns a live session buffer's CLI session id, used by ~agent-restart~ to resume in place. ~agent-start-session~ is the core dispatcher that starts a session through its backend's ~:start-session~ function, passing any extra backend-specific options through. The ~:send-string~ slot inserts text into a session's prompt without submitting it, ~:send-return~ submits the pending prompt, and ~:submit~ atomically inserts and submits; the core wrappers ~agent-send-string~, ~agent-send-return~, and ~agent-submit~ dispatch through these slots and emit the corresponding session events.
 
