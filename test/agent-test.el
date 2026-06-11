@@ -955,6 +955,39 @@
           (should (equal (agent-session-account session) "work"))
           (should (eq (buffer-local-value 'agent--session buf) session)))))))
 
+(ert-deftest agent-test-display-name-prefers-session-struct ()
+  "Use the stored session identity instead of buffer-name parsing."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buf))
+                :find-all-buffers (lambda () (list buf))))
+        (agent--set-session
+         buf
+         (agent-session-create :backend 'one
+                               :directory "~/repo/struct-name-wins/"))
+        (should (equal (agent-display-name buf) "struct-name-wins"))))))
+
+(ert-deftest agent-test-session-group-key-prefers-struct-account ()
+  "Group sessions by the account stored in the session struct."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buf))
+                :account (lambda (_buffer) "fallback-account")))
+        (agent--set-session
+         buf
+         (agent-session-create :backend 'one
+                               :account "struct-account"
+                               :directory "~/repo/a/"))
+        (should (equal (agent--session-group-key buf) "struct-account"))))))
+
 ;;;; Backend struct registry
 
 (ert-deftest agent-test-register-backend-rejects-unknown-keyword ()

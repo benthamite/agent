@@ -611,17 +611,32 @@ When FORCE is non-nil, sync even if `agent-sync-theme' is nil."
 ;;;; Display names
 
 (defun agent--buffer-session-name (buffer)
-  "Return the session name for BUFFER."
-  (agent--session-name (buffer-name buffer)))
+  "Return the session name for BUFFER.
+Prefers the directory stored in BUFFER's `agent-session' struct,
+falling back to parsing the buffer name."
+  (if-let* ((session (agent-session buffer))
+            (directory (agent-session-directory session)))
+      (agent--directory-project-name directory)
+    (agent--session-name (buffer-name buffer))))
 
-(defun agent--qualified-session-name (buffer-name)
-  "Return a qualified session name from BUFFER-NAME.
-Includes instance name when present for disambiguation."
-  (let* ((backend (agent--detect-backend (get-buffer buffer-name)))
-         (project (agent--session-name buffer-name))
-         (instance (when backend
-                     (funcall (agent--backend-get backend :extract-instance-name)
-                              buffer-name))))
+(defun agent--directory-project-name (directory)
+  "Return the project name for DIRECTORY, its last path component."
+  (let ((name (file-name-nondirectory (directory-file-name directory))))
+    (if (string-empty-p name) directory name)))
+
+(defun agent--qualified-session-name (buffer)
+  "Return a qualified session name for BUFFER.
+Includes the instance name when present for disambiguation.
+Prefers BUFFER's `agent-session' fields, falling back to
+buffer-name parsing."
+  (let* ((session (agent-session buffer))
+         (project (agent--buffer-session-name buffer))
+         (instance
+          (if session
+              (agent-session-instance session)
+            (when-let* ((backend (agent--detect-backend buffer)))
+              (funcall (agent--backend-get backend :extract-instance-name)
+                       (buffer-name buffer))))))
     (if instance
         (format "%s:%s" project instance)
       project)))
@@ -646,7 +661,7 @@ Returns the cached value when available."
          (others (cl-remove buffer all-bufs))
          (sibling-names (mapcar #'agent--buffer-session-name others))
          (base (if (member name sibling-names)
-                   (agent--qualified-session-name (buffer-name buffer))
+                   (agent--qualified-session-name buffer)
                  name)))
     (agent--display-name-with-suffix buffer backend base)))
 
@@ -733,10 +748,13 @@ Each SPECS is a list of suffix specs sorted by home-row key."
 
 (defun agent--session-group-key (buffer)
   "Return the group key for BUFFER in the session switcher.
-Uses the backend's :account function if available, falling back
-to the backend's :label or symbol name."
+Prefers the account stored in BUFFER's `agent-session', then the
+backend's :account function, then the backend's :label or symbol
+name."
   (let ((backend (agent--detect-backend buffer)))
-    (or (when-let* ((account-fn (agent--backend-get backend :account)))
+    (or (when-let* ((session (agent-session buffer)))
+          (agent-session-account session))
+        (when-let* ((account-fn (agent--backend-get backend :account)))
           (funcall account-fn buffer))
         (agent--backend-get backend :label)
         (and backend (symbol-name backend))
