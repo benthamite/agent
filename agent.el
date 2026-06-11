@@ -118,13 +118,13 @@ such as handoff-driven autoloops.")
   name label icon program
   buffer-p find-all-buffers find-buffers-for-dir
   start-session session-identity restart-options
-  send-string send-return submit target-buffer
+  send-string send-return submit
   waiting-p busy-p background-tasks-p duration-ms display-name-suffix
   notify
   account-env-var accounts account-file shared-config-items canonical-home
   account-init
   run-prompt skill-roots skill-command-prefix
-  sync-theme modeline-status menu-suffixes
+  sync-theme menu-suffixes
   before-exit-ready-to-close-p before-kill-check)
 
 (defvar agent-backends nil
@@ -1919,8 +1919,10 @@ after each successful skill, and displays a summary when done."
                                :key (lambda (s) (plist-get s :name))
                                :test #'equal)
                       (list :name name :style 'slash)))
-           (run (when-let* ((struct (agent-backend backend)))
-                  (agent-backend-run-prompt struct))))
+           (run (or (when-let* ((struct (agent-backend backend)))
+                      (agent-backend-run-prompt struct))
+                    (user-error "Backend `%s' does not support run-prompt"
+                                backend))))
       (message "Running audit %s..." name)
       (funcall run (agent--skill-prompt skill "--accept")
                :directory (plist-get state :dir)
