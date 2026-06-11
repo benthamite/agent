@@ -245,7 +245,6 @@ Source: lobehub/lobe-icons (MIT).")
   :debug-backtrace #'agent-claude-debug-backtrace
   :act-on-slack-message #'agent-claude-act-on-slack-message
   :before-kill-check (lambda (_buffer) (agent-claude--confirm-kill-branches))
-  :restart #'agent-claude-restart
   :start-session #'agent-claude--start-session
   :session-identity #'agent-claude--session-identity
   :sync-theme #'agent-claude--sync-theme)
@@ -1135,17 +1134,11 @@ against claude-code.el elsewhere."
       (claude-code--start nil switches nil t))))
 
 (defun agent-claude--session-identity (buffer)
-  "Return BUFFER's session identity as an `agent-session', or nil."
-  (when (buffer-live-p buffer)
-    (with-current-buffer buffer
-      (agent-session-create
-       :backend 'claude-code
-       :account (agent-claude--session-account buffer)
-       :directory (claude-code--extract-directory-from-buffer-name
-                   (buffer-name))
-       :instance (claude-code--extract-instance-name-from-buffer-name
-                  (buffer-name))
-       :id (plist-get (agent-claude--parse-status-file) :session_id)))))
+  "Return the session id of the Claude session in BUFFER.
+Signal a `user-error' when the status file is missing or names no
+session id, so callers refuse to act before losing the session."
+  (with-current-buffer buffer
+    (agent-claude--current-session-id)))
 
 ;;;;; Non-interactive execution
 
@@ -2452,29 +2445,7 @@ Claude buffer that requested the handoff."
 
 ;;;;; Restart
 
-;;;###autoload
-(defun agent-claude-restart ()
-  "Kill the current Claude session and resume it in place.
-Useful when a setting change requires relaunching Claude.  Preserves the
-session's directory, instance name, and account (falling back to the
-account resolved by `agent-account-resolve'), so the result is
-equivalent to manually closing the session and reopening it."
-  (interactive)
-  (unless (claude-code--buffer-p (current-buffer))
-    (user-error "Not in a Claude buffer"))
-  (let* ((account (or (agent-claude--session-account)
-                      (agent-account-resolve 'claude-code t)))
-         (session-id (agent-claude--current-session-id))
-         (dir default-directory)
-         (instance-name (claude-code--extract-instance-name-from-buffer-name
-                         (buffer-name))))
-    (agent--force-kill-buffer (current-buffer))
-    (agent-start-session
-     (agent-session-create :backend 'claude-code
-                           :account account
-                           :directory dir
-                           :instance instance-name)
-     :resume-id session-id)))
+(define-obsolete-function-alias 'agent-claude-restart #'agent-restart "0.2")
 
 ;;;;; Branch navigation
 

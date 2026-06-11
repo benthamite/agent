@@ -86,6 +86,7 @@
 (ert-deftest agent-codex-test-restart-preserves-buffer-account ()
   "Restart Codex with the account attached to the current session."
   (let ((dir (make-temp-file "codex-restart" t))
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
         captured-account)
     (unwind-protect
         (with-temp-buffer
@@ -110,13 +111,15 @@
                          (setq captured-account
                                (cdr-safe agent-account--starting))
                          (generate-new-buffer " *codex-restart-target*"))))
-              (kill-buffer (agent-codex-restart)))))
+              (kill-buffer (agent-restart)))))
+      (delete-directory agent-prompt-capture-directory t)
       (delete-directory dir t))
     (should (equal captured-account "work"))))
 
 (ert-deftest agent-codex-test-restart-prompts-when-active-account-differs ()
   "Restart Codex with the selected account when the user chooses it."
   (let ((dir (make-temp-file "codex-restart" t))
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
         captured-account captured-session-id prompt-choices)
     (unwind-protect
         (with-temp-buffer
@@ -143,7 +146,8 @@
                                (cdr-safe agent-account--starting))
                          (setq captured-session-id (plist-get keys :resume-id))
                          (generate-new-buffer " *codex-restart-target*"))))
-              (kill-buffer (agent-codex-restart)))))
+              (kill-buffer (agent-restart)))))
+      (delete-directory agent-prompt-capture-directory t)
       (delete-directory dir t))
     (should (equal prompt-choices '("personal" "work")))
     (should (equal captured-account "personal"))
@@ -153,6 +157,7 @@
 (ert-deftest agent-codex-test-restart-fails-when-active-account-is-missing ()
   "Do not fall back to the session account when the selected account is stale."
   (let ((dir (make-temp-file "codex-restart" t))
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
         killed started)
     (unwind-protect
         (with-temp-buffer
@@ -171,93 +176,111 @@
                        (lambda (&rest _args)
                          (setq started t)
                          (generate-new-buffer " *codex-restart-target*"))))
-              (should-error (agent-codex-restart) :type 'user-error))))
+              (should-error (agent-restart) :type 'user-error))))
+      (delete-directory agent-prompt-capture-directory t)
       (delete-directory dir t))
     (should-not killed)
     (should-not started)))
 
 (ert-deftest agent-codex-test-restart-resumes-current-session-id ()
   "Restart Codex with the session id attached to the current buffer."
-  (let (captured-session-id captured-instance-name)
-    (with-temp-buffer
-      (rename-buffer "*codex:~/project/:default*" t)
-      (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
-      (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                ((symbol-function 'agent--force-kill-buffer) #'ignore)
-                ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                ((symbol-function 'agent-account-resolve)
-                 (lambda (_backend &optional _prompt) nil))
-                ((symbol-function 'codex-start-session)
-                 (lambda (&rest keys)
-                   (setq captured-session-id (plist-get keys :resume-id))
-                   (setq captured-instance-name
-                         (plist-get keys :instance-name))
-                   (generate-new-buffer " *codex-restart-target*"))))
-        (kill-buffer (agent-codex-restart))))
+  (let ((agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        (agent-account--current (make-hash-table :test #'eq))
+        captured-session-id captured-instance-name)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*codex:~/project/:default*" t)
+          (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
+          (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                    ((symbol-function 'agent--force-kill-buffer) #'ignore)
+                    ((symbol-function 'agent-codex--install-hooks) #'ignore)
+                    ((symbol-function 'agent-account-resolve)
+                     (lambda (_backend &optional _prompt) nil))
+                    ((symbol-function 'codex-start-session)
+                     (lambda (&rest keys)
+                       (setq captured-session-id (plist-get keys :resume-id))
+                       (setq captured-instance-name
+                             (plist-get keys :instance-name))
+                       (generate-new-buffer " *codex-restart-target*"))))
+            (kill-buffer (agent-restart))))
+      (delete-directory agent-prompt-capture-directory t))
     (should (equal captured-session-id
                    "019ea295-c3df-70b0-a8e5-a8ffe9df220a"))
     (should (equal captured-instance-name "default"))))
 
 (ert-deftest agent-codex-test-restart-uses-codex-session-identity ()
   "Restart Codex through the canonical session identity resolver."
-  (let (captured-session-id)
-    (with-temp-buffer
-      (rename-buffer "*codex:~/project/:default*" t)
-      (setq-local codex--session-id nil)
-      (setq-local codex--app-server-thread-id nil)
-      (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                ((symbol-function 'agent--force-kill-buffer) #'ignore)
-                ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                ((symbol-function 'agent-account-resolve)
-                 (lambda (_backend &optional _prompt) nil))
-                ((symbol-function 'codex--current-session-identity)
-                 (lambda ()
-                   '(:id "019eada4-ebff-7721-9df6-642202f1138f"
-                     :transcript-file "/tmp/session.jsonl")))
-                ((symbol-function 'codex-start-session)
-                 (lambda (&rest keys)
-                   (setq captured-session-id (plist-get keys :resume-id))
-                   (generate-new-buffer " *codex-restart-target*"))))
-        (kill-buffer (agent-codex-restart))))
+  (let ((agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        (agent-account--current (make-hash-table :test #'eq))
+        captured-session-id)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*codex:~/project/:default*" t)
+          (setq-local codex--session-id nil)
+          (setq-local codex--app-server-thread-id nil)
+          (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                    ((symbol-function 'agent--force-kill-buffer) #'ignore)
+                    ((symbol-function 'agent-codex--install-hooks) #'ignore)
+                    ((symbol-function 'agent-account-resolve)
+                     (lambda (_backend &optional _prompt) nil))
+                    ((symbol-function 'codex--current-session-identity)
+                     (lambda ()
+                       '(:id "019eada4-ebff-7721-9df6-642202f1138f"
+                         :transcript-file "/tmp/session.jsonl")))
+                    ((symbol-function 'codex-start-session)
+                     (lambda (&rest keys)
+                       (setq captured-session-id (plist-get keys :resume-id))
+                       (generate-new-buffer " *codex-restart-target*"))))
+            (kill-buffer (agent-restart))))
+      (delete-directory agent-prompt-capture-directory t))
     (should (equal captured-session-id
                    "019eada4-ebff-7721-9df6-642202f1138f"))))
 
 (ert-deftest agent-codex-test-restart-without-session-identity-does-not-kill ()
   "Restart refuses to kill the current buffer without session identity."
-  (let (killed started)
-    (with-temp-buffer
-      (rename-buffer "*codex:~/project/:default*" t)
-      (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                ((symbol-function 'agent--force-kill-buffer)
-                 (lambda (_buffer) (setq killed t)))
-                ((symbol-function 'agent-account-resolve)
-                 (lambda (_backend &optional _prompt) nil))
-                ((symbol-function 'codex--current-session-identity)
-                 (lambda () nil))
-                ((symbol-function 'codex-start-session)
-                 (lambda (&rest _args) (setq started t))))
-        (should-error (agent-codex-restart) :type 'user-error)))
+  (let ((agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        (agent-account--current (make-hash-table :test #'eq))
+        killed started)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*codex:~/project/:default*" t)
+          (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                    ((symbol-function 'agent--force-kill-buffer)
+                     (lambda (_buffer) (setq killed t)))
+                    ((symbol-function 'agent-account-resolve)
+                     (lambda (_backend &optional _prompt) nil))
+                    ((symbol-function 'codex--current-session-identity)
+                     (lambda () nil))
+                    ((symbol-function 'codex-start-session)
+                     (lambda (&rest _args) (setq started t))))
+            (should-error (agent-restart) :type 'user-error)))
+      (delete-directory agent-prompt-capture-directory t))
     (should-not killed)
     (should-not started)))
 
 (ert-deftest agent-codex-test-restart-uses-session-backend ()
   "Restart preserves the session's buffer-local terminal backend."
-  (let (captured-backend)
-    (with-temp-buffer
-      (rename-buffer "*codex:~/project/:default*" t)
-      (setq-local codex-terminal-backend 'eat)
-      (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
-      (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                ((symbol-function 'agent--force-kill-buffer) #'ignore)
-                ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                ((symbol-function 'agent-account-resolve)
-                 (lambda (_backend &optional _prompt) nil))
-                ((symbol-function 'codex-start-session)
-                 (lambda (&rest keys)
-                   (setq captured-backend
-                         (plist-get keys :terminal-backend))
-                   (generate-new-buffer " *codex-restart-target*"))))
-        (kill-buffer (agent-codex-restart))))
+  (let ((agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        (agent-account--current (make-hash-table :test #'eq))
+        (codex-terminal-backend 'app-server)
+        captured-backend)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*codex:~/project/:default*" t)
+          (setq-local codex-terminal-backend 'eat)
+          (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
+          (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
+                    ((symbol-function 'agent--force-kill-buffer) #'ignore)
+                    ((symbol-function 'agent-codex--install-hooks) #'ignore)
+                    ((symbol-function 'agent-account-resolve)
+                     (lambda (_backend &optional _prompt) nil))
+                    ((symbol-function 'codex-start-session)
+                     (lambda (&rest keys)
+                       (setq captured-backend
+                             (plist-get keys :terminal-backend))
+                       (generate-new-buffer " *codex-restart-target*"))))
+            (kill-buffer (agent-restart))))
+      (delete-directory agent-prompt-capture-directory t))
     (should (eq captured-backend 'eat))))
 
 (ert-deftest agent-codex-test-handoff-kills-single-existing-buffer-when-source-missing ()

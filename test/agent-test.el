@@ -506,7 +506,7 @@
   (let ((agent-backends nil)
         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
         prompted
-        ran)
+        killed)
     (unwind-protect
         (with-temp-buffer
           (rename-buffer "*one:~/repo/project/:default*" t)
@@ -515,7 +515,7 @@
              'one
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
-              :restart (lambda () (interactive) (setq ran t))))
+              :session-identity (lambda (_buffer) "sid-123")))
             (let ((file (agent--prompt-capture-file 'one buf)))
               (make-directory (file-name-directory file) t)
               (with-temp-file file
@@ -523,10 +523,86 @@
             (cl-letf (((symbol-function 'yes-or-no-p)
                        (lambda (prompt)
                          (setq prompted prompt)
-                         nil)))
+                         nil))
+                      ((symbol-function 'agent--force-kill-buffer)
+                       (lambda (_buffer) (setq killed t))))
               (agent-restart))
             (should (string-match-p "1 captured prompt" prompted))
-            (should-not ran)))
+            (should-not killed)))
+      (delete-directory agent-prompt-capture-directory t))))
+
+(ert-deftest agent-test-restart-resumes-with-session-identity ()
+  "Restart kills the buffer and resumes the exact session id."
+  (let ((agent-backends nil)
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        killed
+        resumed)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*one:~/repo/project/:default*" t)
+          (let ((buf (current-buffer)))
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))
+              :session-identity (lambda (_buffer) "sid-123")))
+            (cl-letf (((symbol-function 'agent--force-kill-buffer)
+                       (lambda (_buffer) (setq killed t)))
+                      ((symbol-function 'agent-restart--account)
+                       (lambda (_backend _account) nil))
+                      ((symbol-function 'agent-start-session)
+                       (cl-function
+                        (lambda (session &key initial-prompt resume-id)
+                          (ignore initial-prompt)
+                          (setq resumed (list (agent-session-backend session)
+                                              resume-id))))))
+              (agent-restart))
+            (should killed)
+            (should (equal resumed '(one "sid-123")))))
+      (delete-directory agent-prompt-capture-directory t))))
+
+(ert-deftest agent-test-restart-without-identity-does-not-kill ()
+  "Restart refuses to kill the buffer when no session id exists."
+  (let ((agent-backends nil)
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        killed)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*one:~/repo/project/:default*" t)
+          (let ((buf (current-buffer)))
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))
+              :session-identity (lambda (_buffer) nil)))
+            (cl-letf (((symbol-function 'agent--force-kill-buffer)
+                       (lambda (_buffer) (setq killed t))))
+              (should-error (agent-restart) :type 'user-error))
+            (should-not killed)))
+      (delete-directory agent-prompt-capture-directory t))))
+
+(ert-deftest agent-test-restart-without-restart-options-omits-extras ()
+  "Restart backends lacking restart-options with only the resume id."
+  (let ((agent-backends nil)
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        (captured 'unset))
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*one:~/repo/project/:default*" t)
+          (let ((buf (current-buffer)))
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))
+              :session-identity (lambda (_buffer) "sid-123")))
+            (cl-letf (((symbol-function 'agent--force-kill-buffer) #'ignore)
+                      ((symbol-function 'agent-restart--account)
+                       (lambda (_backend _account) nil))
+                      ((symbol-function 'agent-start-session)
+                       (lambda (_session &rest options)
+                         (setq captured options))))
+              (agent-restart))
+            (should (equal captured '(:resume-id "sid-123")))))
       (delete-directory agent-prompt-capture-directory t))))
 
 (ert-deftest agent-test-run-skill-before-exit-submits-codex-skill ()

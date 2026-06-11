@@ -234,9 +234,9 @@ Source: SVG Repo (CC0).")
   :audit-project #'agent-codex-audit-project
   :debug-backtrace #'agent-codex-debug-backtrace
   :act-on-slack-message #'agent-codex-act-on-slack-message
-  :restart #'agent-codex-restart
   :start-session #'agent-codex--start-session
   :session-identity #'agent-codex--session-identity
+  :restart-options #'agent-codex--restart-options
   :sync-theme #'agent-codex--sync-theme)
 
 ;;;; Functions
@@ -346,14 +346,13 @@ The session account is bound as `agent-account--starting' by
     buffer))
 
 (defun agent-codex--session-identity (buffer)
-  "Return BUFFER's session identity as an `agent-session', or nil."
-  (when-let* ((identity (codex-session-identity buffer)))
-    (agent-session-create
-     :backend 'codex
-     :account (agent-codex--session-account buffer)
-     :directory (plist-get identity :directory)
-     :instance (plist-get identity :instance)
-     :id (plist-get identity :session-id))))
+  "Return the session id of the Codex session in BUFFER, or nil."
+  (plist-get (codex-session-identity buffer) :session-id))
+
+(defun agent-codex--restart-options (buffer)
+  "Return start options preserving BUFFER's terminal backend on restart."
+  (list :terminal-backend
+        (plist-get (codex-session-identity buffer) :terminal-backend)))
 
 ;;;;; Mode line
 
@@ -1135,58 +1134,7 @@ buffer that requested the handoff."
 
 ;;;;; Restart
 
-;;;###autoload
-(defun agent-codex-restart ()
-  "Kill the current Codex session and resume it in place.
-Useful when a setting change requires relaunching Codex.  Preserves the
-session's directory, instance name, and terminal backend.  If the
-active account differs from the session account, prompt for which
-account to use."
-  (interactive)
-  (unless (codex--buffer-p (current-buffer))
-    (user-error "Not in a Codex buffer"))
-  (let* ((identity (codex-session-identity))
-         (session-id (or (plist-get identity :session-id)
-                         (user-error "Current Codex buffer has no session id")))
-         (account (agent-codex--restart-account (agent-codex--session-account)))
-         (session (agent-session-create
-                   :backend 'codex
-                   :account account
-                   :directory (plist-get identity :directory)
-                   :instance (plist-get identity :instance))))
-    (agent--force-kill-buffer (current-buffer))
-    (agent-start-session session
-                         :resume-id session-id
-                         :terminal-backend
-                         (plist-get identity :terminal-backend))))
-
-(defun agent-codex--restart-account (session-account)
-  "Return the account to use when restarting SESSION-ACCOUNT."
-  (let ((selected-account (agent-account-resolve 'codex)))
-    (agent-codex--ensure-restart-account selected-account)
-    (cond
-     ((and session-account selected-account
-           (not (equal session-account selected-account)))
-      (agent-codex--prompt-restart-account session-account selected-account))
-     (selected-account)
-     (session-account
-      (agent-codex--ensure-restart-account session-account))
-     (t
-      (agent-codex--ensure-restart-account
-       (agent-account-resolve 'codex t))))))
-
-(defun agent-codex--prompt-restart-account (session-account selected-account)
-  "Prompt for restart account between SESSION-ACCOUNT and SELECTED-ACCOUNT."
-  (agent-codex--ensure-restart-account
-   (completing-read "Restart with account: "
-                    (list selected-account session-account)
-                    nil t nil nil selected-account)))
-
-(defun agent-codex--ensure-restart-account (account)
-  "Return ACCOUNT after checking that named restart accounts exist."
-  (when (and account (not (agent-account-home 'codex account)))
-    (user-error "Codex account `%s' is not configured" account))
-  account)
+(define-obsolete-function-alias 'agent-codex-restart #'agent-restart "0.2")
 
 ;;;;; Start or switch (Codex-specific entry point)
 

@@ -127,7 +127,7 @@ keys and are deleted as later refactoring phases migrate their
 call sites."
   name label icon program
   buffer-p find-all-buffers find-buffers-for-dir
-  start-session session-identity
+  start-session session-identity restart-options
   send-string send-return submit target-buffer
   waiting-p busy-p background-tasks-p duration-ms display-name-suffix
   notify
@@ -164,6 +164,13 @@ SLOTS is a keyword-value list whose keywords match `agent-backend'
 slot names, e.g. (:buffer-p #\\='fn :label \"Codex\").  Signal an
 error when SLOTS contains an unknown keyword or lacks a key in
 `agent--required-backend-keys'.
+
+Backends whose sessions carry launch state beyond the
+`agent-session' identity provide the optional `:restart-options'
+key: a function called with the session buffer before
+`agent-restart' kills it, returning a plist of extra keyword
+options passed through to `agent-start-session' when the session
+is resumed.
 
 Multi-account backends provide the optional account keys read by
 `agent-account': `:account-env-var' (environment variable naming
@@ -2360,9 +2367,56 @@ kills the session, since the Codex CLI has no `/exit'."
 (defun agent-restart ()
   "Kill the current AI session and resume it in place.
 Useful when a setting change requires relaunching the CLI.
-Dispatches to the backend's `:restart' handler."
+Preserves the session's directory, instance name, account, and any
+launch state the backend's `:restart-options' function captures; if
+the active account differs from the session account, prompt for
+which one to use."
   (interactive)
-  (agent--dispatch-with-captured-prompt-confirmation :restart "Restart"))
+  (let* ((session (or (agent-session)
+                      (user-error "Not in an AI session buffer")))
+         (backend (agent-session-backend session))
+         (buffer (current-buffer)))
+    (when (agent--confirm-no-captured-prompts backend buffer "Restart")
+      (let* ((identity-fn (agent--backend-get backend :session-identity))
+             (session-id (or (and identity-fn (funcall identity-fn buffer))
+                             (user-error "Current session has no session id")))
+             (extra-options
+              (when-let* ((fn (agent--backend-get backend :restart-options)))
+                (funcall fn buffer)))
+             (account (agent-restart--account
+                       backend (agent-session-account session))))
+        (setf (agent-session-account session) account)
+        (agent--force-kill-buffer buffer)
+        (apply #'agent-start-session session
+               :resume-id session-id extra-options)))))
+
+(defun agent-restart--account (backend session-account)
+  "Return the account to restart a BACKEND session with.
+SESSION-ACCOUNT is the account recorded on the session.  Prompt
+for which account to use when it differs from the currently
+selected account."
+  (let ((selected (agent-account-resolve backend)))
+    (agent-restart--ensure-account backend selected)
+    (cond
+     ((and session-account selected
+           (not (equal session-account selected)))
+      (agent-restart--ensure-account
+       backend
+       (completing-read "Restart with account: "
+                        (list selected session-account)
+                        nil t nil nil selected)))
+     (selected)
+     (session-account
+      (agent-restart--ensure-account backend session-account))
+     (t
+      (agent-restart--ensure-account
+       backend (agent-account-resolve backend t))))))
+
+(defun agent-restart--ensure-account (backend account)
+  "Return ACCOUNT after checking it is configured for BACKEND."
+  (when (and account (not (agent-account-home backend account)))
+    (user-error "Account `%s' is not configured" account))
+  account)
 
 ;;;; Transient boolean infix class
 

@@ -79,6 +79,44 @@
       (agent-claude--note-submission))
     (should (eq agent--session-state 'awaiting-input))))
 
+;;;; Restart
+
+(ert-deftest agent-claude-test-restart-prompts-when-active-account-differs ()
+  "Prompt for the restart account when it differs from the session account."
+  (let ((dir (make-temp-file "claude-restart" t))
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        captured-account captured-resume-id prompt-choices)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*claude:~/project/:default*" t)
+          (setq-local agent--session
+                      (agent-session-create :backend 'claude-code
+                                            :account "work"))
+          (let ((agent-claude-accounts
+                 `(("work" . ,(expand-file-name "work" dir))
+                   ("personal" . ,(expand-file-name "personal" dir))))
+                (agent-account--current (make-hash-table :test #'eq)))
+            (puthash 'claude-code "personal" agent-account--current)
+            (cl-letf (((symbol-function 'agent--force-kill-buffer) #'ignore)
+                      ((symbol-function 'agent-claude--current-session-id)
+                       (lambda () "0c5e1c5e-claude-session"))
+                      ((symbol-function 'completing-read)
+                       (lambda (_prompt choices &rest _args)
+                         (setq prompt-choices choices)
+                         "work"))
+                      ((symbol-function 'agent-start-session)
+                       (cl-function
+                        (lambda (session &key resume-id &allow-other-keys)
+                          (setq captured-account
+                                (agent-session-account session))
+                          (setq captured-resume-id resume-id)))))
+              (agent-restart))))
+      (delete-directory agent-prompt-capture-directory t)
+      (delete-directory dir t))
+    (should (equal prompt-choices '("personal" "work")))
+    (should (equal captured-account "work"))
+    (should (equal captured-resume-id "0c5e1c5e-claude-session"))))
+
 ;;;; Slack message action routing
 
 (ert-deftest agent-claude-test-act-on-slack-message-inserts-url-for-review ()
