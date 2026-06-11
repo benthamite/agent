@@ -199,6 +199,9 @@ Used to detect when `/branch' creates a new session.")
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
 (declare-function claude-code--get-or-prompt-for-buffer "claude-code" ())
 (declare-function claude-code--term-send-string "claude-code" (backend string))
+(declare-function claude-code--directory "claude-code" ())
+(declare-function claude-code--prompt-for-instance-name
+                  "claude-code" (dir existing-instance-names &optional force-prompt))
 (declare-function json-pretty-print-buffer "json" ())
 (declare-function org-back-to-heading "org" (&optional invisible-ok))
 (declare-function org-map-entries "org" (func &optional match scope &rest skip))
@@ -252,6 +255,8 @@ Source: lobehub/lobe-icons (MIT).")
   :setup-kill-on-exit #'agent-claude-setup-kill-on-exit
   :exit #'agent-claude-exit
   :restart #'agent-claude-restart
+  :start-session #'agent-claude--start-session
+  :session-identity #'agent-claude--session-identity
   :sync-theme #'agent-claude--sync-theme)
 
 ;;;; Functions
@@ -1265,6 +1270,59 @@ struct via `agent--capture-session'."
 (defun agent-claude-buffer-account ()
   "Return the account name for the current buffer, or nil."
   agent-claude--buffer-account)
+
+;;;;; Parameterized session start
+
+(cl-defun agent-claude--start-session (session &key initial-prompt resume-id
+                                               fork)
+  "Start the Claude Code session described by SESSION; return its buffer.
+SESSION is an `agent-session'.  INITIAL-PROMPT is passed to the Claude
+CLI as the opening user message.  RESUME-ID resumes that session id.
+FORK non-nil adds `--fork-session' to a resume.  The session account
+\(or the resolved active account) is bound as the pending account so
+`agent-claude-account-env' sees it."
+  (let* ((agent-claude--pending-account
+          (or (agent-session-account session)
+              (agent-claude--resolve-account)))
+         (switches (append (when resume-id (list "--resume" resume-id))
+                           (when fork (list "--fork-session"))
+                           (when initial-prompt (list initial-prompt))))
+         (buffer (agent-claude--start-with-overrides
+                  (agent-session-directory session)
+                  (agent-session-instance session)
+                  switches)))
+    (agent--set-session buffer session)
+    buffer))
+
+(defun agent-claude--start-with-overrides (dir instance switches)
+  "Run `claude-code--start' with DIR and INSTANCE injected.
+SWITCHES are extra CLI switches.  A nil DIR or INSTANCE keeps the
+upstream ambient behavior for that value.  This is the ONLY place that
+rebinds the private `claude-code--directory' and
+`claude-code--prompt-for-instance-name'; never add new `cl-letf' calls
+against claude-code.el elsewhere."
+  (let ((orig-directory (symbol-function 'claude-code--directory))
+        (orig-prompt (symbol-function 'claude-code--prompt-for-instance-name)))
+    (cl-letf (((symbol-function 'claude-code--directory)
+               (lambda () (or dir (funcall orig-directory))))
+              ((symbol-function 'claude-code--prompt-for-instance-name)
+               (lambda (prompt-dir existing &optional force-prompt)
+                 (or instance
+                     (funcall orig-prompt prompt-dir existing force-prompt)))))
+      (claude-code--start nil switches nil t))))
+
+(defun agent-claude--session-identity (buffer)
+  "Return BUFFER's session identity as an `agent-session', or nil."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (agent-session-create
+       :backend 'claude-code
+       :account agent-claude--buffer-account
+       :directory (claude-code--extract-directory-from-buffer-name
+                   (buffer-name))
+       :instance (claude-code--extract-instance-name-from-buffer-name
+                  (buffer-name))
+       :id (plist-get (agent-claude--parse-status-file) :session_id)))))
 
 ;;;;; Non-interactive execution
 

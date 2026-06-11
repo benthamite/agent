@@ -788,5 +788,40 @@
                        "~/repo/claude-capture-session-test/"))
         (should (equal (agent-session-instance session) "default"))))))
 
+;;;; Parameterized session start
+
+(ert-deftest agent-claude-test-start-session-injects-parameters ()
+  "Route directory, instance, account, and switches through the wrapper."
+  (let ((buffer (generate-new-buffer " *claude-test-session*"))
+        captured-dir captured-instance captured-switches captured-account)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude--resolve-account)
+                   (lambda () nil))
+                  ((symbol-function 'claude-code--start)
+                   (lambda (_arg switches &optional _force-prompt _force-switch)
+                     (setq captured-dir (claude-code--directory))
+                     (setq captured-instance
+                           (claude-code--prompt-for-instance-name
+                            "/elsewhere/" nil))
+                     (setq captured-switches switches)
+                     (setq captured-account agent-claude--pending-account)
+                     buffer)))
+          (let ((session (agent-session-create
+                          :backend 'claude-code
+                          :account "work"
+                          :directory "/tmp/project/"
+                          :instance "fix")))
+            (should (eq (agent-claude--start-session
+                         session :resume-id "abc" :fork t
+                         :initial-prompt "continue")
+                        buffer))
+            (should (equal captured-dir "/tmp/project/"))
+            (should (equal captured-instance "fix"))
+            (should (equal captured-switches
+                           '("--resume" "abc" "--fork-session" "continue")))
+            (should (equal captured-account "work"))
+            (should (eq (agent-session buffer) session))))
+      (kill-buffer buffer))))
+
 (provide 'agent-claude-test)
 ;;; agent-claude-test.el ends here
