@@ -67,6 +67,23 @@
           (should (equal emitted (list buf 'idle-prompt))))
       (kill-buffer buf))))
 
+(ert-deftest agent-claude-test-permission-prompt-uses-backend-label ()
+  "Title permission alerts with the registered backend label."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*"))
+        notified)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude-notify)
+                   (lambda (title message)
+                     (setq notified (list title message)))))
+          (agent-claude--handle-notification
+           (list :type 'notification
+                 :buffer-name (buffer-name buf)
+                 :json-data "{\"notification_type\":\"permission_prompt\"}"))
+          (should (equal notified
+                         '("Claude Code needs approval"
+                           "project: permission request pending"))))
+      (kill-buffer buf))))
+
 (ert-deftest agent-claude-test-note-submission-emits-submit-event ()
   "Return Claude sessions to busy when a prompt is sent."
   (with-temp-buffer

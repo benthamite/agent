@@ -998,11 +998,7 @@ TITLE is the notification title.  MESSAGE is the notification
 body.  When `agent-alert-on-ready' is non-nil, dispatch to
 the style configured in `agent-alert-style'."
   (claude-code-default-notification title message)
-  (when agent-alert-on-ready
-    (agent--alert-visual title message)
-    (agent--alert-sound)))
-
-
+  (agent--alert-route title message))
 
 (defun agent-claude--notification-type (json-str)
   "Extract the notification type from JSON-STR.
@@ -1031,6 +1027,7 @@ alerts for permission_prompt and elicitation_dialog notifications."
   (when (eq (plist-get message :type) 'notification)
     (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
       (let ((name (agent--session-name (buffer-name buf)))
+            (label (agent--backend-get 'claude-code :label))
             (ntype (agent-claude--notification-type
                     (plist-get message :json-data))))
         (pcase ntype
@@ -1038,15 +1035,15 @@ alerts for permission_prompt and elicitation_dialog notifications."
            (agent-session-event buf 'idle-prompt))
           ("permission_prompt"
            (agent-claude-notify
-            "Claude needs approval"
+            (format "%s needs approval" label)
             (format "%s: permission request pending" name)))
           ("elicitation_dialog"
            (agent-claude-notify
-            "Claude needs input"
+            (format "%s needs input" label)
             (format "%s: waiting for your input" name)))
           (_
            (agent-claude-notify
-            "Claude Code"
+            label
             (format "%s: needs your attention" name)))))))
   nil)
 

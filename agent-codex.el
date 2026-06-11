@@ -437,9 +437,7 @@ TITLE is the notification title.  MESSAGE is the notification body.
 When `agent-alert-on-ready' is non-nil, dispatch to the style
 configured in `agent-alert-style'."
   (codex-default-notification title message)
-  (when agent-alert-on-ready
-    (agent--alert-visual title message)
-    (agent--alert-sound)))
+  (agent--alert-route title message))
 
 (defun agent-codex--has-background-tasks-p (&optional buffer)
   "Return non-nil when Codex session BUFFER has active background work.
@@ -498,7 +496,7 @@ translated into an `idle-prompt' session event."
            (agent-session-event buf 'idle-prompt))
           ("Notification"
            (agent-notify
-            "Codex"
+            (agent--backend-get 'codex :label)
             (format "%s: needs your attention"
                     (agent--session-name (buffer-name buf)))))))))
   nil)

@@ -1036,6 +1036,10 @@ session."
 When `agent-alert-on-ready' is non-nil, dispatch to the
 configured alert style."
   (message "%s: %s" title message)
+  (agent--alert-route title message))
+
+(defun agent--alert-route (title message)
+  "Fire the configured visual/sound alert for TITLE and MESSAGE."
   (when agent-alert-on-ready
     (agent--alert-visual title message)
     (agent--alert-sound)))
