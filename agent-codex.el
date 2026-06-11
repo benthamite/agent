@@ -104,6 +104,7 @@ When nil, use `codex-sandbox-mode' or the CLI default."
   :type 'boolean
   :group 'agent-codex)
 
+(defvar agent-claude-mode)
 (defvar codex-reasoning-effort)
 (defvar codex--session-id)
 (defvar codex--app-server-input-marker)
@@ -246,7 +247,6 @@ this account."
 (defun agent-codex--start-new ()
   "Start a new Codex session using the current account."
   (interactive)
-  (agent-codex--install-hooks)
   (agent-start-session
    (agent-session-create :backend 'codex
                          :account (agent-account-resolve 'codex t))))
@@ -261,7 +261,6 @@ first user message.  RESUME-ID resumes that session id.
 TERMINAL-BACKEND overrides `codex-terminal-backend' for this session.
 The session account is bound as `agent-account--starting' by
 `agent-start-session' so environment hooks see it at spawn time."
-  (agent-codex--install-hooks)
   (let ((buffer (codex-start-session
                  :directory (agent-session-directory session)
                  :instance-name (agent-session-instance session)
@@ -749,7 +748,6 @@ unified session switcher."
   "Resume a previous Codex session.
 With prefix ARG, use Codex CLI's `--last' flag."
   (interactive "P")
-  (agent-codex--install-hooks)
   (codex-resume arg))
 
 ;;;###autoload
@@ -757,37 +755,14 @@ With prefix ARG, use Codex CLI's `--last' flag."
   "Fork a previous Codex session.
 With prefix ARG, use Codex CLI's `--last' flag."
   (interactive "P")
-  (agent-codex--install-hooks)
   (codex-fork arg))
 
 ;;;; Hooks
-
-(defun agent-codex--install-hooks ()
-  "Install Agent hooks for Codex integration."
-  (add-hook 'codex-event-hook #'agent-codex--handle-notification)
-  (setq codex-notification-function #'agent-codex-notify)
-  (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
-  (add-hook 'codex-start-hook #'agent--assign-session-key)
-  (add-hook 'codex-start-hook #'agent--refresh-display-names)
-  (add-hook 'codex-start-hook #'agent-disable-scrollback-truncation)
-  (add-hook 'codex-start-hook #'agent-setup-snippet-keys)
-  (add-hook 'codex-start-hook #'agent-fix-rendering)
-  (add-hook 'codex-start-hook #'agent-codex--record-start-time)
-  (add-hook 'codex-start-hook #'agent-codex-set-modeline)
-  (add-hook 'codex-process-environment-functions
-            #'agent-codex-account-env)
-  (add-hook 'codex-process-environment-functions
-            #'agent-codex--sync-theme-before-start)
-  (add-hook 'kill-buffer-hook #'agent--release-session-key)
-  (add-hook 'kill-buffer-hook #'agent--refresh-display-names-deferred)
-  (add-hook 'codex-command-submitted-hook #'agent-codex--note-submission))
 
 (defun agent-codex--note-submission (buffer)
   "Emit a `submit' session event for Codex session BUFFER.
 Runs on `codex-command-submitted-hook' for every submission path."
   (agent-session-event buffer 'submit))
-
-(agent-codex--install-hooks)
 
 ;;;;; Exit and kill on exit
 
@@ -817,10 +792,10 @@ the Emacs side to match Claude Code's behavior."
 (define-obsolete-function-alias 'agent-codex-setup-kill-on-exit
   #'agent-setup-kill-on-exit "0.2")
 
-(add-hook 'codex-start-hook #'agent-setup-kill-on-exit)
-(advice-add 'codex--do-send-command :around #'agent-codex--intercept-exit)
-(advice-add 'codex--send-command-to-buffer :around
-            #'agent-codex--intercept-exit-to-buffer)
+(defun agent-codex--register-session-teardown ()
+  "Register core session teardown for a freshly started Codex session."
+  (when (codex--buffer-p (current-buffer))
+    (agent--install-session-teardown)))
 
 ;;;;; Account menu infix
 
@@ -870,6 +845,70 @@ entries in `agent-menu'."
 
 (with-eval-after-load 'agent-claude
   (agent-codex--append-menu-suffixes))
+
+;;;; Minor mode
+
+(defvar agent-codex--saved-notification-function nil
+  "Value of `codex-notification-function' before enabling the mode.")
+
+(defconst agent-codex--start-hook-functions
+  '(agent-setup-kill-on-exit
+    agent-codex-set-modeline
+    agent--refresh-display-names
+    agent-disable-scrollback-truncation
+    agent-setup-snippet-keys
+    agent-fix-rendering
+    agent--assign-session-key
+    agent-codex--record-start-time
+    agent-codex--register-session-teardown)
+  "Functions `agent-codex-mode' adds to `codex-start-hook'.")
+
+;;;###autoload
+(define-minor-mode agent-codex-mode
+  "Global minor mode wiring `codex' sessions into agent.
+Owns every hook, advice, and notification handler the Codex
+backend installs; nothing is installed at load time.  Disabling
+removes them symmetrically and restores
+`codex-notification-function'."
+  :global t
+  :group 'agent-codex
+  (if agent-codex-mode
+      (agent-codex--mode-enable)
+    (agent-codex--mode-disable)))
+
+(defun agent-codex--mode-enable ()
+  "Install Codex backend hooks and advice."
+  (setq agent-codex--saved-notification-function codex-notification-function)
+  (setq codex-notification-function #'agent-codex-notify)
+  (add-hook 'codex-event-hook #'agent-codex--handle-notification)
+  (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
+  (dolist (fn agent-codex--start-hook-functions)
+    (add-hook 'codex-start-hook fn))
+  (add-hook 'codex-process-environment-functions
+            #'agent-codex-account-env)
+  (add-hook 'codex-process-environment-functions
+            #'agent-codex--sync-theme-before-start)
+  (add-hook 'codex-command-submitted-hook #'agent-codex--note-submission)
+  (advice-add 'codex--do-send-command :around #'agent-codex--intercept-exit)
+  (advice-add 'codex--send-command-to-buffer :around
+              #'agent-codex--intercept-exit-to-buffer))
+
+(defun agent-codex--mode-disable ()
+  "Remove Codex backend hooks and advice."
+  (setq codex-notification-function agent-codex--saved-notification-function)
+  (remove-hook 'codex-event-hook #'agent-codex--handle-notification)
+  (unless (bound-and-true-p agent-claude-mode)
+    (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer))
+  (dolist (fn agent-codex--start-hook-functions)
+    (remove-hook 'codex-start-hook fn))
+  (remove-hook 'codex-process-environment-functions
+               #'agent-codex-account-env)
+  (remove-hook 'codex-process-environment-functions
+               #'agent-codex--sync-theme-before-start)
+  (remove-hook 'codex-command-submitted-hook #'agent-codex--note-submission)
+  (advice-remove 'codex--do-send-command #'agent-codex--intercept-exit)
+  (advice-remove 'codex--send-command-to-buffer
+                 #'agent-codex--intercept-exit-to-buffer))
 
 ;;;; Provide
 

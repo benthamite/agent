@@ -782,10 +782,6 @@ means a session escaped teardown."
                                       agent--session-key-pool)))
           (puthash (current-buffer) key agent--session-keys))))))
 
-(defun agent--release-session-key ()
-  "Release the session key for the current buffer."
-  (remhash (current-buffer) agent--session-keys))
-
 (defun agent--ensure-all-session-keys ()
   "Ensure every active AI session buffer has a session key."
   (agent--purge-dead-session-keys)

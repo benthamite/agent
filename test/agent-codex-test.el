@@ -100,9 +100,7 @@
                 (agent-account--current (make-hash-table :test #'eq))
                 (agent-codex-account-file (expand-file-name "current" dir)))
             (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                      ((symbol-function 'agent--force-kill-buffer) #'ignore)
-                      ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                      ((symbol-function 'agent-account-sync) #'ignore)
+                      ((symbol-function 'agent--force-kill-buffer) #'ignore)                      ((symbol-function 'agent-account-sync) #'ignore)
                       ((symbol-function 'agent-account-resolve)
                        (lambda (_backend &optional prompt)
                          (when prompt
@@ -134,9 +132,7 @@
                 (agent-account--current (make-hash-table :test #'eq)))
             (puthash 'codex "personal" agent-account--current)
             (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                      ((symbol-function 'agent--force-kill-buffer) #'ignore)
-                      ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                      ((symbol-function 'agent-account-sync) #'ignore)
+                      ((symbol-function 'agent--force-kill-buffer) #'ignore)                      ((symbol-function 'agent-account-sync) #'ignore)
                       ((symbol-function 'completing-read)
                        (lambda (_prompt choices &rest _args)
                          (setq prompt-choices choices)
@@ -193,9 +189,7 @@
           (rename-buffer "*codex:~/project/:default*" t)
           (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
           (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                    ((symbol-function 'agent--force-kill-buffer) #'ignore)
-                    ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                    ((symbol-function 'agent-account-resolve)
+                    ((symbol-function 'agent--force-kill-buffer) #'ignore)                    ((symbol-function 'agent-account-resolve)
                      (lambda (_backend &optional _prompt) nil))
                     ((symbol-function 'codex-start-session)
                      (lambda (&rest keys)
@@ -220,9 +214,7 @@
           (setq-local codex--session-id nil)
           (setq-local codex--app-server-thread-id nil)
           (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                    ((symbol-function 'agent--force-kill-buffer) #'ignore)
-                    ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                    ((symbol-function 'agent-account-resolve)
+                    ((symbol-function 'agent--force-kill-buffer) #'ignore)                    ((symbol-function 'agent-account-resolve)
                      (lambda (_backend &optional _prompt) nil))
                     ((symbol-function 'codex--current-session-identity)
                      (lambda ()
@@ -271,9 +263,7 @@
           (setq-local codex-terminal-backend 'eat)
           (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
           (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                    ((symbol-function 'agent--force-kill-buffer) #'ignore)
-                    ((symbol-function 'agent-codex--install-hooks) #'ignore)
-                    ((symbol-function 'agent-account-resolve)
+                    ((symbol-function 'agent--force-kill-buffer) #'ignore)                    ((symbol-function 'agent-account-resolve)
                      (lambda (_backend &optional _prompt) nil))
                     ((symbol-function 'codex-start-session)
                      (lambda (&rest keys)
@@ -317,20 +307,6 @@
       (when (buffer-live-p existing)
         (kill-buffer existing))
       (delete-directory dir t))))
-
-(ert-deftest agent-codex-test-start-new-installs-start-hook ()
-  "Install Codex start hooks before launching sessions."
-  (let ((codex-start-hook nil)
-        (agent-codex-accounts '(("work" . "/tmp/codex-work"))))
-    (cl-letf (((symbol-function 'agent-account-resolve)
-               (lambda (_backend &optional _prompt) "work"))
-              ((symbol-function 'agent-account-sync) #'ignore)
-              ((symbol-function 'codex-start-session)
-               (lambda (&rest _keys)
-                 (should (memq #'agent-codex--record-start-time
-                               codex-start-hook))
-                 (generate-new-buffer " *codex-start-target*"))))
-      (kill-buffer (agent-codex--start-new)))))
 
 (ert-deftest agent-codex-test-record-start-time-sets-duration ()
   "Record a start time for Codex buffers."
@@ -384,12 +360,6 @@
     (should (equal (nreverse events)
                    (list (list "$session-learning-capture"
                                expected-buffer))))))
-
-(ert-deftest agent-codex-test-install-hooks-registers-submitted-hook ()
-  "Register the submit-event translator on the upstream submitted hook."
-  (agent-codex--install-hooks)
-  (should (memq #'agent-codex--note-submission
-                codex-command-submitted-hook)))
 
 ;;;; Session event translation
 
@@ -880,8 +850,7 @@
   (let ((buffer (generate-new-buffer " *codex-test-session*"))
         captured)
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-codex--install-hooks) #'ignore)
-                  ((symbol-function 'agent-account-sync) #'ignore)
+        (cl-letf (((symbol-function 'agent-account-sync) #'ignore)
                   ((symbol-function 'codex-start-session)
                    (lambda (&rest keys)
                      (setq captured
@@ -902,6 +871,40 @@
             (should (equal (plist-get captured :account) "work"))
             (should (eq (agent-session buffer) session))))
       (kill-buffer buffer))))
+
+;;;; Minor mode
+
+(ert-deftest agent-codex-test-mode-symmetric ()
+  "Enabling then disabling the mode leaves global state untouched."
+  (let ((codex-notification-function #'ignore)
+        (codex-start-hook nil)
+        (codex-event-hook nil)
+        (codex-command-submitted-hook nil)
+        (codex-process-environment-functions nil)
+        (kill-buffer-query-functions kill-buffer-query-functions))
+    (agent-codex-mode 1)
+    (should (memq #'agent-codex--handle-notification codex-event-hook))
+    (should (memq #'agent-codex-account-env
+                  codex-process-environment-functions))
+    (should (memq #'agent-codex--note-submission
+                  codex-command-submitted-hook))
+    (should (memq #'agent-codex--record-start-time codex-start-hook))
+    (should (memq #'agent-codex--register-session-teardown codex-start-hook))
+    (should (eq codex-notification-function #'agent-codex-notify))
+    (should (advice-member-p #'agent-codex--intercept-exit
+                             'codex--do-send-command))
+    (should (advice-member-p #'agent-codex--intercept-exit-to-buffer
+                             'codex--send-command-to-buffer))
+    (agent-codex-mode -1)
+    (should-not (memq #'agent-codex--handle-notification codex-event-hook))
+    (should-not codex-start-hook)
+    (should-not codex-command-submitted-hook)
+    (should-not codex-process-environment-functions)
+    (should (eq codex-notification-function #'ignore))
+    (should-not (advice-member-p #'agent-codex--intercept-exit
+                                 'codex--do-send-command))
+    (should-not (advice-member-p #'agent-codex--intercept-exit-to-buffer
+                                 'codex--send-command-to-buffer))))
 
 (provide 'agent-codex-test)
 ;;; agent-codex-test.el ends here
