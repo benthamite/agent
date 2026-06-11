@@ -14,8 +14,7 @@
    keys
    (list :buffer-p (lambda (_buffer) nil)
          :find-all-buffers (lambda () nil)
-         :extract-instance-name (lambda (_buffer-name) nil)
-         :start-new #'ignore
+         :start-session #'ignore
          :label "Test")))
 
 ;;;; Theme sync
@@ -784,7 +783,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "$"
-          :send-command (lambda (cmd &optional _buffer)
+          :send-string (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
         (should-not (agent-run-skill-before-exit 'codex buf))
@@ -810,7 +809,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "$"
-          :submit-command (lambda (cmd &optional _buffer) (push cmd events))))
+          :submit (lambda (cmd &optional _buffer) (push cmd events))))
         (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
                    (lambda (_buffer) nil))
                   ((symbol-function 'agent--exit-session)
@@ -842,7 +841,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "$"
-          :submit-command (lambda (_cmd &optional _buffer))
+          :submit (lambda (_cmd &optional _buffer))
           :before-exit-ready-to-close-p (lambda (_buffer) ready)))
         (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
                    (lambda (_buffer) nil))
@@ -875,7 +874,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "$"
-          :submit-command (lambda (_cmd &optional _buffer))))
+          :submit (lambda (_cmd &optional _buffer))))
         (cl-letf (((symbol-function 'agent--exit-session)
                    (lambda (_buffer) (setq exited t)))
                   ((symbol-function 'run-at-time)
@@ -909,7 +908,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "$"
-          :send-command (lambda (cmd &optional _buffer)
+          :send-string (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
         (agent--set-session
@@ -930,9 +929,9 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "$"
-          :submit-command (lambda (cmd &optional _buffer)
+          :submit (lambda (cmd &optional _buffer)
                             (push (list 'submit cmd) events))
-          :send-command (lambda (cmd &optional _buffer)
+          :send-string (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
         (should-not (agent-run-skill-before-exit 'codex buf))
@@ -953,7 +952,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "/"
-          :send-command (lambda (cmd &optional _buffer)
+          :send-string (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
         (agent--set-session
@@ -974,7 +973,7 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :send-command (lambda (&rest _args) (setq called t))))
+          :send-string (lambda (&rest _args) (setq called t))))
         (agent--set-session
          buf (agent-session-create :backend 'codex
                                    :directory default-directory))
@@ -995,7 +994,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :duration-ms (lambda (_buffer) 30000)
-          :send-command (lambda (&rest _args) (setq called t))))
+          :send-string (lambda (&rest _args) (setq called t))))
         (should (agent-run-skill-before-exit 'codex buf))
         (should-not called)
         (should-not agent--before-exit)))))
@@ -1013,7 +1012,7 @@
          'codex
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :send-command (lambda (&rest _args) (setq called t))))
+          :send-string (lambda (&rest _args) (setq called t))))
         (should (agent-run-skill-before-exit 'codex buf))
         (should-not called)
         (should-not agent--before-exit)))))
@@ -1033,7 +1032,7 @@
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "$"
           :duration-ms (lambda (_buffer) 60000)
-          :send-command (lambda (cmd &optional _buffer)
+          :send-string (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
         (should-not (agent-run-skill-before-exit 'codex buf))
@@ -1054,7 +1053,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "$"
-          :send-command (lambda (cmd &optional _buffer)
+          :send-string (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
         (agent--set-session
@@ -1076,7 +1075,7 @@
          'other
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :send-command (lambda (&rest _args) (setq called t))))
+          :send-string (lambda (&rest _args) (setq called t))))
         (agent--set-session
          buf (agent-session-create :backend 'other :directory dir))
         (should (agent-run-skill-before-exit 'other buf))
@@ -1147,7 +1146,7 @@
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "/"
-          :submit-command (lambda (cmd &optional _buffer) (push cmd events))))
+          :submit (lambda (cmd &optional _buffer) (push cmd events))))
         (setq-local agent--before-exit
                     (list :queue (list (list "update-log" :args "--auto"))
                           :state 'running))
@@ -1195,8 +1194,7 @@
         (apply #'agent-register-backend
          'one
          (agent-test--backend
-          :buffer-p (lambda (candidate) (eq candidate buf))
-          :extract-instance-name (lambda (_buffer-name) "default")))
+          :buffer-p (lambda (candidate) (eq candidate buf))))
         (setq-local agent--session
                     (agent-session-create :backend 'one :account "work"))
         (should
@@ -1243,7 +1241,7 @@
              (agent-test--backend
               :buffer-p (lambda (candidate) (eq candidate buf))
               :find-all-buffers (lambda () (list buf))
-              :send-command (lambda (text target)
+              :send-string (lambda (text target)
                               (setq sent (list text target)))))
             (let ((file (agent--prompt-capture-file 'one buf)))
               (make-directory (file-name-directory file) t)
@@ -1375,11 +1373,7 @@
         (apply #'agent-register-backend
          'one
          (agent-test--backend
-          :buffer-p (lambda (candidate) (eq candidate buf))
-          :extract-instance-name
-          (lambda (name)
-            (when (string-match ":\\([^:/*]+\\)\\*\\'" name)
-              (match-string 1 name)))))
+          :buffer-p (lambda (candidate) (eq candidate buf))))
         (let* ((agent-account--starting '(one . "work"))
                (session (agent-session buf)))
           (should session)
@@ -1406,11 +1400,7 @@
         (apply #'agent-register-backend
          'claude-code
          (agent-test--backend
-          :buffer-p (lambda (candidate) (eq candidate buf))
-          :extract-instance-name
-          (lambda (name)
-            (when (string-match ":\\([^:/*]+\\)\\*\\'" name)
-              (match-string 1 name)))))
+          :buffer-p (lambda (candidate) (eq candidate buf))))
         (should (equal (agent-session-buffer-name (agent-session buf))
                        (buffer-name buf)))))))
 
@@ -1444,11 +1434,7 @@
         (apply #'agent-register-backend
                'one
                (agent-test--backend
-                :buffer-p (lambda (candidate) (eq candidate buf))
-                :extract-instance-name
-                (lambda (name)
-                  (when (string-match ":\\([^:/*]+\\)\\*\\'" name)
-                    (match-string 1 name)))))
+                :buffer-p (lambda (candidate) (eq candidate buf))))
         (agent--set-session
          buf
          (agent-session-create :backend 'one
@@ -1482,8 +1468,7 @@
         (apply #'agent-register-backend
                'one
                (agent-test--backend
-                :buffer-p (lambda (candidate) (eq candidate buf))
-                :account (lambda (_buffer) "fallback-account")))
+                :buffer-p (lambda (candidate) (eq candidate buf))))
         (agent--set-session
          buf
          (agent-session-create :backend 'one
@@ -1517,14 +1502,13 @@
      'kwspread
      :buffer-p (lambda (_buffer) nil)
      :find-all-buffers (lambda () nil)
-     :extract-instance-name (lambda (_buffer-name) nil)
-     :start-new #'ignore
+     :start-session #'ignore
      :label "Spread")
     (let ((struct (agent-backend 'kwspread)))
       (should (agent-backend-p struct))
       (should (eq (agent-backend-name struct) 'kwspread))
       (should (equal (agent-backend-label struct) "Spread"))
-      (should (eq (agent-backend-start-new struct) #'ignore)))))
+      (should (eq (agent-backend-start-session struct) #'ignore)))))
 
 (ert-deftest agent-test-backend-get-maps-keywords-to-slots ()
   "Map legacy keyword lookups onto struct slots."
@@ -1792,7 +1776,7 @@ timestamp."
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :send-command (lambda (cmd &optional buffer)
+          :send-string (lambda (cmd &optional buffer)
                           (push (list cmd buffer agent--session-state)
                                 events))))
         (setq-local agent--session-state 'awaiting-input)
@@ -1809,9 +1793,9 @@ timestamp."
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :submit-command (lambda (cmd &optional _buffer)
+          :submit (lambda (cmd &optional _buffer)
                             (push (list 'submit cmd) events))
-          :send-command (lambda (cmd &optional _buffer)
+          :send-string (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))))
         (agent-submit "/retro" buf)
         (should (equal events '((submit "/retro"))))))))
@@ -1826,7 +1810,7 @@ timestamp."
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :send-command (lambda (cmd &optional _buffer)
+          :send-string (lambda (cmd &optional _buffer)
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
         (agent-submit "/retro" buf)

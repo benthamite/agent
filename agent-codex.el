@@ -137,17 +137,13 @@ Source: SVG Repo (CC0).")
   :buffer-p #'codex--buffer-p
   :find-all-buffers #'codex--find-all-codex-buffers
   :find-buffers-for-dir #'codex--find-codex-buffers-for-directory
-  :extract-directory #'codex--extract-directory-from-buffer-name
-  :extract-instance-name #'codex--extract-instance-name-from-buffer-name
-  :send-command #'agent-codex-send-command
+  :send-string #'agent-codex-send-command
   :send-return #'agent-codex-send-return
-  :submit-command #'agent-codex-submit-command
+  :submit #'agent-codex-submit-command
   :before-exit-ready-to-close-p #'agent-codex-before-exit-ready-to-close-p
   :duration-ms (lambda (buf)
                  (with-current-buffer buf
                    (agent-codex-status-duration-ms)))
-  :start #'codex--start
-  :start-new #'agent-codex--start-new
   :program "codex"
   :icon (lambda (&optional face)
           (let ((svg (agent-svg-icon agent-codex-icon-svg face)))

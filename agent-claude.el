@@ -213,12 +213,8 @@ Source: lobehub/lobe-icons (MIT).")
   :buffer-p #'claude-code--buffer-p
   :find-all-buffers #'claude-code--find-all-claude-buffers
   :find-buffers-for-dir #'claude-code--find-claude-buffers-for-directory
-  :extract-directory #'claude-code--extract-directory-from-buffer-name
-  :extract-instance-name #'claude-code--extract-instance-name-from-buffer-name
-  :send-command #'agent-claude-send-command
-  :submit-command #'agent-claude-submit-command
-  :start #'claude-code--start
-  :start-new #'agent-claude--start-new
+  :send-string #'agent-claude-send-command
+  :submit #'agent-claude-submit-command
   :program "claude"
   :send-return #'agent-claude-send-return
   :icon (lambda (&optional face)

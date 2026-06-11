@@ -12,8 +12,7 @@
    keys
    (list :buffer-p (lambda (_buffer) nil)
          :find-all-buffers (lambda () nil)
-         :extract-instance-name (lambda (_buffer-name) nil)
-         :start-new #'ignore
+         :start-session #'ignore
          :label "Test")))
 
 (ert-deftest agent-chief-test-extract-json-from-fenced-output ()
@@ -185,11 +184,10 @@
             :find-buffers-for-dir (lambda (_dir)
                                     (and started-buffer
                                          (list started-buffer)))
-            :extract-instance-name (lambda (_name) "chief")
             :start-session (lambda (_session &rest _options)
                              (setq started-buffer
                                    (get-buffer-create "*codex:/tmp/:chief*")))
-            :submit-command (lambda (prompt buffer)
+            :submit (lambda (prompt buffer)
                               (setq submitted (list prompt buffer)))))
           (cl-letf (((symbol-function 'require) #'ignore))
             (agent-chief-session-heartbeat))
@@ -219,11 +217,10 @@
             :find-buffers-for-dir (lambda (_dir)
                                     (and started-buffer
                                          (list started-buffer)))
-            :extract-instance-name (lambda (_name) "chief")
             :start-session (lambda (_session &rest _options)
                              (setq started-buffer
                                    (get-buffer-create "*codex:/tmp/:chief*")))
-            :submit-command (lambda (prompt buffer)
+            :submit (lambda (prompt buffer)
                               (push (list prompt buffer) submitted))))
           (cl-letf (((symbol-function 'require) #'ignore)
                     ((symbol-function 'read-string)
@@ -256,7 +253,7 @@
           (apply #'agent-register-backend
            'codex
            (agent-chief-test--backend
-            :submit-command (lambda (prompt buffer)
+            :submit (lambda (prompt buffer)
                               (setq submitted (list prompt buffer)))))
           (with-current-buffer agent-chief-session-buffer
             (setq-local agent-chief--session-backend 'codex))

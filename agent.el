@@ -114,26 +114,18 @@ such as handoff-driven autoloops.")
 (cl-defstruct (agent-backend
                (:constructor agent-backend--create)
                (:copier nil))
-  "Static description of one registered AI agent backend.
-Slots listed after the transitional marker mirror legacy plist
-keys and are deleted as later refactoring phases migrate their
-call sites."
+  "Static description of one registered AI agent backend."
   name label icon program
   buffer-p find-all-buffers find-buffers-for-dir
   start-session session-identity restart-options
   send-string send-return submit target-buffer
   waiting-p busy-p background-tasks-p duration-ms display-name-suffix
   notify
-  account-env-var accounts account-file shared-config-items account-init
-  canonical-home
+  account-env-var accounts account-file shared-config-items canonical-home
+  account-init
   run-prompt skill-roots skill-command-prefix
   sync-theme modeline-status menu-suffixes
-  before-exit-ready-to-close-p before-kill-check
-  ;; Transitional slots, deleted in later phases:
-  start start-new extract-directory extract-instance-name account
-  send-command submit-command discover-skills handoff run-skill
-  audit-project debug-backtrace act-on-slack-message setup-kill-on-exit
-  exit restart)
+  before-exit-ready-to-close-p before-kill-check)
 
 (defvar agent-backends nil
   "Alist of registered AI backends.
@@ -144,7 +136,7 @@ and STRUCT is an `agent-backend'.")
   "Cached backend symbol for this buffer.")
 
 (defconst agent--required-backend-keys
-  '(:buffer-p :find-all-buffers :extract-instance-name :start-new)
+  '(:buffer-p :find-all-buffers :start-session)
   "Backend slots required by the shared session layer.")
 
 (defconst agent--backend-slot-names
@@ -284,6 +276,12 @@ Given \"*claude:~/path/to/project/:default*\" or
           (substring payload 0 separator)
         payload))))
 
+(defun agent--session-instance-from-buffer-name (buffer-name)
+  "Return the instance name encoded in AI session BUFFER-NAME, or nil."
+  (when-let* ((payload (agent--session-buffer-payload buffer-name))
+              (separator (agent--buffer-name-instance-separator payload)))
+    (substring payload (1+ separator))))
+
 (defun agent--session-buffer-payload (buffer-name)
   "Return the payload encoded in AI session BUFFER-NAME."
   (when (and (stringp buffer-name)
@@ -372,8 +370,7 @@ name encodes no directory."
   (when-let* ((backend (agent--detect-backend buffer))
               (name (buffer-name buffer))
               (directory (agent--session-directory-from-buffer-name name)))
-    (let* ((instance-fn (agent--backend-get backend :extract-instance-name))
-           (instance (when instance-fn (funcall instance-fn name)))
+    (let* ((instance (agent--session-instance-from-buffer-name name))
            (account (or (and (eq (car-safe agent-account--starting) backend)
                              (cdr agent-account--starting))
                         (agent-account-current backend))))
@@ -771,9 +768,7 @@ buffer-name parsing."
          (instance
           (if session
               (agent-session-instance session)
-            (when-let* ((backend (agent--detect-backend buffer)))
-              (funcall (agent--backend-get backend :extract-instance-name)
-                       (buffer-name buffer))))))
+            (agent--session-instance-from-buffer-name (buffer-name buffer)))))
     (if instance
         (format "%s:%s" project instance)
       project)))
@@ -844,7 +839,7 @@ If sessions exist, show a transient menu with home-row keys."
     (cond
      ((null backends) (user-error "No AI backends registered"))
      ((= (length backends) 1)
-      (funcall (agent-backend-start-new (cdar backends))))
+      (agent--start-new-session-for-backend (caar backends)))
      (t
       (let* ((names (mapcar (lambda (e)
                               (cons (or (agent-backend-label (cdr e))
@@ -853,7 +848,13 @@ If sessions exist, show a transient menu with home-row keys."
                             backends))
              (choice (completing-read "Backend: " (mapcar #'car names) nil t))
              (backend-sym (cdr (assoc choice names))))
-        (funcall (agent--backend-get backend-sym :start-new)))))))
+        (agent--start-new-session-for-backend backend-sym))))))
+
+(defun agent--start-new-session-for-backend (backend)
+  "Start a new BACKEND session using its current account."
+  (agent-start-session
+   (agent-session-create :backend backend
+                         :account (agent-account-resolve backend t))))
 
 (transient-define-prefix agent--session-switcher ()
   "Switch to an AI session or start a new one."
@@ -1323,18 +1324,18 @@ ORIG-FN is the original escape command."
 BUFFER defaults to the current session buffer, prompting for one
 when the current buffer is not a session.  Emits a `submit'
 session event before dispatching so stale waiting state clears."
-  (agent--dispatch-send :send-command (list string) buffer))
+  (agent--dispatch-send :send-string (list string) buffer))
 
 (defun agent-submit (string &optional buffer)
   "Insert STRING into session BUFFER's prompt and submit it.
 BUFFER defaults to the current session buffer.  Prefer the
-backend's atomic `:submit-command'; fall back to `:send-command'
-followed by `:send-return' when the backend registers none."
+backend's atomic `:submit'; fall back to `:send-string' followed
+by `:send-return' when the backend registers none."
   (let* ((buf (agent--resolve-session-buffer buffer))
          (backend (agent--detect-backend buf)))
-    (if (agent--backend-get backend :submit-command)
-        (agent--dispatch-send :submit-command (list string) buf)
-      (agent--dispatch-send :send-command (list string) buf)
+    (if (agent--backend-get backend :submit)
+        (agent--dispatch-send :submit (list string) buf)
+      (agent--dispatch-send :send-string (list string) buf)
       (when-let* ((send-return-fn (agent--backend-get backend :send-return)))
         (funcall send-return-fn buf)))))
 
@@ -1346,9 +1347,9 @@ session event before dispatching to the backend's `:send-return'."
 
 (defun agent--dispatch-send (slot args buffer)
   "Emit a `submit' event for BUFFER and call its backend SLOT with ARGS.
-SLOT is one of `:send-command', `:submit-command', and
-`:send-return'.  BUFFER is resolved with
-`agent--resolve-session-buffer' and appended to ARGS."
+SLOT is one of `:send-string', `:submit', and `:send-return'.
+BUFFER is resolved with `agent--resolve-session-buffer' and
+appended to ARGS."
   (let* ((buf (agent--resolve-session-buffer buffer))
          (backend (agent--detect-backend buf))
          (fn (and backend (agent--backend-get backend slot))))
@@ -1387,7 +1388,7 @@ already been inserted."
          (backend (agent--detect-backend session-buffer))
          (prompts (agent--captured-prompts
                    backend session-buffer include-inserted)))
-    (unless (agent--backend-get backend :send-command)
+    (unless (agent--backend-get backend :send-string)
       (user-error "Backend `%s' does not support prompt insertion" backend))
     (unless prompts
       (user-error "No captured prompts for this session"))
@@ -1448,10 +1449,12 @@ already been inserted."
 (defun agent--prompt-session-identity (backend buffer)
   "Return the stable prompt capture identity for BACKEND session BUFFER."
   (let* ((directory (or (agent--buffer-directory backend buffer) ""))
-         (account (when-let* ((session (agent-session buffer)))
-                    (agent-session-account session)))
-         (instance (funcall (agent--backend-get backend :extract-instance-name)
-                            (buffer-name buffer))))
+         (session (agent-session buffer))
+         (account (when session (agent-session-account session)))
+         (instance (if session
+                       (agent-session-instance session)
+                     (agent--session-instance-from-buffer-name
+                      (buffer-name buffer)))))
     (prin1-to-string (list backend account directory instance))))
 
 (defun agent--open-prompt-capture-file (file backend buffer)
@@ -1674,16 +1677,6 @@ registered, use it.  Otherwise, prompt."
                         nil t)))
           (cdr (assoc choice entries))))))
 
-(defun agent--dispatch (key)
-  "Dispatch command KEY to the appropriate backend.
-Uses `call-interactively' so the target command's interactive spec
-runs and prompts for arguments as needed."
-  (let* ((backend (agent--resolve-backend))
-         (fn (agent--backend-get backend key)))
-    (if fn
-        (call-interactively fn)
-      (user-error "Backend `%s' does not support `%s'" backend key))))
-
 (defun agent--run-before-exit-functions (backend buffer)
   "Return non-nil if BACKEND session BUFFER should exit."
   (and (agent--confirm-no-captured-prompts backend buffer "Exit")
@@ -1702,16 +1695,6 @@ runs and prompts for arguments as needed."
                  count
                  (if (= count 1) "" "s")
                  action)))))
-
-(defun agent--dispatch-with-captured-prompt-confirmation (key action)
-  "Dispatch command KEY after confirming pending captures for ACTION."
-  (let* ((backend (agent--resolve-backend))
-         (buffer (current-buffer))
-         (fn (agent--backend-get backend key)))
-    (if (not fn)
-        (user-error "Backend `%s' does not support `%s'" backend key)
-      (when (agent--confirm-no-captured-prompts backend buffer action)
-        (call-interactively fn)))))
 
 (defun agent-run-skill-before-exit (backend buffer)
   "Submit the before-exit skills for BUFFER before BACKEND exits it.
@@ -1795,9 +1778,7 @@ is submitted."
              (command (agent--before-exit-skill-command backend entry)))
         (setq agent--before-exit
               (plist-put agent--before-exit :queue (cdr queue)))
-        (when (and command
-                   (or (agent--backend-get backend :submit-command)
-                       (agent--backend-get backend :send-command)))
+        (when command
           (agent-submit command buffer)
           (message "Started %s; this session will close when the before-exit skills finish"
                    command)

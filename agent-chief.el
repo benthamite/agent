@@ -358,10 +358,8 @@ conversationally in the agent buffer."
               agent-chief-session-instance-name)))
 
 (defun agent-chief--buffer-instance (buffer)
-  "Return BUFFER's backend instance name."
-  (when-let* ((fn (agent--backend-get agent-chief-backend
-                                      :extract-instance-name)))
-    (funcall fn (buffer-name buffer))))
+  "Return BUFFER's session instance name."
+  (agent--session-instance-from-buffer-name (buffer-name buffer)))
 
 (defun agent-chief--mark-session-buffer (buffer)
   "Mark BUFFER as the active chief-of-staff session."
@@ -386,7 +384,7 @@ conversationally in the agent buffer."
   (let* ((target (or buffer (agent-chief--session-buffer)
                      (agent-chief--ensure-session)))
          (backend (buffer-local-value 'agent-chief--session-backend target)))
-    (unless (agent--backend-get backend :submit-command)
+    (unless (agent--backend-get backend :submit)
       (user-error "Backend %S cannot submit chief prompts" backend))
     (with-current-buffer target
       (setq agent--backend backend))
