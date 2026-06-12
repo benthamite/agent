@@ -1020,7 +1020,7 @@ MESSAGE is a plist with :type, :buffer-name, :json-data, and
 alerts for permission_prompt and elicitation_dialog notifications."
   (when (eq (plist-get message :type) 'notification)
     (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
-      (let ((name (agent--session-name (buffer-name buf)))
+      (let ((name (agent--buffer-session-name buf))
             (label (agent-backend-label (agent-backend 'claude-code)))
             (ntype (agent-claude--notification-type
                     (plist-get message :json-data))))

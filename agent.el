@@ -1111,7 +1111,7 @@ registered, falling back to `agent-notify'."
          (struct (and backend (agent-backend backend)))
          (label (or (and struct (agent-backend-label struct))
                     "Session"))
-         (name (agent--session-name (buffer-name buffer)))
+         (name (agent--buffer-session-name buffer))
          (notify (or (and struct (agent-backend-notify struct))
                      #'agent-notify)))
     (funcall notify

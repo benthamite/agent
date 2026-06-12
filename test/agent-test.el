@@ -1506,6 +1506,31 @@
                        '("Test ready"
                          "project: waiting for your response")))))))
 
+(ert-deftest agent-test-notify-ready-prefers-struct-name ()
+  "Derive the ready-alert project name from the session struct.
+A uniquified buffer name defeats buffer-name parsing, but the
+stored struct still yields the project name."
+  (let ((agent-backends nil)
+        notified)
+    (with-temp-buffer
+      (rename-buffer "*claude:~/x/:a*<2>" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))))
+        (setq-local agent--session
+                    (agent-session-create :backend 'one
+                                          :directory "~/repo/project/"
+                                          :instance "a"))
+        (cl-letf (((symbol-function 'agent-notify)
+                   (lambda (title message)
+                     (setq notified (list title message)))))
+          (agent--session-notify-ready buf))
+        (should (equal notified
+                       '("Test ready"
+                         "project: waiting for your response")))))))
+
 (ert-deftest agent-test-session-event-stop-does-not-alert ()
   "Do not fire the ready alert on bare stop events."
   (let ((agent-backends nil)

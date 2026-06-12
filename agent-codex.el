@@ -516,7 +516,7 @@ translated into an `idle-prompt' session event."
            (agent-notify
             (agent-backend-label (agent-backend 'codex))
             (format "%s: needs your attention"
-                    (agent--session-name (buffer-name buf)))))))))
+                    (agent--buffer-session-name buf))))))))
   nil)
 
 ;;;;; Skill runner

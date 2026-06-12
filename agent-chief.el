@@ -347,8 +347,13 @@ slot, so the live session buffer stays reserved for conversation."
               agent-chief-session-instance-name)))
 
 (defun agent-chief--buffer-instance (buffer)
-  "Return BUFFER's session instance name."
-  (agent--session-instance-from-buffer-name (buffer-name buffer)))
+  "Return BUFFER's session instance name.
+Prefers BUFFER's `agent-session' struct, falling back to parsing
+the buffer name."
+  (if-let* ((session (agent-session buffer))
+            (instance (agent-session-instance session)))
+      instance
+    (agent--session-instance-from-buffer-name (buffer-name buffer))))
 
 (defun agent-chief--mark-session-buffer (buffer)
   "Mark BUFFER as the active chief-of-staff session."
