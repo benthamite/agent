@@ -345,28 +345,34 @@
     (should-not killed)
     (should-not started)))
 
-(ert-deftest agent-codex-test-restart-uses-session-backend ()
-  "Restart preserves the session's buffer-local terminal backend."
+(ert-deftest agent-codex-test-restart-uses-default-backend ()
+  "Restart uses the current default terminal backend."
   (let ((agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
         (agent-account--current (make-hash-table :test #'eq))
-        (codex-terminal-backend 'app-server)
+        (old-backend (default-value 'codex-terminal-backend))
         captured-backend)
     (unwind-protect
-        (with-temp-buffer
-          (rename-buffer "*codex:~/project/:default*" t)
-          (setq-local codex-terminal-backend 'eat)
-          (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
-          (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
-                    ((symbol-function 'agent--force-kill-buffer) #'ignore)                    ((symbol-function 'agent-account-resolve)
-                     (lambda (_backend &optional _prompt) nil))
-                    ((symbol-function 'codex-start-session)
-                     (lambda (&rest keys)
-                       (setq captured-backend
-                             (plist-get keys :terminal-backend))
-                       (generate-new-buffer " *codex-restart-target*"))))
-            (kill-buffer (agent-restart))))
+        (progn
+          (setq-default codex-terminal-backend 'app-server)
+          (with-temp-buffer
+            (rename-buffer "*codex:~/project/:default*" t)
+            (setq-local codex-terminal-backend 'eat)
+            (setq-local codex--session-id "019ea295-c3df-70b0-a8e5-a8ffe9df220a")
+            (cl-letf (((symbol-function 'codex--buffer-p)
+                       (lambda (_buffer) t))
+                      ((symbol-function 'agent--force-kill-buffer)
+                       #'ignore)
+                      ((symbol-function 'agent-account-resolve)
+                       (lambda (_backend &optional _prompt) nil))
+                      ((symbol-function 'codex-start-session)
+                       (lambda (&rest keys)
+                         (setq captured-backend
+                               (plist-get keys :terminal-backend))
+                         (generate-new-buffer " *codex-restart-target*"))))
+              (kill-buffer (agent-restart)))))
+      (setq-default codex-terminal-backend old-backend)
       (delete-directory agent-prompt-capture-directory t))
-    (should (eq captured-backend 'eat))))
+    (should (eq captured-backend 'app-server))))
 
 (ert-deftest agent-codex-test-handoff-kills-single-existing-buffer-when-source-missing ()
   "Avoid instance-name prompts when emacsclient did not pass a source buffer."

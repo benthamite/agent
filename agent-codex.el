@@ -278,9 +278,13 @@ The session account is bound as `agent-account--starting' by
   (plist-get (codex-session-identity buffer) :session-id))
 
 (defun agent-codex--restart-options (buffer)
-  "Return start options preserving BUFFER's terminal backend on restart."
+  "Return Codex start options for restart.
+BUFFER is accepted for the backend restart-options contract.
+Restarts use the current default `codex-terminal-backend' rather
+than stale buffer-local launch state from the replaced session."
+  (ignore buffer)
   (list :terminal-backend
-        (plist-get (codex-session-identity buffer) :terminal-backend)))
+        (default-value 'codex-terminal-backend)))
 
 ;;;;; TOML helpers
 

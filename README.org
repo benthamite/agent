@@ -383,7 +383,7 @@ The setup command ~agent-claude-setup-config~ ensures that Claude's statusline, 
 #+findex: agent-codex-fork
 The Codex commands expose workflows that are specific to the Codex CLI; handoff, restart, exit, skill execution, project audits, backtrace debugging, and Slack-message routing use the unified ~agent-*~ commands described above. ~agent-codex-start-or-switch~ starts Codex under the selected account when no Codex sessions exist, otherwise it opens the shared switcher. ~agent-codex-select-account~ persists an account choice by name and applies it to new interactive sessions and non-interactive =codex exec= runs. Skills run non-interactively with =codex exec=, using local skill metadata when available and falling back to a slash invocation otherwise; additional programmatic skill directories are configured through ~agent-codex-programmatic-skill-directories~.
 
-When ~agent-restart~ operates on a Codex session, it resumes codex.el's canonical session identity under the chosen account; app-server sessions use the native app-server resume path and terminal backends use =codex resume=. ~agent-codex-resume~ and ~agent-codex-fork~ expose the Codex CLI's resume and fork subcommands from the unified menu.
+When ~agent-restart~ operates on a Codex session, it resumes codex.el's canonical session identity under the chosen account and current default ~codex-terminal-backend~; app-server sessions use the native app-server resume path and terminal backends use =codex resume=. Changing ~codex-terminal-backend~ and then restarting a Codex session switches the relaunched session to that backend. ~agent-codex-resume~ and ~agent-codex-fork~ expose the Codex CLI's resume and fork subcommands from the unified menu.
 
 * Functions
 :PROPERTIES:
