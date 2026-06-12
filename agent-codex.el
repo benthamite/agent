@@ -510,13 +510,22 @@ indicator, e.g. \"1 background terminal running\"."
 MESSAGE is a plist with :type, :buffer-name, :json-data, and :args.
 The :type field is a string from the hook wrapper (e.g. \"Stop\").
 Codex's Stop fires when the CLI is back at its prompt, so it is
-translated into an `idle-prompt' session event."
+translated into an `idle-prompt' session event.  PermissionRequest
+fires while the CLI waits at an approval prompt mid-turn, so it only
+raises an attention alert and leaves the session state untouched."
   (let ((hook-type (plist-get message :type)))
-    (when (member hook-type '("Stop" "Notification" "SessionStart"))
+    (when (member hook-type
+                  '("Stop" "Notification" "PermissionRequest" "SessionStart"))
       (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
         (pcase hook-type
           ("Stop"
            (agent-session-event buf 'idle-prompt))
+          ("PermissionRequest"
+           (agent-codex-notify
+            (format "%s needs approval"
+                    (agent-backend-label (agent-backend 'codex)))
+            (format "%s: permission request pending"
+                    (agent--buffer-session-name buf))))
           ("Notification"
            (agent-notify
             (agent-backend-label (agent-backend 'codex))

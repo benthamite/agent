@@ -482,6 +482,31 @@
                            "project: waiting for your response"))))
       (kill-buffer buf))))
 
+(ert-deftest agent-codex-test-permission-request-alerts-without-state-change ()
+  "Alert on CLI PermissionRequest events without touching session state."
+  (let ((buf (generate-new-buffer "*codex:/tmp/project/:default*"))
+        notified session-events)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-codex-notify)
+                   (lambda (title message)
+                     (setq notified (list title message))))
+                  ((symbol-function 'agent-session-event)
+                   (lambda (&rest args) (push args session-events))))
+          (with-current-buffer buf
+            (setq-local agent--backend 'codex))
+          (agent-codex--handle-notification
+           (list :type "PermissionRequest"
+                 :buffer-name (buffer-name buf)
+                 :json-data (concat "{\"hook_event_name\":\"PermissionRequest\","
+                                    "\"tool_name\":\"Bash\","
+                                    "\"tool_input\":{\"command\":\"touch /tmp/x\"}}")))
+          (should (equal notified
+                         '("Codex needs approval"
+                           "project: permission request pending")))
+          (should-not session-events)
+          (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))
+      (kill-buffer buf))))
+
 (ert-deftest agent-codex-test-notify-ready-dispatches-backend-notify ()
   "Dispatch Codex ready alerts through the registered notify slot."
   (let ((buf (generate-new-buffer "*codex:/tmp/project/:default*"))
