@@ -462,7 +462,7 @@
   (let ((buf (generate-new-buffer "*codex:/tmp/project/:default*"))
         notified)
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-notify)
+        (cl-letf (((symbol-function 'agent-codex-notify)
                    (lambda (title message)
                      (setq notified (list title message)))))
           (with-current-buffer buf
@@ -474,6 +474,25 @@
           (should (equal notified
                          '("Codex ready"
                            "project: waiting for your response"))))
+      (kill-buffer buf))))
+
+(ert-deftest agent-codex-test-notify-ready-dispatches-backend-notify ()
+  "Dispatch Codex ready alerts through the registered notify slot."
+  (let ((buf (generate-new-buffer "*codex:/tmp/project/:default*"))
+        notified fallback)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-codex-notify)
+                   (lambda (title message)
+                     (setq notified (list title message))))
+                  ((symbol-function 'agent-notify)
+                   (lambda (&rest args) (setq fallback args))))
+          (with-current-buffer buf
+            (setq-local agent--backend 'codex))
+          (agent--session-notify-ready buf)
+          (should (equal notified
+                         '("Codex ready"
+                           "project: waiting for your response")))
+          (should-not fallback))
       (kill-buffer buf))))
 
 (ert-deftest agent-codex-test-submitted-hook-emits-submit-event ()
@@ -984,7 +1003,7 @@
                   codex-command-submitted-hook))
     (should (memq #'agent-codex--record-start-time codex-start-hook))
     (should (memq #'agent-codex--register-session-teardown codex-start-hook))
-    (should (eq codex-notification-function #'agent-codex-notify))
+    (should (eq codex-notification-function #'codex-default-notification))
     (should (advice-member-p #'agent-codex--intercept-exit
                              'codex--do-send-command))
     (should (advice-member-p #'agent-codex--intercept-exit-to-buffer

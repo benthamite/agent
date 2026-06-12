@@ -160,6 +160,7 @@ Source: SVG Repo (CC0).")
   :busy-p #'agent-codex--busy-p
   :label "Codex"
   :run-prompt #'agent-codex-run-prompt
+  :notify #'agent-codex-notify
   :skill-roots #'agent-codex-skill-roots
   :skill-command-prefix "$"
   :start-session #'agent-codex--start-session
@@ -869,7 +870,7 @@ removes them symmetrically and restores
 (defun agent-codex--mode-enable ()
   "Install Codex backend hooks and advice."
   (setq agent-codex--saved-notification-function codex-notification-function)
-  (setq codex-notification-function #'agent-codex-notify)
+  (setq codex-notification-function #'codex-default-notification)
   (add-hook 'codex-event-hook #'agent-codex--handle-notification)
   (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
   (dolist (fn agent-codex--start-hook-functions)
