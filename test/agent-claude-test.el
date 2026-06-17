@@ -1010,5 +1010,34 @@
       (kill-buffer buf-a)
       (kill-buffer buf-b))))
 
+;;;; Monet leak reaping
+
+(ert-deftest agent-claude-test-monet-close-server-kills-live-process ()
+  "`agent-claude--monet-close-server' terminates a live server process."
+  (let ((proc (make-process :name "agent-test-monet-server"
+                            :command '("sleep" "60")
+                            :noquery t)))
+    (unwind-protect
+        (progn
+          (should (process-live-p proc))
+          (agent-claude--monet-close-server proc)
+          (should-not (process-live-p proc)))
+      (when (process-live-p proc) (delete-process proc)))))
+
+(ert-deftest agent-claude-test-monet-close-on-disconnect-reaps-server ()
+  "Disconnect handler closes the session's leaked server process.
+Reproduces the leak where `monet--on-close-server' dropped the
+session but left its listening server alive until the GC sweep."
+  (let ((proc (make-process :name "agent-test-monet-server"
+                            :command '("sleep" "60")
+                            :noquery t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'monet--session-server)
+                   (lambda (_session) proc)))
+          (should (process-live-p proc))
+          (agent-claude--monet-close-server-on-disconnect 'fake-session)
+          (should-not (process-live-p proc)))
+      (when (process-live-p proc) (delete-process proc)))))
+
 (provide 'agent-claude-test)
 ;;; agent-claude-test.el ends here

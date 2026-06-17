@@ -506,11 +506,24 @@ the session from `monet--sessions'."
               (server (monet--session-server session)))
     (ignore-errors
       (monet--remove-lockfile (monet--session-port session)))
-    (when (process-live-p server)
-      (ignore-errors (websocket-server-close server))
-      (when (process-live-p server)
-        (delete-process server)))
+    (agent-claude--monet-close-server server)
     (remhash key monet--sessions)))
+
+(defun agent-claude--monet-close-server (server)
+  "Close the listening websocket SERVER process, forcing it if needed."
+  (when (process-live-p server)
+    (ignore-errors (websocket-server-close server))
+    (when (process-live-p server)
+      (delete-process server))))
+
+(defun agent-claude--monet-close-server-on-disconnect (session &rest _)
+  "Close SESSION's websocket server when its Claude client disconnects.
+`monet--on-close-server' drops the session from `monet--sessions'
+but leaves the listening server process alive, so it escapes
+session teardown.  Closing it here reaps the server at the source
+of the disconnect instead of waiting for the GC safety net."
+  (when-let* ((server (monet--session-server session)))
+    (agent-claude--monet-close-server server)))
 
 (defun agent-claude--cleanup-monet-session ()
   "Clean up the monet websocket session for the current Claude buffer."
@@ -579,6 +592,8 @@ disable.")
 Idempotent, so deferred installs after re-enables are safe."
   (advice-add 'monet-start-server-in-directory :around
               #'agent-claude--monet-cleanup-before-start)
+  (advice-add 'monet--on-close-server :after
+              #'agent-claude--monet-close-server-on-disconnect)
   (advice-add 'monet--display-diff-buffer :override
               #'agent-claude--display-diff-buffer)
   (unless agent-claude--monet-gc-timer
@@ -589,6 +604,8 @@ Idempotent, so deferred installs after re-enables are safe."
   "Remove monet advice and cancel the GC timer."
   (advice-remove 'monet-start-server-in-directory
                  #'agent-claude--monet-cleanup-before-start)
+  (advice-remove 'monet--on-close-server
+                 #'agent-claude--monet-close-server-on-disconnect)
   (advice-remove 'monet--display-diff-buffer
                  #'agent-claude--display-diff-buffer)
   (when agent-claude--monet-gc-timer
