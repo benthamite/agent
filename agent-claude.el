@@ -498,6 +498,12 @@ show the unified session switcher."
 (declare-function monet--remove-lockfile "monet")
 (declare-function websocket-server-close "websocket")
 
+(defvar agent-claude--pending-monet-key nil
+  "Monet session key for the Claude process currently being started.")
+
+(defvar-local agent-claude--monet-key nil
+  "Monet session key owned by this Claude buffer.")
+
 (defun agent-claude--monet-stop-session (key)
   "Fully stop the monet session for KEY.
 Closes the websocket server, removes the lockfile, and removes
@@ -529,7 +535,8 @@ of the disconnect instead of waiting for the GC safety net."
   "Clean up the monet websocket session for the current Claude buffer."
   (when (and (claude-code--buffer-p (current-buffer))
              (boundp 'monet--sessions))
-    (agent-claude--monet-stop-session (buffer-name))))
+    (agent-claude--monet-stop-session
+     (or agent-claude--monet-key (buffer-name)))))
 
 (defun agent-claude--monet-cleanup-before-start (orig-fn key directory)
   "Clean up old monet session for KEY before starting a new one.
@@ -537,7 +544,21 @@ ORIG-FN is called with KEY and DIRECTORY after cleanup."
   (when (and (boundp 'monet--sessions)
              (gethash key monet--sessions))
     (agent-claude--monet-stop-session key))
-  (funcall orig-fn key directory))
+  (let ((result (funcall orig-fn key directory)))
+    (when (agent-claude--monet-claude-key-p key)
+      (setq agent-claude--pending-monet-key key))
+    result))
+
+(defun agent-claude--monet-claude-key-p (key)
+  "Return non-nil when KEY names a Claude Code session buffer."
+  (and (stringp key)
+       (string-prefix-p "*claude:" key)))
+
+(defun agent-claude--capture-monet-key ()
+  "Store the pending Monet key buffer-locally at Claude session start."
+  (when (claude-code--buffer-p (current-buffer))
+    (setq agent-claude--monet-key agent-claude--pending-monet-key)
+    (setq agent-claude--pending-monet-key nil)))
 
 (defun agent-claude--monet-gc-orphaned-servers ()
   "Delete websocket server processes not tracked by any monet session.
@@ -2320,6 +2341,7 @@ Signals an error if the status file is missing or incomplete."
 (defconst agent-claude--start-hook-functions
   '(agent-setup-kill-on-exit
     agent-claude--capture-status-uuid
+    agent-claude--capture-monet-key
     agent-claude-start-status-polling
     agent-claude-set-modeline
     agent--refresh-display-names

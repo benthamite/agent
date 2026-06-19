@@ -1045,5 +1045,32 @@ session but left its listening server alive until the GC sweep."
           (should-not (process-live-p proc)))
       (when (process-live-p proc) (delete-process proc)))))
 
+(ert-deftest agent-claude-test-monet-teardown-uses-started-key ()
+  "Session teardown stops the Monet key captured when the server started."
+  (let ((buffer (generate-new-buffer "*claude:renamed*"))
+        (sessions (make-hash-table :test 'equal))
+        (agent-claude--pending-monet-key nil)
+        stopped)
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-code--buffer-p)
+                   (lambda (candidate) (eq candidate buffer)))
+                  ((symbol-function 'agent-claude--fetch-usage) #'ignore)
+                  ((symbol-function 'agent-claude--monet-stop-session)
+                   (lambda (key) (push key stopped))))
+          (cl-progv '(monet--sessions) (list sessions)
+            (agent-claude--monet-cleanup-before-start
+             (lambda (_key _directory) 'session)
+             "*claude:original*" "/tmp/project/")
+            (with-current-buffer buffer
+              (dolist (fn agent-claude--start-hook-functions)
+                (when (memq fn '(agent-claude--capture-monet-key
+                                 agent-claude--register-session-teardown))
+                  (funcall fn))))
+            (agent--session-teardown buffer)
+            (should (equal stopped '("*claude:original*")))))
+      (agent-claude-stop-usage-polling)
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (provide 'agent-claude-test)
 ;;; agent-claude-test.el ends here
