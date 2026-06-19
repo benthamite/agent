@@ -38,6 +38,13 @@
 (eval-and-compile (require 'transient))
 (require 'agent-account)
 
+;;;; Split-module autoloads
+
+(autoload 'agent-capture-prompt "agent-capture" nil t)
+(autoload 'agent-insert-captured-prompt "agent-capture" nil t)
+(autoload 'agent-act-on-slack-message "agent-slack" nil t)
+(autoload 'agent-setup-snippet-keys "agent-snippet" nil t)
+
 ;;;; Custom group
 
 (defgroup agent ()

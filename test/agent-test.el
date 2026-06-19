@@ -1708,5 +1708,9 @@ timestamp."
     (should children)
     (should (= (length children) 2))))
 
+(ert-deftest agent-test-menu-slack-command-is-autoloaded ()
+  "Source-loaded core menu references an available Slack command."
+  (should (fboundp 'agent-act-on-slack-message)))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here

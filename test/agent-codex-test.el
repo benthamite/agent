@@ -1018,6 +1018,12 @@
 
 ;;;; Minor mode
 
+(ert-deftest agent-codex-test-snippet-start-hook-function-is-autoloaded ()
+  "Source-loaded Codex hooks reference an available snippet command."
+  (should (memq 'agent-setup-snippet-keys
+                agent-codex--start-hook-functions))
+  (should (fboundp 'agent-setup-snippet-keys)))
+
 (ert-deftest agent-codex-test-mode-symmetric ()
   "Enabling then disabling the mode leaves global state untouched."
   (let ((codex-notification-function #'ignore)

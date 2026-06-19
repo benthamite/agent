@@ -914,6 +914,12 @@
 
 ;;;; Minor mode
 
+(ert-deftest agent-claude-test-snippet-start-hook-function-is-autoloaded ()
+  "Source-loaded Claude hooks reference an available snippet command."
+  (should (memq 'agent-setup-snippet-keys
+                agent-claude--start-hook-functions))
+  (should (fboundp 'agent-setup-snippet-keys)))
+
 (ert-deftest agent-claude-test-mode-symmetric ()
   "Enabling then disabling the mode leaves global state untouched."
   (let ((claude-code-notification-function #'ignore)
