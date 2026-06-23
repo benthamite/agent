@@ -617,22 +617,40 @@
 
 (ert-deftest agent-claude-test-batch-env-preserves-api-key-without-account ()
   "Preserve `ANTHROPIC_API_KEY' when no account config is active."
-  (let ((process-environment '("ANTHROPIC_API_KEY=key" "CLAUDE_CODE=1"))
+  (let ((process-environment '("ANTHROPIC_API_KEY=key"
+                               "ANTHROPIC_AUTH_TOKEN=token"
+                               "CLAUDE_CODE=1"))
         (agent-claude-accounts nil)
         (agent-account--current (make-hash-table :test #'eq)))
     (should (member "ANTHROPIC_API_KEY=key"
+                    (agent-claude--batch-process-environment)))
+    (should (member "ANTHROPIC_AUTH_TOKEN=token"
                     (agent-claude--batch-process-environment)))))
 
 (ert-deftest agent-claude-test-batch-env-strips-api-key-with-account ()
   "Strip conflicting auth when `CLAUDE_CONFIG_DIR' is set."
-  (let ((process-environment '("ANTHROPIC_API_KEY=key" "CLAUDE_CODE=1"))
+  (let ((process-environment '("ANTHROPIC_API_KEY=key"
+                               "ANTHROPIC_AUTH_TOKEN=token"
+                               "CLAUDE_CODE=1"))
         (agent-claude-accounts '(("work" . "/tmp/claude-work")))
         (agent-account--current (make-hash-table :test #'eq)))
     (puthash 'claude-code "work" agent-account--current)
     (let ((env (agent-claude--batch-process-environment)))
       (should (member "CLAUDE_CONFIG_DIR=/tmp/claude-work" env))
       (should-not (member "ANTHROPIC_API_KEY=key" env))
+      (should-not (member "ANTHROPIC_AUTH_TOKEN=token" env))
       (should-not (member "CLAUDE_CODE=1" env)))))
+
+(ert-deftest agent-claude-test-account-env-shadows-api-key-with-account ()
+  "Shadow inherited API-key auth when an interactive account is active."
+  (let ((agent-claude-accounts '(("work" . "/tmp/claude-work")))
+        (agent-account--current (make-hash-table :test #'eq)))
+    (puthash 'claude-code "work" agent-account--current)
+    (should (equal (agent-claude-account-env "*claude*" "/tmp/project/")
+                   '("CLAUDE_CONFIG_DIR=/tmp/claude-work"
+                     "ANTHROPIC_API_KEY="
+                     "ANTHROPIC_AUTH_TOKEN="
+                     "CLAUDE_CODE=")))))
 
 (ert-deftest agent-claude-test-run-prompt-slot-normalizes-success ()
   "Translate the rich claude result plist into the normalized callback."

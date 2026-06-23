@@ -329,13 +329,18 @@ if the status file is unavailable, or if the user confirms."
 
 ;;;;; Smart start
 
+(defconst agent-claude--account-auth-shadow-env
+  '("ANTHROPIC_API_KEY=" "ANTHROPIC_AUTH_TOKEN=" "CLAUDE_CODE=")
+  "Environment entries that keep account sessions from inheriting auth.")
+
 (defun agent-claude-account-env (_buffer-name _dir)
   "Return `CLAUDE_CONFIG_DIR' for the Claude session being started.
 Resolves the account via `agent-account-resolve' (the in-flight
 start binding first, then the persisted selection) and never
 prompts or touches the filesystem."
   (when-let* ((account (agent-account-resolve 'claude-code)))
-    (agent-account-env 'claude-code account)))
+    (append (agent-account-env 'claude-code account)
+            agent-claude--account-auth-shadow-env)))
 
 (defconst agent-claude--shared-config-items
   '("settings.json" "settings.local.json"
@@ -1619,7 +1624,8 @@ This is the `run-prompt' backend slot implementation."
               (cl-remove-if
                (lambda (s)
                  (or (string-prefix-p "CLAUDE_CODE" s)
-                     (string-prefix-p "ANTHROPIC_API_KEY=" s)))
+                     (string-prefix-p "ANTHROPIC_API_KEY=" s)
+                     (string-prefix-p "ANTHROPIC_AUTH_TOKEN=" s)))
                process-environment))
     process-environment))
 
