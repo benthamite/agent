@@ -323,8 +323,9 @@
 (ert-deftest agent-test-trajectory-new-task-uses-origin-main ()
   "Create a Trajectory agent-c task from origin/main, not local HEAD."
   (let* ((root (file-name-as-directory
-                (make-temp-file "agent-trajectory" t)))
+         (make-temp-file "agent-trajectory" t)))
          (agent-trajectory-agent-c-root root)
+         (agent-trajectory-agent-c-overlay-directory nil)
          (slug "model-spec-inclusion")
          (target (expand-file-name slug root))
          (calls nil)
@@ -355,6 +356,53 @@
                      (expand-file-name
                       "agent-c-cr-studio/.claude/.env" root)))))
       (delete-directory root t))))
+
+(ert-deftest agent-test-trajectory-new-task-applies-local-overlay ()
+  "Apply local instruction overlays and hide them from worktree status."
+  (let* ((root (file-name-as-directory
+                (make-temp-file "agent-trajectory" t)))
+         (overlay (file-name-as-directory
+                   (make-temp-file "agent-overlay" t)))
+         (agent-trajectory-agent-c-root root)
+         (agent-trajectory-agent-c-overlay-directory overlay)
+         (slug "ai-race-information-hazards")
+         (target (expand-file-name slug root))
+         calls)
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "main" root))
+          (with-temp-file (expand-file-name "AGENTS.md" overlay)
+            (insert "local agents\n"))
+          (with-temp-file (expand-file-name "CLAUDE.md" overlay)
+            (insert "local claude\n"))
+          (cl-letf (((symbol-function 'process-file)
+                     (lambda (program _infile buffer _display &rest args)
+                       (push (list default-directory program args) calls)
+                       (when buffer
+                         (with-current-buffer buffer
+                           (insert "ok\n")))
+                       0))
+                    ((symbol-function 'dired) #'ignore))
+            (agent-trajectory-new-task slug)
+            (should (equal (string-trim
+                            (with-temp-buffer
+                              (insert-file-contents
+                               (expand-file-name "AGENTS.md" target))
+                              (buffer-string)))
+                           "local agents"))
+            (should (equal (string-trim
+                            (with-temp-buffer
+                              (insert-file-contents
+                               (expand-file-name "CLAUDE.md" target))
+                              (buffer-string)))
+                           "local claude"))
+            (should (member
+                     (list (file-name-as-directory target) "git"
+                           '("update-index" "--skip-worktree"
+                             "AGENTS.md" "CLAUDE.md"))
+                     calls))))
+      (delete-directory root t)
+      (delete-directory overlay t))))
 
 (ert-deftest agent-test-trajectory-new-task-rejects-path-slugs ()
   "Reject task slugs that are not a single path component."

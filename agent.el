@@ -533,6 +533,15 @@ New directories entered by the user are automatically added."
   :type 'directory
   :group 'agent)
 
+(defcustom agent-trajectory-agent-c-overlay-directory
+  (expand-file-name "~/My Drive/dotfiles/claude/templates/agent-c/")
+  "Directory containing local-only agent-c instruction overlays.
+When this directory contains `AGENTS.md' and `CLAUDE.md',
+`agent-trajectory-new-task' copies them into each new task
+worktree and marks those paths skip-worktree."
+  :type '(choice (const :tag "Disabled" nil) directory)
+  :group 'agent)
+
 (defcustom agent-alert-on-ready nil
   "When non-nil, alert the user when an AI session finishes responding."
   :type 'boolean
@@ -1911,7 +1920,9 @@ When COMMIT is nil, use the current Git HEAD."
 SLUG must be the exact task slug and a single path component.  The
 new worktree is created at `agent-trajectory-agent-c-root'/SLUG
 on branch pablo/SLUG from origin/main, then wired to the canonical
-Rubric Studio `.claude/.env' symlink."
+Rubric Studio `.claude/.env' symlink.  When
+`agent-trajectory-agent-c-overlay-directory' is configured, copy
+its local-only instruction overlays into the new worktree."
   (interactive (list (agent-trajectory--read-task-slug)))
   (let* ((slug (agent-trajectory--validate-task-slug slug))
          (root (file-name-as-directory
@@ -1921,6 +1932,7 @@ Rubric Studio `.claude/.env' symlink."
     (agent-trajectory--git root "worktree" "add" target
                            "-b" (concat "pablo/" slug) "origin/main")
     (agent-trajectory--link-task-key root target)
+    (agent-trajectory--apply-overlay target)
     (dired target)
     (message "Ready: cd %s && claude-trajectory" target)
     target))
@@ -1957,6 +1969,36 @@ Rubric Studio `.claude/.env' symlink."
     (when (or (file-exists-p link) (file-symlink-p link))
       (user-error "Refusing to overwrite existing key link: %s" link))
     (make-symbolic-link key link)))
+
+(defun agent-trajectory--apply-overlay (target)
+  "Apply local-only instruction overlays to TARGET."
+  (when-let* ((overlay (agent-trajectory--overlay-directory)))
+    (dolist (file '("AGENTS.md" "CLAUDE.md"))
+      (copy-file (expand-file-name file overlay)
+                 (expand-file-name file target) t))
+    (let ((default-directory (file-name-as-directory target)))
+      (agent-trajectory--git-command
+       "update-index" "--skip-worktree" "AGENTS.md" "CLAUDE.md"))))
+
+(defun agent-trajectory--overlay-directory ()
+  "Return the overlay directory, or nil if it is unavailable."
+  (when agent-trajectory-agent-c-overlay-directory
+    (let ((dir (file-name-as-directory
+                (expand-file-name
+                 agent-trajectory-agent-c-overlay-directory))))
+      (when (and (file-readable-p (expand-file-name "AGENTS.md" dir))
+                 (file-readable-p (expand-file-name "CLAUDE.md" dir)))
+        dir))))
+
+(defun agent-trajectory--git-command (&rest args)
+  "Run git with ARGS in `default-directory'."
+  (with-temp-buffer
+    (let ((exit (apply #'process-file "git" nil (current-buffer) nil args)))
+      (unless (zerop exit)
+        (user-error "Git failed in %s: git %s\n%s"
+                    default-directory
+                    (string-join args " ")
+                    (string-trim (buffer-string)))))))
 
 ;;;###autoload
 (defun agent-audit-project ()
