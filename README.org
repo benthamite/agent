@@ -271,10 +271,12 @@ The command ~agent-trajectory-new-task~ creates a Trajectory =agent-c= task
 worktree from =origin/main= at =~/Trajectory/agent-c/<slug>=, checks out branch
 =pablo/<slug>=, wires the worktree's =.claude/.env= symlink to the canonical
 Rubric Studio key, applies any local-only instruction overlay configured by
-~agent-trajectory-agent-c-overlay-directory~, marks those overlay files
-skip-worktree, and opens the new worktree in Dired. It is the Emacs equivalent
-of the shell =newtask= helper, but it does not depend on the local =main=
-worktree's current branch.
+~agent-trajectory-agent-c-overlay-directory~, prepending
+~agent-trajectory-parent-agents-file~ so Codex worktree sessions inherit the
+Trajectory parent context even though each =agent-c= worktree is its own Git
+root, marks those overlay files skip-worktree, and opens the new worktree in
+Dired. It is the Emacs equivalent of the shell =newtask= helper, but it does
+not depend on the local =main= worktree's current branch.
 
 The commands ~agent-handoff~, ~agent-audit-project~, ~agent-debug-backtrace~, ~agent-act-on-slack-message~, ~agent-exit~, and ~agent-restart~ resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (~agent-claude-handoff~, ~agent-codex-restart~, and so on) remain available as obsolete aliases.
 

@@ -542,6 +542,12 @@ worktree and marks those paths skip-worktree."
   :type '(choice (const :tag "Disabled" nil) directory)
   :group 'agent)
 
+(defcustom agent-trajectory-parent-agents-file
+  (expand-file-name "~/Trajectory/AGENTS.md")
+  "Trajectory parent `AGENTS.md' prepended to local agent-c overlays."
+  :type '(choice (const :tag "Disabled" nil) file)
+  :group 'agent)
+
 (defcustom agent-alert-on-ready nil
   "When non-nil, alert the user when an AI session finishes responding."
   :type 'boolean
@@ -1973,12 +1979,34 @@ its local-only instruction overlays into the new worktree."
 (defun agent-trajectory--apply-overlay (target)
   "Apply local-only instruction overlays to TARGET."
   (when-let* ((overlay (agent-trajectory--overlay-directory)))
-    (dolist (file '("AGENTS.md" "CLAUDE.md"))
-      (copy-file (expand-file-name file overlay)
-                 (expand-file-name file target) t))
+    (agent-trajectory--write-agents-overlay overlay target)
+    (copy-file (expand-file-name "CLAUDE.md" overlay)
+               (expand-file-name "CLAUDE.md" target) t)
     (let ((default-directory (file-name-as-directory target)))
       (agent-trajectory--git-command
        "update-index" "--skip-worktree" "AGENTS.md" "CLAUDE.md"))))
+
+(defun agent-trajectory--write-agents-overlay (overlay target)
+  "Write composed local AGENTS overlay from OVERLAY into TARGET."
+  (let ((parent (agent-trajectory--parent-agents-file))
+        (source (expand-file-name "AGENTS.md" overlay))
+        (dest (expand-file-name "AGENTS.md" target)))
+    (if parent
+        (with-temp-file dest
+          (insert-file-contents parent)
+          (goto-char (point-max))
+          (unless (bolp)
+            (insert "\n"))
+          (insert "\n--- local agent-c overlay ---\n\n")
+          (insert-file-contents source))
+      (copy-file source dest t))))
+
+(defun agent-trajectory--parent-agents-file ()
+  "Return readable Trajectory parent AGENTS file, or nil."
+  (when agent-trajectory-parent-agents-file
+    (let ((file (expand-file-name agent-trajectory-parent-agents-file)))
+      (when (file-readable-p file)
+        file))))
 
 (defun agent-trajectory--overlay-directory ()
   "Return the overlay directory, or nil if it is unavailable."

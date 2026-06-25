@@ -326,6 +326,7 @@
          (make-temp-file "agent-trajectory" t)))
          (agent-trajectory-agent-c-root root)
          (agent-trajectory-agent-c-overlay-directory nil)
+         (agent-trajectory-parent-agents-file nil)
          (slug "model-spec-inclusion")
          (target (expand-file-name slug root))
          (calls nil)
@@ -365,6 +366,7 @@
                    (make-temp-file "agent-overlay" t)))
          (agent-trajectory-agent-c-root root)
          (agent-trajectory-agent-c-overlay-directory overlay)
+         (agent-trajectory-parent-agents-file nil)
          (slug "ai-race-information-hazards")
          (target (expand-file-name slug root))
          calls)
@@ -403,6 +405,46 @@
                      calls))))
       (delete-directory root t)
       (delete-directory overlay t))))
+
+(ert-deftest agent-test-trajectory-new-task-composes-parent-overlay ()
+  "Prepend Trajectory parent context to local worktree AGENTS overlay."
+  (let* ((root (file-name-as-directory
+                (make-temp-file "agent-trajectory" t)))
+         (overlay (file-name-as-directory
+                   (make-temp-file "agent-overlay" t)))
+         (parent (make-temp-file "agent-parent-agents"))
+         (agent-trajectory-agent-c-root root)
+         (agent-trajectory-agent-c-overlay-directory overlay)
+         (agent-trajectory-parent-agents-file parent)
+         (slug "conceptual-task")
+         (target (expand-file-name slug root)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "main" root))
+          (with-temp-file parent
+            (insert "parent trajectory context\n"))
+          (with-temp-file (expand-file-name "AGENTS.md" overlay)
+            (insert "local agent-c context\n"))
+          (with-temp-file (expand-file-name "CLAUDE.md" overlay)
+            (insert "local claude\n"))
+          (cl-letf (((symbol-function 'process-file)
+                     (lambda (_program _infile buffer _display &rest _args)
+                       (when buffer
+                         (with-current-buffer buffer
+                           (insert "ok\n")))
+                       0))
+                    ((symbol-function 'dired) #'ignore))
+            (agent-trajectory-new-task slug)
+            (should (equal (with-temp-buffer
+                             (insert-file-contents
+                              (expand-file-name "AGENTS.md" target))
+                             (buffer-string))
+                           (concat "parent trajectory context\n"
+                                   "\n--- local agent-c overlay ---\n\n"
+                                   "local agent-c context\n")))))
+      (delete-directory root t)
+      (delete-directory overlay t)
+      (delete-file parent))))
 
 (ert-deftest agent-test-trajectory-new-task-rejects-path-slugs ()
   "Reject task slugs that are not a single path component."
