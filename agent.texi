@@ -308,6 +308,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-jump-to-waiting
 @findex agent-run-skill
 @findex agent-post-push-ci
+@findex agent-trajectory-new-task
 @findex agent-handoff
 @findex agent-handoff-from-emacsclient
 @findex agent-audit-project
@@ -320,7 +321,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-fix-rendering
 @findex agent-disable-scrollback-truncation
 @findex agent-snippet-tab
-The command @code{agent-menu} opens the unified transient menu. It includes shared entries for session switching, waiting-session jumps, handoff, restart, exit, skill execution, project audit, backtrace debugging, Slack-message action routing, alert toggles, terminal maintenance, and a separate Prompts section for prompt capture and captured prompt insertion. Backend modules append their own suffixes to the same menu when loaded.
+The command @code{agent-menu} opens the unified transient menu. It includes shared entries for session switching, waiting-session jumps, handoff, restart, exit, skill execution, Trajectory CR task worktree creation, project audit, backtrace debugging, Slack-message action routing, alert toggles, terminal maintenance, and a separate Prompts section for prompt capture and captured prompt insertion. Backend modules append their own suffixes to the same menu when loaded.
 
 The command @code{agent-start-or-switch} is the main entry point. If no sessions exist, it starts a new session through the selected backend. If sessions already exist, it opens the session switcher. Sessions receive stable home-row keys where possible and display backend icons next to their labels.
 
@@ -332,6 +333,13 @@ The command @code{agent-post-push-ci} runs the @code{post-push-ci} skill through
 selected backend with @samp{--no-push --commit HEAD}. Use it after a push has
 already happened and you want an agent to inspect GitHub Actions failures, fix
 the root cause, and continue the authorized CI closeout loop.
+
+The command @code{agent-trajectory-new-task} creates a Trajectory @samp{agent-c} task
+worktree from @samp{origin/main} at @samp{~/Trajectory/agent-c/<slug>}, checks out branch
+@samp{pablo/<slug>}, wires the worktree's @samp{.claude/.env} symlink to the canonical
+Rubric Studio key, and opens the new worktree in Dired. It is the Emacs
+equivalent of the shell @samp{newtask} helper, but it does not depend on the local
+@samp{main} worktree's current branch.
 
 The commands @code{agent-handoff}, @code{agent-audit-project}, @code{agent-debug-backtrace}, @code{agent-act-on-slack-message}, @code{agent-exit}, and @code{agent-restart} resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (@code{agent-claude-handoff}, @code{agent-codex-restart}, and so on) remain available as obsolete aliases.
 

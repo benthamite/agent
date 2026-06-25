@@ -320,6 +320,47 @@
             (should (string-match-p "--no-push --commit abc123" ran))))
       (delete-directory root t))))
 
+(ert-deftest agent-test-trajectory-new-task-uses-origin-main ()
+  "Create a Trajectory agent-c task from origin/main, not local HEAD."
+  (let* ((root (file-name-as-directory
+                (make-temp-file "agent-trajectory" t)))
+         (agent-trajectory-agent-c-root root)
+         (slug "model-spec-inclusion")
+         (target (expand-file-name slug root))
+         (calls nil)
+         opened)
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "main" root))
+          (cl-letf (((symbol-function 'process-file)
+                     (lambda (program _infile buffer _display &rest args)
+                       (push (cons program args) calls)
+                       (when buffer
+                         (with-current-buffer buffer
+                           (insert "ok\n")))
+                       0))
+                    ((symbol-function 'dired)
+                     (lambda (dir) (setq opened dir))))
+            (agent-trajectory-new-task slug)
+            (should (equal (reverse calls)
+                           `(("git" "fetch" "origin" "main")
+                             ("git" "worktree" "add" ,target
+                              "-b" ,(concat "pablo/" slug)
+                              "origin/main"))))
+            (should (equal opened target))
+            (should (file-directory-p (expand-file-name ".claude" target)))
+            (should (file-symlink-p (expand-file-name ".claude/.env" target)))
+            (should (equal
+                     (file-symlink-p (expand-file-name ".claude/.env" target))
+                     (expand-file-name
+                      "agent-c-cr-studio/.claude/.env" root)))))
+      (delete-directory root t))))
+
+(ert-deftest agent-test-trajectory-new-task-rejects-path-slugs ()
+  "Reject task slugs that are not a single path component."
+  (should-error (agent-trajectory-new-task "../bad") :type 'user-error)
+  (should-error (agent-trajectory-new-task "nested/task") :type 'user-error))
+
 (ert-deftest agent-test-skill-result-does-not-modify-new-user-buffer ()
   "Display skill output in a result buffer, not an unrelated new buffer."
   (let ((unrelated (get-buffer-create "*agent-unrelated*"))

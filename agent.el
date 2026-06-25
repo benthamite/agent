@@ -527,6 +527,12 @@ New directories entered by the user are automatically added."
   :type '(repeat directory)
   :group 'agent)
 
+(defcustom agent-trajectory-agent-c-root
+  (expand-file-name "~/Trajectory/agent-c/")
+  "Root directory containing Trajectory agent-c worktrees."
+  :type 'directory
+  :group 'agent)
+
 (defcustom agent-alert-on-ready nil
   "When non-nil, alert the user when an AI session finishes responding."
   :type 'boolean
@@ -1900,6 +1906,59 @@ When COMMIT is nil, use the current Git HEAD."
     (string-trim (buffer-string))))
 
 ;;;###autoload
+(defun agent-trajectory-new-task (slug)
+  "Create a Trajectory agent-c task worktree for SLUG.
+SLUG must be the exact task slug and a single path component.  The
+new worktree is created at `agent-trajectory-agent-c-root'/SLUG
+on branch pablo/SLUG from origin/main, then wired to the canonical
+Rubric Studio `.claude/.env' symlink."
+  (interactive (list (agent-trajectory--read-task-slug)))
+  (let* ((slug (agent-trajectory--validate-task-slug slug))
+         (root (file-name-as-directory
+                (expand-file-name agent-trajectory-agent-c-root)))
+         (target (expand-file-name slug root)))
+    (agent-trajectory--git root "fetch" "origin" "main")
+    (agent-trajectory--git root "worktree" "add" target
+                           "-b" (concat "pablo/" slug) "origin/main")
+    (agent-trajectory--link-task-key root target)
+    (dired target)
+    (message "Ready: cd %s && claude-trajectory" target)
+    target))
+
+(defun agent-trajectory--read-task-slug ()
+  "Read a Trajectory agent-c task slug from the minibuffer."
+  (agent-trajectory--validate-task-slug
+   (read-string "Task slug: ")))
+
+(defun agent-trajectory--validate-task-slug (slug)
+  "Return normalized task SLUG, or signal if it is unsafe."
+  (let ((slug (string-trim (or slug ""))))
+    (unless (string-match-p "\\`[[:alnum:]][[:alnum:]_-]*\\'" slug)
+      (user-error "Task slug must be a single path component"))
+    slug))
+
+(defun agent-trajectory--git (root &rest args)
+  "Run git in ROOT's main worktree with ARGS."
+  (let ((default-directory (expand-file-name "main/" root)))
+    (with-temp-buffer
+      (let ((exit (apply #'process-file "git" nil (current-buffer) nil args)))
+        (unless (zerop exit)
+          (user-error "Git failed in %s: git %s\n%s"
+                      default-directory
+                      (string-join args " ")
+                      (string-trim (buffer-string))))))))
+
+(defun agent-trajectory--link-task-key (root target)
+  "Link TARGET's `.claude/.env' to the canonical key under ROOT."
+  (let* ((claude-dir (expand-file-name ".claude" target))
+         (link (expand-file-name ".env" claude-dir))
+         (key (expand-file-name "agent-c-cr-studio/.claude/.env" root)))
+    (make-directory claude-dir t)
+    (when (or (file-exists-p link) (file-symlink-p link))
+      (user-error "Refusing to overwrite existing key link: %s" link))
+    (make-symbolic-link key link)))
+
+;;;###autoload
 (defun agent-audit-project ()
   "Run a comprehensive project audit via the selected backend.
 Sequentially runs each skill in `agent-audit-skills' with
@@ -2273,6 +2332,7 @@ selected account."
     ("S" "disable scrollback" agent-disable-scrollback-truncation)]
    ["Tools"
     ("s" "run skill" agent-run-skill)
+    ("n" "new CR task" agent-trajectory-new-task)
     ("c" "post-push CI" agent-post-push-ci)
     ("a" "audit project" agent-audit-project)
     ("d" "debug backtrace" agent-debug-backtrace)
