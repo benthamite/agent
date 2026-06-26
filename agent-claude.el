@@ -330,8 +330,15 @@ if the status file is unavailable, or if the user confirms."
 ;;;;; Smart start
 
 (defconst agent-claude--account-auth-shadow-env
-  '("ANTHROPIC_API_KEY=" "ANTHROPIC_AUTH_TOKEN=" "CLAUDE_CODE=")
-  "Environment entries that keep account sessions from inheriting auth.")
+  '("ANTHROPIC_API_KEY" "ANTHROPIC_AUTH_TOKEN" "CLAUDE_CODE")
+  "Environment variable names removed from account Claude Code sessions.
+Each is a bare variable name without a trailing \"=\", so the variable is
+unset for the launched process and every subprocess it spawns, rather than
+set to the empty string.  An empty ANTHROPIC_AUTH_TOKEN is inherited by
+subprocesses and makes the Anthropic SDK build an illegal empty
+\"Authorization: Bearer\" header, surfacing as a misleading connection
+error; see `process-environment'.  This mirrors the shell `claude' shim,
+which clears the same variables with `unset'.")
 
 (defun agent-claude-account-env (_buffer-name _dir)
   "Return `CLAUDE_CONFIG_DIR' for the Claude session being started.
