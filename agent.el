@@ -1926,7 +1926,9 @@ When COMMIT is nil, use the current Git HEAD."
 SLUG must be the exact task slug and a single path component.  The
 new worktree is created at `agent-trajectory-agent-c-root'/SLUG
 on branch pablo/SLUG from origin/main, then wired to the canonical
-Rubric Studio `.claude/.env' symlink.  When
+Rubric Studio `.claude/.env' symlink, and sparse-checked-out to
+`.claude'/`meta'/`platform' so the checkout stays small instead of
+materializing the whole repo's task corpus.  When
 `agent-trajectory-agent-c-overlay-directory' is configured, copy
 its local-only instruction overlays into the new worktree."
   (interactive (list (agent-trajectory--read-task-slug)))
@@ -1938,6 +1940,7 @@ its local-only instruction overlays into the new worktree."
     (agent-trajectory--git root "worktree" "add" target
                            "-b" (concat "pablo/" slug) "origin/main")
     (agent-trajectory--link-task-key root target)
+    (agent-trajectory--sparse-task-worktree target)
     (agent-trajectory--apply-overlay target)
     (dired target)
     (message "Ready: cd %s && claude-trajectory" target)
@@ -1975,6 +1978,20 @@ its local-only instruction overlays into the new worktree."
     (when (or (file-exists-p link) (file-symlink-p link))
       (user-error "Refusing to overwrite existing key link: %s" link))
     (make-symbolic-link key link)))
+
+(defun agent-trajectory--sparse-task-worktree (target)
+  "Sparse-checkout TARGET to the directories a CR task worktree needs.
+Keep `.claude', `meta' and `platform' (root files stay too), dropping
+the rest of the repo's large task corpus; the new task's own files are
+created under `tasks/' as work proceeds.  Best-effort: a failure is
+reported but does not abort task creation."
+  (let ((default-directory (file-name-as-directory target)))
+    (condition-case err
+        (agent-trajectory--git-command
+         "sparse-checkout" "set" ".claude" "meta" "platform")
+      (error
+       (message "agent-trajectory: sparse-checkout skipped (%s)"
+                (error-message-string err))))))
 
 (defun agent-trajectory--apply-overlay (target)
   "Apply local-only instruction overlays to TARGET."

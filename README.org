@@ -270,7 +270,9 @@ the root cause, and continue the authorized CI closeout loop.
 The command ~agent-trajectory-new-task~ creates a Trajectory =agent-c= task
 worktree from =origin/main= at =~/Trajectory/agent-c/<slug>=, checks out branch
 =pablo/<slug>=, wires the worktree's =.claude/.env= symlink to the canonical
-Rubric Studio key, applies any local-only instruction overlay configured by
+Rubric Studio key, sparse-checks out the worktree to =.claude=, =meta= and
+=platform= (keeping the checkout small instead of materializing the whole task
+corpus), applies any local-only instruction overlay configured by
 ~agent-trajectory-agent-c-overlay-directory~, prepending
 ~agent-trajectory-parent-agents-file~ so Codex worktree sessions inherit the
 Trajectory parent context even though each =agent-c= worktree is its own Git
