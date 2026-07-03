@@ -348,7 +348,9 @@
                            `(("git" "fetch" "origin" "main")
                              ("git" "worktree" "add" ,target
                               "-b" ,(concat "pablo/" slug)
-                              "origin/main"))))
+                              "origin/main")
+                             ("git" "sparse-checkout" "set"
+                              ".claude" "meta" "platform"))))
             (should (equal opened target))
             (should (file-directory-p (expand-file-name ".claude" target)))
             (should (file-symlink-p (expand-file-name ".claude/.env" target)))

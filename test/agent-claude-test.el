@@ -648,9 +648,9 @@
     (puthash 'claude-code "work" agent-account--current)
     (should (equal (agent-claude-account-env "*claude*" "/tmp/project/")
                    '("CLAUDE_CONFIG_DIR=/tmp/claude-work"
-                     "ANTHROPIC_API_KEY="
-                     "ANTHROPIC_AUTH_TOKEN="
-                     "CLAUDE_CODE=")))))
+                     "ANTHROPIC_API_KEY"
+                     "ANTHROPIC_AUTH_TOKEN"
+                     "CLAUDE_CODE")))))
 
 (ert-deftest agent-claude-test-run-prompt-slot-normalizes-success ()
   "Translate the rich claude result plist into the normalized callback."
