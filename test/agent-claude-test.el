@@ -1090,5 +1090,55 @@ session but left its listening server alive until the GC sweep."
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest agent-claude-test-monet-start-captures-server-process ()
+  "Capture the Monet server process owned by the started Claude session."
+  (let ((buffer (generate-new-buffer "*claude:renamed*"))
+        (proc (make-process :name "agent-test-monet-server"
+                            :command '("sleep" "60")
+                            :noquery t))
+        (agent-claude--pending-monet-key nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-code--buffer-p)
+                   (lambda (candidate) (eq candidate buffer)))
+                  ((symbol-function 'monet--session-server)
+                   (lambda (_session) proc)))
+          (agent-claude--monet-cleanup-before-start
+           (lambda (_key _directory) 'session)
+           "*claude:original*" "/tmp/project/")
+          (with-current-buffer buffer
+            (agent-claude--capture-monet-key))
+          (should (equal (buffer-local-value 'agent-claude--monet-key buffer)
+                         "*claude:original*"))
+          (should (local-variable-p 'agent-claude--monet-server buffer))
+          (should (eq (buffer-local-value 'agent-claude--monet-server buffer)
+                      proc)))
+      (when (process-live-p proc) (delete-process proc))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest agent-claude-test-monet-teardown-closes-captured-server-without-session ()
+  "Session teardown closes a captured Monet server missing from Monet's table."
+  (let ((buffer (generate-new-buffer "*claude:renamed*"))
+        (sessions (make-hash-table :test 'equal))
+        (proc (make-process :name "agent-test-monet-server"
+                            :command '("sleep" "60")
+                            :noquery t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-code--buffer-p)
+                   (lambda (candidate) (eq candidate buffer)))
+                  ((symbol-function 'agent-claude--fetch-usage) #'ignore))
+          (cl-progv '(monet--sessions) (list sessions)
+            (with-current-buffer buffer
+              (set (make-local-variable 'agent-claude--monet-key)
+                   "*claude:original*")
+              (set (make-local-variable 'agent-claude--monet-server) proc)
+              (agent-claude--register-session-teardown))
+            (agent--session-teardown buffer)
+            (should-not (process-live-p proc))))
+      (agent-claude-stop-usage-polling)
+      (when (process-live-p proc) (delete-process proc))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (provide 'agent-claude-test)
 ;;; agent-claude-test.el ends here

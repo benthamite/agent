@@ -513,18 +513,24 @@ show the unified session switcher."
 (defvar agent-claude--pending-monet-key nil
   "Monet session key for the Claude process currently being started.")
 
+(defvar agent-claude--pending-monet-server nil
+  "Monet websocket server for the Claude process currently being started.")
+
 (defvar-local agent-claude--monet-key nil
   "Monet session key owned by this Claude buffer.")
+
+(defvar-local agent-claude--monet-server nil
+  "Monet websocket server process owned by this Claude buffer.")
 
 (defun agent-claude--monet-stop-session (key)
   "Fully stop the monet session for KEY.
 Closes the websocket server, removes the lockfile, and removes
 the session from `monet--sessions'."
-  (when-let* ((session (gethash key monet--sessions))
-              (server (monet--session-server session)))
+  (when-let ((session (and key (gethash key monet--sessions))))
     (ignore-errors
       (monet--remove-lockfile (monet--session-port session)))
-    (agent-claude--monet-close-server server)
+    (when-let ((server (monet--session-server session)))
+      (agent-claude--monet-close-server server))
     (remhash key monet--sessions)))
 
 (defun agent-claude--monet-close-server (server)
@@ -545,20 +551,33 @@ of the disconnect instead of waiting for the GC safety net."
 
 (defun agent-claude--cleanup-monet-session ()
   "Clean up the monet websocket session for the current Claude buffer."
-  (when (and (claude-code--buffer-p (current-buffer))
-             (boundp 'monet--sessions))
-    (agent-claude--monet-stop-session
-     (or agent-claude--monet-key (buffer-name)))))
+  (when (or (claude-code--buffer-p (current-buffer))
+            agent-claude--monet-key
+            agent-claude--monet-server)
+    (when (boundp 'monet--sessions)
+      (agent-claude--monet-stop-session
+       (or agent-claude--monet-key (buffer-name))))
+    (when agent-claude--monet-server
+      (agent-claude--monet-close-server agent-claude--monet-server))
+    (setq agent-claude--monet-key nil)
+    (setq agent-claude--monet-server nil)))
 
 (defun agent-claude--monet-cleanup-before-start (orig-fn key directory)
   "Clean up old monet session for KEY before starting a new one.
 ORIG-FN is called with KEY and DIRECTORY after cleanup."
+  (when (agent-claude--monet-claude-key-p key)
+    (setq agent-claude--pending-monet-key nil)
+    (setq agent-claude--pending-monet-server nil))
   (when (and (boundp 'monet--sessions)
              (gethash key monet--sessions))
     (agent-claude--monet-stop-session key))
   (let ((result (funcall orig-fn key directory)))
     (when (agent-claude--monet-claude-key-p key)
-      (setq agent-claude--pending-monet-key key))
+      (setq agent-claude--pending-monet-key key)
+      (setq agent-claude--pending-monet-server
+            (and result
+                 (fboundp 'monet--session-server)
+                 (monet--session-server result))))
     result))
 
 (defun agent-claude--monet-claude-key-p (key)
@@ -567,10 +586,12 @@ ORIG-FN is called with KEY and DIRECTORY after cleanup."
        (string-prefix-p "*claude:" key)))
 
 (defun agent-claude--capture-monet-key ()
-  "Store the pending Monet key buffer-locally at Claude session start."
+  "Store the pending Monet session data at Claude session start."
   (when (claude-code--buffer-p (current-buffer))
     (setq agent-claude--monet-key agent-claude--pending-monet-key)
-    (setq agent-claude--pending-monet-key nil)))
+    (setq agent-claude--monet-server agent-claude--pending-monet-server)
+    (setq agent-claude--pending-monet-key nil)
+    (setq agent-claude--pending-monet-server nil)))
 
 (defun agent-claude--monet-gc-orphaned-servers ()
   "Delete websocket server processes not tracked by any monet session.
