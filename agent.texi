@@ -339,12 +339,12 @@ task worktree from @samp{origin/main} at @samp{~/Trajectory/reasoning-tasks/<slu
 checks out branch @samp{pablo/<slug>}, wires the worktree's @samp{.claude/.env} symlink to the canonical
 Rubric Studio key, sparse-checks out the worktree to @samp{.claude}, @samp{meta} and
 @samp{platform} (keeping the checkout small instead of materializing the whole task
-corpus), applies any local-only instruction overlay configured by
-@code{agent-trajectory-reasoning-tasks-overlay-directory}, prepending
-@code{agent-trajectory-parent-agents-file} so Codex worktree sessions inherit the
-Trajectory parent context even though each @samp{reasoning-tasks} worktree is its own Git
-root, marks those overlay files skip-worktree, and opens the new worktree in
-Dired. It is the Emacs equivalent of the shell @samp{newtask} helper, but it does
+corpus), runs the sync hook script configured by
+@code{agent-trajectory-sync-worktree-script}, and opens the new worktree in Dired.
+The sync script is the same SessionStart hook every later session runs, and
+the single source of truth for composing the local @samp{AGENTS.md} and @samp{CLAUDE.md}
+instruction overlay, linking the canonical key and injecting private skills.
+The command is the Emacs equivalent of the shell @samp{newtask} helper, but it does
 not depend on the local @samp{main} worktree's current branch.
 
 The commands @code{agent-handoff}, @code{agent-audit-project}, @code{agent-debug-backtrace}, @code{agent-act-on-slack-message}, @code{agent-exit}, and @code{agent-restart} resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (@code{agent-claude-handoff}, @code{agent-codex-restart}, and so on) remain available as obsolete aliases.

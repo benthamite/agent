@@ -325,8 +325,8 @@
   (let* ((root (file-name-as-directory
          (make-temp-file "agent-trajectory" t)))
          (agent-trajectory-reasoning-tasks-root root)
-         (agent-trajectory-reasoning-tasks-overlay-directory nil)
-         (agent-trajectory-parent-agents-file nil)
+         (agent-trajectory-sync-worktree-script
+          (expand-file-name "missing-sync.sh" root))
          (slug "model-spec-inclusion")
          (target (expand-file-name slug root))
          (calls nil)
@@ -360,93 +360,39 @@
                       "reasoning-tasks-cr-studio/.claude/.env" root)))))
       (delete-directory root t))))
 
-(ert-deftest agent-test-trajectory-new-task-applies-local-overlay ()
-  "Apply local instruction overlays and hide them from worktree status."
+(ert-deftest agent-test-trajectory-new-task-runs-sync-script ()
+  "Delegate worktree overlay setup to the sync hook script."
   (let* ((root (file-name-as-directory
                 (make-temp-file "agent-trajectory" t)))
-         (overlay (file-name-as-directory
-                   (make-temp-file "agent-overlay" t)))
+         (script (make-temp-file "agent-sync-script"))
          (agent-trajectory-reasoning-tasks-root root)
-         (agent-trajectory-reasoning-tasks-overlay-directory overlay)
-         (agent-trajectory-parent-agents-file nil)
+         (agent-trajectory-sync-worktree-script script)
          (slug "ai-race-information-hazards")
          (target (expand-file-name slug root))
-         calls)
+         sync-call)
     (unwind-protect
         (progn
           (make-directory (expand-file-name "main" root))
-          (with-temp-file (expand-file-name "AGENTS.md" overlay)
-            (insert "local agents\n"))
-          (with-temp-file (expand-file-name "CLAUDE.md" overlay)
-            (insert "local claude\n"))
           (cl-letf (((symbol-function 'process-file)
                      (lambda (program _infile buffer _display &rest args)
-                       (push (list default-directory program args) calls)
+                       (when (equal program "bash")
+                         (setq sync-call (list default-directory args
+                                               process-environment)))
                        (when buffer
                          (with-current-buffer buffer
                            (insert "ok\n")))
                        0))
                     ((symbol-function 'dired) #'ignore))
             (agent-trajectory-new-task slug)
-            (should (equal (string-trim
-                            (with-temp-buffer
-                              (insert-file-contents
-                               (expand-file-name "AGENTS.md" target))
-                              (buffer-string)))
-                           "local agents"))
-            (should (equal (string-trim
-                            (with-temp-buffer
-                              (insert-file-contents
-                               (expand-file-name "CLAUDE.md" target))
-                              (buffer-string)))
-                           "local claude"))
-            (should (member
-                     (list (file-name-as-directory target) "git"
-                           '("update-index" "--skip-worktree"
-                             "AGENTS.md" "CLAUDE.md"))
-                     calls))))
+            (should (equal (nth 0 sync-call)
+                           (file-name-as-directory target)))
+            (should (equal (nth 1 sync-call) (list script)))
+            (should (member "SYNC_REASONING_TASKS_SKIP_FETCH=1"
+                            (nth 2 sync-call)))
+            (should (member (concat "CLAUDE_PROJECT_DIR=" target)
+                            (nth 2 sync-call)))))
       (delete-directory root t)
-      (delete-directory overlay t))))
-
-(ert-deftest agent-test-trajectory-new-task-composes-parent-overlay ()
-  "Prepend Trajectory parent context to local worktree AGENTS overlay."
-  (let* ((root (file-name-as-directory
-                (make-temp-file "agent-trajectory" t)))
-         (overlay (file-name-as-directory
-                   (make-temp-file "agent-overlay" t)))
-         (parent (make-temp-file "agent-parent-agents"))
-         (agent-trajectory-reasoning-tasks-root root)
-         (agent-trajectory-reasoning-tasks-overlay-directory overlay)
-         (agent-trajectory-parent-agents-file parent)
-         (slug "conceptual-task")
-         (target (expand-file-name slug root)))
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "main" root))
-          (with-temp-file parent
-            (insert "parent trajectory context\n"))
-          (with-temp-file (expand-file-name "AGENTS.md" overlay)
-            (insert "local reasoning-tasks context\n"))
-          (with-temp-file (expand-file-name "CLAUDE.md" overlay)
-            (insert "local claude\n"))
-          (cl-letf (((symbol-function 'process-file)
-                     (lambda (_program _infile buffer _display &rest _args)
-                       (when buffer
-                         (with-current-buffer buffer
-                           (insert "ok\n")))
-                       0))
-                    ((symbol-function 'dired) #'ignore))
-            (agent-trajectory-new-task slug)
-            (should (equal (with-temp-buffer
-                             (insert-file-contents
-                              (expand-file-name "AGENTS.md" target))
-                             (buffer-string))
-                           (concat "parent trajectory context\n"
-                                   "\n--- local reasoning-tasks overlay ---\n\n"
-                                   "local reasoning-tasks context\n")))))
-      (delete-directory root t)
-      (delete-directory overlay t)
-      (delete-file parent))))
+      (delete-file script))))
 
 (ert-deftest agent-test-trajectory-new-task-rejects-path-slugs ()
   "Reject task slugs that are not a single path component."

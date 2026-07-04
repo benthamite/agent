@@ -540,27 +540,25 @@ New directories entered by the user are automatically added."
 (make-obsolete-variable 'agent-trajectory-agent-c-root
                         'agent-trajectory-reasoning-tasks-root "0.2")
 
-(defconst agent-trajectory--legacy-agent-c-overlay-directory-default
-  (expand-file-name "~/My Drive/dotfiles/claude/templates/agent-c/")
-  "Previous default for `agent-trajectory-agent-c-overlay-directory'.")
-
-(defcustom agent-trajectory-reasoning-tasks-overlay-directory
-  (expand-file-name "~/My Drive/dotfiles/claude/templates/reasoning-tasks/")
-  "Directory containing local-only reasoning-tasks instruction overlays.
-When this directory contains `AGENTS.md' and `CLAUDE.md',
-`agent-trajectory-new-task' copies them into each new task
-worktree and marks those paths skip-worktree."
-  :type '(choice (const :tag "Disabled" nil) directory)
+(defcustom agent-trajectory-sync-worktree-script
+  (expand-file-name
+   "~/My Drive/dotfiles/claude/hooks/sync-reasoning-tasks-worktree.sh")
+  "Script that initializes and syncs a reasoning-tasks task worktree.
+This SessionStart hook is the single source of truth for composing the
+local `AGENTS.md'/`CLAUDE.md' instruction overlay, linking the
+canonical key and injecting private skills.  `agent-trajectory-new-task'
+runs it once so a fresh worktree matches what every later session start
+produces.  Overlay locations are configured through the script's
+SYNC_REASONING_TASKS_* environment variables, not through Emacs."
+  :type 'file
   :group 'agent)
 
 (make-obsolete-variable 'agent-trajectory-agent-c-overlay-directory
-                        'agent-trajectory-reasoning-tasks-overlay-directory "0.2")
-
-(defcustom agent-trajectory-parent-agents-file
-  (expand-file-name "~/Trajectory/AGENTS.md")
-  "Trajectory parent `AGENTS.md' prepended to local reasoning-tasks overlays."
-  :type '(choice (const :tag "Disabled" nil) file)
-  :group 'agent)
+                        'agent-trajectory-sync-worktree-script "0.2")
+(make-obsolete-variable 'agent-trajectory-reasoning-tasks-overlay-directory
+                        'agent-trajectory-sync-worktree-script "0.2")
+(make-obsolete-variable 'agent-trajectory-parent-agents-file
+                        'agent-trajectory-sync-worktree-script "0.2")
 
 (defcustom agent-alert-on-ready nil
   "When non-nil, alert the user when an AI session finishes responding."
@@ -1943,9 +1941,10 @@ new worktree is created at
 from origin/main, then wired to the canonical Rubric Studio
 `.claude/.env' symlink, and sparse-checked-out to
 `.claude'/`meta'/`platform' so the checkout stays small instead of
-materializing the whole repo's task corpus.  When
-`agent-trajectory-reasoning-tasks-overlay-directory' is configured,
-copy its local-only instruction overlays into the new worktree."
+materializing the whole repo's task corpus.  Finally, run
+`agent-trajectory-sync-worktree-script' in the new worktree so it
+gets the same local instruction overlay, key link and private
+skills as any later session start."
   (interactive (list (agent-trajectory--read-task-slug)))
   (let* ((slug (agent-trajectory--validate-task-slug slug))
          (root (agent-trajectory--root-directory))
@@ -1955,7 +1954,7 @@ copy its local-only instruction overlays into the new worktree."
                            "-b" (concat "pablo/" slug) "origin/main")
     (agent-trajectory--link-task-key root target)
     (agent-trajectory--sparse-task-worktree target)
-    (agent-trajectory--apply-overlay target)
+    (agent-trajectory--sync-worktree target)
     (dired target)
     (message "Ready: cd %s && claude-trajectory" target)
     target))
@@ -2016,49 +2015,33 @@ reported but does not abort task creation."
        (message "agent-trajectory: sparse-checkout skipped (%s)"
                 (error-message-string err))))))
 
-(defun agent-trajectory--apply-overlay (target)
-  "Apply local-only instruction overlays to TARGET."
-  (when-let* ((overlay (agent-trajectory--overlay-directory)))
-    (agent-trajectory--write-agents-overlay overlay target)
-    (copy-file (expand-file-name "CLAUDE.md" overlay)
-               (expand-file-name "CLAUDE.md" target) t)
-    (let ((default-directory (file-name-as-directory target)))
-      (agent-trajectory--git-command
-       "update-index" "--skip-worktree" "AGENTS.md" "CLAUDE.md"))))
+(defun agent-trajectory--sync-worktree (target)
+  "Run the reasoning-tasks sync hook script in TARGET.
+Delegates to `agent-trajectory-sync-worktree-script', the single
+source of truth for the local instruction overlay.  Best-effort: a
+failure is reported but does not abort task creation, since the same
+script re-runs on every session start."
+  (let ((script (expand-file-name agent-trajectory-sync-worktree-script))
+        (default-directory (file-name-as-directory target)))
+    (if (file-readable-p script)
+        (agent-trajectory--run-sync-script script)
+      (message "agent-trajectory: worktree sync skipped (unreadable %s)"
+               script))))
 
-(defun agent-trajectory--write-agents-overlay (overlay target)
-  "Write composed local AGENTS overlay from OVERLAY into TARGET."
-  (let ((parent (agent-trajectory--parent-agents-file))
-        (source (expand-file-name "AGENTS.md" overlay))
-        (dest (expand-file-name "AGENTS.md" target)))
-    (if parent
-        (with-temp-file dest
-          (insert-file-contents parent)
-          (goto-char (point-max))
-          (unless (bolp)
-            (insert "\n"))
-          (insert "\n--- local reasoning-tasks overlay ---\n\n")
-          (insert-file-contents source))
-      (copy-file source dest t))))
-
-(defun agent-trajectory--parent-agents-file ()
-  "Return readable Trajectory parent AGENTS file, or nil."
-  (when agent-trajectory-parent-agents-file
-    (let ((file (expand-file-name agent-trajectory-parent-agents-file)))
-      (when (file-readable-p file)
-        file))))
-
-(defun agent-trajectory--overlay-directory ()
-  "Return the overlay directory, or nil if it is unavailable."
-  (when-let* ((configured (or (agent-trajectory--legacy-custom-directory
-                               'agent-trajectory-agent-c-overlay-directory
-                               agent-trajectory--legacy-agent-c-overlay-directory-default)
-                              agent-trajectory-reasoning-tasks-overlay-directory)))
-    (let ((dir (file-name-as-directory
-                (expand-file-name configured))))
-      (when (and (file-readable-p (expand-file-name "AGENTS.md" dir))
-                 (file-readable-p (expand-file-name "CLAUDE.md" dir)))
-        dir))))
+(defun agent-trajectory--run-sync-script (script)
+  "Run sync SCRIPT in `default-directory', reporting failure.
+Passes SYNC_REASONING_TASKS_SKIP_FETCH=1 because the caller just
+fetched, and points CLAUDE_PROJECT_DIR at the worktree so the script
+acts on it rather than on any inherited project directory."
+  (let ((process-environment
+         (append (list "SYNC_REASONING_TASKS_SKIP_FETCH=1"
+                       (concat "CLAUDE_PROJECT_DIR="
+                               (directory-file-name default-directory)))
+                 process-environment)))
+    (with-temp-buffer
+      (unless (zerop (process-file "bash" nil (current-buffer) nil script))
+        (message "agent-trajectory: worktree sync failed\n%s"
+                 (string-trim (buffer-string)))))))
 
 (defun agent-trajectory--legacy-custom-directory (symbol old-default)
   "Return obsolete SYMBOL's directory if it differs from OLD-DEFAULT."

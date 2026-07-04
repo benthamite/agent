@@ -272,12 +272,12 @@ task worktree from =origin/main= at =~/Trajectory/reasoning-tasks/<slug>=,
 checks out branch =pablo/<slug>=, wires the worktree's =.claude/.env= symlink to the canonical
 Rubric Studio key, sparse-checks out the worktree to =.claude=, =meta= and
 =platform= (keeping the checkout small instead of materializing the whole task
-corpus), applies any local-only instruction overlay configured by
-~agent-trajectory-reasoning-tasks-overlay-directory~, prepending
-~agent-trajectory-parent-agents-file~ so Codex worktree sessions inherit the
-Trajectory parent context even though each =reasoning-tasks= worktree is its own Git
-root, marks those overlay files skip-worktree, and opens the new worktree in
-Dired. It is the Emacs equivalent of the shell =newtask= helper, but it does
+corpus), runs the sync hook script configured by
+~agent-trajectory-sync-worktree-script~, and opens the new worktree in Dired.
+The sync script is the same SessionStart hook every later session runs, and
+the single source of truth for composing the local =AGENTS.md= and =CLAUDE.md=
+instruction overlay, linking the canonical key and injecting private skills.
+The command is the Emacs equivalent of the shell =newtask= helper, but it does
 not depend on the local =main= worktree's current branch.
 
 The commands ~agent-handoff~, ~agent-audit-project~, ~agent-debug-backtrace~, ~agent-act-on-slack-message~, ~agent-exit~, and ~agent-restart~ resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (~agent-claude-handoff~, ~agent-codex-restart~, and so on) remain available as obsolete aliases.
