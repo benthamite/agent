@@ -321,11 +321,11 @@
       (delete-directory root t))))
 
 (ert-deftest agent-test-trajectory-new-task-uses-origin-main ()
-  "Create a Trajectory agent-c task from origin/main, not local HEAD."
+  "Create a Trajectory reasoning-tasks task from origin/main."
   (let* ((root (file-name-as-directory
          (make-temp-file "agent-trajectory" t)))
-         (agent-trajectory-agent-c-root root)
-         (agent-trajectory-agent-c-overlay-directory nil)
+         (agent-trajectory-reasoning-tasks-root root)
+         (agent-trajectory-reasoning-tasks-overlay-directory nil)
          (agent-trajectory-parent-agents-file nil)
          (slug "model-spec-inclusion")
          (target (expand-file-name slug root))
@@ -357,7 +357,7 @@
             (should (equal
                      (file-symlink-p (expand-file-name ".claude/.env" target))
                      (expand-file-name
-                      "agent-c-cr-studio/.claude/.env" root)))))
+                      "reasoning-tasks-cr-studio/.claude/.env" root)))))
       (delete-directory root t))))
 
 (ert-deftest agent-test-trajectory-new-task-applies-local-overlay ()
@@ -366,8 +366,8 @@
                 (make-temp-file "agent-trajectory" t)))
          (overlay (file-name-as-directory
                    (make-temp-file "agent-overlay" t)))
-         (agent-trajectory-agent-c-root root)
-         (agent-trajectory-agent-c-overlay-directory overlay)
+         (agent-trajectory-reasoning-tasks-root root)
+         (agent-trajectory-reasoning-tasks-overlay-directory overlay)
          (agent-trajectory-parent-agents-file nil)
          (slug "ai-race-information-hazards")
          (target (expand-file-name slug root))
@@ -415,8 +415,8 @@
          (overlay (file-name-as-directory
                    (make-temp-file "agent-overlay" t)))
          (parent (make-temp-file "agent-parent-agents"))
-         (agent-trajectory-agent-c-root root)
-         (agent-trajectory-agent-c-overlay-directory overlay)
+         (agent-trajectory-reasoning-tasks-root root)
+         (agent-trajectory-reasoning-tasks-overlay-directory overlay)
          (agent-trajectory-parent-agents-file parent)
          (slug "conceptual-task")
          (target (expand-file-name slug root)))
@@ -426,7 +426,7 @@
           (with-temp-file parent
             (insert "parent trajectory context\n"))
           (with-temp-file (expand-file-name "AGENTS.md" overlay)
-            (insert "local agent-c context\n"))
+            (insert "local reasoning-tasks context\n"))
           (with-temp-file (expand-file-name "CLAUDE.md" overlay)
             (insert "local claude\n"))
           (cl-letf (((symbol-function 'process-file)
@@ -442,8 +442,8 @@
                               (expand-file-name "AGENTS.md" target))
                              (buffer-string))
                            (concat "parent trajectory context\n"
-                                   "\n--- local agent-c overlay ---\n\n"
-                                   "local agent-c context\n")))))
+                                   "\n--- local reasoning-tasks overlay ---\n\n"
+                                   "local reasoning-tasks context\n")))))
       (delete-directory root t)
       (delete-directory overlay t)
       (delete-file parent))))

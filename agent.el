@@ -527,24 +527,38 @@ New directories entered by the user are automatically added."
   :type '(repeat directory)
   :group 'agent)
 
-(defcustom agent-trajectory-agent-c-root
+(defconst agent-trajectory--legacy-agent-c-root-default
   (expand-file-name "~/Trajectory/agent-c/")
-  "Root directory containing Trajectory agent-c worktrees."
+  "Previous default for `agent-trajectory-agent-c-root'.")
+
+(defcustom agent-trajectory-reasoning-tasks-root
+  (expand-file-name "~/Trajectory/reasoning-tasks/")
+  "Root directory containing Trajectory reasoning-tasks worktrees."
   :type 'directory
   :group 'agent)
 
-(defcustom agent-trajectory-agent-c-overlay-directory
+(make-obsolete-variable 'agent-trajectory-agent-c-root
+                        'agent-trajectory-reasoning-tasks-root "0.2")
+
+(defconst agent-trajectory--legacy-agent-c-overlay-directory-default
   (expand-file-name "~/My Drive/dotfiles/claude/templates/agent-c/")
-  "Directory containing local-only agent-c instruction overlays.
+  "Previous default for `agent-trajectory-agent-c-overlay-directory'.")
+
+(defcustom agent-trajectory-reasoning-tasks-overlay-directory
+  (expand-file-name "~/My Drive/dotfiles/claude/templates/reasoning-tasks/")
+  "Directory containing local-only reasoning-tasks instruction overlays.
 When this directory contains `AGENTS.md' and `CLAUDE.md',
 `agent-trajectory-new-task' copies them into each new task
 worktree and marks those paths skip-worktree."
   :type '(choice (const :tag "Disabled" nil) directory)
   :group 'agent)
 
+(make-obsolete-variable 'agent-trajectory-agent-c-overlay-directory
+                        'agent-trajectory-reasoning-tasks-overlay-directory "0.2")
+
 (defcustom agent-trajectory-parent-agents-file
   (expand-file-name "~/Trajectory/AGENTS.md")
-  "Trajectory parent `AGENTS.md' prepended to local agent-c overlays."
+  "Trajectory parent `AGENTS.md' prepended to local reasoning-tasks overlays."
   :type '(choice (const :tag "Disabled" nil) file)
   :group 'agent)
 
@@ -1922,19 +1936,19 @@ When COMMIT is nil, use the current Git HEAD."
 
 ;;;###autoload
 (defun agent-trajectory-new-task (slug)
-  "Create a Trajectory agent-c task worktree for SLUG.
+  "Create a Trajectory reasoning-tasks worktree for SLUG.
 SLUG must be the exact task slug and a single path component.  The
-new worktree is created at `agent-trajectory-agent-c-root'/SLUG
-on branch pablo/SLUG from origin/main, then wired to the canonical
-Rubric Studio `.claude/.env' symlink, and sparse-checked-out to
+new worktree is created at
+`agent-trajectory-reasoning-tasks-root'/SLUG on branch pablo/SLUG
+from origin/main, then wired to the canonical Rubric Studio
+`.claude/.env' symlink, and sparse-checked-out to
 `.claude'/`meta'/`platform' so the checkout stays small instead of
 materializing the whole repo's task corpus.  When
-`agent-trajectory-agent-c-overlay-directory' is configured, copy
-its local-only instruction overlays into the new worktree."
+`agent-trajectory-reasoning-tasks-overlay-directory' is configured,
+copy its local-only instruction overlays into the new worktree."
   (interactive (list (agent-trajectory--read-task-slug)))
   (let* ((slug (agent-trajectory--validate-task-slug slug))
-         (root (file-name-as-directory
-                (expand-file-name agent-trajectory-agent-c-root)))
+         (root (agent-trajectory--root-directory))
          (target (expand-file-name slug root)))
     (agent-trajectory--git root "fetch" "origin" "main")
     (agent-trajectory--git root "worktree" "add" target
@@ -1947,9 +1961,18 @@ its local-only instruction overlays into the new worktree."
     target))
 
 (defun agent-trajectory--read-task-slug ()
-  "Read a Trajectory agent-c task slug from the minibuffer."
+  "Read a Trajectory reasoning-tasks slug from the minibuffer."
   (agent-trajectory--validate-task-slug
    (read-string "Task slug: ")))
+
+(defun agent-trajectory--root-directory ()
+  "Return the Trajectory reasoning-tasks worktree root directory."
+  (file-name-as-directory
+   (expand-file-name
+    (or (agent-trajectory--legacy-custom-directory
+         'agent-trajectory-agent-c-root
+         agent-trajectory--legacy-agent-c-root-default)
+        agent-trajectory-reasoning-tasks-root))))
 
 (defun agent-trajectory--validate-task-slug (slug)
   "Return normalized task SLUG, or signal if it is unsafe."
@@ -1973,7 +1996,7 @@ its local-only instruction overlays into the new worktree."
   "Link TARGET's `.claude/.env' to the canonical key under ROOT."
   (let* ((claude-dir (expand-file-name ".claude" target))
          (link (expand-file-name ".env" claude-dir))
-         (key (expand-file-name "agent-c-cr-studio/.claude/.env" root)))
+         (key (expand-file-name "reasoning-tasks-cr-studio/.claude/.env" root)))
     (make-directory claude-dir t)
     (when (or (file-exists-p link) (file-symlink-p link))
       (user-error "Refusing to overwrite existing key link: %s" link))
@@ -2014,7 +2037,7 @@ reported but does not abort task creation."
           (goto-char (point-max))
           (unless (bolp)
             (insert "\n"))
-          (insert "\n--- local agent-c overlay ---\n\n")
+          (insert "\n--- local reasoning-tasks overlay ---\n\n")
           (insert-file-contents source))
       (copy-file source dest t))))
 
@@ -2027,13 +2050,26 @@ reported but does not abort task creation."
 
 (defun agent-trajectory--overlay-directory ()
   "Return the overlay directory, or nil if it is unavailable."
-  (when agent-trajectory-agent-c-overlay-directory
+  (when-let* ((configured (or (agent-trajectory--legacy-custom-directory
+                               'agent-trajectory-agent-c-overlay-directory
+                               agent-trajectory--legacy-agent-c-overlay-directory-default)
+                              agent-trajectory-reasoning-tasks-overlay-directory)))
     (let ((dir (file-name-as-directory
-                (expand-file-name
-                 agent-trajectory-agent-c-overlay-directory))))
+                (expand-file-name configured))))
       (when (and (file-readable-p (expand-file-name "AGENTS.md" dir))
                  (file-readable-p (expand-file-name "CLAUDE.md" dir)))
         dir))))
+
+(defun agent-trajectory--legacy-custom-directory (symbol old-default)
+  "Return obsolete SYMBOL's directory if it differs from OLD-DEFAULT."
+  (when (and (boundp symbol)
+             (stringp (symbol-value symbol)))
+    (let ((value (file-name-as-directory
+                  (expand-file-name (symbol-value symbol))))
+          (default (file-name-as-directory
+                    (expand-file-name old-default))))
+      (unless (equal value default)
+        (symbol-value symbol)))))
 
 (defun agent-trajectory--git-command (&rest args)
   "Run git with ARGS in `default-directory'."

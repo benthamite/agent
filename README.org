@@ -267,15 +267,15 @@ selected backend with =--no-push --commit HEAD=. Use it after a push has
 already happened and you want an agent to inspect GitHub Actions failures, fix
 the root cause, and continue the authorized CI closeout loop.
 
-The command ~agent-trajectory-new-task~ creates a Trajectory =agent-c= task
-worktree from =origin/main= at =~/Trajectory/agent-c/<slug>=, checks out branch
-=pablo/<slug>=, wires the worktree's =.claude/.env= symlink to the canonical
+The command ~agent-trajectory-new-task~ creates a Trajectory =reasoning-tasks=
+task worktree from =origin/main= at =~/Trajectory/reasoning-tasks/<slug>=,
+checks out branch =pablo/<slug>=, wires the worktree's =.claude/.env= symlink to the canonical
 Rubric Studio key, sparse-checks out the worktree to =.claude=, =meta= and
 =platform= (keeping the checkout small instead of materializing the whole task
 corpus), applies any local-only instruction overlay configured by
-~agent-trajectory-agent-c-overlay-directory~, prepending
+~agent-trajectory-reasoning-tasks-overlay-directory~, prepending
 ~agent-trajectory-parent-agents-file~ so Codex worktree sessions inherit the
-Trajectory parent context even though each =agent-c= worktree is its own Git
+Trajectory parent context even though each =reasoning-tasks= worktree is its own Git
 root, marks those overlay files skip-worktree, and opens the new worktree in
 Dired. It is the Emacs equivalent of the shell =newtask= helper, but it does
 not depend on the local =main= worktree's current branch.
