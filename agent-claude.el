@@ -586,12 +586,26 @@ ORIG-FN is called with KEY and DIRECTORY after cleanup."
        (string-prefix-p "*claude:" key)))
 
 (defun agent-claude--capture-monet-key ()
-  "Store the pending Monet session data at Claude session start."
+  "Store pending or existing Monet session data for this Claude buffer."
   (when (claude-code--buffer-p (current-buffer))
-    (setq agent-claude--monet-key agent-claude--pending-monet-key)
-    (setq agent-claude--monet-server agent-claude--pending-monet-server)
-    (setq agent-claude--pending-monet-key nil)
-    (setq agent-claude--pending-monet-server nil)))
+    (if agent-claude--pending-monet-key
+        (progn
+          (setq agent-claude--monet-key agent-claude--pending-monet-key)
+          (setq agent-claude--monet-server agent-claude--pending-monet-server)
+          (setq agent-claude--pending-monet-key nil)
+          (setq agent-claude--pending-monet-server nil))
+      (agent-claude--adopt-existing-monet-session))))
+
+(defun agent-claude--adopt-existing-monet-session ()
+  "Record the current buffer's already-running Monet session."
+  (when (boundp 'monet--sessions)
+    (let* ((key (or agent-claude--monet-key (buffer-name)))
+           (session (and key (gethash key monet--sessions))))
+      (when session
+        (setq agent-claude--monet-key key)
+        (setq agent-claude--monet-server
+              (and (fboundp 'monet--session-server)
+                   (monet--session-server session)))))))
 
 (defun agent-claude--monet-gc-orphaned-servers ()
   "Delete websocket server processes not tracked by any monet session.
@@ -938,6 +952,7 @@ deletes the status file, stops the monet session, and stops usage
 polling when this was the last live Claude session.  Also ensures
 the account-wide usage poller is running."
   (when (claude-code--buffer-p (current-buffer))
+    (agent-claude--adopt-existing-monet-session)
     (if (agent-claude--session-teardown-registered-p)
         (setq agent-claude--session-teardown-registered t)
       (setq agent-claude--session-teardown-registered t)
