@@ -60,31 +60,38 @@ helpers so breakage after a CLI update surfaces exactly once."
 ;; non-default CLAUDE_CONFIG_DIR is active, the service name gains a
 ;; suffix of the first 8 hex chars of the SHA-256 of the expanded
 ;; config-dir path.  The secret is a JSON object whose
-;; `claudeAiOauth.accessToken' field holds the bearer token.
-;; Last verified against Claude Code 2.1.172 on 2026-06-11.
+;; `claudeAiOauth.accessToken' field holds the bearer token.  An
+;; API-key account instead caches its key under the sibling service
+;; "Claude Code[-<hash>]" (no "-credentials") and leaves the OAuth
+;; service holding an empty "{}"; that is a valid non-OAuth account,
+;; not a breakage, so it must not warn.
+;; Last verified against Claude Code 2.1.202 on 2026-07-07.
 
 (defun agent-claude-cli-oauth-token (config-dir)
   "Extract the OAuth access token from the macOS Keychain for CONFIG-DIR.
-CONFIG-DIR is the account's `CLAUDE_CONFIG_DIR' path, or nil for
-the default configuration.  Returns the token string, or nil if
-unavailable."
+CONFIG-DIR is the account's `CLAUDE_CONFIG_DIR' path, or nil for the
+default configuration.  Returns the token string, or nil when the
+account is not OAuth-authenticated (for example an API-key account,
+whose OAuth store is an empty `{}').  Warns once only when the Keychain
+read itself fails, since a failed read—not a missing subscription
+login—is what signals a CLI-convention change."
   (let* ((service (agent-claude-cli-keychain-service config-dir))
-         (raw (with-output-to-string
-                (with-current-buffer standard-output
-                  (call-process "security" nil t nil
-                                "find-generic-password"
-                                "-s" service "-w"))))
-         (json (condition-case nil
-                   (json-parse-string (string-trim raw)
-                                      :object-type 'plist)
-                 (json-parse-error nil)))
-         (oauth (and json (plist-get json :claudeAiOauth))))
-    (if oauth
-        (plist-get oauth :accessToken)
-      (agent-claude-cli--warn-once
-       (list 'oauth service)
-       "no OAuth credentials in Keychain service %s" service)
-      nil)))
+         (raw (string-trim
+               (with-output-to-string
+                 (with-current-buffer standard-output
+                   (call-process "security" nil t nil
+                                 "find-generic-password"
+                                 "-s" service "-w")))))
+         (parsed (condition-case nil
+                     (json-parse-string raw :object-type 'plist)
+                   (json-error 'unreadable))))
+    (if (eq parsed 'unreadable)
+        (progn
+          (agent-claude-cli--warn-once
+           (list 'oauth service)
+           "no OAuth credentials in Keychain service %s" service)
+          nil)
+      (plist-get (plist-get parsed :claudeAiOauth) :accessToken))))
 
 (defun agent-claude-cli-keychain-service (config-dir)
   "Return the macOS Keychain service name for CONFIG-DIR.

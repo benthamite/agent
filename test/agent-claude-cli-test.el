@@ -48,6 +48,44 @@
     (should (= (length agent-claude-cli--warned) 1))
     (should (= (length warnings) 1))))
 
+;;;; OAuth token lookup
+
+(defmacro agent-claude-cli-test--with-security (output &rest body)
+  "Run BODY with `security' stubbed to emit OUTPUT on stdout.
+Also binds a `warnings' list capturing `display-warning' calls so BODY
+can assert on them."
+  (declare (indent 1))
+  `(let ((agent-claude-cli--warned nil)
+         (warnings nil))
+     (cl-letf (((symbol-function 'call-process)
+                (lambda (&rest _args) (insert ,output) 0))
+               ((symbol-function 'display-warning)
+                (lambda (&rest args) (push args warnings))))
+       ,@body)))
+
+(ert-deftest agent-claude-cli-test-oauth-token-returns-token ()
+  "Return the access token from a valid OAuth credentials blob."
+  (agent-claude-cli-test--with-security
+      "{\"claudeAiOauth\":{\"accessToken\":\"tok-123\"}}"
+    (should (equal (agent-claude-cli-oauth-token "/tmp/acct") "tok-123"))
+    (should (null warnings))))
+
+(ert-deftest agent-claude-cli-test-oauth-token-empty-blob-is-silent ()
+  "An empty `{}' store (an API-key account) yields nil without warning.
+A valid parse that merely lacks `claudeAiOauth' means the account is not
+OAuth-authenticated, which is expected rather than a breakage."
+  (agent-claude-cli-test--with-security "{}"
+    (should (null (agent-claude-cli-oauth-token "/tmp/acct")))
+    (should (null warnings))
+    (should (null agent-claude-cli--warned))))
+
+(ert-deftest agent-claude-cli-test-oauth-token-unreadable-warns ()
+  "An empty or unparseable Keychain read warns once: the lookup failed.
+This is the CLI-convention-break signal the warning exists to surface."
+  (agent-claude-cli-test--with-security ""
+    (should (null (agent-claude-cli-oauth-token "/tmp/acct")))
+    (should (= (length warnings) 1))))
+
 ;;;; Transcript JSONL
 
 (ert-deftest agent-claude-cli-test-read-session-header-round-trip ()
