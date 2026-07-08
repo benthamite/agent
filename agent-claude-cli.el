@@ -74,8 +74,14 @@ default configuration.  Returns the token string, or nil when the
 account is not OAuth-authenticated (for example an API-key account,
 whose OAuth store is an empty `{}').  Warns once only when the Keychain
 read itself fails, since a failed read—not a missing subscription
-login—is what signals a CLI-convention change."
+login—is what signals a CLI-convention change.
+
+Runs `security' from `temporary-file-directory': callers such as the
+usage-poller timer can fire with `default-directory' naming a deleted
+worktree, and `call-process' signals `file-missing' when asked to spawn
+there."
   (let* ((service (agent-claude-cli-keychain-service config-dir))
+         (default-directory temporary-file-directory)
          (raw (string-trim
                (with-output-to-string
                  (with-current-buffer standard-output

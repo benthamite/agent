@@ -79,6 +79,28 @@ OAuth-authenticated, which is expected rather than a breakage."
     (should (null warnings))
     (should (null agent-claude-cli--warned))))
 
+(ert-deftest agent-claude-cli-test-oauth-token-survives-deleted-default-directory ()
+  "Token lookup succeeds when the caller's `default-directory' is gone.
+The usage poller calls this from a timer, so the current buffer's
+`default-directory' can name a deleted worktree.  `call-process' spawns
+its subprocess in `default-directory' and signals `file-missing' when
+that directory no longer exists; the stub reproduces that documented
+behavior."
+  (let ((agent-claude-cli--warned nil))
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (&rest _args)
+                 (unless (file-directory-p default-directory)
+                   (signal 'file-missing
+                           (list "Setting current directory"
+                                 "No such file or directory"
+                                 default-directory)))
+                 (insert "{\"claudeAiOauth\":{\"accessToken\":\"tok-123\"}}")
+                 0))
+              ((symbol-function 'display-warning) #'ignore))
+      (let ((default-directory "/nonexistent/deleted-worktree/"))
+        (should (equal (agent-claude-cli-oauth-token "/tmp/acct")
+                       "tok-123"))))))
+
 (ert-deftest agent-claude-cli-test-oauth-token-unreadable-warns ()
   "An empty or unparseable Keychain read warns once: the lookup failed.
 This is the CLI-convention-break signal the warning exists to surface."
