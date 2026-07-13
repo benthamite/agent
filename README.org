@@ -253,8 +253,11 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 #+findex: agent-toggle-alert
 #+findex: agent-fix-rendering
 #+findex: agent-disable-scrollback-truncation
+#+findex: agent-setup-scroll-keys
 #+findex: agent-snippet-tab
 The command ~agent-menu~ opens the unified transient menu. It includes shared entries for session switching, waiting-session jumps, handoff, restart, exit, skill execution, Trajectory CR task worktree creation, project audit, backtrace debugging, Slack-message action routing, alert toggles, terminal maintenance, and a separate Prompts section for prompt capture and captured prompt insertion. Backend modules append their own suffixes to the same menu when loaded.
+
+In EAT-backed Claude and Codex session buffers, ~agent-setup-scroll-keys~ makes PageUp and PageDown send terminal mouse-wheel events, matching the TUI scroll path used by the mouse. While ~agent-claude-mode~ or ~agent-codex-mode~ is enabled, PageUp and PageDown also target a hovered visible AI terminal when the selected window is not the terminal; ordinary buffers keep their normal scrolling when no AI terminal is selected or hovered.
 
 The command ~agent-start-or-switch~ is the main entry point. If no sessions exist, it starts a new session through the selected backend. If sessions already exist, it opens the session switcher. Sessions receive stable home-row keys where possible and display backend icons next to their labels.
 

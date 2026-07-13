@@ -934,6 +934,9 @@
 
 (ert-deftest agent-claude-test-snippet-start-hook-function-is-autoloaded ()
   "Source-loaded Claude hooks reference an available snippet command."
+  (should (memq 'agent-setup-scroll-keys
+                agent-claude--start-hook-functions))
+  (should (fboundp 'agent-setup-scroll-keys))
   (should (memq 'agent-setup-snippet-keys
                 agent-claude--start-hook-functions))
   (should (fboundp 'agent-setup-snippet-keys)))
@@ -944,6 +947,7 @@
         (claude-code-start-hook nil)
         (claude-code-event-hook nil)
         (claude-code-process-environment-functions nil)
+        (agent-scroll-keys-global-mode nil)
         (kill-buffer-query-functions kill-buffer-query-functions))
     (agent-claude-mode 1)
     (should (memq #'agent-claude--handle-stop claude-code-event-hook))
@@ -951,6 +955,7 @@
                   claude-code-process-environment-functions))
     (should (eq claude-code-notification-function
                 #'claude-code-default-notification))
+    (should agent-scroll-keys-global-mode)
     (should (advice-member-p #'agent-claude--note-submission
                              'claude-code--do-send-command))
     (should (advice-member-p #'agent-claude--send-escape-in-current-buffer
@@ -960,6 +965,7 @@
     (should-not claude-code-start-hook)
     (should-not claude-code-process-environment-functions)
     (should (eq claude-code-notification-function #'ignore))
+    (should-not agent-scroll-keys-global-mode)
     (should-not (advice-member-p #'agent-claude--note-submission
                                  'claude-code--do-send-command))
     (should-not (advice-member-p #'agent-claude--send-escape-in-current-buffer

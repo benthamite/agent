@@ -1020,6 +1020,9 @@
 
 (ert-deftest agent-codex-test-snippet-start-hook-function-is-autoloaded ()
   "Source-loaded Codex hooks reference an available snippet command."
+  (should (memq 'agent-setup-scroll-keys
+                agent-codex--start-hook-functions))
+  (should (fboundp 'agent-setup-scroll-keys))
   (should (memq 'agent-setup-snippet-keys
                 agent-codex--start-hook-functions))
   (should (fboundp 'agent-setup-snippet-keys)))
@@ -1031,6 +1034,7 @@
         (codex-event-hook nil)
         (codex-command-submitted-hook nil)
         (codex-process-environment-functions nil)
+        (agent-scroll-keys-global-mode nil)
         (kill-buffer-query-functions kill-buffer-query-functions))
     (agent-codex-mode 1)
     (should (memq #'agent-codex--handle-notification codex-event-hook))
@@ -1041,6 +1045,7 @@
     (should (memq #'agent-codex--record-start-time codex-start-hook))
     (should (memq #'agent-codex--register-session-teardown codex-start-hook))
     (should (eq codex-notification-function #'codex-default-notification))
+    (should agent-scroll-keys-global-mode)
     (should (advice-member-p #'agent-codex--intercept-exit
                              'codex--do-send-command))
     (should (advice-member-p #'agent-codex--intercept-exit-to-buffer
@@ -1051,6 +1056,7 @@
     (should-not codex-command-submitted-hook)
     (should-not codex-process-environment-functions)
     (should (eq codex-notification-function #'ignore))
+    (should-not agent-scroll-keys-global-mode)
     (should-not (advice-member-p #'agent-codex--intercept-exit
                                  'codex--do-send-command))
     (should-not (advice-member-p #'agent-codex--intercept-exit-to-buffer

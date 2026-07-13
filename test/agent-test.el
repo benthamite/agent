@@ -18,6 +18,25 @@
          :start-session #'ignore
          :label "Test")))
 
+(defun agent-test--terminal-page-up ()
+  "Simulate a terminal mode PageUp binding."
+  (interactive))
+
+(defun agent-test--terminal-page-down ()
+  "Simulate a terminal mode PageDown binding."
+  (interactive))
+
+(defvar agent-test--terminal-navigation-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [prior] #'agent-test--terminal-page-up)
+    (define-key map [next] #'agent-test--terminal-page-down)
+    map)
+  "Keymap simulating terminal navigation bindings.")
+
+(define-minor-mode agent-test--terminal-navigation-mode
+  "Minor mode simulating terminal navigation key capture."
+  :keymap agent-test--terminal-navigation-mode-map)
+
 ;;;; Theme sync
 
 (ert-deftest agent-test-sync-theme-dispatches-to-backends ()
@@ -67,6 +86,161 @@
 (ert-deftest agent-test-gptel-response-text-ignores-reasoning-event ()
   "Ignore gptel reasoning events sent before final response text."
   (should-not (agent--gptel-response-text '(reasoning . "thinking"))))
+
+;;;; Page scrolling
+
+(ert-deftest agent-test-setup-scroll-keys-overrides-terminal-navigation ()
+  "Make PageUp and PageDown scroll instead of reaching terminal keymaps."
+  (let ((minor-mode-overriding-map-alist nil))
+    (with-temp-buffer
+      (setq-local eat-terminal 'terminal)
+      (agent-test--terminal-navigation-mode 1)
+      (cl-letf (((symbol-function 'agent--detect-backend)
+                 (lambda (_buffer) 'claude-code)))
+        (agent-setup-scroll-keys))
+      (should agent-scroll-keys-mode)
+      (should (assq 'agent-scroll-keys-mode
+                    minor-mode-overriding-map-alist))
+      (should (eq (key-binding (kbd "<prior>") t)
+                  #'agent-scroll-page-up))
+      (should (eq (key-binding (kbd "<next>") t)
+                  #'agent-scroll-page-down))
+      (should (eq (key-binding (kbd "<kp-prior>") t)
+                  #'agent-scroll-page-up))
+      (should (eq (key-binding (kbd "<kp-next>") t)
+                  #'agent-scroll-page-down)))))
+
+(ert-deftest agent-test-setup-scroll-keys-ignores-non-eat-sessions ()
+  "Leave non-Eat session buffers alone."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'agent--detect-backend)
+               (lambda (_buffer) 'codex)))
+      (agent-setup-scroll-keys))
+    (should-not agent-scroll-keys-mode)))
+
+(ert-deftest agent-test-setup-scroll-keys-updates-existing-buffers ()
+  "Apply PageUp and PageDown scrolling to existing terminal buffers."
+  (let ((eat-buffer (generate-new-buffer " *agent-eat*"))
+        (other-buffer (generate-new-buffer " *agent-other*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent--find-all-buffers)
+                   (lambda () (list eat-buffer other-buffer)))
+                  ((symbol-function 'agent--detect-backend)
+                   (lambda (buffer)
+                     (and (eq buffer eat-buffer) 'claude-code))))
+          (with-current-buffer eat-buffer
+            (setq-local eat-terminal 'terminal))
+          (agent-setup-scroll-keys-in-existing-buffers)
+          (with-current-buffer eat-buffer
+            (should agent-scroll-keys-mode)
+            (should (eq (key-binding (kbd "<prior>") t)
+                        #'agent-scroll-page-up))
+            (should (eq (key-binding (kbd "<next>") t)
+                        #'agent-scroll-page-down)))
+          (with-current-buffer other-buffer
+            (should-not agent-scroll-keys-mode)))
+      (kill-buffer eat-buffer)
+      (kill-buffer other-buffer))))
+
+(ert-deftest agent-test-scroll-page-keys-send-terminal-wheel-events ()
+  "PageUp and PageDown drive the terminal mouse-wheel path."
+  (let ((agent-scroll-wheel-events 8)
+        events)
+    (with-temp-buffer
+      (setq-local eat-terminal 'terminal)
+      (cl-letf (((symbol-function 'eat-self-input)
+                 (lambda (count event)
+                   (push (list count (event-basic-type event)) events))))
+        (agent-scroll-page-up)
+        (agent-scroll-page-down)))
+    (should (equal (nreverse events)
+                   '((8 wheel-up) (8 wheel-down))))))
+
+(ert-deftest agent-test-global-scroll-keys-map-overrides-page-keys ()
+  "Global PageUp/PageDown bindings can intercept non-terminal buffers."
+  (let ((agent-scroll-keys-global-mode t))
+    (should (eq (key-binding (kbd "<prior>") t)
+                #'agent-scroll-page-up))
+    (should (eq (key-binding (kbd "<next>") t)
+                #'agent-scroll-page-down))
+    (should (eq (key-binding (kbd "<kp-prior>") t)
+                #'agent-scroll-page-up))
+    (should (eq (key-binding (kbd "<kp-next>") t)
+                #'agent-scroll-page-down))))
+
+(ert-deftest agent-test-scroll-page-keys-target-hovered-terminal-window ()
+  "PageUp targets the hovered terminal when another window is selected."
+  (let ((terminal-buffer (generate-new-buffer " *agent-hover-eat*"))
+        (other-buffer (generate-new-buffer " *agent-hover-other*"))
+        events)
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (switch-to-buffer other-buffer)
+          (let ((terminal-window (split-window-right)))
+            (set-window-buffer terminal-window terminal-buffer)
+            (with-current-buffer terminal-buffer
+              (setq-local eat-terminal 'terminal))
+            (cl-letf (((symbol-function 'agent--detect-backend)
+                       (lambda (buffer)
+                         (and (eq buffer terminal-buffer) 'claude-code)))
+                      ((symbol-function 'agent--mouse-terminal-scroll-window)
+                       (lambda () terminal-window))
+                      ((symbol-function 'eat-self-input)
+                       (lambda (count event)
+                         (push (list count (event-basic-type event))
+                               events))))
+              (agent-scroll-page-up)))
+          (should (equal events '((8 wheel-up)))))
+      (kill-buffer terminal-buffer)
+      (kill-buffer other-buffer))))
+
+(ert-deftest agent-test-scroll-page-keys-fall-back-outside-terminals ()
+  "PageUp keeps ordinary scrolling when no terminal window is targeted."
+  (let (called)
+    (cl-letf (((symbol-function 'agent--terminal-scroll-window)
+               (lambda () nil))
+              ((symbol-function 'scroll-down-command)
+               (lambda (&optional _arg)
+                 (interactive "P")
+                 (setq called t))))
+      (agent-scroll-page-up))
+    (should called)))
+
+(ert-deftest agent-test-scroll-down-command-redirects-in-terminals ()
+  "Redirect `scroll-down-command' itself in agent terminal buffers."
+  (let (events)
+    (with-temp-buffer
+      (setq-local eat-terminal 'terminal)
+      (save-window-excursion
+        (switch-to-buffer (current-buffer))
+        (cl-letf (((symbol-function 'agent--detect-backend)
+                   (lambda (_buffer) 'claude-code))
+                  ((symbol-function 'agent--send-terminal-wheel)
+                   (lambda (event window)
+                     (push (list event (eq window (selected-window)))
+                           events))))
+          (agent--scroll-down-command #'ignore)
+          (agent--scroll-up-command #'ignore))))
+    (should (equal (nreverse events)
+                   '((wheel-up t) (wheel-down t))))))
+
+(ert-deftest agent-test-scroll-command-advice-installs-symmetrically ()
+  "Enable and disable scroll command advice with global scroll mode."
+  (let ((agent-scroll-keys-global-mode nil))
+    (unwind-protect
+        (progn
+          (agent-scroll-keys-global-mode 1)
+          (should (advice-member-p #'agent--scroll-down-command
+                                   'scroll-down-command))
+          (should (advice-member-p #'agent--scroll-up-command
+                                   'scroll-up-command))
+          (agent-scroll-keys-global-mode -1)
+          (should-not (advice-member-p #'agent--scroll-down-command
+                                       'scroll-down-command))
+          (should-not (advice-member-p #'agent--scroll-up-command
+                                       'scroll-up-command)))
+      (agent-scroll-keys-global-mode -1))))
 
 ;;;; Session keys and display names
 

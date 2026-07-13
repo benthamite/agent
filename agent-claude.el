@@ -2395,6 +2395,7 @@ Signals an error if the status file is missing or incomplete."
     agent-claude-set-modeline
     agent--refresh-display-names
     agent-disable-scrollback-truncation
+    agent-setup-scroll-keys
     agent-setup-snippet-keys
     agent--assign-session-key
     agent-claude--register-session-teardown)
@@ -2423,6 +2424,8 @@ symmetrically and restores `claude-code-notification-function'."
   (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
   (dolist (fn agent-claude--start-hook-functions)
     (add-hook 'claude-code-start-hook fn))
+  (agent-scroll-keys-global-mode 1)
+  (agent-setup-scroll-keys-in-existing-buffers)
   (add-hook 'claude-code-process-environment-functions
             #'agent-claude-account-env)
   (add-hook 'claude-code-process-environment-functions
@@ -2459,7 +2462,8 @@ symmetrically and restores `claude-code-notification-function'."
   (remove-hook 'claude-code-event-hook #'agent-claude--handle-notification)
   (remove-hook 'claude-code-event-hook #'agent-claude--handle-stop)
   (unless (bound-and-true-p agent-codex-mode)
-    (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer))
+    (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer)
+    (agent-scroll-keys-global-mode -1))
   (dolist (fn agent-claude--start-hook-functions)
     (remove-hook 'claude-code-start-hook fn))
   (remove-hook 'claude-code-process-environment-functions

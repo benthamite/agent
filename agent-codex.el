@@ -860,6 +860,7 @@ the Emacs side to match Claude Code's behavior."
     agent-codex-set-modeline
     agent--refresh-display-names
     agent-disable-scrollback-truncation
+    agent-setup-scroll-keys
     agent-setup-snippet-keys
     agent-fix-rendering
     agent--assign-session-key
@@ -888,6 +889,8 @@ removes them symmetrically and restores
   (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
   (dolist (fn agent-codex--start-hook-functions)
     (add-hook 'codex-start-hook fn))
+  (agent-scroll-keys-global-mode 1)
+  (agent-setup-scroll-keys-in-existing-buffers)
   (add-hook 'codex-process-environment-functions
             #'agent-codex-account-env)
   (add-hook 'codex-process-environment-functions
@@ -902,7 +905,8 @@ removes them symmetrically and restores
   (setq codex-notification-function agent-codex--saved-notification-function)
   (remove-hook 'codex-event-hook #'agent-codex--handle-notification)
   (unless (bound-and-true-p agent-claude-mode)
-    (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer))
+    (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer)
+    (agent-scroll-keys-global-mode -1))
   (dolist (fn agent-codex--start-hook-functions)
     (remove-hook 'codex-start-hook fn))
   (remove-hook 'codex-process-environment-functions
