@@ -1965,5 +1965,18 @@ timestamp."
   "Source-loaded core menu references an available Slack command."
   (should (fboundp 'agent-act-on-slack-message)))
 
+(ert-deftest agent-test-main-file-declares-backend-dependencies ()
+  "Package metadata declares the backends the split modules hard-require.
+Elpaca byte-compiles the package with only the main file's declared
+dependencies on the load path, so an undeclared backend silently fails
+byte-compilation of the module that requires it."
+  (let ((requires (with-temp-buffer
+                    (insert-file-contents (locate-library "agent.el" t))
+                    (require 'lisp-mnt)
+                    (lm-header "package-requires"))))
+    (should requires)
+    (dolist (backend '(claude-code codex))
+      (should (assq backend (car (read-from-string requires)))))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here

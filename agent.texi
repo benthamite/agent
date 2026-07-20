@@ -106,7 +106,7 @@ The package is split into a small backend-agnostic core and focused modules:
 
 The main workflow is to load @samp{agent.el}, require the backend modules you use, and enable their minor modes (see @ref{Backend minor modes}); loading a backend module installs nothing by itself. Once the Claude and Codex modules are active, @samp{M-x agent-menu} and @samp{M-x agent-start-or-switch} operate across both tools. Sessions are grouped by account when the backend exposes account metadata, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
 
-The package depends on @samp{transient} for menus and @samp{consult} for completion. The Claude backend expects @samp{claude-code.el}. The Codex backend expects @samp{codex.el}. Optional integrations use packages such as @samp{yasnippet}, @samp{doom-modeline}, @samp{gptel}, @samp{agent-log}, and @samp{monet} when those are available.
+The package depends on @samp{transient} for menus, @samp{consult} for completion, @samp{claude-code.el} for the Claude backend, and @samp{codex.el} for the Codex backend. All four are declared in the package metadata so that the package manager builds @samp{agent} with them available; the backend modules hard-require their respective backend at load time. Optional integrations use packages such as @samp{yasnippet}, @samp{doom-modeline}, @samp{gptel}, @samp{agent-log}, and @samp{monet} when those are available.
 
 @node Architecture
 @chapter Architecture

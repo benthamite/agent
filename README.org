@@ -35,7 +35,7 @@ The package is split into a small backend-agnostic core and focused modules:
 
 The main workflow is to load =agent.el=, require the backend modules you use, and enable their minor modes (see [[#h:minor-modes][Backend minor modes]]); loading a backend module installs nothing by itself. Once the Claude and Codex modules are active, =M-x agent-menu= and =M-x agent-start-or-switch= operate across both tools. Sessions are grouped by account when the backend exposes account metadata, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
 
-The package depends on =transient= for menus and =consult= for completion. The Claude backend expects =claude-code.el=. The Codex backend expects =codex.el=. Optional integrations use packages such as =yasnippet=, =doom-modeline=, =gptel=, =agent-log=, and =monet= when those are available.
+The package depends on =transient= for menus, =consult= for completion, =claude-code.el= for the Claude backend, and =codex.el= for the Codex backend. All four are declared in the package metadata so that the package manager builds =agent= with them available; the backend modules hard-require their respective backend at load time. Optional integrations use packages such as =yasnippet=, =doom-modeline=, =gptel=, =agent-log=, and =monet= when those are available.
 
 * Architecture
 :PROPERTIES:

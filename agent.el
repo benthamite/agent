@@ -5,7 +5,7 @@
 ;; Author: Pablo Stafforini
 ;; URL: https://github.com/benthamite/agent
 ;; Version: 0.1
-;; Package-Requires: ((emacs "30.0") (transient "0.9") (consult "1.0"))
+;; Package-Requires: ((emacs "30.0") (transient "0.9") (consult "1.0") (claude-code "0.1") (codex "0.1"))
 
 ;; This file is NOT part of GNU Emacs.
 
