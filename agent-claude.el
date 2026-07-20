@@ -571,13 +571,14 @@ ORIG-FN is called with KEY and DIRECTORY after cleanup."
   (when (and (boundp 'monet--sessions)
              (gethash key monet--sessions))
     (agent-claude--monet-stop-session key))
-  (let ((result (funcall orig-fn key directory)))
+  (let* ((result (funcall orig-fn key directory))
+         (server (and result
+                      (fboundp 'monet--session-server)
+                      (monet--session-server result))))
+    (agent-claude--monet-register-server server)
     (when (agent-claude--monet-claude-key-p key)
       (setq agent-claude--pending-monet-key key)
-      (setq agent-claude--pending-monet-server
-            (and result
-                 (fboundp 'monet--session-server)
-                 (monet--session-server result))))
+      (setq agent-claude--pending-monet-server server))
     result))
 
 (defun agent-claude--monet-claude-key-p (key)
@@ -605,26 +606,48 @@ ORIG-FN is called with KEY and DIRECTORY after cleanup."
         (setq agent-claude--monet-key key)
         (setq agent-claude--monet-server
               (and (fboundp 'monet--session-server)
-                   (monet--session-server session)))))))
+                   (monet--session-server session)))
+        (agent-claude--monet-register-server agent-claude--monet-server)))))
+
+(defvar agent-claude--monet-owned-servers nil
+  "Websocket server processes created or adopted through monet.
+The leak GC sweep inspects only the processes in this list, so websocket
+servers owned by other packages (such as atomic-chrome or org-roam-ui)
+can never be mistaken for leaked monet servers.")
+
+(defun agent-claude--monet-register-server (server)
+  "Record SERVER as a monet-owned websocket server process."
+  (when (and (processp server)
+             (not (memq server agent-claude--monet-owned-servers)))
+    (push server agent-claude--monet-owned-servers)))
 
 (defun agent-claude--monet-gc-orphaned-servers ()
-  "Delete websocket server processes not tracked by any monet session.
-Runs periodically as a safety net to catch servers leaked through
-any code path."
+  "Delete monet-owned server processes not tracked by any monet session.
+Runs periodically as a safety net to catch servers leaked through any
+monet code path.  Only servers registered in
+`agent-claude--monet-owned-servers' are considered, so the sweep never
+touches websocket servers created by other packages."
+  (setq agent-claude--monet-owned-servers
+        (seq-filter #'process-live-p agent-claude--monet-owned-servers))
   (when (boundp 'monet--sessions)
-    (let ((active-servers nil))
-      (maphash (lambda (_k session)
-        (when-let* ((server (monet--session-server session)))
-          (push server active-servers)))
-        monet--sessions)
-      (dolist (p (process-list))
-        (when (and (string-match-p "\\`websocket server on port [0-9]"
-                                   (process-name p))
-                   (eq (process-status p) 'listen)
+    (let ((active-servers (agent-claude--monet-active-servers)))
+      (dolist (p agent-claude--monet-owned-servers)
+        (when (and (eq (process-status p) 'listen)
                    (not (memq p active-servers)))
           (agent--report-leak "monet server" "%s escaped session teardown"
                               (process-name p))
-          (delete-process p))))))
+          (delete-process p)
+          (setq agent-claude--monet-owned-servers
+                (delq p agent-claude--monet-owned-servers)))))))
+
+(defun agent-claude--monet-active-servers ()
+  "Return the server processes tracked by `monet--sessions'."
+  (let (servers)
+    (maphash (lambda (_k session)
+               (when-let* ((server (monet--session-server session)))
+                 (push server servers)))
+             monet--sessions)
+    servers))
 
 (defun agent-claude--diff-file-in-session-p (diff-buffer session)
   "Return non-nil if DIFF-BUFFER's file is inside SESSION's directory."

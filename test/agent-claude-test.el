@@ -1212,5 +1212,110 @@ session but left its listening server alive until the GC sweep."
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest agent-claude-test-monet-gc-ignores-foreign-websocket-server ()
+  "GC sweep leaves unregistered websocket servers from other packages alone.
+Reproduces the false positive where atomic-chrome's listening server on
+its fixed port was reported and deleted as a leaked monet server."
+  (let ((foreign (make-network-process :name "websocket server on port 64292"
+                                       :server t
+                                       :host 'local
+                                       :service t
+                                       :noquery t))
+        (agent-claude--monet-owned-servers nil)
+        (sessions (make-hash-table :test 'equal))
+        reported)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent--report-leak)
+                   (lambda (&rest args) (push args reported))))
+          (cl-progv '(monet--sessions) (list sessions)
+            (agent-claude--monet-gc-orphaned-servers))
+          (should (process-live-p foreign))
+          (should-not reported))
+      (when (process-live-p foreign) (delete-process foreign)))))
+
+(ert-deftest agent-claude-test-monet-gc-reaps-registered-orphan ()
+  "GC sweep reports and closes a registered server with no monet session."
+  (let ((server (make-network-process :name "websocket server on port 0"
+                                      :server t
+                                      :host 'local
+                                      :service t
+                                      :noquery t))
+        (agent-claude--monet-owned-servers nil)
+        (sessions (make-hash-table :test 'equal))
+        reported)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent--report-leak)
+                   (lambda (&rest args) (push args reported))))
+          (agent-claude--monet-register-server server)
+          (cl-progv '(monet--sessions) (list sessions)
+            (agent-claude--monet-gc-orphaned-servers))
+          (should-not (process-live-p server))
+          (should (= (length reported) 1))
+          (should-not (memq server agent-claude--monet-owned-servers)))
+      (when (process-live-p server) (delete-process server)))))
+
+(ert-deftest agent-claude-test-monet-gc-keeps-registered-active-server ()
+  "GC sweep leaves a registered server that monet still tracks."
+  (let ((server (make-network-process :name "websocket server on port 0"
+                                      :server t
+                                      :host 'local
+                                      :service t
+                                      :noquery t))
+        (agent-claude--monet-owned-servers nil)
+        (sessions (make-hash-table :test 'equal))
+        reported)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent--report-leak)
+                   (lambda (&rest args) (push args reported)))
+                  ((symbol-function 'monet--session-server)
+                   (lambda (_session) server)))
+          (puthash "*claude:active*" 'fake-session sessions)
+          (agent-claude--monet-register-server server)
+          (cl-progv '(monet--sessions) (list sessions)
+            (agent-claude--monet-gc-orphaned-servers))
+          (should (process-live-p server))
+          (should-not reported)
+          (should (memq server agent-claude--monet-owned-servers)))
+      (when (process-live-p server) (delete-process server)))))
+
+(ert-deftest agent-claude-test-monet-start-registers-server ()
+  "Starting a monet session registers its server for the GC sweep."
+  (let ((proc (make-process :name "agent-test-monet-server"
+                            :command '("sleep" "60")
+                            :noquery t))
+        (agent-claude--monet-owned-servers nil)
+        (agent-claude--pending-monet-key nil)
+        (agent-claude--pending-monet-server nil)
+        (sessions (make-hash-table :test 'equal)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'monet--session-server)
+                   (lambda (_session) proc)))
+          (cl-progv '(monet--sessions) (list sessions)
+            (agent-claude--monet-cleanup-before-start
+             (lambda (_key _directory) 'session)
+             "*claude:original*" "/tmp/project/"))
+          (should (memq proc agent-claude--monet-owned-servers)))
+      (when (process-live-p proc) (delete-process proc)))))
+
+(ert-deftest agent-claude-test-monet-adopt-registers-server ()
+  "Adopting an existing monet session registers its server for the sweep."
+  (let ((buffer (generate-new-buffer "*claude:existing*"))
+        (proc (make-process :name "agent-test-monet-server"
+                            :command '("sleep" "60")
+                            :noquery t))
+        (agent-claude--monet-owned-servers nil)
+        (sessions (make-hash-table :test 'equal)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'monet--session-server)
+                   (lambda (_session) proc)))
+          (puthash (buffer-name buffer) 'fake-session sessions)
+          (cl-progv '(monet--sessions) (list sessions)
+            (with-current-buffer buffer
+              (agent-claude--adopt-existing-monet-session)))
+          (should (memq proc agent-claude--monet-owned-servers)))
+      (when (process-live-p proc) (delete-process proc))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (provide 'agent-claude-test)
 ;;; agent-claude-test.el ends here
