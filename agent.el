@@ -1209,29 +1209,13 @@ registered, falling back to `agent-notify'."
   :type 'natnum
   :group 'agent)
 
-(defcustom agent-scroll-follow-mouse t
-  "When non-nil, PageUp/PageDown scroll the hovered AI terminal.
-The selected window still wins when it displays an AI terminal."
-  :type 'boolean
-  :group 'agent)
-
 (defvar agent-scroll-keys-mode-map nil
   "Keymap for `agent-scroll-keys-mode'.")
 
 (defvar agent-scroll-keys-global-mode-map nil
-  "Keymap for `agent-scroll-keys-global-mode'.")
+  "Obsolete global PageUp/PageDown keymap cleared during package load.")
 
 (setq agent-scroll-keys-mode-map
-      (let ((map (make-sparse-keymap)))
-        (define-key map [prior] #'agent-scroll-page-up)
-        (define-key map [next] #'agent-scroll-page-down)
-        (define-key map [kp-prior] #'agent-scroll-page-up)
-        (define-key map [kp-next] #'agent-scroll-page-down)
-        (define-key map [remap scroll-down-command] #'agent-scroll-page-up)
-        (define-key map [remap scroll-up-command] #'agent-scroll-page-down)
-        map))
-
-(setq agent-scroll-keys-global-mode-map
       (let ((map (make-sparse-keymap)))
         (define-key map [prior] #'agent-scroll-page-up)
         (define-key map [next] #'agent-scroll-page-down)
@@ -1246,37 +1230,30 @@ The selected window still wins when it displays an AI terminal."
   :keymap agent-scroll-keys-mode-map)
 
 (define-minor-mode agent-scroll-keys-global-mode
-  "Global mode making PageUp/PageDown scroll visible AI terminals."
+  "Global mode redirecting scroll commands in selected AI terminals."
   :global t
-  :keymap agent-scroll-keys-global-mode-map
   (if agent-scroll-keys-global-mode
       (agent--scroll-command-advice-add)
     (agent--scroll-command-advice-remove)))
 
+(defun agent--clear-global-scroll-keymap ()
+  "Remove obsolete global PageUp/PageDown bindings."
+  (setq agent-scroll-keys-global-mode-map nil
+        minor-mode-map-alist
+        (assq-delete-all 'agent-scroll-keys-global-mode
+                         minor-mode-map-alist)))
+
+(agent--clear-global-scroll-keymap)
+
 (defun agent-scroll-page-up ()
   "Scroll the current AI terminal session upward."
   (interactive)
-  (agent--scroll-page 'wheel-up))
+  (agent--send-terminal-wheel 'wheel-up))
 
 (defun agent-scroll-page-down ()
   "Scroll the current AI terminal session downward."
   (interactive)
-  (agent--scroll-page 'wheel-down))
-
-(defun agent--scroll-page (event)
-  "Handle PageUp/PageDown by sending terminal wheel EVENT."
-  (if-let* ((window (agent--terminal-scroll-window)))
-      (agent--send-terminal-wheel event window)
-    (if (bound-and-true-p eat-terminal)
-        (agent--send-terminal-wheel event)
-      (agent--scroll-page-fallback event))))
-
-(defun agent--terminal-scroll-window ()
-  "Return the terminal window PageUp/PageDown should scroll."
-  (or (and (agent--terminal-scroll-window-p (selected-window))
-           (selected-window))
-      (and agent-scroll-follow-mouse
-           (agent--mouse-terminal-scroll-window))))
+  (agent--send-terminal-wheel 'wheel-down))
 
 (defun agent--terminal-scroll-window-p (window)
   "Return non-nil when WINDOW displays an agent EAT terminal."
@@ -1284,41 +1261,6 @@ The selected window still wins when it displays an AI terminal."
        (with-current-buffer (window-buffer window)
          (and (bound-and-true-p eat-terminal)
               (agent--detect-backend (current-buffer))))))
-
-(defun agent--mouse-terminal-scroll-window ()
-  "Return the agent terminal window under the mouse, if any."
-  (pcase-let ((`(,frame ,x . ,y) (mouse-position)))
-    (when (and frame (frame-live-p frame) x y)
-      (let ((window (window-at x y frame)))
-        (and (agent--terminal-scroll-window-p window) window)))))
-
-(defun agent--scroll-page-fallback (event)
-  "Run the non-agent PageUp/PageDown command for wheel EVENT."
-  (call-interactively (agent--scroll-fallback-command event)))
-
-(defun agent--scroll-fallback-command (event)
-  "Return the command to run when wheel EVENT has no terminal target."
-  (or (agent--scroll-fallback-key-binding (this-command-keys-vector))
-      (agent--scroll-default-command event)))
-
-(defun agent--scroll-fallback-key-binding (keys)
-  "Return the command KEYS would call without agent scroll modes."
-  (when (> (length keys) 0)
-    (let ((agent-scroll-keys-global-mode nil)
-          (agent-scroll-keys-mode nil)
-          (minor-mode-overriding-map-alist
-           (assq-delete-all 'agent-scroll-keys-mode
-                            (copy-sequence minor-mode-overriding-map-alist))))
-      (let ((command (key-binding keys t)))
-        (unless (memq command '(agent-scroll-page-up agent-scroll-page-down))
-          command)))))
-
-(defun agent--scroll-default-command (event)
-  "Return the ordinary PageUp/PageDown command for wheel EVENT."
-  (pcase event
-    ('wheel-up #'scroll-down-command)
-    ('wheel-down #'scroll-up-command)
-    (_ #'scroll-down-command)))
 
 (defun agent--scroll-command-advice-add ()
   "Install scroll-command advice for agent terminal buffers."
@@ -1352,18 +1294,8 @@ ORIGINAL and ARGS describe the wrapped command call."
 
 (defun agent--scroll-command-redirect-window ()
   "Return the AI terminal window a scroll command should target."
-  (or (and (agent--terminal-scroll-window-p (selected-window))
-           (selected-window))
-      (and (agent--page-scroll-key-p)
-           agent-scroll-follow-mouse
-           (agent--mouse-terminal-scroll-window))))
-
-(defun agent--page-scroll-key-p ()
-  "Return non-nil when the current key sequence is PageUp/PageDown."
-  (let ((keys (this-command-keys-vector)))
-    (and (> (length keys) 0)
-         (memq (aref keys (1- (length keys)))
-               '(prior next kp-prior kp-next)))))
+  (let ((window (selected-window)))
+    (and (agent--terminal-scroll-window-p window) window)))
 
 (defun agent--send-terminal-wheel (event &optional window)
   "Send terminal mouse wheel EVENT to WINDOW or the current AI terminal."

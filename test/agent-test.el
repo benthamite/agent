@@ -156,23 +156,35 @@
     (should (equal (nreverse events)
                    '((8 wheel-up) (8 wheel-down))))))
 
-(ert-deftest agent-test-global-scroll-keys-map-overrides-page-keys ()
-  "Global PageUp/PageDown bindings can intercept non-terminal buffers."
+(ert-deftest agent-test-global-scroll-mode-preserves-nonterminal-page-keys ()
+  "Keep PageUp and PageDown local to a selected nonterminal buffer."
   (let ((agent-scroll-keys-global-mode t))
-    (should (eq (key-binding (kbd "<prior>") t)
-                #'agent-scroll-page-up))
-    (should (eq (key-binding (kbd "<next>") t)
-                #'agent-scroll-page-down))
-    (should (eq (key-binding (kbd "<kp-prior>") t)
-                #'agent-scroll-page-up))
-    (should (eq (key-binding (kbd "<kp-next>") t)
-                #'agent-scroll-page-down))))
+    (with-temp-buffer
+      (agent-test--terminal-navigation-mode 1)
+      (should (eq (key-binding (kbd "<prior>") t)
+                  #'agent-test--terminal-page-up))
+      (should (eq (key-binding (kbd "<next>") t)
+                  #'agent-test--terminal-page-down)))))
 
-(ert-deftest agent-test-scroll-page-keys-target-hovered-terminal-window ()
-  "PageUp targets the hovered terminal when another window is selected."
-  (let ((terminal-buffer (generate-new-buffer " *agent-hover-eat*"))
-        (other-buffer (generate-new-buffer " *agent-hover-other*"))
-        events)
+(ert-deftest agent-test-clear-global-scroll-keymap-removes-legacy-state ()
+  "Remove global PageUp bindings left behind by a package reload."
+  (let* ((map (make-sparse-keymap))
+         (agent-scroll-keys-global-mode-map map)
+         (minor-mode-map-alist
+          (cons (cons 'agent-scroll-keys-global-mode map)
+                minor-mode-map-alist)))
+    (define-key map [prior] #'agent-scroll-page-up)
+    (agent--clear-global-scroll-keymap)
+    (should-not agent-scroll-keys-global-mode-map)
+    (should-not (assq 'agent-scroll-keys-global-mode
+                      minor-mode-map-alist))))
+
+(ert-deftest agent-test-scroll-commands-ignore-visible-unselected-terminal ()
+  "Keep scroll commands in the selected nonterminal window."
+  (let ((terminal-buffer (generate-new-buffer " *agent-visible-eat*"))
+        (other-buffer (generate-new-buffer " *agent-visible-other*"))
+        events
+        originals)
     (unwind-protect
         (save-window-excursion
           (delete-other-windows)
@@ -184,28 +196,16 @@
             (cl-letf (((symbol-function 'agent--detect-backend)
                        (lambda (buffer)
                          (and (eq buffer terminal-buffer) 'claude-code)))
-                      ((symbol-function 'agent--mouse-terminal-scroll-window)
-                       (lambda () terminal-window))
-                      ((symbol-function 'eat-self-input)
-                       (lambda (count event)
-                         (push (list count (event-basic-type event))
-                               events))))
-              (agent-scroll-page-up)))
-          (should (equal events '((8 wheel-up)))))
+                      ((symbol-function 'agent--send-terminal-wheel)
+                       (lambda (&rest args) (push args events))))
+              (agent--scroll-down-command
+               (lambda () (push 'down originals)))
+              (agent--scroll-up-command
+               (lambda () (push 'up originals)))))
+          (should-not events)
+          (should (equal (nreverse originals) '(down up))))
       (kill-buffer terminal-buffer)
       (kill-buffer other-buffer))))
-
-(ert-deftest agent-test-scroll-page-keys-fall-back-outside-terminals ()
-  "PageUp keeps ordinary scrolling when no terminal window is targeted."
-  (let (called)
-    (cl-letf (((symbol-function 'agent--terminal-scroll-window)
-               (lambda () nil))
-              ((symbol-function 'scroll-down-command)
-               (lambda (&optional _arg)
-                 (interactive "P")
-                 (setq called t))))
-      (agent-scroll-page-up))
-    (should called)))
 
 (ert-deftest agent-test-scroll-down-command-redirects-in-terminals ()
   "Redirect `scroll-down-command' itself in agent terminal buffers."
