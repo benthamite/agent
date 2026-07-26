@@ -2394,9 +2394,10 @@ the right one before starting a BACKEND session."
   (unless (and (require 'gptel nil t) (fboundp 'gptel-request))
     (user-error "Package `gptel' is required for backtrace debugging"))
   (message "Identifying packages from backtrace...")
-  (let ((contents (with-temp-buffer
-                    (insert-file-contents backtrace-file)
-                    (buffer-string)))
+  (let ((contents (agent--debug-backtrace-excerpt
+                   (with-temp-buffer
+                     (insert-file-contents backtrace-file)
+                     (buffer-string))))
         (gptel-backend (alist-get agent-debug-backtrace-backend
                                   gptel--known-backends nil nil #'string=))
         (gptel-model agent-debug-backtrace-model)
@@ -2417,6 +2418,33 @@ the right one before starting a BACKEND session."
                                     nil nil nil (car candidates))))
              (agent--debug-start-session
               backend (intern selected) backtrace-file))))))))
+
+(defconst agent--debug-backtrace-line-limit 400
+  "Maximum characters kept per backtrace line sent to the model.")
+
+(defconst agent--debug-backtrace-size-limit 100000
+  "Maximum total characters of backtrace contents sent to the model.")
+
+(defun agent--debug-backtrace-excerpt (contents)
+  "Return backtrace CONTENTS truncated to fit within model request limits.
+Backtraces can embed multi-megabyte printed objects in single frames,
+which makes the identification request exceed API payload limits.  The
+frame names at the start of each line are all the model needs, so long
+lines are cut at `agent--debug-backtrace-line-limit' and the result is
+capped at `agent--debug-backtrace-size-limit'."
+  (let* ((lines (split-string contents "\n"))
+         (trimmed (mapcar #'agent--debug-truncate-line lines))
+         (joined (string-join trimmed "\n")))
+    (if (> (length joined) agent--debug-backtrace-size-limit)
+        (substring joined 0 agent--debug-backtrace-size-limit)
+      joined)))
+
+(defun agent--debug-truncate-line (line)
+  "Return LINE cut at `agent--debug-backtrace-line-limit' characters."
+  (if (> (length line) agent--debug-backtrace-line-limit)
+      (concat (substring line 0 agent--debug-backtrace-line-limit)
+              " [truncated]")
+    line))
 
 (defun agent--debug-start-session (backend package backtrace-file)
   "Start a BACKEND session for PACKAGE with BACKTRACE-FILE.

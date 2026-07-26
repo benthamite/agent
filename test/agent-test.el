@@ -87,6 +87,26 @@
   "Ignore gptel reasoning events sent before final response text."
   (should-not (agent--gptel-response-text '(reasoning . "thinking"))))
 
+;;;; Backtrace debugging
+
+(ert-deftest agent-test-debug-backtrace-excerpt-truncates-long-lines ()
+  "Truncate oversized backtrace lines while keeping the frame names."
+  (let* ((long (concat "  json-serialize(" (make-string 10000 ?x) ")"))
+         (excerpt (agent--debug-backtrace-excerpt (concat "short\n" long))))
+    (should (string-prefix-p "short\n  json-serialize(" excerpt))
+    (should (< (length excerpt) 1000))))
+
+(ert-deftest agent-test-debug-backtrace-excerpt-keeps-short-content ()
+  "Return short backtrace content unchanged."
+  (should (equal (agent--debug-backtrace-excerpt "a\nb") "a\nb")))
+
+(ert-deftest agent-test-debug-backtrace-excerpt-caps-total-size ()
+  "Cap the total excerpt size for backtraces with many lines."
+  (let* ((line (make-string 200 ?y))
+         (contents (mapconcat #'identity (make-list 5000 line) "\n")))
+    (should (<= (length (agent--debug-backtrace-excerpt contents))
+                agent--debug-backtrace-size-limit))))
+
 ;;;; Page scrolling
 
 (ert-deftest agent-test-setup-scroll-keys-overrides-terminal-navigation ()

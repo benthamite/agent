@@ -191,7 +191,7 @@ The Codex backend options control account selection, skill discovery, and non-in
 
 ~agent-codex-exec-approval-policy~, ~agent-codex-exec-sandbox-mode~, and ~agent-codex-exec-skip-git-repo-check~ configure the non-interactive Codex calls used by skill and audit workflows. The approval policy is passed as a top-level Codex CLI option before the =exec= subcommand, while the sandbox and repository-check options are passed to =codex exec= itself.
 
-The =gptel= classifier requests used by backtrace debugging and Slack routing ignore reasoning-block callback events and parse only the final response text.
+The =gptel= classifier requests used by backtrace debugging and Slack routing ignore reasoning-block callback events and parse only the final response text. Backtrace debugging sends the model a truncated excerpt of the backtrace rather than the full contents: each line is cut at 400 characters and the excerpt is capped at 100,000 characters, since backtraces can embed multi-megabyte printed objects that exceed API payload limits, while the frame names at the start of each line suffice to identify packages. The agent session itself still receives the path to the complete backtrace file.
 
 ** Chief-of-staff loop
 :PROPERTIES:
