@@ -108,6 +108,37 @@ This is the CLI-convention-break signal the warning exists to surface."
     (should (null (agent-claude-cli-oauth-token "/tmp/acct")))
     (should (= (length warnings) 1))))
 
+;;;; Claude JSON
+
+(ert-deftest agent-claude-cli-test-read-claude-json-retries-mid-write ()
+  "Recover from a parse failure caused by reading during a rewrite.
+The first read sees a truncated file; the retry, after the delay during
+which the writer finishes, sees valid JSON.  No warning is emitted."
+  (let ((path (make-temp-file "claude-json" nil ".json" "{\"a\": "))
+        (agent-claude-cli--warned nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'sleep-for)
+                   (lambda (&rest _)
+                     (with-temp-file path (insert "{\"a\": 1}")))))
+          (let ((result (agent-claude-cli-read-claude-json path)))
+            (should (hash-table-p result))
+            (should (= (gethash "a" result) 1))
+            (should (null agent-claude-cli--warned))))
+      (delete-file path))))
+
+(ert-deftest agent-claude-cli-test-read-claude-json-invalid-warns-once ()
+  "A persistently invalid file warns once and returns nil."
+  (let ((path (make-temp-file "claude-json" nil ".json" "{\"a\": "))
+        (agent-claude-cli--warned nil)
+        (warnings nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'display-warning)
+                   (lambda (&rest args) (push args warnings)))
+                  ((symbol-function 'sleep-for) #'ignore))
+          (should (null (agent-claude-cli-read-claude-json path)))
+          (should (= (length warnings) 1)))
+      (delete-file path))))
+
 ;;;; Transcript JSONL
 
 (ert-deftest agent-claude-cli-test-read-session-header-round-trip ()

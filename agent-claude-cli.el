@@ -355,17 +355,28 @@ Modifies TARGET-ENV in place."
 
 (defun agent-claude-cli-read-claude-json (path)
   "Read and parse the JSON file at PATH.
-Return a hash table, or nil if PATH does not exist or is invalid."
+Return a hash table, or nil if PATH does not exist or is invalid.  A
+parse failure is retried once after a short delay: the CLI rewrites this
+file frequently, so a read can land mid-write and see truncated JSON.
+Only a failure that persists across the retry is warned about."
   (when (file-exists-p path)
-    (condition-case nil
-        (with-temp-buffer
-          (insert-file-contents path)
-          (json-parse-buffer))
-      (error
-       (agent-claude-cli--warn-once
-        (list 'claude-json path)
-        "unreadable or invalid JSON at %s" path)
-       nil))))
+    (or (agent-claude-cli--parse-json-file path)
+        (progn
+          (sleep-for 0.2)
+          (agent-claude-cli--parse-json-file path))
+        (progn
+          (agent-claude-cli--warn-once
+           (list 'claude-json path)
+           "unreadable or invalid JSON at %s" path)
+          nil))))
+
+(defun agent-claude-cli--parse-json-file (path)
+  "Parse the JSON file at PATH, returning nil on any read or parse error."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents path)
+        (json-parse-buffer))
+    (error nil)))
 
 (defun agent-claude-cli-merge-project (table key val)
   "Merge project VAL under KEY into TABLE.
