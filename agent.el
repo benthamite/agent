@@ -594,6 +594,13 @@ Applied in the session switcher when the backend's
 these sessions from `agent-waiting' (truly idle)."
   :group 'agent)
 
+(defface agent-unknown
+  '((t :inherit shadow))
+  "Face for sessions whose state has never been observed.
+Applied in the session switcher when no session event has reached a
+buffer, so that an unknown state is not presented as a known one."
+  :group 'agent)
+
 ;;;; State variables
 
 (defconst agent--home-row-keys '("a" "s" "d" "f" "j" "k" "l" ";")
@@ -616,9 +623,11 @@ Excludes \"w\" and \"e\", which are reserved for actions in
 (defvar-local agent--display-name-cache nil
   "Cached display name for the modeline.")
 
-(defvar-local agent--session-state 'busy
+(defvar-local agent--session-state 'unknown
   "Lifecycle state of this AI session buffer.
-One of the symbols `busy', `awaiting-input', and `closing'.
+One of the symbols `unknown', `busy', `awaiting-input', and `closing'.
+Buffers start as `unknown' because no session event has been observed
+yet; assuming `busy' would report a state that was never seen.
 Only `agent-session-event' may set this variable.")
 
 (defvar-local agent--session-state-changed-at nil
@@ -934,41 +943,57 @@ the backend's :label or symbol name."
          (state (agent-session-display-state buf backend))
          (cmd (make-symbol (format "ai-switch-%s" key)))
          (spec (list key label cmd)))
-    (unless (eq state 'busy)
-      (setq spec (append spec
-                         (list :face (if (eq state 'background-waiting)
-                                         'agent-waiting-with-background
-                                       'agent-waiting)))))
+    (when-let* ((face (agent--session-state-face state)))
+      (setq spec (append spec (list :face face))))
     (fset cmd (lambda () (interactive) (switch-to-buffer buf)))
     spec))
 
+(defun agent--session-state-face (state)
+  "Return the session-switcher face for display STATE, or nil for none."
+  (pcase state
+    ('waiting 'agent-waiting)
+    ('background-waiting 'agent-waiting-with-background)
+    ('unknown 'agent-unknown)
+    (_ nil)))
+
 (defun agent--session-waiting-p (buffer &optional backend)
-  "Return non-nil when BUFFER is waiting for input.
+  "Return non-nil when BUFFER is blocked on user input.
 BACKEND defaults to the detected backend."
-  (not (eq (agent-session-display-state buffer backend) 'busy)))
+  (memq (agent-session-display-state buffer backend)
+        '(waiting background-waiting)))
 
 (defun agent-session-display-state (buffer &optional backend)
   "Return the switcher display state for session BUFFER.
-BACKEND defaults to the detected backend.  The result is one of
-the symbols `busy', `waiting', and `background-waiting'.  A
-session counts as waiting when its backend reports an input
-prompt directly via `:waiting-p' (an active turn that accepts
-steering input), or when `agent--session-state' is
-`awaiting-input' and the backend's `:busy-p' does not veto it as
-stale.  Waiting sessions whose backend reports work via
-`:background-tasks-p' display as `background-waiting'."
-  (let* ((backend (or backend (agent--detect-backend buffer)))
-         (backend-waiting (agent--backend-waiting-p buffer backend))
-         (awaiting (eq (buffer-local-value 'agent--session-state buffer)
-                       'awaiting-input)))
+BACKEND defaults to the detected backend.  The result is one of the
+symbols `busy', `waiting', `background-waiting', and `unknown'.
+
+A session is waiting only when it is blocked on the user, meaning it
+has stopped and will not proceed until the user submits something.
+Being able to type into the prompt mid-turn is not waiting.
+
+Backends that observe a protocol report authoritatively through
+`:waiting-p' and `:busy-p', and those answers win.  Otherwise the
+session-event state machine decides, and a session that has never
+received an event displays as `unknown' rather than guessing.
+Waiting sessions whose backend reports work via `:background-tasks-p'
+display as `background-waiting'."
+  (let ((backend (or backend (agent--detect-backend buffer)))
+        (state (buffer-local-value 'agent--session-state buffer)))
     (cond
-     ((and (not backend-waiting)
-           (or (not awaiting)
-               (agent--backend-busy-p buffer backend)))
-      'busy)
-     ((agent--backend-background-tasks-p buffer backend)
-      'background-waiting)
-     (t 'waiting))))
+     ((agent--backend-waiting-p buffer backend)
+      (agent--waiting-display-state buffer backend))
+     ((agent--backend-busy-p buffer backend) 'busy)
+     ((eq state 'awaiting-input)
+      (agent--waiting-display-state buffer backend))
+     ((eq state 'unknown) 'unknown)
+     (t 'busy))))
+
+(defun agent--waiting-display-state (buffer backend)
+  "Return the waiting display state for BUFFER according to BACKEND.
+Sessions with reported background work are distinguished from idle ones."
+  (if (agent--backend-background-tasks-p buffer backend)
+      'background-waiting
+    'waiting))
 
 (defun agent--backend-waiting-p (buffer backend)
   "Return non-nil when BACKEND reports BUFFER is accepting input."

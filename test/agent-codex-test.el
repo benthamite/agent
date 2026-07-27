@@ -504,7 +504,7 @@
                          '("Codex needs approval"
                            "project: permission request pending")))
           (should-not session-events)
-          (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))
+          (should (eq (buffer-local-value 'agent--session-state buf) 'unknown)))
       (kill-buffer buf))))
 
 (ert-deftest agent-codex-test-notify-ready-dispatches-backend-notify ()

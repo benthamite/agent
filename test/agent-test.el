@@ -350,11 +350,26 @@
 
 ;;;; Display state
 
-(ert-deftest agent-test-display-state-busy-by-default ()
-  "Report busy for sessions without waiting state."
+(ert-deftest agent-test-display-state-unknown-before-any-event ()
+  "Report unknown for sessions that have never seen a session event.
+Reporting busy here would present the `defvar-local' initializer as an
+observation."
   (let ((agent-backends nil))
     (with-temp-buffer
+      (should (eq (agent-session-display-state (current-buffer)) 'unknown)))))
+
+(ert-deftest agent-test-display-state-busy-after-submit ()
+  "Report busy once a submit event has been observed."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (agent-session-event (current-buffer) 'submit)
       (should (eq (agent-session-display-state (current-buffer)) 'busy)))))
+
+(ert-deftest agent-test-unknown-session-is-not-waiting ()
+  "Do not offer unknown sessions to `agent-jump-to-waiting'."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (should-not (agent--session-waiting-p (current-buffer))))))
 
 (ert-deftest agent-test-display-state-waiting-after-awaiting-input ()
   "Report waiting once the session state machine awaits input."
