@@ -85,6 +85,54 @@
                            "project: permission request pending"))))
       (kill-buffer buf))))
 
+(ert-deftest agent-claude-test-new-prompt-id-marks-session-busy ()
+  "Treat a fresh statusline prompt id as the start of a turn.
+Claude Code reports no turn-start hook, so this is how turns the user
+did not type become visible."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent--session-state 'awaiting-input)
+      (setq-local agent--session-state-changed-at 100.0)
+      (setq-local agent-claude--status-polled-at 200.0)
+      (setq-local agent-claude--status-data '(:prompt_id "turn-one"))
+      (agent-claude--detect-turn-start '(:prompt_id "turn-two") buf)
+      (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))))
+
+(ert-deftest agent-claude-test-unchanged-prompt-id-leaves-state-alone ()
+  "Do not disturb a waiting session while the same turn id persists."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent--session-state 'awaiting-input)
+      (setq-local agent-claude--status-polled-at 200.0)
+      (setq-local agent-claude--status-data '(:prompt_id "turn-one"))
+      (agent-claude--detect-turn-start '(:prompt_id "turn-one") buf)
+      (should (eq (buffer-local-value 'agent--session-state buf)
+                  'awaiting-input)))))
+
+(ert-deftest agent-claude-test-first-poll-does-not-mark-busy ()
+  "Do not infer a turn start merely from beginning to observe a session."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent--session-state 'awaiting-input)
+      (setq-local agent-claude--status-data nil)
+      (agent-claude--detect-turn-start '(:prompt_id "turn-one") buf)
+      (should (eq (buffer-local-value 'agent--session-state buf)
+                  'awaiting-input)))))
+
+(ert-deftest agent-claude-test-turn-shorter-than-poll-stays-waiting ()
+  "Do not resurrect a turn that started and finished between two polls.
+Its stop event has already landed, so marking the session busy would
+strand it there until the next turn."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent-claude--status-polled-at 200.0)
+      (setq-local agent--session-state 'awaiting-input)
+      (setq-local agent--session-state-changed-at 205.0)
+      (setq-local agent-claude--status-data '(:prompt_id "turn-one"))
+      (agent-claude--detect-turn-start '(:prompt_id "turn-two") buf)
+      (should (eq (buffer-local-value 'agent--session-state buf)
+                  'awaiting-input)))))
+
 (ert-deftest agent-claude-test-activity-event-marks-session-busy ()
   "Return a session to busy on evidence of work, with no user submission.
 This is the case Claude Code reports no hook for: a turn the user did

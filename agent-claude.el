@@ -166,6 +166,11 @@ Written by `agent-claude-select-account', read at session start."
   "Session ID when this buffer was first created.
 Used to detect when `/branch' creates a new session.")
 
+(defvar-local agent-claude--status-polled-at nil
+  "Value of `float-time' at the previous successful status poll.
+Used to tell a turn that began since the last poll from one that also
+ended in that window.")
+
 (defvar-local agent-claude--status-timer nil
   "Timer for periodic status polling in the current Claude buffer.")
 
@@ -722,7 +727,40 @@ call; it is canceled automatically when BUFFER is no longer live."
     (with-current-buffer buffer
       (when-let* ((data (agent-claude--parse-status-file)))
         (agent-claude--detect-branch data)
-        (setq agent-claude--status-data data)))))
+        (agent-claude--detect-turn-start data buffer)
+        (setq agent-claude--status-data data)
+        (setq agent-claude--status-polled-at (float-time))))))
+
+(defun agent-claude--detect-turn-start (new-data buffer)
+  "Mark BUFFER busy when NEW-DATA reports a turn that has not been seen.
+NEW-DATA is the freshly parsed status plist.
+
+Claude Code publishes no turn-start hook, so a turn the user did not
+type -- one driven by remote control, a scheduled task, or a resumed
+background job -- is otherwise unobservable, and the session keeps
+displaying as waiting while it works.  The statusline reports a fresh
+`prompt_id' for every turn whatever its origin, so a changed value
+means a new turn began.
+
+A turn shorter than the poll interval both starts and ends between two
+polls.  Its `stop' event has already landed by the time the change is
+noticed, so treating it as a start would strand the session as busy.
+`agent-claude--turn-ended-since-last-poll-p' detects that case, and the
+new identifier is recorded without marking the session busy."
+  (let ((new-id (plist-get new-data :prompt_id))
+        (old-id (plist-get agent-claude--status-data :prompt_id)))
+    (when (and new-id old-id
+               (not (string= new-id old-id))
+               (not (agent-claude--turn-ended-since-last-poll-p buffer)))
+      (agent-session-event buffer 'activity))))
+
+(defun agent-claude--turn-ended-since-last-poll-p (buffer)
+  "Return non-nil when BUFFER stopped responding since the previous poll."
+  (let ((changed (buffer-local-value 'agent--session-state-changed-at buffer))
+        (polled agent-claude--status-polled-at))
+    (and changed polled (> changed polled)
+         (eq (buffer-local-value 'agent--session-state buffer)
+             'awaiting-input))))
 
 (defun agent-claude--detect-branch (new-data)
   "Detect a session ID change, indicating a branch.
