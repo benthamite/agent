@@ -621,17 +621,50 @@
           (should (eq (agent-session-display-state buf 'codex) 'busy)))
       (kill-buffer buf))))
 
-(ert-deftest agent-codex-test-app-server-active-prompt-is-background-waiting ()
-  "Show app-server turns with an available prompt as background waiting."
+(ert-deftest agent-codex-test-app-server-active-prompt-is-busy ()
+  "Show app-server turns as busy even when the prompt accepts input.
+Queueing text mid-turn has always been possible and does not mean Codex
+is waiting for the user."
+  (let ((buf (generate-new-buffer "*codex-test*"))
+        (proc (start-process "agent-codex-test-server" nil "sleep" "30")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "❯ ")
+          (setq-local codex--app-server-process proc)
+          (setq-local codex--app-server-turn-active-p t)
+          (setq-local codex--app-server-input-marker
+                      (copy-marker (point-max) nil))
+          (setq-local agent--session-state 'awaiting-input)
+          (should (eq (agent-session-display-state buf 'codex) 'busy)))
+      (delete-process proc)
+      (kill-buffer buf))))
+
+(ert-deftest agent-codex-test-app-server-completed-turn-is-waiting ()
+  "Show a finished app-server turn as waiting despite a stale busy state."
+  (let ((buf (generate-new-buffer "*codex-test*"))
+        (proc (start-process "agent-codex-test-server" nil "sleep" "30")))
+    (unwind-protect
+        (with-current-buffer buf
+          (insert "❯ ")
+          (setq-local codex--app-server-process proc)
+          (setq-local codex--app-server-turn-active-p nil)
+          (setq-local agent--session-state 'busy)
+          (should (eq (agent-session-display-state buf 'codex) 'waiting)))
+      (delete-process proc)
+      (kill-buffer buf))))
+
+(ert-deftest agent-codex-test-terminal-session-ignores-app-server-turn-flag ()
+  "Leave terminal Codex sessions to the session-event state machine.
+Without a live app server an inactive turn flag carries no information,
+so it must not be read as waiting."
   (let ((buf (generate-new-buffer "*codex-test*")))
     (unwind-protect
         (with-current-buffer buf
           (insert "❯ ")
-          (setq-local codex--app-server-turn-active-p t)
-          (setq-local codex--app-server-input-marker
-                      (copy-marker (point-max) nil))
-          (should (eq (agent-session-display-state buf 'codex)
-                      'background-waiting)))
+          (setq-local codex--app-server-process nil)
+          (setq-local codex--app-server-turn-active-p nil)
+          (setq-local agent--session-state 'busy)
+          (should (eq (agent-session-display-state buf 'codex) 'busy)))
       (kill-buffer buf))))
 
 (ert-deftest agent-codex-test-waiting-with-background-work-is-amber ()

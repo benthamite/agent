@@ -107,7 +107,7 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar agent-claude-mode)
 (defvar codex-reasoning-effort)
 (defvar codex--session-id)
-(defvar codex--app-server-input-marker)
+(defvar codex--app-server-process)
 (defvar codex--app-server-thread-id)
 (defvar codex--app-server-turn-active-p)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
@@ -469,28 +469,31 @@ indicator, e.g. \"1 background terminal running\"."
   (let ((buf (or buffer (current-buffer))))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (or (agent-codex--app-server-accepting-input-p)
-            (save-excursion
-              (goto-char (point-max))
-              (re-search-backward agent-codex--background-tasks-regexp
-                                  (max (point-min) (- (point-max) 800))
-                                  t)))))))
+        (save-excursion
+          (goto-char (point-max))
+          (re-search-backward agent-codex--background-tasks-regexp
+                              (max (point-min) (- (point-max) 800))
+                              t))))))
 
 (defun agent-codex--waiting-p (&optional buffer)
-  "Return non-nil when Codex session BUFFER is accepting input."
+  "Return non-nil when Codex session BUFFER is blocked on user input.
+App-server sessions learn turn boundaries from the JSON-RPC stream, so
+an inactive turn means Codex has finished and will not proceed until
+the user submits something.  Being able to queue text mid-turn is not
+waiting, and does not count here.
+
+Terminal sessions have no protocol signal and return nil, leaving the
+decision to `agent--session-state' and `agent-codex--busy-p'."
   (let ((buf (or buffer (current-buffer))))
     (when (buffer-live-p buf)
       (with-current-buffer buf
-        (agent-codex--app-server-accepting-input-p)))))
+        (and (agent-codex--app-server-live-p)
+             (not codex--app-server-turn-active-p))))))
 
-(defun agent-codex--app-server-accepting-input-p ()
-  "Return non-nil when an active app-server turn has an input prompt."
-  (and (boundp 'codex--app-server-turn-active-p)
-       codex--app-server-turn-active-p
-       (boundp 'codex--app-server-input-marker)
-       (markerp codex--app-server-input-marker)
-       (marker-position codex--app-server-input-marker)
-       t))
+(defun agent-codex--app-server-live-p ()
+  "Return non-nil when the current buffer has a live Codex app server."
+  (and (boundp 'codex--app-server-process)
+       (process-live-p codex--app-server-process)))
 
 (defun agent-codex--busy-p (&optional buffer)
   "Return non-nil when Codex session BUFFER is actively responding."
