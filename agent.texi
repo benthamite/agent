@@ -325,7 +325,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-disable-scrollback-truncation
 @findex agent-setup-scroll-keys
 @findex agent-snippet-tab
-The command @code{agent-menu} opens the unified transient menu. It includes shared entries for session switching, waiting-session jumps, handoff, restart, exit, skill execution, Trajectory CR task worktree creation, project audit, backtrace debugging, Slack-message action routing, alert toggles, terminal maintenance, and a separate Prompts section for prompt capture and captured prompt insertion. Backend modules append their own suffixes to the same menu when loaded.
+The command @code{agent-menu} opens the unified transient menu. It includes shared entries for session switching, waiting-session jumps, handoff, restart, exit, skill execution, Trajectory CR task worktree creation, project audit, backtrace debugging, Slack-message action routing, Forge-notification action routing, alert toggles, terminal maintenance, and a separate Prompts section for prompt capture and captured prompt insertion. Backend modules append their own suffixes to the same menu when loaded.
 
 In EAT-backed Claude and Codex session buffers, @code{agent-setup-scroll-keys} makes PageUp and PageDown send terminal mouse-wheel events, matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window.
 
@@ -354,7 +354,8 @@ The command is the Emacs equivalent of the shell @samp{newtask} helper, but it d
 not depend on the local @samp{main} worktree's current branch.
 
 The command @code{agent-act-on-forge-notification} is the Forge counterpart of
-@code{agent-act-on-slack-message}. Called on a notification in
+@code{agent-act-on-slack-message}, and sits next to it in @code{agent-menu} under @samp{g}.
+Called on a notification in
 @code{forge-list-notifications}, it starts a session in the working tree of the
 repository that notification belongs to and inserts the issue or pull request
 URL into the prompt without submitting it. It also accepts the topic at point,

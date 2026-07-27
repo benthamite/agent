@@ -2637,6 +2637,7 @@ selected account."
     ("a" "audit project" agent-audit-project)
     ("d" "debug backtrace" agent-debug-backtrace)
     ("m" "act on Slack message" agent-act-on-slack-message)
+    ("g" "act on Forge notification" agent-act-on-forge-notification)
     ""
     "Alerts"
     ("T" "toggle alert" agent-toggle-alert)]
