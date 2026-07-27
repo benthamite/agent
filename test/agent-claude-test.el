@@ -85,6 +85,47 @@
                            "project: permission request pending"))))
       (kill-buffer buf))))
 
+(ert-deftest agent-claude-test-activity-event-marks-session-busy ()
+  "Return a session to busy on evidence of work, with no user submission.
+This is the case Claude Code reports no hook for: a turn the user did
+not start, such as one resumed after a background task finishes."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq-local agent--session-state 'awaiting-input))
+          (agent-claude--handle-session-state
+           (list :type 'activity :buffer-name (buffer-name buf)))
+          (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-blocked-hook-event-marks-session-waiting ()
+  "Mark sessions blocked when the CLI reports they cannot proceed alone."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf (setq-local agent--session-state 'busy))
+          (agent-claude--handle-session-state
+           (list :type 'blocked :buffer-name (buffer-name buf)))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-session-state-handler-ignores-other-events ()
+  "Leave state alone for unrelated events and never consume the hook.
+`claude-code-event-hook' runs with `run-hook-with-args-until-success',
+so a non-nil return would stop later handlers from seeing the event."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf (setq-local agent--session-state 'busy))
+          (should-not (agent-claude--handle-session-state
+                       (list :type 'notification :buffer-name (buffer-name buf))))
+          (should (eq (buffer-local-value 'agent--session-state buf) 'busy))
+          (should-not (agent-claude--handle-session-state
+                       (list :type 'activity :buffer-name "*claude:~/gone/*"))))
+      (kill-buffer buf))))
+
 (ert-deftest agent-claude-test-permission-prompt-marks-session-blocked ()
   "Show sessions stopped at a permission dialog as waiting for the user.
 Claude reaches these from inside a turn, so without this the session

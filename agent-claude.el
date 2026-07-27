@@ -1184,6 +1184,20 @@ Control active\"."
                  agent-claude--remote-control-active-regexp
                  limit t))))))))
 
+(defun agent-claude--handle-session-state (message)
+  "Handle a turn-state event from the Claude Code CLI.
+MESSAGE is a plist with :type, :buffer-name, :json-data, and :args.
+
+Claude Code publishes no hook for the start of a turn, so turns the user
+did not type cannot be observed directly.  The `notify-emacs-state.sh'
+hook wrapper forwards ordinary lifecycle events in their place:
+`activity' when the session is demonstrably working, and `blocked' when
+it will not proceed without the user."
+  (when-let* ((event (memq (plist-get message :type) '(activity blocked)))
+              (buf (get-buffer (plist-get message :buffer-name))))
+    (agent-session-event buf (car event)))
+  nil)
+
 (defun agent-claude--handle-stop (message)
   "Handle a stop event from the Claude Code CLI.
 MESSAGE is a plist with :type, :buffer-name, :json-data, and
@@ -2451,6 +2465,7 @@ symmetrically and restores `claude-code-notification-function'."
   (setq claude-code-notification-function #'claude-code-default-notification)
   (add-hook 'claude-code-event-hook #'agent-claude--handle-notification)
   (add-hook 'claude-code-event-hook #'agent-claude--handle-stop)
+  (add-hook 'claude-code-event-hook #'agent-claude--handle-session-state)
   (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
   (dolist (fn agent-claude--start-hook-functions)
     (add-hook 'claude-code-start-hook fn))
@@ -2491,6 +2506,7 @@ symmetrically and restores `claude-code-notification-function'."
         agent-claude--saved-notification-function)
   (remove-hook 'claude-code-event-hook #'agent-claude--handle-notification)
   (remove-hook 'claude-code-event-hook #'agent-claude--handle-stop)
+  (remove-hook 'claude-code-event-hook #'agent-claude--handle-session-state)
   (unless (bound-and-true-p agent-codex-mode)
     (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer)
     (agent-scroll-keys-global-mode -1))
