@@ -85,6 +85,50 @@
                            "project: permission request pending"))))
       (kill-buffer buf))))
 
+(ert-deftest agent-claude-test-permission-prompt-marks-session-blocked ()
+  "Show sessions stopped at a permission dialog as waiting for the user.
+Claude reaches these from inside a turn, so without this the session
+reads as busy while it is in fact blocked on an answer."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude-notify) #'ignore))
+          (with-current-buffer buf (setq-local agent--session-state 'busy))
+          (agent-claude--handle-notification
+           (list :type 'notification
+                 :buffer-name (buffer-name buf)
+                 :json-data "{\"notification_type\":\"permission_prompt\"}"))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-elicitation-dialog-marks-session-blocked ()
+  "Show sessions stopped at an MCP input dialog as waiting for the user."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude-notify) #'ignore))
+          (with-current-buffer buf (setq-local agent--session-state 'busy))
+          (agent-claude--handle-notification
+           (list :type 'notification
+                 :buffer-name (buffer-name buf)
+                 :json-data "{\"notification_type\":\"elicitation_dialog\"}"))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-blocked-event-does-not-alert-ready ()
+  "Do not fire a ready alert for `blocked' events.
+The backend has already alerted about the dialog, so a second
+notification would double-report the same interruption."
+  (with-temp-buffer
+    (let ((buf (current-buffer))
+          notified)
+      (cl-letf (((symbol-function 'agent--session-notify-ready)
+                 (lambda (&rest _) (setq notified t))))
+        (agent-session-event buf 'blocked)
+        (should (eq (buffer-local-value 'agent--session-state buf)
+                    'awaiting-input))
+        (should-not notified)))))
+
 (ert-deftest agent-claude-test-note-submission-emits-submit-event ()
   "Return Claude sessions to busy when a prompt is sent."
   (with-temp-buffer

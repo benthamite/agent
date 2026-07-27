@@ -1132,8 +1132,11 @@ configured alert style."
 
 (defun agent-session-event (buffer event)
   "Apply session EVENT to BUFFER's state machine.
-EVENT is one of the symbols `stop', `idle-prompt', `submit', and
-`exit-request'.  This function is the single owner of
+EVENT is one of the symbols `stop', `idle-prompt', `blocked',
+`submit', and `exit-request'.  A `blocked' event marks the session as
+waiting on the user without firing a ready alert, for cases where the
+backend has already alerted, such as a permission or input dialog.
+This function is the single owner of
 `agent--session-state'; backends translate raw CLI events into
 calls to it and never set session state directly.  A `submit'
 event delivered while BUFFER is already busy is ignored, because
@@ -1141,7 +1144,7 @@ backend submission hooks can fire multiple times per submission
 and on submissions that start no turn."
   (when (buffer-live-p buffer)
     (pcase event
-      ((or 'stop 'idle-prompt)
+      ((or 'stop 'idle-prompt 'blocked)
        (agent--session-event-awaiting-input buffer event))
       ('submit
        (unless (eq (buffer-local-value 'agent--session-state buffer) 'busy)

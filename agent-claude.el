@@ -1126,7 +1126,12 @@ moves the installation into a minor mode."
   "Handle a notification event from the Claude Code CLI.
 MESSAGE is a plist with :type, :buffer-name, :json-data, and
 :args.  Translates idle_prompt into a session event and fires OS
-alerts for permission_prompt and elicitation_dialog notifications."
+alerts for permission_prompt and elicitation_dialog notifications.
+
+Permission and elicitation dialogs also mark the session as blocked on
+the user.  Claude reaches them from inside a turn, with a tool call
+still in flight, so nothing else reports them as waiting even though
+they proceed only once the user answers."
   (when (eq (plist-get message :type) 'notification)
     (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
       (let ((name (agent--buffer-session-name buf))
@@ -1137,10 +1142,12 @@ alerts for permission_prompt and elicitation_dialog notifications."
           ("idle_prompt"
            (agent-session-event buf 'idle-prompt))
           ("permission_prompt"
+           (agent-session-event buf 'blocked)
            (agent-claude-notify
             (format "%s needs approval" label)
             (format "%s: permission request pending" name)))
           ("elicitation_dialog"
+           (agent-session-event buf 'blocked)
            (agent-claude-notify
             (format "%s needs input" label)
             (format "%s: waiting for your input" name)))
