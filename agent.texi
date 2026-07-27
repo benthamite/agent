@@ -92,6 +92,8 @@ The package is split into a small backend-agnostic core and focused modules:
 @tab Persisted Org prompt capture, keyed to the session it targets
 @item @samp{agent-slack.el}
 @tab Slack-message-to-project routing: classifies a Slack message with @samp{gptel} and starts a session in the matching project
+@item @samp{agent-forge.el}
+@tab Forge-notification-to-project routing: starts a session in the working tree of the repository the notification belongs to
 @item @samp{agent-snippet.el}
 @tab Yasnippet TAB expansion and snippet insertion in eat-based session buffers
 @item @samp{agent-claude.el}
@@ -314,6 +316,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-audit-project
 @findex agent-debug-backtrace
 @findex agent-act-on-slack-message
+@findex agent-act-on-forge-notification
 @findex agent-exit
 @findex agent-restart
 @findex agent-setup-kill-on-exit
@@ -349,6 +352,21 @@ the single source of truth for composing the local @samp{AGENTS.md} and @samp{CL
 instruction overlay, linking the canonical key and injecting private skills.
 The command is the Emacs equivalent of the shell @samp{newtask} helper, but it does
 not depend on the local @samp{main} worktree's current branch.
+
+The command @code{agent-act-on-forge-notification} is the Forge counterpart of
+@code{agent-act-on-slack-message}. Called on a notification in
+@code{forge-list-notifications}, it starts a session in the working tree of the
+repository that notification belongs to and inserts the issue or pull request
+URL into the prompt without submitting it. It also accepts the topic at point,
+so it works from a topic buffer or a Magit status buffer.
+
+Unlike Slack routing, it needs no language model and no project registry. A
+Slack message has to be classified to find its project, whereas a Forge
+notification already records its repository and the repository already records
+its working tree. The command signals an error when the repository has no local
+clone, or when the recorded path no longer exists: Forge does not update that
+path when a repository is renamed or moved, so a stale entry is an ordinary
+failure rather than an exceptional one.
 
 The commands @code{agent-handoff}, @code{agent-audit-project}, @code{agent-debug-backtrace}, @code{agent-act-on-slack-message}, @code{agent-exit}, and @code{agent-restart} resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (@code{agent-claude-handoff}, @code{agent-codex-restart}, and so on) remain available as obsolete aliases.
 

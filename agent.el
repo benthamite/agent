@@ -43,6 +43,7 @@
 (autoload 'agent-capture-prompt "agent-capture" nil t)
 (autoload 'agent-insert-captured-prompt "agent-capture" nil t)
 (autoload 'agent-act-on-slack-message "agent-slack" nil t)
+(autoload 'agent-act-on-forge-notification "agent-forge" nil t)
 (autoload 'agent-setup-snippet-keys "agent-snippet" nil t)
 
 ;;;; Custom group

@@ -27,6 +27,7 @@ The package is split into a small backend-agnostic core and focused modules:
 | =agent-account.el=   | Multi-account support shared by all backends: selection, persistence, per-account config homes, symlinked shared state                                                                                                      |
 | =agent-capture.el=   | Persisted Org prompt capture, keyed to the session it targets                                                                                                                                                               |
 | =agent-slack.el=     | Slack-message-to-project routing: classifies a Slack message with =gptel= and starts a session in the matching project                                                                                                      |
+| =agent-forge.el=     | Forge-notification-to-project routing: starts a session in the working tree of the repository the notification belongs to                                                                                                   |
 | =agent-snippet.el=   | Yasnippet TAB expansion and snippet insertion in eat-based session buffers                                                                                                                                                  |
 | =agent-claude.el=    | Claude Code backend: integrates =claude-code.el= with status and usage polling, branch navigation, batch TODO processing, hook setup, and ~agent-claude-mode~                                                               |
 | =agent-claude-cli.el= | Quarantined undocumented Claude CLI conventions: Keychain credential naming, the usage API endpoint, the =~/.claude/projects/= directory encoding, transcript JSONL parsing, and the =.claude.json= merge engine            |
@@ -247,6 +248,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 #+findex: agent-audit-project
 #+findex: agent-debug-backtrace
 #+findex: agent-act-on-slack-message
+#+findex: agent-act-on-forge-notification
 #+findex: agent-exit
 #+findex: agent-restart
 #+findex: agent-setup-kill-on-exit
@@ -282,6 +284,21 @@ the single source of truth for composing the local =AGENTS.md= and =CLAUDE.md=
 instruction overlay, linking the canonical key and injecting private skills.
 The command is the Emacs equivalent of the shell =newtask= helper, but it does
 not depend on the local =main= worktree's current branch.
+
+The command ~agent-act-on-forge-notification~ is the Forge counterpart of
+~agent-act-on-slack-message~. Called on a notification in
+~forge-list-notifications~, it starts a session in the working tree of the
+repository that notification belongs to and inserts the issue or pull request
+URL into the prompt without submitting it. It also accepts the topic at point,
+so it works from a topic buffer or a Magit status buffer.
+
+Unlike Slack routing, it needs no language model and no project registry. A
+Slack message has to be classified to find its project, whereas a Forge
+notification already records its repository and the repository already records
+its working tree. The command signals an error when the repository has no local
+clone, or when the recorded path no longer exists: Forge does not update that
+path when a repository is renamed or moved, so a stale entry is an ordinary
+failure rather than an exceptional one.
 
 The commands ~agent-handoff~, ~agent-audit-project~, ~agent-debug-backtrace~, ~agent-act-on-slack-message~, ~agent-exit~, and ~agent-restart~ resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (~agent-claude-handoff~, ~agent-codex-restart~, and so on) remain available as obsolete aliases.
 
