@@ -97,9 +97,10 @@ treated as eligible."
   :group 'agent)
 
 (defcustom agent-before-exit-timeout 600
-  "Seconds before an unfinished before-exit skill chain is abandoned.
-When a session's chain has run this long without reaching its
-exit, the watchdog resets the chain state, warns, and leaves the
+  "Seconds before an unfinished before-exit skill is abandoned.
+The watchdog restarts whenever the chain advances to another
+skill.  If the current skill runs this long without finishing,
+the watchdog resets the chain state, warns, and leaves the
 session open."
   :type 'number
   :group 'agent)
@@ -1158,12 +1159,14 @@ and on submissions that start no turn."
 
 (defun agent--session-event-awaiting-input (buffer event)
   "Transition BUFFER to `awaiting-input' and run the ready side effects.
-EVENT is `stop' or `idle-prompt'.  The before-exit chain is
-advanced first; when it consumes the event, the ready alert,
-scrolling, and display-name refresh are suppressed.  The ready
-alert fires only for `idle-prompt' events."
+EVENT is `stop', `idle-prompt', or `blocked'.  Completion events
+advance the before-exit chain first; when it consumes the event,
+the ready alert, scrolling, and display-name refresh are
+suppressed.  A `blocked' event never advances the chain.  The
+ready alert fires only for `idle-prompt' events."
   (agent--session-set-state buffer 'awaiting-input)
-  (unless (agent--before-exit-transition buffer 'step)
+  (unless (and (memq event '(stop idle-prompt))
+               (agent--before-exit-transition buffer 'step))
     (when (eq event 'idle-prompt)
       (agent--session-notify-ready buffer))
     (agent--scroll-to-bottom buffer)
@@ -1598,8 +1601,17 @@ Return non-nil when the chain consumed the event."
       (when (agent--before-exit-ready-to-close-p backend buffer)
         (if (and (plist-get agent--before-exit :queue)
                  (agent--before-exit-submit-next buffer))
-            t
+            (progn
+              (agent--before-exit-restart-watchdog buffer)
+              t)
           (agent--before-exit-close buffer backend))))))
+
+(defun agent--before-exit-restart-watchdog (buffer)
+  "Restart BUFFER's watchdog after its before-exit chain advances."
+  (agent--before-exit-cancel-watchdog)
+  (setq agent--before-exit
+        (plist-put agent--before-exit :timer
+                   (agent--before-exit-start-watchdog buffer))))
 
 (defun agent--before-exit-abort (buffer)
   "Abandon BUFFER's before-exit chain, leaving the session open."

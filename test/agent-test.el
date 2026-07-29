@@ -1025,6 +1025,51 @@ observation."
           (should exited)
           (should (eq (plist-get agent--before-exit :state) 'closing)))))))
 
+(ert-deftest agent-test-before-exit-progress-renews-timeout-and-kills-buffer ()
+  "Give each progressing skill a full timeout before killing the buffer."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names '("first" "second"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        (agent-before-exit-timeout 600)
+        canceled
+        timers
+        (timer-count 0))
+    (let ((buf (generate-new-buffer " *agent-progressing-exit*")))
+      (unwind-protect
+          (progn
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))
+              :skill-command-prefix "/"
+              :submit (lambda (command &optional _buffer)
+                        (when (equal command "/exit")
+                          (kill-buffer buf)))))
+            (cl-letf (((symbol-function 'run-at-time)
+                       (lambda (time _repeat function &rest args)
+                         (if (zerop time)
+                             (apply function args)
+                           (let ((timer (list 'watchdog
+                                              (cl-incf timer-count))))
+                             (push (list timer function args) timers)
+                             timer))))
+                      ((symbol-function 'cancel-timer)
+                       (lambda (timer) (push timer canceled))))
+              (with-current-buffer buf
+                (should-not (agent-run-skill-before-exit 'one buf)))
+              (let* ((state (buffer-local-value 'agent--before-exit buf))
+                     (first-watchdog (plist-get state :timer)))
+                (should (agent--before-exit-transition buf 'step))
+                (unless (member first-watchdog canceled)
+                  (let ((timer (cl-find first-watchdog timers
+                                        :key #'car :test #'equal)))
+                    (apply (nth 1 timer) (nth 2 timer))))
+                (agent--before-exit-transition buf 'step)
+                (should-not (buffer-live-p buf)))))
+        (when (buffer-live-p buf)
+          (kill-buffer buf))))))
+
 (ert-deftest agent-test-before-exit-veto-defers-exactly-one-stop ()
   "Defer chain advance while the backend vetoes, then proceed."
   (let ((agent-backends nil)
@@ -1331,6 +1376,28 @@ observation."
           (should-not (agent--before-exit-transition buf 'step)))
         (should-not ran)
         (should (eq (plist-get agent--before-exit :state) 'running))))))
+
+(ert-deftest agent-test-blocked-event-does-not-advance-before-exit-chain ()
+  "Mark the session blocked without treating the event as skill completion."
+  (let ((agent-backends nil)
+        submitted)
+    (with-temp-buffer
+      (let ((buf (current-buffer))
+            (queue '("second")))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
+          :submit (lambda (command &optional _buffer)
+                    (push command submitted))))
+        (setq-local agent--before-exit
+                    (list :queue queue :state 'running :timer nil))
+        (agent-session-event buf 'blocked)
+        (should (eq agent--session-state 'awaiting-input))
+        (should (equal (plist-get agent--before-exit :queue) queue))
+        (should (eq (plist-get agent--before-exit :state) 'running))
+        (should-not submitted)))))
 
 (ert-deftest agent-test-before-exit-step-advances-to-next-skill ()
   "Submit the next queued skill instead of exiting while the chain has more."
