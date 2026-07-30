@@ -515,11 +515,15 @@ The :type field is a string from the hook wrapper (e.g. \"Stop\").
 Codex's Stop fires when the CLI is back at its prompt, so it is
 translated into an `idle-prompt' session event.  PermissionRequest
 fires while the CLI waits at an approval prompt mid-turn, so it only
-raises an attention alert and leaves the session state untouched."
+raises an attention alert and leaves the session state untouched.
+Every handled event also records the native session id reported by
+`codex-session-identity' through `agent--note-session-id'."
   (let ((hook-type (plist-get message :type)))
     (when (member hook-type
                   '("Stop" "Notification" "PermissionRequest" "SessionStart"))
       (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
+        (agent--note-session-id
+         buf (plist-get (codex-session-identity buf) :session-id))
         (pcase hook-type
           ("Stop"
            (agent-session-event buf 'idle-prompt))

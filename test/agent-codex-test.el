@@ -1049,6 +1049,27 @@ so it must not be read as waiting."
             (should (eq (agent-session buffer) session))))
       (kill-buffer buffer))))
 
+;;;; Session id recording
+
+(ert-deftest agent-codex-test-handle-notification-notes-session-id ()
+  "Record the native session id reported by a Codex hook event."
+  (let ((buf (generate-new-buffer "*codex-test-session-id*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (agent--set-session
+             buf (agent-session-create :backend 'codex
+                                       :directory "~/project/")))
+          (cl-letf (((symbol-function 'codex-session-identity)
+                     (lambda (&optional _buffer)
+                       '(:session-id "codex-sid-1")))
+                    ((symbol-function 'agent-session-event) #'ignore))
+            (agent-codex--handle-notification
+             (list :type "SessionStart" :buffer-name (buffer-name buf)))
+            (should (equal (agent-session-id (agent-session buf))
+                           "codex-sid-1"))))
+      (kill-buffer buf))))
+
 ;;;; Minor mode
 
 (ert-deftest agent-codex-test-snippet-start-hook-function-is-autoloaded ()

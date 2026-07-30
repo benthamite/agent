@@ -1029,6 +1029,19 @@ notification would double-report the same interruption."
                        "~/repo/claude-capture-session-test/"))
         (should (equal (agent-session-instance session) "default"))))))
 
+;;;; Session id recording
+
+(ert-deftest agent-claude-test-read-status-notes-session-id ()
+  "Record the native session id from the status poll on the session struct."
+  (with-temp-buffer
+    (agent--set-session (current-buffer)
+                        (agent-session-create :backend 'claude-code
+                                              :directory "~/project/"))
+    (cl-letf (((symbol-function 'agent-claude--parse-status-file)
+               (lambda () '(:session_id "sid-1" :prompt_id "p1"))))
+      (agent-claude--read-status (cons nil nil) (current-buffer))
+      (should (equal (agent-session-id (agent-session)) "sid-1")))))
+
 ;;;; Parameterized session start
 
 (ert-deftest agent-claude-test-start-session-injects-parameters ()

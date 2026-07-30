@@ -719,7 +719,10 @@ Idempotent, so deferred installs after re-enables are safe."
 (defun agent-claude--read-status (timer-cell buffer)
   "Read and parse the status file for BUFFER.
 TIMER-CELL is a cons whose car is the timer that triggered this
-call; it is canceled automatically when BUFFER is no longer live."
+call; it is canceled automatically when BUFFER is no longer live.
+Each poll also records the reported native session id through
+`agent--note-session-id', so the session struct tracks branch
+switches as soon as the status line reports them."
   (if (not (buffer-live-p buffer))
       (progn
         (agent--report-leak "status timer" "poll timer outlived %s" buffer)
@@ -727,6 +730,7 @@ call; it is canceled automatically when BUFFER is no longer live."
     (with-current-buffer buffer
       (when-let* ((data (agent-claude--parse-status-file)))
         (agent-claude--detect-branch data)
+        (agent--note-session-id buffer (plist-get data :session_id))
         (agent-claude--detect-turn-start data buffer)
         (setq agent-claude--status-data data)
         (setq agent-claude--status-polled-at (float-time))))))
