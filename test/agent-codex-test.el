@@ -1070,6 +1070,26 @@ so it must not be read as waiting."
                            "codex-sid-1"))))
       (kill-buffer buf))))
 
+(ert-deftest agent-codex-test-note-submission-notes-session-id ()
+  "Record the native session id when a submission fires the hook.
+A fresh app-server session knows its thread id before any CLI hook
+event, so the submission hook must also record it."
+  (let ((buf (generate-new-buffer "*codex-test-submit-id*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (agent--set-session
+             buf (agent-session-create :backend 'codex
+                                       :directory "~/project/")))
+          (cl-letf (((symbol-function 'codex-session-identity)
+                     (lambda (&optional _buffer)
+                       '(:session-id "codex-sid-2")))
+                    ((symbol-function 'agent-session-event) #'ignore))
+            (agent-codex--note-submission buf)
+            (should (equal (agent-session-id (agent-session buf))
+                           "codex-sid-2"))))
+      (kill-buffer buf))))
+
 ;;;; Minor mode
 
 (ert-deftest agent-codex-test-snippet-start-hook-function-is-autoloaded ()

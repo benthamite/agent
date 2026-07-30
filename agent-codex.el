@@ -522,8 +522,7 @@ Every handled event also records the native session id reported by
     (when (member hook-type
                   '("Stop" "Notification" "PermissionRequest" "SessionStart"))
       (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
-        (agent--note-session-id
-         buf (plist-get (codex-session-identity buf) :session-id))
+        (agent-codex--note-session-id buf)
         (pcase hook-type
           ("Stop"
            (agent-session-event buf 'idle-prompt))
@@ -805,8 +804,17 @@ With prefix ARG, use Codex CLI's `--last' flag."
 
 (defun agent-codex--note-submission (buffer)
   "Emit a `submit' session event for Codex session BUFFER.
-Runs on `codex-command-submitted-hook' for every submission path."
+Runs on `codex-command-submitted-hook' for every submission path.
+Also records the native session id, because a fresh app-server session
+knows its thread id before any CLI hook event fires, and this hook is
+the earliest per-buffer signal after that point."
+  (agent-codex--note-session-id buffer)
   (agent-session-event buffer 'submit))
+
+(defun agent-codex--note-session-id (buffer)
+  "Record BUFFER's native Codex session id on its session struct."
+  (agent--note-session-id
+   buffer (plist-get (codex-session-identity buffer) :session-id)))
 
 ;;;;; Exit and kill on exit
 
