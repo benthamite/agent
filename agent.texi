@@ -128,6 +128,10 @@ The package depends on @samp{transient} for menus, @samp{consult} for completion
 @findex agent-session-buffer-name
 Every live session buffer carries a buffer-local @code{agent-session} struct, captured once when the session starts. Its slots are @code{backend} (the backend symbol), @code{account} (the account name, or nil for the default), @code{directory} (the abbreviated project directory), @code{instance} (the instance name, or nil), and @code{id} (the CLI session id, or nil until known). The function @code{agent-session} returns the struct for a buffer, and @code{agent-session-buffer-name} derives the canonical buffer name from the identity. All orchestration code reads identity from this struct; nothing parses buffer names.
 
+@findex agent-session-buffers
+@vindex agent-session-id-functions
+The @code{id} slot holds the backend's native session id and is maintained for the whole session lifetime: a non-fork resume seeds it in @code{agent-start-session}, the Claude backend records the @code{session_id} reported by every status poll (so a branch switch, which changes the id, updates it), and the Codex backend records the id @code{codex-session-identity} reports on every CLI hook event. Whenever the recorded id changes, the abnormal hook @code{agent-session-id-functions} runs with the session buffer, so optional integrations — such as the Agent Log bridge — can observe identity without reading private variables. The public surface for such integrations is @code{agent-session}, the @code{agent-session-id} accessor, @code{agent-session-buffers} (all live session buffers across backends), and @code{agent-session-display-state}.
+
 @node Session state machine
 @section Session state machine
 

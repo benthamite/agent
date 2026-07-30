@@ -1648,6 +1648,76 @@ observation."
                                :directory "~/repo/a/"))
         (should (equal (agent--session-group-key buf) "struct-account"))))))
 
+;;;; Session id recording
+
+(ert-deftest agent-test-note-session-id-records-and-fires-hook-once ()
+  "Record a new id on the struct and fire the hook exactly once."
+  (with-temp-buffer
+    (agent--set-session (current-buffer)
+                        (agent-session-create :backend 'claude-code
+                                              :directory "~/project/"))
+    (let* ((fired 0)
+           (agent-session-id-functions
+            (list (lambda (_buffer) (cl-incf fired)))))
+      (agent--note-session-id (current-buffer) "abc-123")
+      (agent--note-session-id (current-buffer) "abc-123")
+      (should (equal (agent-session-id (agent-session)) "abc-123"))
+      (should (= fired 1)))))
+
+(ert-deftest agent-test-note-session-id-updates-on-change ()
+  "Record a changed id, as on a Claude branch switch, and re-fire the hook."
+  (with-temp-buffer
+    (agent--set-session (current-buffer)
+                        (agent-session-create :backend 'claude-code
+                                              :directory "~/project/"))
+    (let* ((fired 0)
+           (agent-session-id-functions
+            (list (lambda (_buffer) (cl-incf fired)))))
+      (agent--note-session-id (current-buffer) "abc-123")
+      (agent--note-session-id (current-buffer) "def-456")
+      (should (equal (agent-session-id (agent-session)) "def-456"))
+      (should (= fired 2)))))
+
+(ert-deftest agent-test-note-session-id-ignores-nil-and-empty ()
+  "Ignore nil and empty ids."
+  (with-temp-buffer
+    (agent--set-session (current-buffer)
+                        (agent-session-create :backend 'claude-code
+                                              :directory "~/project/"))
+    (agent--note-session-id (current-buffer) nil)
+    (agent--note-session-id (current-buffer) "")
+    (should (null (agent-session-id (agent-session))))))
+
+(ert-deftest agent-test-start-session-seeds-resume-id ()
+  "Seed the session id on a non-fork resume and leave it nil on a fork."
+  (let (started
+        (agent-backends nil))
+    (cl-letf (((symbol-function 'agent-account-resolve) (lambda (&rest _) nil))
+              ((symbol-function 'agent-account-sync) #'ignore))
+      (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :start-session (lambda (session &rest _)
+                               (setq started session)
+                               (current-buffer))))
+      (agent-start-session (agent-session-create :backend 'one)
+                           :resume-id "res-1")
+      (should (equal (agent-session-id started) "res-1"))
+      (agent-start-session (agent-session-create :backend 'one)
+                           :resume-id "res-2" :fork t)
+      (should (null (agent-session-id started))))))
+
+(ert-deftest agent-test-session-buffers-returns-backend-buffers ()
+  "Return each backend's live buffers from `agent-session-buffers'."
+  (with-temp-buffer
+    (let ((buf (current-buffer))
+          (agent-backends nil))
+      (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :find-all-buffers (lambda () (list buf))))
+      (should (equal (agent-session-buffers) (list buf))))))
+
 ;;;; Backend struct registry
 
 (ert-deftest agent-test-register-backend-rejects-unknown-keyword ()

@@ -319,13 +319,16 @@ from `agent-account-resolve' so the recorded identity always matches
 the environment the backend spawns with (still nil when the backend has
 no accounts configured).  INITIAL-PROMPT is submitted as the first
 user message.  RESUME-ID resumes that session id instead of starting
-fresh.  Remaining OPTIONS are passed through to the backend, which may
-support extras such as `:fork' (Claude Code) or `:terminal-backend'
-\(Codex).  When SESSION carries an account, defensively sync its config
-home with `agent-account-sync' and bind `agent-account--starting'
-around the backend call so `process-environment' hooks see the account
-at spawn time.  Return the new session buffer."
-  (ignore initial-prompt resume-id)
+fresh; a non-fork RESUME-ID also seeds the session's `id' slot, because
+that identity is already known, while a fork acquires a fresh id that
+only the backend can report.  Remaining OPTIONS are passed through to
+the backend, which may support extras such as `:fork' (Claude Code) or
+`:terminal-backend' \(Codex).  When SESSION carries an account,
+defensively sync its config home with `agent-account-sync' and bind
+`agent-account--starting' around the backend call so
+`process-environment' hooks see the account at spawn time.  Return the
+new session buffer."
+  (ignore initial-prompt)
   (let* ((backend (agent-session-backend session))
          (account (or (agent-session-account session)
                       (setf (agent-session-account session)
@@ -335,6 +338,8 @@ at spawn time.  Return the new session buffer."
     (unless start
       (user-error "Backend `%s' does not support parameterized session start"
                   backend))
+    (when (and resume-id (not (plist-get options :fork)))
+      (setf (agent-session-id session) resume-id))
     (when account
       (agent-account-sync backend account))
     (let ((agent-account--starting (and account (cons backend account))))
@@ -443,6 +448,33 @@ session releases its resources exactly once."
     (setq agent--backend (agent-session-backend session)))
   (agent--install-session-teardown buffer)
   session)
+
+(defcustom agent-session-id-functions nil
+  "Abnormal hook run when a live session's native id is recorded or changes.
+Each function is called with the session buffer, after the `id' slot of
+the buffer's `agent-session' struct has been updated.  Read the new
+value with (agent-session-id (agent-session BUFFER))."
+  :type 'hook
+  :group 'agent)
+
+(defun agent--note-session-id (buffer id)
+  "Record ID as the native session id of the session in BUFFER.
+Do nothing unless BUFFER is live, belongs to a session, and ID is a
+non-empty string that differs from the recorded id.  Run
+`agent-session-id-functions' with BUFFER after recording, so optional
+integrations can observe identity changes without reading private
+variables."
+  (when (and (buffer-live-p buffer)
+             (stringp id)
+             (not (string-empty-p id)))
+    (when-let* ((session (agent-session buffer)))
+      (unless (equal (agent-session-id session) id)
+        (setf (agent-session-id session) id)
+        (run-hook-with-args 'agent-session-id-functions buffer)))))
+
+(defun agent-session-buffers ()
+  "Return all live AI session buffers across registered backends."
+  (agent--find-all-buffers))
 
 ;;;; Customization
 
