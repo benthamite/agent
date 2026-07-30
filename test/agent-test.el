@@ -1707,6 +1707,16 @@ observation."
                            :resume-id "res-2" :fork t)
       (should (null (agent-session-id started))))))
 
+(ert-deftest agent-test-history-errors-without-agent-log ()
+  "Signal a clear `user-error' when the agent-log package is missing."
+  (let ((real-require (symbol-function 'require)))
+    (cl-letf (((symbol-function 'require)
+               (lambda (feature &optional filename noerror)
+                 (if (eq feature 'agent-log)
+                     nil
+                   (funcall real-require feature filename noerror)))))
+      (should-error (agent-history) :type 'user-error))))
+
 (ert-deftest agent-test-session-buffers-returns-backend-buffers ()
   "Return each backend's live buffers from `agent-session-buffers'."
   (with-temp-buffer

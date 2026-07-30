@@ -201,7 +201,6 @@ ended in that window.")
 (declare-function org-entry-is-done-p "org" ())
 (declare-function org-todo "org" (&optional arg))
 (declare-function outline-next-heading "outline" ())
-(declare-function agent-log-menu "agent-log" ())
 (declare-function eat-self-input "eat" (n &optional e))
 (declare-function eat-term-display-cursor "eat" (terminal))
 (declare-function eat-term-send-string "eat" (terminal string))
@@ -2449,20 +2448,12 @@ Signals an error if the status file is missing or incomplete."
   :backend 'claude-code
   :description "claude account")
 
-(defun agent-claude-agent-log-menu ()
-  "Open the optional `agent-log' menu."
-  (interactive)
-  (unless (require 'agent-log nil t)
-    (user-error "Package `agent-log' is required for log browsing"))
-  (call-interactively #'agent-log-menu))
-
 (defun agent-claude--menu-suffixes ()
   "Return Claude Code suffix specs for the unified agent menu."
   '(("B" "switch branch" agent-claude-switch-branch)
     ("N" "new branch" agent-claude-create-branch)
     ("b" "batch todos" agent-claude-batch-todos)
     ("t" "send todo at point" agent-claude-send-todo-at-point)
-    ("l" "logs" agent-claude-agent-log-menu)
     ("u" "start status polling" agent-claude-start-status-polling)
     ("U" "stop status polling" agent-claude-stop-status-polling)
     ("-c" agent-claude--infix-account)

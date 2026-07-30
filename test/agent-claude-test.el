@@ -598,12 +598,6 @@ notification would double-report the same interruption."
                   :retrieved))
       (should-not observed))))
 
-;;;; Transient menu
-
-(ert-deftest agent-claude-test-agent-log-wrapper-is-command ()
-  "Expose log browsing as a command without requiring `agent-log'."
-  (should (commandp 'agent-claude-agent-log-menu)))
-
 ;;;; Display names
 
 (ert-deftest agent-claude-test-display-name-adds-branch-suffix ()

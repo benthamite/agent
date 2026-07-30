@@ -682,6 +682,7 @@ Only `agent-session-event' may set this variable.")
 (declare-function elpaca-get "elpaca")
 (declare-function elpaca-source-dir "elpaca")
 (declare-function find-library-name "find-func")
+(declare-function agent-log-menu "agent-log" ())
 (declare-function agent-capture-confirm-no-pending "agent-capture"
                   (backend buffer action))
 
@@ -2660,6 +2661,17 @@ selected account."
 
 ;;;; Transient menu
 
+;;;###autoload
+(defun agent-history ()
+  "Browse and act on historical sessions with the optional Agent Log package.
+Delegate to `agent-log-menu'.  Loading `agent' never requires
+`agent-log'; this command loads it on demand and signals a clear error
+when it is not installed."
+  (interactive)
+  (unless (require 'agent-log nil t)
+    (user-error "Package `agent-log' is required for history browsing"))
+  (call-interactively #'agent-log-menu))
+
 ;;;###autoload (autoload 'agent-menu "agent" nil t)
 (transient-define-prefix agent-menu ()
   "Dispatch AI session commands."
@@ -2669,6 +2681,7 @@ selected account."
     ("h" "handoff" agent-handoff)
     ("x" "exit session" agent-exit)
     ("r" "restart" agent-restart)
+    ("l" "history" agent-history)
     ""
     "Buffer"
     ("K" "setup kill on exit" agent-setup-kill-on-exit)

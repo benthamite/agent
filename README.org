@@ -255,13 +255,17 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 #+findex: agent-act-on-forge-notification
 #+findex: agent-exit
 #+findex: agent-restart
+#+findex: agent-history
 #+findex: agent-setup-kill-on-exit
 #+findex: agent-toggle-alert
 #+findex: agent-fix-rendering
 #+findex: agent-disable-scrollback-truncation
 #+findex: agent-setup-scroll-keys
 #+findex: agent-snippet-tab
-The command ~agent-menu~ opens the unified transient menu. It includes shared entries for session switching, waiting-session jumps, handoff, restart, exit, skill execution, Trajectory CR task worktree creation, project audit, backtrace debugging, Slack-message action routing, Forge-notification action routing, alert toggles, terminal maintenance, and a separate Prompts section for prompt capture and captured prompt insertion. Backend modules append their own suffixes to the same menu when loaded.
+The command ~agent-menu~ opens the unified transient menu. It includes shared entries for session switching, waiting-session jumps, handoff, restart, exit, history browsing, skill execution, Trajectory CR task worktree creation, project audit, backtrace debugging, Slack-message action routing, Forge-notification action routing, alert toggles, terminal maintenance, and a separate Prompts section for prompt capture and captured prompt insertion. Backend modules append their own suffixes to the same menu when loaded.
+
+#+findex: agent-history
+The command ~agent-history~, bound to =l= in the Sessions column, opens the Agent Log menu for browsing, opening, searching, and resuming historical sessions across backends. Agent Log is an optional package: loading =agent= never requires it, ~agent-history~ loads it on demand, and invoking the command without Agent Log installed signals a clear error. Neither ~agent-menu~ nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
 
 In EAT-backed Claude and Codex session buffers, ~agent-setup-scroll-keys~ makes PageUp and PageDown send terminal mouse-wheel events, matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window.
 
@@ -480,7 +484,7 @@ The Claude and Codex status helpers are intended for modeline integrations such 
 :END:
 
 #+findex: agent-menu
-Backend modules extend ~agent-menu~ through ~transient-append-suffix~ after the core menu is available, first removing their own existing suffixes so reloading does not duplicate or stale-position those entries. The base menu contains shared session, tool, alert, buffer, prompt, and option entries. The Claude module appends branch navigation, batch TODOs, TODO sending, log browsing, status polling, Claude account selection, and branch-kill warnings. The Codex module appends Codex resume/fork commands and Codex account selection. In the Options group, =-c= selects the Claude account and =-x= selects the Codex account so the two account selectors appear next to each other. Both account infixes share one implementation in =agent-account.el=, and both sync the selected account's config home as soon as the selection is made.
+Backend modules extend ~agent-menu~ through ~transient-append-suffix~ after the core menu is available, first removing their own existing suffixes so reloading does not duplicate or stale-position those entries. The base menu contains shared session, tool, alert, buffer, prompt, and option entries, including the shared ~agent-history~ delegation to the optional Agent Log package. The Claude module appends branch navigation, batch TODOs, TODO sending, status polling, Claude account selection, and branch-kill warnings. The Codex module appends Codex resume/fork commands and Codex account selection. In the Options group, =-c= selects the Claude account and =-x= selects the Codex account so the two account selectors appear next to each other. Both account infixes share one implementation in =agent-account.el=, and both sync the selected account's config home as soon as the selection is made.
 
 Boolean menu infixes use a shared transient class that toggles the bound variable each time it is invoked. The theme-sync infix additionally calls ~agent-sync-theme-now~ when enabling theme sync, so backend configuration files are updated immediately.
 
