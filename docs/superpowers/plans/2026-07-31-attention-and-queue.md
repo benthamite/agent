@@ -275,10 +275,12 @@ the implementer does not "fix" it back.
     `(:type EVENT :time FLOAT :source SYMBOL-or-nil :redundant BOOL
     :payload PLIST-or-nil)`.
   - The `error` event symbol.
-  - `agent--session-record-completion BUFFER PAYLOAD` — the single
-    correlation contract: ranks a turn-end report and records it in one
-    step.  Every at-most-once consumer reads its verdict through the
-    delivered `:redundant` flag rather than re-deriving it.
+  - `agent--session-record-completion BUFFER PAYLOAD &optional ABNORMAL`
+    — the single correlation contract: ranks a turn-end report and
+    records it in one step.  ABNORMAL marks an `error`, which declares
+    the next turn end rather than counting towards it.  Every
+    at-most-once consumer reads the verdict through the delivered
+    `:redundant` flag rather than re-deriving it.
   - `agent--before-exit-advance-deferred BUFFER` — the chain's
     submission *and* its close, both moved out of event delivery.
   - `agent--session-channel-turns`, `agent--session-completed-turns`,
@@ -616,6 +618,58 @@ same turn ending, so the second is redundant."
                     '(stop . (:source claude-stop-hook)))
                    '(t)))))
 
+(ert-deftest agent-test-session-event/error-after-normal-turns-is-terminal ()
+  "A failure channel that has missed every good turn still ends this one.
+`StopFailure' speaks only when a turn fails, so after two ordinary turns
+its own tally is zero.  Counting it would leave the generation where it
+was, and the `Stop' for the failed turn would then be ranked canonical:
+it would overwrite the recorded reason, advance the before-exit chain,
+and reopen the queue on a session whose turn had just died."
+  (agent-test--with-event-buffer buf
+    (let ((steps 0))
+      (cl-letf (((symbol-function 'agent--before-exit-transition)
+                 (lambda (_buffer event)
+                   (when (eq event 'step) (cl-incf steps))
+                   nil))
+                ((symbol-function 'agent--scroll-to-bottom) #'ignore)
+                ((symbol-function 'agent--refresh-display-names-deferred)
+                 #'ignore)
+                ((symbol-function 'agent--session-notify-ready) #'ignore))
+        ;; Two ordinary turns first, so every dense channel is ahead of
+        ;; the failure channel.
+        (should (equal (agent-test--completion-flags
+                        buf
+                        '(stop . (:source claude-stop-hook))
+                        '(idle-prompt . (:source claude-idle-notification))
+                        '(submit)
+                        '(stop . (:source claude-stop-hook))
+                        '(idle-prompt . (:source claude-idle-notification)))
+                       '(nil t nil t)))
+        (setq steps 0)
+        ;; The third turn fails, and both of its ordinary reports follow.
+        (should (equal (agent-test--completion-flags
+                        buf
+                        '(submit)
+                        '(error . (:error "rate_limit"
+                                          :source claude-stop-failure-hook))
+                        '(stop . (:source claude-stop-hook))
+                        '(idle-prompt . (:source claude-idle-notification)))
+                       '(t t)))
+        ;; Neither of them advanced anything.
+        (should (= steps 0))
+        (should (eq (buffer-local-value 'agent--session-awaiting-reason buf)
+                    'error))
+        (should-not (agent-session-fresh-turn-evidence-p buf))
+        ;; A genuinely new turn still reports normally afterwards.
+        (should (equal (agent-test--completion-flags
+                        buf
+                        '(submit)
+                        '(activity)
+                        '(stop . (:source claude-stop-hook)))
+                       '(nil)))
+        (should (= steps 1))
+        (should (agent-session-fresh-turn-evidence-p buf))))))
+
 (ert-deftest agent-test-session-event/records-the-awaiting-reason ()
   "The reason a session is waiting is recorded and cleared by progress."
   (agent-test--with-event-buffer buf
@@ -874,9 +928,10 @@ the observer hook still sees it."
     ;; never DELIVERED as redundant: reporting a failure twice is
     ;; harmless, and missing one is not.
     (let* ((completion (memq event '(stop idle-prompt)))
-           (first-report (and (or completion (eq event 'error))
+           (abnormal (eq event 'error))
+           (first-report (and (or completion abnormal)
                               (agent--session-record-completion
-                               buffer payload)))
+                               buffer payload abnormal)))
            (redundant (and completion (not first-report))))
       (pcase event
         ((or 'stop 'idle-prompt 'blocked 'error)
@@ -896,12 +951,13 @@ the observer hook still sees it."
              :redundant redundant
              :payload payload)))))
 
-(defun agent--session-record-completion (buffer payload)
+(defun agent--session-record-completion (buffer payload &optional abnormal)
   "Record a turn-end report described by PAYLOAD in BUFFER, and rank it.
-Return non-nil when this is the FIRST report of a turn end -- what the
-rest of the code calls canonical.  Deciding and recording happen here
-together, in one place, so the delivered verdict and the state it was
-derived from can never disagree.
+ABNORMAL non-nil means the report is an `error' -- a turn that ended
+badly.  Return non-nil when this report is the FIRST account of a turn
+end -- what the rest of the code calls canonical.  Deciding and
+recording happen here together, in one place, so the delivered verdict
+and the state it was derived from can never disagree.
 
 This is the single correlation contract every at-most-once consumer
 depends on.  One finished turn can produce several completion events --
@@ -911,16 +967,18 @@ later, or the Codex app-server's `turn/completed' followed by the CLI
 reported must not advance the before-exit chain or resolve a queued
 prompt a second time.  In order:
 
-1. A completion carrying a turn id is canonical when that id differs
-   from the last one completed, and redundant when it repeats it.  Only
+1. A report carrying a turn id is canonical when that id differs from
+   the last one completed, and redundant when it repeats it.  Only
    Codex app-server supplies ids, and there they are authoritative.
-2. Otherwise, count.  Each channel keeps its own tally of the turn ends
+2. An ABNORMAL report DECLARES the next turn end rather than counting
+   towards it (see below).
+3. Otherwise, count.  Each channel keeps its own tally of the turn ends
    it has reported.  This report takes its channel's tally to N; the
-   completion is the first report of the Nth turn end -- canonical --
-   when N exceeds every other channel's tally, and a later report of a
-   turn end already counted otherwise.
+   report is the first account of the Nth turn end -- canonical -- when
+   N exceeds every other channel's tally, and a later account of a turn
+   end already recorded otherwise.
 
-Rule 2 rests on one property of the backends, and on nothing else:
+Rule 3 rests on one property of the backends, and on nothing else:
 **each channel reports each turn at most once, in order.**  Claude's
 `Stop' hook fires once per turn; its `idle_prompt' notification fires
 once per turn; the Codex app-server's `turn/completed' and the Codex
@@ -928,7 +986,30 @@ CLI's `Stop' hook likewise.  Two streams of turn-end reports therefore
 run in lockstep, and the Nth report on either stream describes the Nth
 turn.  Counting them separately says which turn a report describes
 without any shared mutable state to get out of step, without any clock,
-and without anything that a later event can reset."
+and without anything that a later event can reset.
+
+Rule 2 exists because that property does not hold for every channel.
+Claude's `StopFailure' hook is SPARSE: it speaks only when a turn ends
+badly, so its tally counts failures, not turns, and is behind by every
+turn that went well.  Counting it would rank its first report as an
+account of turn one however many turns had already finished -- and,
+worse, would leave the generation unchanged, so the ordinary `Stop' for
+that same failed turn would then be ranked canonical, overwrite the
+recorded reason, advance the before-exit chain, and reopen the queue on
+a session whose turn had just died.
+
+So an abnormal report declares instead: it is the end of the next turn,
+whichever channel says so, and its own channel is aligned to that
+generation so its following report is counted normally like any other.
+The ordinary `Stop' that follows a failure then lands on a generation
+already recorded and is correctly redundant.
+
+The one case this leaves open is two abnormal reports for the same turn
+from different channels, which would declare two generations and put
+the count one ahead.  No backend does that -- Claude's `StopFailure'
+and the Codex app-server's `systemError' never coexist in one
+session -- and the consequence would be under-reporting, which is the
+conservative direction."
   (with-current-buffer buffer
     (let* ((source (plist-get payload :source))
            (turn (plist-get payload :turn-id))
@@ -939,6 +1020,13 @@ and without anything that a later event can reset."
        ;; The channel is repeating the turn id it last reported.  Do not
        ;; count it: a repeat is not a further turn.
        ((and turn (equal turn agent--session-completed-turn-id)) nil)
+       (abnormal
+        (let ((n (1+ agent--session-completed-turns)))
+          (setf (alist-get source agent--session-channel-turns nil nil #'equal)
+                n)
+          (setq agent--session-completed-turns n)
+          (setq agent--session-completed-turn-id turn)
+          t))
        (t
         (let ((n (1+ seen)))
           (setf (alist-get source agent--session-channel-turns nil nil #'equal)
@@ -964,10 +1052,13 @@ earlier attempts got wrong:
   because the notification channel's first and second reports are still
   its first and second, whenever they arrive.
 
-**Where this is not reliable, and what happens then.**  The rule is
-exactly as good as the property it rests on.  A channel that reports a
-turn it should not, or fails to report one it should, puts its tally
-out of step with the others:
+**Where this is not reliable, and what happens then.**  Rule 3 is
+exactly as good as the property it rests on, and applies only to
+channels that have it.  A channel that speaks for a subset of turns by
+design is not counted at all -- that is what rule 2 is for, and the
+failure channel is the only such channel either backend has.  What
+remains is a channel that should report every turn but reports one too
+many or one too few:
 
 - A channel wired up twice -- the same hook command listed twice in
   `settings.json` -- reports one turn twice and so runs ahead, and its
@@ -4271,17 +4362,31 @@ item here would dispatch the next prompt while B is still running."
 
 (ert-deftest agent-queue-test-error/an-item-added-later-is-not-sent ()
   "A prompt queued after a failed turn is not dispatched by the poll.
-The error arrives while the queue is empty, so nothing is paused; the
-duplicate of that dead turn arrives next and must not be read as fresh
-evidence; only then is a prompt queued.  Without a positive fresh-turn
+The session has already completed an ordinary turn, so every dense
+channel is ahead of the sparse failure channel -- the case where naive
+counting would rank the failed turn's `Stop' as a new turn and reopen
+the gate.  The error arrives while the queue is empty, so nothing is
+paused; only then is a prompt queued.  Without a positive fresh-turn
 requirement the safety-net poll would submit it into the session that
 just failed."
   (agent-queue-test--with-session buffer
+    ;; An ordinary turn first.
+    (agent-session-event buffer 'submit)
+    (agent-session-event buffer 'stop '(:source claude-stop-hook))
+    (agent-session-event buffer 'idle-prompt
+                         '(:source claude-idle-notification))
+    (should (agent-session-fresh-turn-evidence-p buffer))
+    ;; The next turn fails, and its ordinary reports follow.
     (agent-session-event buffer 'submit)
     (agent-session-event buffer 'error
                          '(:error "rate_limit"
                                   :source claude-stop-failure-hook))
     (agent-session-event buffer 'stop '(:source claude-stop-hook))
+    (agent-session-event buffer 'idle-prompt
+                         '(:source claude-idle-notification))
+    (should (eq (buffer-local-value 'agent--session-awaiting-reason buffer)
+                'error))
+    (should-not (agent-session-fresh-turn-evidence-p buffer))
     (agent-queue-add buffer "please continue")
     (should-not (agent-queue--drain-ready-p buffer))
     (agent-queue--drain buffer)
@@ -7450,7 +7555,12 @@ in prose matching the manual's existing style:
   turn, in order — Claude's `Stop` hook once per turn, its `idle_prompt`
   notification once per turn — so the Nth event on either stream is
   about the Nth turn.  A completion is a new turn's end when it takes
-  its own channel past the highest count any channel has reached.  That
+  its own channel past the highest count any channel has reached.  A
+  report of a turn that *failed* is the exception, because the channel
+  that carries it speaks only about failures and so cannot be counted
+  against turns: it simply declares that this turn has ended, and the
+  ordinary `Stop` that follows a failure is recognised as describing
+  that same failed turn.  That
   holds however long a report is delayed and whatever happens in
   between, which is why no threshold and no "a new turn started" flag
   are used: a delayed duplicate and a very short turn cannot be told
