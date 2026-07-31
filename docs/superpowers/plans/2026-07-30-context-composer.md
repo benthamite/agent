@@ -10,10 +10,22 @@ once to an idle Claude Code or Codex session, per
 
 **Architecture:** A new `agent-context.el` module holds the item model,
 sources, safety layer, renderer, composer buffer, and dispatch pipeline.
-Core gains two optional backend slots (`:attach-file-reference`,
-`:attach-media`) with a `(TOKEN . UNDO)` + dry-run contract; each adapter
-registers them.  codex.el (sibling repo) gains a programmatic mention API
-with detach handles.
+Core gains five optional backend slots — pure token renderers
+(`:file-reference-token`, `:media-token`), effectful attachers returning
+undo closures (`:attach-file-reference`, `:attach-media`), and an
+authoritative `:ready-to-submit-p` probe — plus a `submit-failed` rollback
+event.  codex.el (sibling repo) gains a programmatic mention API with
+detach handles and a public turn-readiness predicate.
+
+**Plan revision 2** (after Codex review): pure/effectful slot split
+(replaces the DRY-RUN contract; Task 1 amends spec §8 accordingly), a
+final readiness gate so dispatch can never queue or steer, a commit
+boundary at `agent-submit` with isolated post-submit cleanup, core state
+rollback on synchronous submit failure, `/mention` compatibility and a
+mandatory codex rebuild, transport detection from
+`codex-terminal-backend` with no silent downgrade, complete deferred
+re-validation, spec-complete refresh/flycheck/rev/special-mode/transport-
+column coverage, and repaired or added tests throughout.
 
 **Tech Stack:** Emacs Lisp 30, `cl-defstruct`, `transient`, `project`,
 `url.el`, `shr`, ERT.
@@ -28,11 +40,21 @@ with detach handles.
 - Sizes are reported in bytes/characters only; never call them tokens.
 - Secret-path rejections name the path only; secret contents never appear
   in any message, warning, or preview.
-- Every dispatch failure path leaves the draft buffer intact and retryable
-  and runs collected undo closures.
-- Busy targets are refused; unknown state requires explicit confirmation.
-  No queue/steer/interrupt integration exists in this worktree; do not add
+- Every PRE-submit dispatch failure (including `quit`) leaves the draft
+  intact and retryable, runs every collected undo closure independently,
+  and rolls the target's session state back with `submit-failed`.  The
+  commit boundary is the successful return of `agent-submit`: after it,
+  no failure may restore the draft or run undos.
+- Busy targets are refused; unknown state requires explicit confirmation;
+  and immediately before attachment/submission the backend's
+  `:ready-to-submit-p` probe is consulted, treating pending turn starts,
+  queued input, and reasoning-held submissions as busy — dispatch must
+  never queue or steer through a backend side effect.  No
+  queue/steer/interrupt integration exists in this worktree; do not add
   one.
+- Transport support is decided from the buffer's actual configuration
+  (`codex-terminal-backend`), never by API-presence fallbacks; an
+  unsupported transport is an honest refusal, not a silent downgrade.
 - Defcustom defaults exactly as specified: `agent-context-max-files` 40,
   `agent-context-max-file-bytes` 131072, `agent-context-warn-bytes` 65536,
   `agent-context-max-bytes` 262144, `agent-context-url-timeout` 10,
@@ -46,53 +68,96 @@ Byte-compile with `make compile`.
 
 ---
 
-### Task 1: Core backend attachment slots
+### Task 1: Core contracts — attachment slots, readiness probe, submit rollback
 
 **Files:**
-- Modify: `agent.el` (the `agent-backend` defstruct, ~line 123)
+- Modify: `agent.el` (the `agent-backend` defstruct ~line 123;
+  `agent-session-event` ~line 1168)
+- Modify: `docs/superpowers/specs/2026-07-30-context-composer-design.md`
+  §8 (contract refinement, same commit, so the spec stays the source of
+  truth: pure token slots + effectful attach slots replace the
+  `(PATH BUFFER)`→`(TOKEN . UNDO)` single-function contract; add the
+  `:ready-to-submit-p` probe and the `submit-failed` rollback event)
 - Test: `test/agent-test.el`
 
 **Interfaces:**
-- Produces: `agent-backend` slots `attach-file-reference` and
-  `attach-media` with accessors `agent-backend-attach-file-reference`,
-  `agent-backend-attach-media`.  Contract (used by Tasks 9 and 11): each
-  slot holds a function `(PATH BUFFER &optional DRY-RUN)` returning
-  `(TOKEN . UNDO)`, where TOKEN is the exact string placed in the outgoing
-  message, and UNDO is nil or a zero-arg closure removing any out-of-band
-  attachment.  With DRY-RUN non-nil the function must be side-effect-free
-  and return `(TOKEN . nil)` with the same TOKEN.
+- Produces five optional `agent-backend` slots with accessors
+  `agent-backend-file-reference-token`, `agent-backend-media-token`,
+  `agent-backend-attach-file-reference`, `agent-backend-attach-media`,
+  `agent-backend-ready-to-submit-p`.  Contract (used by Tasks 8, 9, 11):
+  - `:file-reference-token` / `:media-token` — `(PATH BUFFER)` → TOKEN
+    string, **pure** (no side effects; safe for previews and size gates),
+    or nil when that transport is unsupported for BUFFER right now.
+  - `:attach-file-reference` / `:attach-media` — `(PATH BUFFER)` →
+    UNDO closure or nil; performs the out-of-band attachment whose text
+    representation the token slot already rendered.  A backend whose
+    token is the whole mechanism (Claude `@` mentions) registers no
+    attach function.
+  - `:ready-to-submit-p` — `(BUFFER)` → one of the symbols `ready`,
+    `busy`, `unknown`.  `busy` must cover every state in which a
+    submission would not start a fresh turn (active turn, pending
+    `turn/start`, queued input, reasoning-held submissions).
+- Produces the `submit-failed` session event: rolls the state set by a
+  `submit` event back to `awaiting-input` with **no** ready alert, no
+  before-exit-chain advancement, no scrolling — for callers whose backend
+  dispatch signaled synchronously after `submit` fired.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
-Add to `test/agent-test.el`, new section `;;;; Backend attachment slots`:
+Add to `test/agent-test.el`, new section `;;;; Backend attachment and readiness slots`:
 
 ```elisp
 (ert-deftest agent-test-register-backend-accepts-attachment-slots ()
-  "The registry accepts and exposes the two attachment slots."
+  "The registry accepts and exposes the attachment and readiness slots."
   (let ((agent-backends nil)
-        (ref (lambda (path _buffer &optional _dry-run)
-               (cons (format "@%s " path) nil)))
-        (media (lambda (path _buffer &optional _dry-run)
-                 (cons (format "(image %s)" path) nil))))
+        (token (lambda (path _buffer) (format "@%s " path)))
+        (attach (lambda (_path _buffer) (lambda () 'undone)))
+        (ready (lambda (_buffer) 'ready)))
     (agent-register-backend
      'stub
      :buffer-p #'ignore
      :find-all-buffers (lambda () nil)
      :start-session #'ignore
-     :attach-file-reference ref
-     :attach-media media)
+     :file-reference-token token
+     :media-token token
+     :attach-file-reference attach
+     :attach-media attach
+     :ready-to-submit-p ready)
     (let ((struct (agent-backend 'stub)))
-      (should (eq (agent-backend-attach-file-reference struct) ref))
-      (should (eq (agent-backend-attach-media struct) media))
-      (should (equal (funcall (agent-backend-attach-file-reference struct)
-                              "/tmp/x.el" nil t)
-                     '("@/tmp/x.el " . nil))))))
+      (should (eq (agent-backend-file-reference-token struct) token))
+      (should (eq (agent-backend-media-token struct) token))
+      (should (eq (agent-backend-attach-file-reference struct) attach))
+      (should (eq (agent-backend-attach-media struct) attach))
+      (should (eq (funcall (agent-backend-ready-to-submit-p struct) nil)
+                  'ready))
+      (should (equal (funcall (agent-backend-file-reference-token struct)
+                              "/tmp/x.el" nil)
+                     "@/tmp/x.el ")))))
+
+(ert-deftest agent-test-submit-failed-rolls-state-back-quietly ()
+  "`submit-failed' restores awaiting-input without ready side effects."
+  (let ((agent-backends nil)
+        (alerts 0))
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'agent--session-notify-ready)
+                 (lambda (&rest _) (cl-incf alerts))))
+        (agent-session-event (current-buffer) 'stop)
+        (agent-session-event (current-buffer) 'submit)
+        (should (eq (agent-session-display-state (current-buffer)) 'busy))
+        (agent-session-event (current-buffer) 'submit-failed)
+        (should (eq (agent-session-display-state (current-buffer))
+                    'waiting))
+        ;; No alert fired for the rollback (stop fires none either).
+        (should (= alerts 0))
+        ;; The rollback never advances a before-exit chain.
+        (should (null agent--before-exit))))))
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
 Run: `make test`
-Expected: FAIL with "unknown slot keyword `:attach-file-reference'".
+Expected: FAIL with "unknown slot keyword `:file-reference-token'" and
+"Unknown agent session event: submit-failed".
 
 - [ ] **Step 3: Implement**
 
@@ -100,31 +165,57 @@ In `agent.el`, extend the struct's send-slot line:
 
 ```elisp
   send-string send-return submit
-  attach-file-reference attach-media
+  file-reference-token media-token attach-file-reference attach-media
+  ready-to-submit-p
 ```
 
-and document the contract in the `agent-register-backend` docstring by
-appending:
+Append to the `agent-register-backend` docstring:
 
 ```
 Backends that can reference or attach files provide the optional
-`:attach-file-reference' and `:attach-media' keys: functions called
-with (PATH BUFFER &optional DRY-RUN) that return a cons (TOKEN . UNDO).
-TOKEN is the exact text a composed message embeds for PATH; UNDO is nil
-or a closure that removes any out-of-band attachment the call created.
-When DRY-RUN is non-nil the function must be free of side effects and
-return the same TOKEN with a nil UNDO.
+attachment keys.  `:file-reference-token' and `:media-token' are pure
+functions of (PATH BUFFER) returning the exact text a composed message
+embeds for PATH, or nil when that transport is unsupported for BUFFER;
+they must be free of side effects so previews and size checks can call
+them.  `:attach-file-reference' and `:attach-media' are functions of
+(PATH BUFFER) performing the matching out-of-band attachment and
+returning nil or an undo closure that removes it; backends whose token
+is the whole mechanism register no attach function.
+`:ready-to-submit-p' is a function of BUFFER returning one of the
+symbols `ready', `busy', and `unknown'; `busy' must cover every state
+in which a submission would not start a fresh turn.
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+In `agent-session-event`, add the event to the docstring list and the
+dispatch:
+
+```elisp
+      ('submit-failed
+       (agent--session-set-state buffer 'awaiting-input))
+```
+
+with this docstring addition:
+
+```
+A `submit-failed' event rolls back the state a `submit' event set when
+the backend dispatch then signaled synchronously: the session returns
+to `awaiting-input' with no ready alert, no before-exit-chain
+advancement, and no scrolling, because nothing new happened in the
+session itself.
+```
+
+Amend spec §8 in the same commit to describe the five-slot contract and
+the `submit-failed` event exactly as above.
+
+- [ ] **Step 4: Run tests to verify they pass**
 
 Run: `make test` — all tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add agent.el test/agent-test.el
-git commit -m "agent: add backend attachment slots"
+git add agent.el test/agent-test.el docs/superpowers/specs/2026-07-30-context-composer-design.md
+git commit -m "agent: add attachment, readiness, and rollback contracts"
 ```
 
 ---
@@ -277,8 +368,11 @@ other modules, `Package-Requires: ((emacs "30.0") (agent "0.1"))`):
 ;;;; Item and draft model
 
 (cl-defstruct (agent-context-item
-               (:constructor agent-context-item-create) (:copier nil))
-  "One piece of context in a composition."
+               (:constructor agent-context-item-create)
+               (:copier agent-context-item-copy))
+  "One piece of context in a composition.
+The copier exists so `agent-context--last' can retain deep copies that
+later drafts cannot mutate."
   id kind label provenance transport content size note)
 
 (cl-defstruct (agent-context-draft
@@ -396,23 +490,28 @@ items; non-image binaries are rejected."
      :transport 'inline :content content
      :size (agent-context--exact-size content))))
 
-(defun agent-context--mention-file-item (path)
-  "Return a deferred mention item for PATH."
+(defun agent-context--mention-file-item (path &optional root)
+  "Return a deferred mention item for PATH.
+ROOT, when non-nil, records the directory-expansion root so dispatch
+can re-verify that PATH's truename still lies under it."
   (agent-context-item-create
    :id (agent-context--next-id) :kind 'file
    :label (abbreviate-file-name path)
-   :provenance (list :path path)
+   :provenance (append (list :path path) (when root (list :root root)))
    :transport 'mention :content nil
    :size (agent-context--file-size path)))
 
-(defun agent-context--media-item (path &optional temp)
+(defun agent-context--media-item (path &optional temp root)
   "Return a media item for image PATH.
-TEMP non-nil marks PATH as a composer-owned temp file."
+TEMP non-nil marks PATH as a composer-owned temp file.  ROOT records
+the directory-expansion root, as in `agent-context--mention-file-item'."
   (agent-context--assert-safe-path path)
   (agent-context-item-create
    :id (agent-context--next-id) :kind 'image
    :label (abbreviate-file-name path)
-   :provenance (append (list :path path) (when temp (list :temp-file t)))
+   :provenance (append (list :path path)
+                       (when temp (list :temp-file t))
+                       (when root (list :root root)))
    :transport 'media :content nil
    :size (agent-context--file-size path)))
 
@@ -520,15 +619,30 @@ symlinks that escape the root, and reports what it skipped."
           (with-temp-file (expand-file-name ".env" root) (insert "K=v"))
           (with-temp-file (expand-file-name "blob.bin" root)
             (set-buffer-multibyte nil) (insert "x\0y"))
+          ;; Named to sort before f0-f2 so the limit hits f2, not the
+          ;; image (directory-files-recursively returns sorted paths).
+          (with-temp-file (expand-file-name "a-shot.png" root)
+            (insert "fake image"))
           (make-symbolic-link outside (expand-file-name "escape.txt" root))
-          (let* ((agent-context-max-files 2)
+          (let* ((agent-context-max-files 3)
                  (result (agent-context--directory-items root))
                  (items (car result))
                  (report (cdr result)))
-            (should (= (length items) 2))
-            (should (cl-every (lambda (i)
-                                (eq (agent-context-item-transport i) 'mention))
-                              items))
+            ;; Walk order: .env (secret), a-shot.png (media), blob.bin
+            ;; (binary), escape.txt (symlink), f0 f1 (mentions), f2
+            ;; (over the 3-item limit).
+            (should (= (length items) 3))
+            (should (= 1 (cl-count 'media items
+                                   :key #'agent-context-item-transport)))
+            (should (= 2 (cl-count 'mention items
+                                   :key #'agent-context-item-transport)))
+            ;; Every expansion item records the root for dispatch re-checks.
+            (should (cl-every
+                     (lambda (item)
+                       (equal (plist-get (agent-context-item-provenance item)
+                                         :root)
+                              (file-truename (file-name-as-directory root))))
+                     items))
             (should (string-match-p "1 secret" report))
             (should (string-match-p "1 binary" report))
             (should (string-match-p "1 symlink" report))
@@ -600,12 +714,15 @@ otherwise walk the tree, pruning `agent-context-exclude-regexps'."
                      agent-context-exclude-regexps))))))
 
 (defun agent-context--directory-items (dir)
-  "Expand DIR into mention file items.
+  "Expand DIR into mention file items and media items for images.
 Return (ITEMS . REPORT) where REPORT is a human-readable summary of
 skipped entries: secret paths, binaries, oversize files, symlinks that
-escape DIR, and entries over `agent-context-max-files'."
+escape DIR, and entries over `agent-context-max-files'.  Every produced
+item records DIR's truename under provenance key `:root' so dispatch
+can re-verify containment."
   (let* ((root (file-truename (file-name-as-directory dir)))
          (secret 0) (binary 0) (oversize 0) (symlink 0) (over 0)
+         (images 0)
          items)
     (dolist (path (agent-context--candidate-files root))
       (let ((path (expand-file-name path)))
@@ -614,22 +731,27 @@ escape DIR, and entries over `agent-context-max-files'."
           (cl-incf symlink))
          ((agent-context--secret-path-p path) (cl-incf secret))
          ((not (file-readable-p path)) (cl-incf binary))
-         ((agent-context--binary-file-p path) (cl-incf binary))
          ((> (or (file-attribute-size (file-attributes path)) 0)
              agent-context-max-file-bytes)
           (cl-incf oversize))
          ((>= (length items) agent-context-max-files) (cl-incf over))
-         (t (push (agent-context--mention-file-item path) items)))))
+         ((agent-context--image-file-p path)
+          ;; Recognized images are attachable media, not binary rejects.
+          (cl-incf images)
+          (push (agent-context--media-item path nil root) items))
+         ((agent-context--binary-file-p path) (cl-incf binary))
+         (t (push (agent-context--mention-file-item path root) items)))))
     (cons (nreverse items)
           (agent-context--expansion-report
-           (length items) secret binary oversize symlink over))))
+           (length items) images secret binary oversize symlink over))))
 
-(defun agent-context--expansion-report (added secret binary oversize
-                                              symlink over)
+(defun agent-context--expansion-report (added images secret binary
+                                              oversize symlink over)
   "Return the expansion summary string for the given counts."
   (string-join
    (delq nil
          (list (format "added %d" added)
+               (unless (zerop images) (format "%d image" images))
                (unless (zerop secret) (format "%d secret-path" secret))
                (unless (zerop binary) (format "%d binary" binary))
                (unless (zerop oversize) (format "%d oversize" oversize))
@@ -688,19 +810,24 @@ git commit -m "agent-context: add safety layer and directory expansion"
   "A diff item snapshots git output with repo provenance."
   (agent-context-test--with-git
       '((("diff") . "diff --git a/f b/f\n+new\n")
-        (("rev-parse" "--show-toplevel") . "/tmp/repo\n"))
+        (("rev-parse" "--show-toplevel") . "/tmp/repo\n")
+        (("rev-parse" "--short" "HEAD") . "abc1234\n"))
     (let ((item (agent-context--diff-item "/tmp/repo/")))
       (should (eq (agent-context-item-kind item) 'diff))
       (should (eq (agent-context-item-transport item) 'inline))
       (should (string-match-p "\\+new" (agent-context-item-content item)))
       (should (equal (plist-get (agent-context-item-provenance item) :repo)
-                     "/tmp/repo")))))
+                     "/tmp/repo"))
+      ;; Working and staged diffs record the revision they were taken at.
+      (should (equal (plist-get (agent-context-item-provenance item) :rev)
+                     "abc1234")))))
 
 (ert-deftest agent-context-test-empty-diff-notes-emptiness ()
   "An empty diff is added with an explicit note, not dropped."
   (agent-context-test--with-git
       '((("diff" "--cached") . "")
-        (("rev-parse" "--show-toplevel") . "/tmp/repo\n"))
+        (("rev-parse" "--show-toplevel") . "/tmp/repo\n")
+        (("rev-parse" "--short" "HEAD") . "abc1234\n"))
     (let ((item (agent-context--diff-item "/tmp/repo/" t)))
       (should (equal (agent-context-item-note item) "empty diff"))
       (should (string-match-p "staged" (agent-context-item-label item))))))
@@ -720,6 +847,21 @@ git commit -m "agent-context: add safety layer and directory expansion"
                                 (agent-context-item-content item)))
         (should (string-match-p ":error:"
                                 (agent-context-item-content item)))))))
+
+(ert-deftest agent-context-test-diagnostics-item-prefers-active-flycheck ()
+  "When flycheck is active in the buffer, its errors are used."
+  (with-temp-buffer
+    (rename-buffer "ctx-flycheck-test" t)
+    (setq-local flycheck-mode t)
+    (cl-letf (((symbol-function 'flycheck-error-line) (lambda (_) 7))
+              ((symbol-function 'flycheck-error-level) (lambda (_) 'warning))
+              ((symbol-function 'flycheck-error-message)
+               (lambda (_) "unused var")))
+      (defvar flycheck-current-errors)
+      (let ((flycheck-current-errors (list 'stub-error)))
+        (let ((item (agent-context--diagnostics-item (current-buffer))))
+          (should (string-match-p "7:warning: unused var"
+                                  (agent-context-item-content item))))))))
 
 (ert-deftest agent-context-test-buffer-content-item-detects-compilation ()
   "A compilation-derived buffer yields kind `compilation'."
@@ -753,13 +895,17 @@ Run: `make test` — FAIL, functions undefined.
 
 (defun agent-context--diff-item (dir &optional staged)
   "Return an inline snapshot item for DIR's diff.
-STAGED non-nil takes the index diff instead of the working tree."
+STAGED non-nil takes the index diff instead of the working tree.  The
+provenance records the repository toplevel and the current short HEAD
+revision, so a stale snapshot is attributable."
   (let* ((content (apply #'agent-context--git-output dir
                          (if staged '("diff" "--cached") '("diff"))))
          (label (if staged "staged diff" "working-tree diff")))
     (agent-context-item-create
      :id (agent-context--next-id) :kind 'diff :label label
      :provenance (list :repo (agent-context--git-toplevel dir)
+                       :rev (string-trim (agent-context--git-output
+                                          dir "rev-parse" "--short" "HEAD"))
                        :staged (and staged t)
                        :language "diff"
                        :captured-at (float-time))
@@ -795,15 +941,25 @@ STAGED non-nil takes the index diff instead of the working tree."
 (declare-function flymake-diagnostic-type "flymake")
 (declare-function flymake-diagnostic-text "flymake")
 
+(declare-function flycheck-error-line "flycheck")
+(declare-function flycheck-error-level "flycheck")
+(declare-function flycheck-error-message "flycheck")
+(defvar flycheck-current-errors)
+
 (defun agent-context--diagnostics-item (buffer)
-  "Return an inline item for BUFFER's flymake diagnostics."
+  "Return an inline item for BUFFER's diagnostics.
+Uses flycheck when it is active in BUFFER, flymake otherwise."
   (with-current-buffer buffer
-    (unless (bound-and-true-p flymake-mode)
-      (user-error "agent-context: no flymake diagnostics in %s"
+    (unless (or (bound-and-true-p flycheck-mode)
+                (bound-and-true-p flymake-mode))
+      (user-error "agent-context: no flymake or flycheck diagnostics in %s"
                   (buffer-name)))
-    (require 'flymake)
-    (let* ((lines (mapcar #'agent-context--diagnostic-line
-                          (flymake-diagnostics)))
+    (let* ((lines (if (bound-and-true-p flycheck-mode)
+                      (mapcar #'agent-context--flycheck-line
+                              flycheck-current-errors)
+                    (require 'flymake)
+                    (mapcar #'agent-context--diagnostic-line
+                            (flymake-diagnostics))))
            (content (string-join lines "\n")))
       (agent-context-item-create
        :id (agent-context--next-id) :kind 'diagnostics
@@ -820,6 +976,12 @@ STAGED non-nil takes the index diff instead of the working tree."
   (format "%s:%d:%s: %s"
           (buffer-name) (line-number-at-pos (flymake-diagnostic-beg diag))
           (flymake-diagnostic-type diag) (flymake-diagnostic-text diag)))
+
+(defun agent-context--flycheck-line (err)
+  "Render flycheck ERR as \"buffer:line:level: message\"."
+  (format "%s:%d:%s: %s"
+          (buffer-name) (flycheck-error-line err)
+          (flycheck-error-level err) (flycheck-error-message err)))
 
 (defun agent-context--buffer-content-item (buffer)
   "Return an inline item for BUFFER's full contents.
@@ -868,7 +1030,9 @@ git commit -m "agent-context: add git, diagnostics, and buffer sources"
 ```elisp
 (defmacro agent-context-test--with-url (status body final &rest test-body)
   "Stub `url-retrieve-synchronously' with STATUS, BODY, FINAL url.
-A nil STATUS simulates a network failure (nil return)."
+A nil STATUS simulates a network failure (nil return).  Bind
+`agent-context-test--url-content-type' around TEST-BODY to control the
+response Content-Type (default text/plain)."
   (declare (indent 3))
   `(cl-letf (((symbol-function 'url-retrieve-synchronously)
               (lambda (&rest _)
@@ -876,7 +1040,9 @@ A nil STATUS simulates a network failure (nil return)."
                   (let ((buf (generate-new-buffer " *ctx-url*")))
                     (with-current-buffer buf
                       (insert "HTTP/1.1 " (number-to-string ,status) " X\r\n"
-                              "Content-Type: text/plain\r\n\r\n" ,body)
+                              "Content-Type: "
+                              agent-context-test--url-content-type
+                              "\r\n\r\n" ,body)
                       (goto-char (point-min))
                       (setq-local url-http-response-status ,status)
                       (setq-local url-http-end-of-headers
@@ -886,6 +1052,8 @@ A nil STATUS simulates a network failure (nil return)."
                                   (url-generic-parse-url ,final)))
                     buf)))))
      ,@test-body))
+
+(defvar agent-context-test--url-content-type "text/plain")
 
 (ert-deftest agent-context-test-url-fetch-success-records-final-url ()
   "A fetched URL snapshots the body and both URLs."
@@ -922,6 +1090,25 @@ A nil STATUS simulates a network failure (nil return)."
     (let ((agent-context-url-max-bytes 10))
       (should-error (agent-context--url-item "https://x.test/a")
                     :type 'user-error))))
+
+(ert-deftest agent-context-test-url-html-decided-by-content-type ()
+  "HTML conversion keys off Content-Type, not the body's first byte."
+  ;; text/plain that merely starts with `<' is never transformed.
+  (agent-context-test--with-url 200 "<not html, just text" "https://x.test/a"
+    (let ((item (agent-context--url-item "https://x.test/a")))
+      (should (equal (agent-context-item-content item)
+                     "<not html, just text"))
+      (should (null (agent-context-item-note item)))))
+  ;; text/html is rendered to text when libxml is available.
+  (skip-unless (libxml-available-p))
+  (let ((agent-context-test--url-content-type "text/html"))
+    (agent-context-test--with-url 200 "<p>hi <b>there</b></p>"
+        "https://x.test/a"
+      (let ((item (agent-context--url-item "https://x.test/a")))
+        (should (string-match-p "hi there"
+                                (agent-context-item-content item)))
+        (should (equal (agent-context-item-note item)
+                       "HTML rendered to text"))))))
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -969,8 +1156,19 @@ failed fetch is never mistaken for an empty page."
                     :final-url (if (bound-and-true-p url-http-target-url)
                                    (url-recreate-url url-http-target-url)
                                  url)
-                    :html (string-match-p "\\`\\s-*<" body)))))
+                    :html (equal (agent-context--response-content-type)
+                                 "text/html")))))
       (kill-buffer buffer))))
+
+(defun agent-context--response-content-type ()
+  "Return the lowercased media type of the response, or nil.
+Reads the Content-Type header of the current url-retrieve buffer;
+the body's first byte is deliberately not consulted."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^Content-Type:[ \t]*\\([^;\r\n]+\\)"
+                             url-http-end-of-headers t)
+      (downcase (string-trim (match-string 1))))))
 
 (defun agent-context--url-item (url)
   "Fetch URL and return an inline snapshot item for it."
@@ -1311,9 +1509,47 @@ git commit -m "agent-context: add deterministic renderer"
   (agent-context-test--with-composer
    (should agent-context--current)
    (should (derived-mode-p 'agent-context-mode))
+   (should (derived-mode-p 'special-mode))
    (should (string-match-p "stub-proj"
                            (buffer-substring-no-properties
                             (point-min) (point-max))))))
+
+(ert-deftest agent-context-test-field-types-item-lines-command ()
+  "Letters self-insert in the instruction field but act on item lines."
+  (agent-context-test--with-composer
+   (agent-context--add-item (agent-context-test--mk-inline "x" "y"))
+   (agent-context--refresh)
+   ;; In the field: plain letters must reach self-insert despite the
+   ;; special-mode parent map.
+   (goto-char agent-context--instr-start)
+   (should (eq (key-binding "g") #'self-insert-command))
+   ;; On an item line: the item keymap wins.
+   (agent-context--goto-item-line 1)
+   (should (eq (key-binding "d") #'agent-context-delete-item))
+   (should (eq (key-binding "q") #'quit-window))))
+
+(ert-deftest agent-context-test-item-line-shows-transport-column ()
+  "Item lines display the transport alongside kind, size, and notes."
+  (agent-context-test--with-composer
+   (agent-context--add-item (agent-context--mention-file-item "/tmp/f.el"))
+   (agent-context--refresh)
+   (agent-context--goto-item-line 1)
+   (let ((line (buffer-substring-no-properties (point)
+                                               (line-end-position))))
+     (should (string-match-p "mention" line)))))
+
+(ert-deftest agent-context-test-refresh-reports-gone-source ()
+  "Refreshing an item whose source buffer died errors; the item stays."
+  (agent-context-test--with-composer
+   (let ((src (generate-new-buffer "ctx-gone")))
+     (with-current-buffer src (insert "text"))
+     (agent-context--add-item (agent-context--buffer-item src))
+     (kill-buffer src))
+   (agent-context--refresh)
+   (agent-context--goto-item-line 1)
+   (should-error (agent-context-refresh-item) :type 'user-error)
+   (should (= 1 (length (agent-context-draft-items
+                         agent-context--current))))))
 
 (ert-deftest agent-context-test-instruction-survives-refresh ()
   "Typed instruction text survives an item-list refresh."
@@ -1379,11 +1615,17 @@ Add the test helper used above:
 
 ```elisp
 (defun agent-context--goto-item-line (n)
-  "Move point to the Nth item line in the composer buffer."
+  "Move point to the start of the Nth item line in the composer buffer.
+Each search leaves point after the matched run (which includes the
+trailing newline), so the landing position must come from the match's
+beginning, not from `beginning-of-line'."
   (goto-char (point-min))
-  (dotimes (_ n)
-    (text-property-search-forward 'agent-context-item))
-  (beginning-of-line))
+  (let (match)
+    (dotimes (_ n)
+      (setq match (text-property-search-forward 'agent-context-item)))
+    (unless match
+      (user-error "No item %d" n))
+    (goto-char (prop-match-beginning match))))
 ```
 
 (This helper is production code — implement it in `agent-context.el`, not
@@ -1425,10 +1667,27 @@ Run: `make test` — FAIL, `agent-context-compose` undefined.
     (define-key map (kbd "T") #'agent-context-retarget)
     (define-key map (kbd "q") #'quit-window)
     map)
-  "Keymap active on read-only composer lines.")
+  "Keymap active on read-only composer lines (a `keymap' text property).")
 
-(define-derived-mode agent-context-mode nil "AgentCtx"
-  "Major mode for the agent context composition draft."
+(defvar agent-context--field-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map global-map)
+    (define-key map (kbd "C-c C-c") #'agent-context-dispatch)
+    (define-key map (kbd "C-c C-k") #'agent-context-cancel)
+    map)
+  "Keymap for the editable instruction field.
+Installed as a `keymap' text property over the field, parented to the
+global map, so ordinary typing works even though the mode derives from
+`special-mode' (whose mode map binds plain letters to commands).")
+
+(define-derived-mode agent-context-mode special-mode "AgentCtx"
+  "Major mode for the agent context composition draft.
+Derives from `special-mode' for its conventions, but the buffer itself
+is writable: everything except the instruction field is protected by
+read-only text properties, the instruction field carries
+`agent-context--field-map' so letters self-insert there, and the
+protected lines carry `agent-context--item-line-map'."
+  (setq buffer-read-only nil)
   (setq-local truncate-lines t))
 
 ;;;###autoload
@@ -1480,11 +1739,14 @@ otherwise the session picker chooses one."
           (if (plist-get size :exact) "exact" "est., read at send")))
 
 (defun agent-context--item-line (n item)
-  "Return the propertized composer line for ITEM at position N."
+  "Return the propertized composer line for ITEM at position N.
+The line shows kind, transport, label, size (exact or estimated), and
+any retained warning note."
   (propertize
-   (format "%2d. %-12s %-40s %s%s\n"
+   (format "%2d. %-12s %-8s %-36s %s%s\n"
            n (agent-context-item-kind item)
-           (truncate-string-to-width (agent-context-item-label item) 40
+           (agent-context-item-transport item)
+           (truncate-string-to-width (agent-context-item-label item) 36
                                      nil nil "…")
            (agent-context--size-string (agent-context-item-size item))
            (if-let* ((note (agent-context-item-note item)))
@@ -1517,11 +1779,17 @@ otherwise the session picker chooses one."
                      (agent-context--target-line))))
     (setq agent-context--instr-start (point-marker))
     (set-marker-insertion-type agent-context--instr-start nil)
-    (insert instr)
+    ;; The field text carries the field keymap; the first protected
+    ;; character after the field is front-sticky for `keymap' only, so
+    ;; text typed into an EMPTY field inherits the field keymap from it.
+    (insert (propertize instr 'keymap agent-context--field-map))
     (setq agent-context--instr-end (point-marker))
     (set-marker-insertion-type agent-context--instr-end t)
+    (insert (propertize "\n" 'read-only t 'rear-nonsticky t
+                        'keymap agent-context--field-map
+                        'front-sticky '(keymap)))
     (insert (agent-context--protected
-             (concat "\n\nItems (dispatch order):\n"
+             (concat "\nItems (dispatch order):\n"
                      (if items
                          (let ((n 0))
                            (mapconcat (lambda (item)
@@ -1607,23 +1875,66 @@ Deletes any composer-owned temp file backing it."
   (interactive)
   (agent-context--move-item 1))
 
+(defun agent-context--transport-supported-p (transport path)
+  "Return non-nil when TRANSPORT works for PATH on the draft's target.
+Consults the pure token slot; a nil token or a missing slot means the
+transport is unsupported for that session right now."
+  (let* ((target (agent-context-draft-target agent-context--current))
+         (backend (and (buffer-live-p target)
+                       (agent--detect-backend target)))
+         (struct (and backend (agent-backend backend)))
+         (fn (and struct
+                  (pcase transport
+                    ('mention (agent-backend-file-reference-token struct))
+                    ('media (agent-backend-media-token struct))))))
+    (and fn (funcall fn path target) t)))
+
+(defun agent-context--gate-new-item (item)
+  "Return ITEM adjusted to the target's capabilities, or signal.
+A mention item whose transport is unsupported degrades to an inline
+snapshot with a message (never silently); an unsupported media item is
+an honest error."
+  (pcase (agent-context-item-transport item)
+    ('mention
+     (let ((path (plist-get (agent-context-item-provenance item) :path)))
+       (if (agent-context--transport-supported-p 'mention path)
+           item
+         (message "agent-context: target lacks file mentions; inlining %s"
+                  (agent-context-item-label item))
+         (agent-context--file-item path 'inline))))
+    ('media
+     (let ((path (plist-get (agent-context-item-provenance item) :path)))
+       (unless (agent-context--transport-supported-p 'media path)
+         (user-error
+          "agent-context: the target session does not support image items"))
+       item))
+    (_ item)))
+
 (defun agent-context-toggle-transport ()
-  "Toggle the file item at point between mention and inline."
+  "Toggle the file item at point between mention and inline.
+Toggling to mention is refused when the target does not support it."
   (interactive)
   (let* ((item (agent-context--item-at-point))
          (path (plist-get (agent-context-item-provenance item) :path)))
     (unless (and (eq (agent-context-item-kind item) 'file) path)
       (user-error "Only file items toggle between mention and inline"))
-    (let* ((target-transport
-            (if (eq (agent-context-item-transport item) 'mention)
-                'inline 'mention))
-           (replacement (agent-context--file-item path target-transport))
-           (items (agent-context-draft-items agent-context--current)))
-      (setcar (nthcdr (agent-context--item-index item) items) replacement))
+    (let ((target-transport
+           (if (eq (agent-context-item-transport item) 'mention)
+               'inline 'mention)))
+      (when (and (eq target-transport 'mention)
+                 (not (agent-context--transport-supported-p 'mention path)))
+        (user-error
+         "agent-context: the target session does not support file mentions"))
+      (let ((replacement (agent-context--file-item path target-transport))
+            (items (agent-context-draft-items agent-context--current)))
+        (setcar (nthcdr (agent-context--item-index item) items)
+                replacement)))
     (agent-context--refresh)))
 
 (defun agent-context-refresh-item ()
-  "Re-resolve the snapshot item at point from its provenance."
+  "Re-resolve the snapshot item at point from its provenance.
+Every snapshot kind has a resolver; an item whose source is gone
+reports that and stays in the draft unchanged."
   (interactive)
   (let* ((item (agent-context--item-at-point))
          (prov (agent-context-item-provenance item))
@@ -1634,16 +1945,16 @@ Deletes any composer-owned temp file backing it."
             ('commit (car (agent-context--commit-items
                            (plist-get prov :repo)
                            (list (plist-get prov :rev)))))
-            ('region
-             ;; Line positions may have shifted; refusing beats guessing.
-             (user-error
-              "Region items cannot be refreshed; delete and re-add"))
-            ('buffer
-             (let ((buf (get-buffer (plist-get prov :buffer-name))))
-               (unless (buffer-live-p buf)
-                 (user-error "Source buffer %s is gone"
-                             (plist-get prov :buffer-name)))
-               (agent-context--buffer-item buf)))
+            ('region (agent-context--refresh-region prov))
+            ((or 'buffer 'compilation)
+             (agent-context--buffer-content-item
+              (agent-context--live-source-buffer prov)))
+            ('diagnostics
+             (agent-context--diagnostics-item
+              (agent-context--live-source-buffer prov)))
+            ('file                       ; inline snapshot of a file
+             (agent-context--inline-file-item (plist-get prov :path)))
+            ('capture (agent-context--refresh-capture prov))
             ('url (when (yes-or-no-p "Re-fetch URL? ")
                     (agent-context--url-item (plist-get prov :url))))
             (_ (user-error "This item kind cannot be refreshed")))))
@@ -1653,11 +1964,61 @@ Deletes any composer-owned temp file backing it."
               replacement)
       (agent-context--refresh))))
 
+(defun agent-context--live-source-buffer (prov)
+  "Return PROV's source buffer, or signal when it is gone."
+  (let ((buf (get-buffer (plist-get prov :buffer-name))))
+    (unless (buffer-live-p buf)
+      (user-error "Source buffer %s is gone" (plist-get prov :buffer-name)))
+    buf))
+
+(defun agent-context--refresh-region (prov)
+  "Re-read PROV's recorded line range from its live source buffer.
+The range is line-based, so content that moved lines reads
+differently — that is what refresh is for."
+  (let ((buf (agent-context--live-source-buffer prov)))
+    (with-current-buffer buf
+      (pcase-let ((`(,beg-line ,end-line) (plist-get prov :lines)))
+        (save-excursion
+          (goto-char (point-min))
+          (forward-line (1- beg-line))
+          (let ((beg (point)))
+            (goto-char (point-min))
+            (forward-line end-line)
+            (agent-context--region-item buf beg (point))))))))
+
+(defun agent-context--refresh-capture (prov)
+  "Re-read PROV's capture entry from its Org file."
+  (require 'agent-capture)
+  (let* ((old (plist-get prov :capture-plist))
+         (prompts (agent-capture--read-prompts (plist-get old :file) t))
+         (match (cl-find-if
+                 (lambda (p)
+                   (and (equal (plist-get p :title) (plist-get old :title))
+                        (equal (plist-get p :created)
+                               (plist-get old :created))))
+                 prompts)))
+    (unless match
+      (user-error "Captured prompt %S is gone from its file"
+                  (plist-get old :title)))
+    (agent-context--capture-item match)))
+
+(declare-function agent-capture--read-prompts "agent-capture"
+                  (file &optional include-inserted))
+
 (defun agent-context-retarget ()
-  "Choose a different target session for the draft."
+  "Choose a different target session for the draft.
+Mention and media items the new target cannot take are marked with an
+`unsupported by target' note; dispatch re-gates them authoritatively."
   (interactive)
   (setf (agent-context-draft-target agent-context--current)
         (agent--read-session-buffer))
+  (dolist (item (agent-context-draft-items agent-context--current))
+    (let ((transport (agent-context-item-transport item))
+          (path (plist-get (agent-context-item-provenance item) :path)))
+      (when (memq transport '(mention media))
+        (setf (agent-context-item-note item)
+              (unless (agent-context--transport-supported-p transport path)
+                "unsupported by target")))))
   (agent-context--refresh))
 
 (defun agent-context-preview-item ()
@@ -1687,14 +2048,15 @@ Deferred items show the file's content as of now, clearly titled."
     (pop-to-buffer buf)))
 
 (defun agent-context-preview-message ()
-  "Show the fully rendered outgoing message (dry run, no side effects)."
+  "Show the fully rendered outgoing message.
+Uses the pure token slots only, so previewing never attaches anything."
   (interactive)
   (let* ((draft agent-context--current)
+         (target (agent-context-draft-target draft))
          (msg (agent-context--render
                (agent-context--instruction)
                (agent-context-draft-items draft)
-               (lambda (item)
-                 (car (agent-context--token item nil t)))))
+               (lambda (item) (agent-context--token-for item target))))
          (buf (get-buffer-create "*Agent context preview*")))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
@@ -1718,16 +2080,13 @@ Deferred items show the file's content as of now, clearly titled."
     (setq agent-context--current nil)))
 ```
 
-`agent-context--token` is defined in Task 9; for this task add a
+`agent-context--token-for` is defined in Task 9; for this task add a
 forward stub so `P` works once dispatch lands:
 
 ```elisp
-(defun agent-context--token (item _backend-struct dry-run)
+(defun agent-context--token-for (item _target)
   "Placeholder until dispatch lands; returns a plain path token."
-  (ignore dry-run)
-  (cons (format "@%s " (plist-get (agent-context-item-provenance item)
-                                  :path))
-        nil))
+  (format "@%s " (plist-get (agent-context-item-provenance item) :path)))
 
 (defun agent-context-dispatch ()
   "Dispatch the draft (implemented in the dispatch task)."
@@ -1767,10 +2126,13 @@ Add-source commands and the transient:
 
 ;;;###autoload
 (defun agent-context-add-region ()
-  "Add the active region (of the origin or current buffer) to the draft.
-Callable from any buffer: starts a draft when none exists."
+  "Add the active region of the buffer this command is invoked in.
+From the composer buffer itself (the add transient), the draft's
+originating buffer supplies the region.  Callable from any buffer:
+starts a draft when none exists."
   (interactive)
-  (let ((source (if agent-context--current
+  (let ((source (if (eq (current-buffer)
+                        (get-buffer agent-context-buffer-name))
                     (agent-context--origin)
                   (current-buffer))))
     (unless agent-context--current
@@ -1798,16 +2160,21 @@ Callable from any buffer: starts a draft when none exists."
   (agent-context--refresh))
 
 (defun agent-context-add-file (path)
-  "Add the file at PATH to the draft (native mention transport)."
+  "Add the file at PATH to the draft.
+Defaults to the native mention transport when the target supports it;
+otherwise inlines with a message (capability-gated at add time)."
   (interactive "fContext file: ")
-  (agent-context--add-item (agent-context--file-item path))
+  (agent-context--add-item
+   (agent-context--gate-new-item (agent-context--file-item path)))
   (agent-context--refresh))
 
 (defun agent-context-add-directory (dir)
-  "Expand DIR into mention items, reporting skips."
+  "Expand DIR into mention/media items, reporting skips.
+Each produced item passes the same capability gate as a single add."
   (interactive "DContext directory: ")
   (pcase-let ((`(,items . ,report) (agent-context--directory-items dir)))
-    (dolist (item items) (agent-context--add-item item))
+    (dolist (item items)
+      (agent-context--add-item (agent-context--gate-new-item item)))
     (agent-context--refresh)
     (message "agent-context: %s" report)))
 
@@ -1865,11 +2232,13 @@ Callable from any buffer: starts a draft when none exists."
   (agent-context--refresh))
 
 (defun agent-context-add-image (path)
-  "Add the image file at PATH as a native attachment."
+  "Add the image file at PATH as a native attachment.
+Refused with an honest error when the target cannot take images."
   (interactive "fImage file: ")
   (unless (agent-context--image-file-p path)
     (user-error "agent-context: %s is not a recognized image type" path))
-  (agent-context--add-item (agent-context--media-item path))
+  (agent-context--add-item
+   (agent-context--gate-new-item (agent-context--media-item path)))
   (agent-context--refresh))
 
 (defvar agent-context--temp-directory nil)
@@ -1883,7 +2252,10 @@ Callable from any buffer: starts a draft when none exists."
   agent-context--temp-directory)
 
 (defun agent-context-add-clipboard-image ()
-  "Write the clipboard image to a private temp file and attach it."
+  "Write the clipboard image to a private temp file and attach it.
+The file is composer-owned: deleted when its item is removed or the
+draft is cancelled, kept after a successful dispatch (the CLI may read
+it asynchronously)."
   (interactive)
   (let ((data (or (gui-get-selection 'CLIPBOARD 'image/png)
                   (user-error "No image on the clipboard"))))
@@ -1893,7 +2265,8 @@ Callable from any buffer: starts a draft when none exists."
            (coding-system-for-write 'binary))
       (with-temp-file path (insert data))
       (set-file-modes path #o600)
-      (agent-context--add-item (agent-context--media-item path t))))
+      (agent-context--add-item
+       (agent-context--gate-new-item (agent-context--media-item path t)))))
   (agent-context--refresh))
 
 (defun agent-context-add-url (url)
@@ -1933,33 +2306,54 @@ git commit -m "agent-context: add the composer buffer UI"
 - Test: `test/agent-context-test.el`
 
 **Interfaces:**
-- Consumes: `agent-submit`, `agent-session-display-state`,
-  `agent--detect-backend`, `agent-backend`,
-  `agent-backend-attach-file-reference`, `agent-backend-attach-media`
-  (Task 1 contract); `agent-capture--delete-prompt` (Task 6).
-- Produces: `agent-context-dispatch` (real implementation);
-  `agent-context--token (item backend-struct target dry-run)` →
-  `(TOKEN . UNDO)`; `agent-context-recompose` (autoloaded);
-  `agent-context--last` populated on success.
+- Consumes: `agent-submit`, `agent-session-event` (`submit-failed`),
+  `agent-session-display-state`, `agent--detect-backend`,
+  `agent-backend`, the five Task 1 slots; `agent-capture--delete-prompt`
+  (Task 6); `agent-context-item-copy` (Task 2).
+- Produces: `agent-context-dispatch` (replacing the Task 8 stub);
+  `agent-context--token-for (item target)` → TOKEN string or honest
+  `user-error` (pure; replaces the Task 8 stub);
+  `agent-context--attach (item target)` → UNDO or nil;
+  `agent-context--run-undos (undos)`; `agent-context--recheck-deferred
+  (items target)`; `agent-context--final-readiness-check (target)`;
+  `agent-context--finish (draft instruction target)` (never signals);
+  `agent-context--detached-copies (items)`; `agent-context-recompose`
+  (autoloaded); `agent-context--last` populated on success.
 
-Note: Task 8's temporary `agent-context--token` had no TARGET argument;
-this task replaces it with the four-argument version below and updates
-`agent-context-preview-message` to call
-`(agent-context--token item backend-struct target t)` with the draft's
-backend struct and target.
+Transaction contract implemented here (mirrors the Global Constraints):
+
+1. Validation, deferred re-checks, and the size gate run first and may
+   signal freely — nothing has been attached yet.
+2. `agent-context--final-readiness-check` runs immediately before the
+   attach phase; `:ready-to-submit-p` returning `busy` refuses.  Between
+   this check, the attach loop, and `agent-submit` there are no Elisp
+   yields (no `sit-for`, no process waits in this code), so the gate
+   cannot be invalidated mid-dispatch by asynchronous events.
+3. The attach loop plus the single `agent-submit` form the guarded
+   region: any `error` **or `quit`** there runs every collected undo
+   independently, emits `submit-failed` at the live target so the
+   session is retryable, and preserves the draft.
+4. The commit boundary is `agent-submit` returning.  After it, cleanup
+   (bookkeeping, capture deletion, buffer kill) is isolated per phase;
+   a cleanup failure warns but never restores the draft, never runs
+   undos, and never permits a resend.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```elisp
 (defmacro agent-context-test--with-dispatch-env (state &rest body)
   "Set up a stub backend and composer whose target reports STATE.
-Binds SUBMITTED (list of submitted strings), ATTACHED and UNDONE
-(counters) in BODY's scope."
+Binds in BODY's scope: SUBMITTED (list of submitted strings), ATTACHED
+and UNDONE (counters), READY (settable symbol consulted by the
+`:ready-to-submit-p' probe, initially `ready'), and MENTION-FILE (a
+real readable temp file for deferred items — dispatch re-validation
+requires real files)."
   (declare (indent 1))
   `(let* ((agent-backends nil)
-          (submitted nil) (attached 0) (undone 0)
+          (submitted nil) (attached 0) (undone 0) (ready 'ready)
+          (mention-file (make-temp-file "ctx-dispatch" nil ".el" ";; x\n"))
           (target (generate-new-buffer " *ctx-target*")))
-     (ignore attached undone)
+     (ignore attached undone ready mention-file)
      (agent-register-backend
       'stub
       :buffer-p (lambda (buf) (eq buf target))
@@ -1967,20 +2361,17 @@ Binds SUBMITTED (list of submitted strings), ATTACHED and UNDONE
       :start-session #'ignore
       :label "Stub"
       :submit (lambda (text _buf) (push text submitted))
+      :file-reference-token (lambda (path _buf) (format "@%s " path))
+      :media-token (lambda (path _buf) (format "(img %s)" path))
       :attach-file-reference
-      (lambda (path _buf &optional dry-run)
-        (if dry-run
-            (cons (format "@%s " path) nil)
-          (cl-incf attached)
-          (cons (format "@%s " path)
-                (lambda () (cl-incf undone)))))
+      (lambda (_path _buf)
+        (cl-incf attached)
+        (lambda () (cl-incf undone)))
       :attach-media
-      (lambda (path _buf &optional dry-run)
-        (if dry-run
-            (cons (format "(img %s)" path) nil)
-          (cl-incf attached)
-          (cons (format "(img %s)" path)
-                (lambda () (cl-incf undone))))))
+      (lambda (_path _buf)
+        (cl-incf attached)
+        (lambda () (cl-incf undone)))
+      :ready-to-submit-p (lambda (_buf) ready))
      (let ((agent-context--current
             (agent-context-draft-create
              :target target :items nil
@@ -1994,7 +2385,9 @@ Binds SUBMITTED (list of submitted strings), ATTACHED and UNDONE
                      ((symbol-function 'agent-context--finish-buffer)
                       #'ignore))
              ,@body)
-         (kill-buffer target)))))
+         (kill-buffer target)
+         (when (file-exists-p mention-file)
+           (delete-file mention-file))))))
 
 (ert-deftest agent-context-test-dispatch-refuses-busy-target ()
   "A busy target is refused and the draft survives."
@@ -2005,6 +2398,19 @@ Binds SUBMITTED (list of submitted strings), ATTACHED and UNDONE
     (should agent-context--current)
     (should (= 1 (length (agent-context-draft-items
                           agent-context--current))))))
+
+(ert-deftest agent-context-test-dispatch-readiness-probe-blocks-submit ()
+  "Regression: a target whose backend probe says busy is refused even
+while its display state says waiting — dispatch must never reach a
+backend that would queue or steer the submission."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (setq ready 'busy)                  ; e.g. pending turn/start
+    (agent-context--add-item
+     (agent-context--mention-file-item mention-file))
+    (should-error (agent-context-dispatch) :type 'user-error)
+    (should (null submitted))
+    (should (= attached 0))             ; refused BEFORE any attachment
+    (should agent-context--current)))
 
 (ert-deftest agent-context-test-dispatch-unknown-state-needs-confirm ()
   "Unknown state dispatches only after explicit confirmation."
@@ -2021,25 +2427,92 @@ Binds SUBMITTED (list of submitted strings), ATTACHED and UNDONE
   "A successful dispatch submits one rendered message and records it."
   (agent-context-test--with-dispatch-env 'awaiting-input
     (agent-context--add-item (agent-context-test--mk-inline "snap" "abc"))
-    (agent-context--add-item (agent-context--mention-file-item "/tmp/f.el"))
+    (agent-context--add-item
+     (agent-context--mention-file-item mention-file))
     (agent-context-dispatch)
     (should (= 1 (length submitted)))
     (should (string-match-p "do it" (car submitted)))
     (should (string-match-p "abc" (car submitted)))
-    (should (string-match-p "@/tmp/f\\.el" (car submitted)))
+    (should (string-match-p (regexp-quote mention-file) (car submitted)))
     (should (null agent-context--current))
     (should (plist-get agent-context--last :items))))
 
-(ert-deftest agent-context-test-dispatch-failure-preserves-and-undoes ()
-  "A failing submit runs undo closures and keeps the draft."
+(ert-deftest agent-context-test-dispatch-failure-rolls-back-and-retries ()
+  "A synchronously failing submit undoes attachments, rolls the target's
+state back so it is not stuck busy, and a retry then succeeds."
   (agent-context-test--with-dispatch-env 'awaiting-input
-    (agent-context--add-item (agent-context--mention-file-item "/tmp/f.el"))
+    (agent-context--add-item
+     (agent-context--mention-file-item mention-file))
+    (let ((real-submit (symbol-function 'agent-submit))
+          (fail t))
+      (cl-letf (((symbol-function 'agent-submit)
+                 (lambda (text buf)
+                   (agent-session-event buf 'submit) ; what core does
+                   (if fail (error "boom")
+                     (funcall real-submit text buf)))))
+        (ignore real-submit)
+        (agent-context-dispatch)        ; must not signal
+        (should agent-context--current)
+        (should (= attached 1))
+        (should (= undone 1))
+        ;; The submit event marked the target busy; the rollback event
+        ;; must have restored it, or retry would be refused forever.
+        (should-not (eq (agent-session-display-state
+                         (agent-context-draft-target
+                          agent-context--current))
+                        'busy))
+        (setq fail nil)
+        (agent-context-dispatch)
+        (should (= 1 (length submitted)))
+        (should (null agent-context--current))))))
+
+(ert-deftest agent-context-test-dispatch-quit-treated-as-failure ()
+  "C-g during submission runs undos and preserves the draft."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (agent-context--add-item
+     (agent-context--mention-file-item mention-file))
     (cl-letf (((symbol-function 'agent-submit)
-               (lambda (&rest _) (error "boom"))))
-      (agent-context-dispatch))          ; must not signal
+               (lambda (&rest _) (signal 'quit nil))))
+      (agent-context-dispatch))         ; must not re-signal quit
     (should agent-context--current)
-    (should (= attached 1))
     (should (= undone 1))))
+
+(ert-deftest agent-context-test-dispatch-undos-run-independently ()
+  "Every undo closure runs even when an earlier one fails."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (let ((second-ran nil) (calls 0))
+      (setf (agent-backend-attach-file-reference (agent-backend 'stub))
+            (lambda (_path _buf)
+              (cl-incf calls)
+              (if (= calls 1)
+                  (lambda () (error "undo one broke"))
+                (lambda () (setq second-ran t)))))
+      (agent-context--add-item
+       (agent-context--mention-file-item mention-file))
+      (agent-context--add-item
+       (agent-context--mention-file-item mention-file))
+      (cl-letf (((symbol-function 'agent-submit)
+                 (lambda (&rest _) (error "boom"))))
+        (agent-context-dispatch))
+      (should second-ran)
+      (should agent-context--current))))
+
+(ert-deftest agent-context-test-dispatch-post-submit-cleanup-isolated ()
+  "A cleanup failure after a successful submit cannot cause a resend."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (require 'agent-capture)
+    (let ((prompt (list :file "/tmp/cap.org" :title "P" :created "c"
+                        :text "captured text")))
+      (cl-letf (((symbol-function 'agent-capture--delete-prompt)
+                 (lambda (_p) (error "capture file locked"))))
+        (agent-context--add-item (agent-context--capture-item prompt))
+        (agent-context-dispatch)))      ; must not signal
+    ;; Sent exactly once; draft gone; no undo ran; retry impossible.
+    (should (= 1 (length submitted)))
+    (should (null agent-context--current))
+    (should (= undone 0))
+    (should-error (agent-context-dispatch) :type 'user-error)
+    (should (= 1 (length submitted)))))
 
 (ert-deftest agent-context-test-dispatch-dead-target-keeps-draft ()
   "A dead target aborts before submitting; the draft is intact."
@@ -2059,15 +2532,45 @@ Binds SUBMITTED (list of submitted strings), ATTACHED and UNDONE
       (should-error (agent-context-dispatch) :type 'user-error)
       (should (null submitted)))))
 
-(ert-deftest agent-context-test-dispatch-media-unsupported-honest-error ()
-  "A media item without a backend media slot errors without loss."
+(ert-deftest agent-context-test-dispatch-warn-gate-asks-first ()
+  "Above the warn threshold, refusal cancels and consent sends."
   (agent-context-test--with-dispatch-env 'awaiting-input
-    (setf (agent-backend-attach-media (agent-backend 'stub)) nil)
-    (agent-context--add-item (agent-context--media-item "/tmp/x.png"))
+    (agent-context--add-item
+     (agent-context-test--mk-inline "biggish" (make-string 64 ?x)))
+    (let ((agent-context-warn-bytes 10))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
+        (should-error (agent-context-dispatch) :type 'user-error)
+        (should (null submitted)))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+        (agent-context-dispatch)
+        (should (= 1 (length submitted)))))))
+
+(ert-deftest agent-context-test-dispatch-media-unsupported-honest-error ()
+  "A media item whose token slot reports unsupported errors without loss."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (setf (agent-backend-media-token (agent-backend 'stub))
+          (lambda (_path _buf) nil))    ; unsupported for this buffer
+    (let ((image (make-temp-file "ctx" nil ".png" "fake")))
+      (unwind-protect
+          (progn
+            (agent-context--add-item (agent-context--media-item image))
+            (should-error (agent-context-dispatch) :type 'user-error)
+            (should (null submitted))
+            (should (= 1 (length (agent-context-draft-items
+                                  agent-context--current)))))
+        (delete-file image)))))
+
+(ert-deftest agent-context-test-dispatch-rechecks-mutated-deferred-file ()
+  "A mention file replaced by binary content is refused at dispatch."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (agent-context--add-item
+     (agent-context--mention-file-item mention-file))
+    (with-temp-file mention-file
+      (set-buffer-multibyte nil)
+      (insert "now\0binary"))
     (should-error (agent-context-dispatch) :type 'user-error)
     (should (null submitted))
-    (should (= 1 (length (agent-context-draft-items
-                          agent-context--current))))))
+    (should agent-context--current)))
 
 (ert-deftest agent-context-test-dispatch-deletes-capture-on-success-only ()
   "Capture entries are removed exactly on success."
@@ -2080,11 +2583,34 @@ Binds SUBMITTED (list of submitted strings), ATTACHED and UNDONE
                  (lambda (p) (push p deleted))))
         (agent-context--add-item (agent-context--capture-item prompt))
         (cl-letf (((symbol-function 'agent-submit)
-                   (lambda (&rest _) (error "boom"))))
+                   (lambda (buf-text buf)
+                     (ignore buf-text)
+                     (agent-session-event buf 'submit)
+                     (error "boom"))))
           (agent-context-dispatch))
         (should (null deleted))
         (agent-context-dispatch)
         (should (equal deleted (list prompt)))))))
+
+(ert-deftest agent-context-test-last-items-are-detached-copies ()
+  "`agent-context--last' holds deep copies with temp ownership dropped."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (let ((image (make-temp-file "ctx" nil ".png" "fake")))
+      (unwind-protect
+          (let ((item (agent-context--media-item image t)))
+            (agent-context--add-item item)
+            (agent-context-dispatch)
+            (let ((kept (car (plist-get agent-context--last :items))))
+              (should-not (eq kept item))
+              ;; Ownership dropped: a recomposed draft must never delete
+              ;; a file the dispatched message may still be read from.
+              (should-not (plist-get (agent-context-item-provenance kept)
+                                     :temp-file))
+              ;; Mutating the kept copy cannot touch the original.
+              (setf (agent-context-item-label kept) "mutated")
+              (should-not (equal (agent-context-item-label item)
+                                 "mutated"))))
+        (delete-file image)))))
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2096,22 +2622,51 @@ Run: `make test` — FAIL ("Dispatch not implemented yet").
 Replace the Task 8 stubs:
 
 ```elisp
-(defun agent-context--token (item backend-struct target dry-run)
-  "Return (TOKEN . UNDO) for mention/media ITEM against TARGET.
-BACKEND-STRUCT supplies the attachment slots.  DRY-RUN must be free of
-side effects (used by previews and the size gate)."
-  (let* ((path (plist-get (agent-context-item-provenance item) :path))
+(defun agent-context--token-for (item target)
+  "Return ITEM's token string for TARGET, or signal an honest error.
+Pure: consults only the token slots, so previews and size gates can
+call it freely.  A missing slot means the backend never supports the
+transport; a nil token means this particular session cannot take it —
+neither is ever silently downgraded."
+  (let* ((backend (agent--detect-backend target))
+         (struct (and backend (agent-backend backend)))
+         (path (plist-get (agent-context-item-provenance item) :path))
          (media (eq (agent-context-item-transport item) 'media))
-         (fn (if media
-                 (and backend-struct
-                      (agent-backend-attach-media backend-struct))
-               (and backend-struct
-                    (agent-backend-attach-file-reference backend-struct)))))
+         (fn (and struct (if media
+                             (agent-backend-media-token struct)
+                           (agent-backend-file-reference-token struct)))))
     (unless fn
-      (user-error
-       "agent-context: the target backend does not support %s attachments"
-       (if media "image" "file-reference")))
-    (funcall fn path target dry-run)))
+      (user-error "agent-context: %s does not support %s items"
+                  (or (and struct (agent-backend-label struct)) backend)
+                  (if media "image" "file-mention")))
+    (or (funcall fn path target)
+        (user-error
+         "agent-context: %s items are unsupported for this session%s"
+         (if media "image" "file-mention")
+         (if media "" "; toggle the item to inline instead")))))
+
+(defun agent-context--attach (item target)
+  "Perform ITEM's out-of-band attachment for TARGET.
+Return an undo closure, or nil when the token is the whole mechanism."
+  (let* ((struct (agent-backend (agent--detect-backend target)))
+         (path (plist-get (agent-context-item-provenance item) :path))
+         (fn (if (eq (agent-context-item-transport item) 'media)
+                 (agent-backend-attach-media struct)
+               (agent-backend-attach-file-reference struct))))
+    (when fn (funcall fn path target))))
+
+(defun agent-context--run-undos (undos)
+  "Run every undo closure in UNDOS, isolating failures.
+One failing undo must not prevent the others from running."
+  (dolist (undo undos)
+    (condition-case undo-err
+        (funcall undo)
+      ((error quit)
+       (display-warning
+        'agent-context
+        (format "attachment undo failed: %s"
+                (error-message-string undo-err))
+        :warning)))))
 
 (defun agent-context--validated-target ()
   "Return the draft's target buffer, or signal with the draft intact."
@@ -2124,7 +2679,7 @@ side effects (used by previews and the size gate)."
     (agent-context-draft-target agent-context--current)))
 
 (defun agent-context--check-target-ready (target)
-  "Enforce the busy policy for TARGET."
+  "Enforce the display-state busy policy for TARGET."
   (pcase (agent-session-display-state target)
     ('busy
      (user-error
@@ -2137,15 +2692,45 @@ side effects (used by previews and the size gate)."
        (user-error "agent-context: dispatch cancelled")))
     (_ t)))
 
-(defun agent-context--recheck-deferred (items)
-  "Re-apply safety checks to deferred ITEMS at dispatch time."
+(defun agent-context--final-readiness-check (target)
+  "Authoritative last-moment gate before attachment and submission.
+Consults the backend's `:ready-to-submit-p' probe; `busy' refuses.
+On Codex app-server this covers states the display never shows —
+pending `turn/start', queued input, reasoning-held submissions — where
+submitting would queue or steer instead of starting a fresh turn."
+  (when-let* ((backend (agent--detect-backend target))
+              (struct (agent-backend backend))
+              (fn (agent-backend-ready-to-submit-p struct)))
+    (when (eq (funcall fn target) 'busy)
+      (user-error
+       "agent-context: %s is not ready for a new turn; try again when idle"
+       (agent-display-name target)))))
+
+(defun agent-context--recheck-deferred (items target)
+  "Re-apply every safety and capability check to deferred ITEMS.
+Covers readability, secret paths, type class (media must still be an
+image, a mention must not have become binary), symlink containment for
+expansion-produced items, and — via the token lookup — transport
+support on the (possibly retargeted) TARGET."
   (dolist (item items)
     (unless (eq (agent-context-item-transport item) 'inline)
-      (let ((path (plist-get (agent-context-item-provenance item) :path)))
+      (let* ((prov (agent-context-item-provenance item))
+             (path (plist-get prov :path))
+             (media (eq (agent-context-item-transport item) 'media)))
         (unless (and path (file-readable-p path))
           (user-error "agent-context: %s is no longer readable"
                       (or path (agent-context-item-label item))))
-        (agent-context--assert-safe-path path)))))
+        (agent-context--assert-safe-path path)
+        (if media
+            (unless (agent-context--image-file-p path)
+              (user-error "agent-context: %s is no longer an image" path))
+          (when (agent-context--binary-file-p path)
+            (user-error "agent-context: %s became binary" path)))
+        (when-let* ((root (plist-get prov :root)))
+          (unless (string-prefix-p root (file-truename path))
+            (user-error "agent-context: %s now resolves outside %s"
+                        path (abbreviate-file-name root))))
+        (agent-context--token-for item target)))))
 
 (defun agent-context--size-gate (text)
   "Apply the warn/refuse byte gates to the rendered TEXT."
@@ -2163,62 +2748,91 @@ side effects (used by previews and the size gate)."
 
 (defun agent-context-dispatch ()
   "Validate, render, and submit the draft exactly once.
-Every failure path leaves the draft intact and retryable and undoes
-any out-of-band attachment already made."
+Pre-submit failures (including quit) leave the draft intact, run every
+undo closure, and roll the target's state back with `submit-failed'.
+The commit boundary is `agent-submit' returning: after it, no failure
+restores the draft or runs undos."
   (interactive)
   (unless agent-context--current
     (user-error "No context draft"))
   (let* ((draft agent-context--current)
          (items (agent-context-draft-items draft))
          (instruction (agent-context--instruction))
-         (target (agent-context--validated-target))
-         (backend (agent--detect-backend target))
-         (struct (agent-backend backend)))
+         (target (agent-context--validated-target)))
     (when (and (string-empty-p instruction) (null items))
       (user-error "agent-context: nothing to send"))
     (agent-context--check-target-ready target)
-    (agent-context--recheck-deferred items)
-    ;; Truthful size gate on a dry-run render (identical tokens).
-    (agent-context--size-gate
-     (agent-context--render instruction items
-                            (lambda (item)
-                              (car (agent-context--token
-                                    item struct target t)))))
-    ;; Effectful attach + single submit, with undo on any failure.
-    (let (undos)
-      (condition-case err
-          (let ((message-text
-                 (agent-context--render
-                  instruction items
-                  (lambda (item)
-                    (pcase-let ((`(,token . ,undo)
-                                 (agent-context--token
-                                  item struct target nil)))
-                      (when undo (push undo undos))
-                      token)))))
-            (agent-submit message-text target)
-            (agent-context--finish draft instruction))
-        (error
-         (mapc #'funcall undos)
-         (message "agent-context: dispatch failed (%s); draft preserved"
-                  (error-message-string err)))))))
+    (agent-context--recheck-deferred items target)
+    ;; Tokens are pure and deterministic, so this render is byte-equal
+    ;; to the submitted message; gating it is truthful.
+    (let ((message-text
+           (agent-context--render
+            instruction items
+            (lambda (item) (agent-context--token-for item target)))))
+      (agent-context--size-gate message-text)
+      ;; Authoritative readiness, then attach, then one submit.  No
+      ;; Elisp yields separate these steps, so the gate holds.
+      (agent-context--final-readiness-check target)
+      (let (undos sent)
+        (condition-case err
+            (progn
+              (dolist (item items)
+                (unless (eq (agent-context-item-transport item) 'inline)
+                  (when-let* ((undo (agent-context--attach item target)))
+                    (push undo undos))))
+              (agent-submit message-text target)
+              (setq sent t))
+          ((error quit)
+           (agent-context--run-undos undos)
+           (when (buffer-live-p target)
+             (agent-session-event target 'submit-failed))
+           (message "agent-context: dispatch failed (%s); draft preserved"
+                    (if (eq (car-safe err) 'quit) "quit"
+                      (error-message-string err)))))
+        (when sent
+          (agent-context--finish draft instruction target))))))
 
-(defun agent-context--finish (draft instruction)
-  "Record success for DRAFT with INSTRUCTION and clean up."
+(defun agent-context--finish (draft instruction target)
+  "Commit success bookkeeping for DRAFT; never signals.
+Runs only after `agent-submit' returned: the message is sent, so no
+failure here may restore the draft, run undos, or permit a resend.
+Irreversible bookkeeping runs first; each cleanup phase is isolated."
+  (setq agent-context--last
+        (list :instruction instruction
+              :items (agent-context--detached-copies
+                      (agent-context-draft-items draft))))
+  (setq agent-context--current nil)
   (dolist (item (agent-context-draft-items draft))
     (when-let* (((eq (agent-context-item-kind item) 'capture))
                 (plist (plist-get (agent-context-item-provenance item)
                                   :capture-plist)))
-      (require 'agent-capture)
-      (agent-capture--delete-prompt plist)))
-  (setq agent-context--last
-        (list :instruction instruction
-              :items (agent-context-draft-items draft)))
-  (setq agent-context--current nil)
-  (agent-context--finish-buffer)
+      (condition-case cap-err
+          (progn (require 'agent-capture)
+                 (agent-capture--delete-prompt plist))
+        ((error quit)
+         (display-warning
+          'agent-context
+          (format "sent, but removing the capture entry failed: %s"
+                  (error-message-string cap-err))
+          :warning)))))
+  (condition-case nil (agent-context--finish-buffer) ((error quit) nil))
   (message "agent-context: dispatched to %s (%d items)"
-           (agent-display-name (agent-context-draft-target draft))
+           (if (buffer-live-p target) (agent-display-name target) "session")
            (length (agent-context-draft-items draft))))
+
+(defun agent-context--detached-copies (items)
+  "Return deep copies of ITEMS with temp-file ownership dropped.
+`agent-context--last' must not share structure with live drafts, and a
+recomposed draft must never delete a media file the dispatched message
+may still be read from."
+  (mapcar (lambda (item)
+            (let ((copy (agent-context-item-copy item)))
+              (setf (agent-context-item-provenance copy)
+                    (plist-put (copy-sequence
+                                (agent-context-item-provenance copy))
+                               :temp-file nil))
+              copy))
+          items))
 
 (defun agent-context--finish-buffer ()
   "Kill the composer buffer after a successful dispatch."
@@ -2227,7 +2841,9 @@ any out-of-band attachment already made."
 
 ;;;###autoload
 (defun agent-context-recompose ()
-  "Rebuild a draft from the last successfully dispatched composition."
+  "Rebuild a draft from the last successfully dispatched composition.
+The new draft gets fresh copies, so editing it never mutates the
+retained record (and vice versa)."
   (interactive)
   (unless agent-context--last
     (user-error "No previous composition"))
@@ -2235,39 +2851,14 @@ any out-of-band attachment already made."
     (user-error "A draft already exists; finish or cancel it first"))
   (agent-context-compose)
   (setf (agent-context-draft-items agent-context--current)
-        (plist-get agent-context--last :items))
+        (agent-context--detached-copies
+         (plist-get agent-context--last :items)))
   (with-current-buffer agent-context-buffer-name
     (agent-context--refresh)
     (save-excursion
       (goto-char agent-context--instr-start)
-      (insert (plist-get agent-context--last :instruction)))))
-```
-
-Also update `agent-context-preview-message` (Task 8) to pass the real
-backend struct and target:
-
-```elisp
-(defun agent-context-preview-message ()
-  "Show the fully rendered outgoing message (dry run, no side effects)."
-  (interactive)
-  (let* ((draft agent-context--current)
-         (target (agent-context-draft-target draft))
-         (struct (when-let* ((backend (and (buffer-live-p target)
-                                           (agent--detect-backend target))))
-                   (agent-backend backend)))
-         (msg (agent-context--render
-               (agent-context--instruction)
-               (agent-context-draft-items draft)
-               (lambda (item)
-                 (car (agent-context--token item struct target t)))))
-         (buf (get-buffer-create "*Agent context preview*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert msg))
-      (special-mode)
-      (goto-char (point-min)))
-    (pop-to-buffer buf)))
+      (insert (propertize (plist-get agent-context--last :instruction)
+                          'keymap agent-context--field-map)))))
 ```
 
 Note `agent-context--on-kill` (Task 8) clears `agent-context--current`
@@ -2306,13 +2897,22 @@ repo's checklist asks.
 
 **Interfaces:**
 - Produces (consumed by agent-codex in Task 11):
-  - `codex-app-server-attach-mention (path)` — now takes PATH (interactive
-    spec `"fMention file: "`), buffer-local effect on the current buffer,
-    returns a handle.
+  - `codex-app-server-attach-mention (&optional path)` — PATH may now be
+    passed programmatically; called with no argument (interactively or by
+    the existing `/mention` slash-command path) it prompts exactly as
+    before.  Buffer-local effect on the current buffer; returns a handle.
   - `codex-app-server-attach-image (path)` — unchanged signature, now
     returns a handle.
   - `codex-app-server-detach (handle)` — removes the pending entry if not
     yet consumed; returns non-nil when something was removed.
+  - `codex-app-server-ready-for-turn-p (&optional buffer)` — non-nil only
+    when BUFFER can start a fresh turn immediately: live process, thread
+    started, no active turn, no pending `turn/start`, no queued inputs,
+    no reasoning-held or startup submissions.
+
+Before writing code, `grep -n "attach-mention" codex-app-server.el
+codex.el` and note every caller — the `/mention` slash dispatcher and any
+keymap binding call it with **no arguments**, and must keep working.
 
 - [ ] **Step 1: Write the failing tests** (in `codex-test.el`, following
   its local conventions for naming and fixtures)
@@ -2329,6 +2929,44 @@ repo's checklist asks.
       (should (null codex--app-server-pending-mentions))
       ;; A second detach of the same handle is a no-op.
       (should-not (codex-app-server-detach handle)))))
+
+(ert-deftest codex-test-app-server-attach-mention-no-arg-still-prompts ()
+  "/mention regression: a no-argument call prompts as before."
+  (with-temp-buffer
+    (setq-local codex--app-server-pending-mentions nil)
+    (cl-letf (((symbol-function 'read-file-name)
+               (lambda (&rest _) "/tmp/prompted.el")))
+      (codex-app-server-attach-mention)
+      (should (equal codex--app-server-pending-mentions
+                     '(("prompted.el" . "/tmp/prompted.el")))))))
+
+(ert-deftest codex-test-app-server-ready-for-turn-p-blocking-states ()
+  "Each pending state independently blocks turn readiness."
+  (with-temp-buffer
+    (setq-local codex--app-server-process
+                (start-process "codex-test-stub" nil "cat"))
+    (unwind-protect
+        (progn
+          (setq-local codex--app-server-thread-id "t1")
+          (setq-local codex--app-server-turn-active-p nil)
+          (setq-local codex--app-server-turn-start-pending-p nil)
+          (setq-local codex--app-server-queued-turn-inputs nil)
+          (setq-local codex--app-server-pending-reasoning-steps nil)
+          (setq-local codex--app-server-reasoning-waiting-submissions nil)
+          (setq-local codex--app-server-startup-submissions nil)
+          (should (codex-app-server-ready-for-turn-p))
+          (dolist (blocker '(codex--app-server-turn-active-p
+                             codex--app-server-turn-start-pending-p
+                             codex--app-server-queued-turn-inputs
+                             codex--app-server-pending-reasoning-steps
+                             codex--app-server-reasoning-waiting-submissions
+                             codex--app-server-startup-submissions))
+            (set blocker '(t))
+            (should-not (codex-app-server-ready-for-turn-p))
+            (set blocker nil))
+          (setq-local codex--app-server-thread-id nil)
+          (should-not (codex-app-server-ready-for-turn-p)))
+      (delete-process codex--app-server-process))))
 
 (ert-deftest codex-test-app-server-attach-image-returns-handle ()
   "Attach-image returns a handle that removes exactly its entry."
@@ -2350,12 +2988,15 @@ Expected: FAIL — attach-mention takes no argument; detach undefined.
 - [ ] **Step 3: Implement**
 
 ```elisp
-(defun codex-app-server-attach-mention (path)
+(defun codex-app-server-attach-mention (&optional path)
   "Attach a file mention for PATH to the next app-server turn input.
-Operates on the current buffer's pending mentions.  Return a handle
-accepted by `codex-app-server-detach'."
-  (interactive "fMention file: ")
-  (let* ((path (expand-file-name path))
+With no PATH — interactively, or from the `/mention' slash command —
+prompt for the file exactly as before.  Operates on the current
+buffer's pending mentions.  Return a handle accepted by
+`codex-app-server-detach'."
+  (interactive)
+  (let* ((path (expand-file-name
+                (or path (read-file-name "Mention file: "))))
          (entry (cons (file-name-nondirectory path) path)))
     (setq codex--app-server-pending-mentions
           (append codex--app-server-pending-mentions (list entry)))
@@ -2388,12 +3029,31 @@ removed.  Removal is by object identity, so duplicate paths are safe."
        (setq codex--app-server-pending-images
              (delq path codex--app-server-pending-images))
        t))))
+
+(defun codex-app-server-ready-for-turn-p (&optional buffer)
+  "Return non-nil when BUFFER can start a fresh turn immediately.
+Nil while the app-server process is dead, the thread has not started,
+a turn is active, a `turn/start' is pending, queued inputs exist, or
+reasoning-held or startup submissions are waiting — in those states a
+new submission would be queued or would steer the running turn."
+  (with-current-buffer (or buffer (current-buffer))
+    (and (process-live-p codex--app-server-process)
+         codex--app-server-thread-id
+         (not codex--app-server-turn-active-p)
+         (not codex--app-server-turn-start-pending-p)
+         (null codex--app-server-queued-turn-inputs)
+         (null codex--app-server-pending-reasoning-steps)
+         (null codex--app-server-reasoning-waiting-submissions)
+         (null codex--app-server-startup-submissions)
+         t)))
 ```
 
 (For the image test to pass, note `memq`/`delq` operate on the *same
-string object* stored in the handle, so two equal paths do not collide.)
+string object* stored in the handle, so two equal paths do not collide.
+If grep in Step 0 found `/mention` callers passing arguments, adjust
+them to the new optional signature and extend the regression test.)
 
-Update the codex manual (README.org API section) with the three functions,
+Update the codex manual (README.org API section) with the four functions,
 regenerate its texi per that repo's convention, and run its full checks.
 
 - [ ] **Step 4: Run codex tests and compile**
@@ -2404,8 +3064,27 @@ Run (codex repo): `make test && make compile` — clean.
 
 ```bash
 git add codex-app-server.el codex-test.el README.org codex.texi
-git commit -m "codex-app-server: add programmatic mention and detach API"
+git commit -m "codex-app-server: add programmatic attachment and readiness API"
 ```
+
+- [ ] **Step 6: Rebuild the active Elpaca codex build (mandatory)**
+
+The agent repo's Makefile resolves `codex` from the Elpaca *builds*
+directory, not the source checkout.  Rebuild and verify before Task 11:
+
+```bash
+emacsclient -e "(elpaca-rebuild 'codex)"
+```
+
+then confirm the build actually exposes the new API:
+
+```bash
+cd ~/.config/emacs-profiles/8.3.0-dev/elpaca/sources/agent
+emacs --batch --eval '(dolist (dir (file-expand-wildcards "~/.config/emacs-profiles/8.3.0-dev/elpaca/builds/*/")) (add-to-list (quote load-path) dir))' \
+  -l codex-app-server --eval '(prin1 (list (fboundp (quote codex-app-server-detach)) (fboundp (quote codex-app-server-ready-for-turn-p))))'
+```
+
+Expected output: `(t t)`.  Do not proceed to Task 11 until it is.
 
 ---
 
@@ -2417,71 +3096,112 @@ git commit -m "codex-app-server: add programmatic mention and detach API"
 - Test: `test/agent-claude-test.el`, `test/agent-codex-test.el`
 
 **Interfaces:**
-- Consumes: Task 1 slot contract; Task 10 codex API (guarded by
-  `(fboundp 'codex-app-server-detach)` so agent-codex still works against
-  an older codex.el).  Note: the Makefile's LOAD_PATH prefers elpaca
-  *builds*; after Task 10, rebuild the codex package (or verify the
-  build directory picked up the new functions) before expecting the
-  `skip-unless` test to run rather than skip.
-- Produces: `agent-claude--attach-file-reference`,
-  `agent-claude--attach-media`, `agent-codex--attach-file-reference`,
-  `agent-codex--attach-media`, registered under `:attach-file-reference`
-  and `:attach-media` for both backends.
+- Consumes: Task 1 slot contract; Task 10 codex API.  Task 10 Step 6
+  (Elpaca rebuild + verification) is a hard prerequisite: the
+  integration tests below assert `fboundp` and **fail**, not skip, when
+  the API is absent.
+- Produces:
+  - Claude: `agent-claude--file-reference-token`,
+    `agent-claude--media-token` (pure `@` tokens; no attach functions —
+    the token is the whole mechanism).
+  - Codex: `agent-codex--session-transport`,
+    `agent-codex--mention-api-available-p` (indirection so tests can
+    simulate an older codex.el), `agent-codex--file-reference-token`,
+    `agent-codex--media-token`, `agent-codex--attach-file-reference`,
+    `agent-codex--attach-media`, `agent-codex--detach-closure`,
+    `agent-codex--ready-to-submit-p`.
+  - Registrations: Claude gets `:file-reference-token` and
+    `:media-token`; Codex gets all four token/attach slots **and**
+    `:ready-to-submit-p`.
 
 - [ ] **Step 1: Write the failing tests**
 
 In `test/agent-claude-test.el`:
 
 ```elisp
-(ert-deftest agent-claude-test-attach-file-reference-token ()
-  "Claude file references are @-mention tokens with no undo."
-  (should (equal (agent-claude--attach-file-reference "/tmp/a.el" nil)
-                 '("@/tmp/a.el " . nil)))
-  (should (equal (agent-claude--attach-file-reference "/tmp/a.el" nil t)
-                 '("@/tmp/a.el " . nil))))
+(ert-deftest agent-claude-test-file-reference-token ()
+  "Claude file references are pure @-mention tokens."
+  (should (equal (agent-claude--file-reference-token "/tmp/a.el" nil)
+                 "@/tmp/a.el "))
+  (should (equal (agent-claude--media-token "/tmp/a.png" nil)
+                 "@/tmp/a.png ")))
 
-(ert-deftest agent-claude-test-registers-attachment-slots ()
-  "The claude-code backend registers both attachment slots."
+(ert-deftest agent-claude-test-registers-token-slots-only ()
+  "Claude registers pure tokens and no attach functions."
   (let ((struct (agent-backend 'claude-code)))
-    (should (agent-backend-attach-file-reference struct))
-    (should (agent-backend-attach-media struct))))
+    (should (agent-backend-file-reference-token struct))
+    (should (agent-backend-media-token struct))
+    (should (null (agent-backend-attach-file-reference struct)))
+    (should (null (agent-backend-attach-media struct)))))
 ```
 
 In `test/agent-codex-test.el`:
 
 ```elisp
-(ert-deftest agent-codex-test-attach-file-reference-terminal-token ()
-  "Terminal Codex sessions use the @-mention token with no undo."
-  (with-temp-buffer                    ; no app-server here
-    (should (equal (agent-codex--attach-file-reference
-                    "/tmp/a.el" (current-buffer))
-                   '("@/tmp/a.el " . nil)))))
+(ert-deftest agent-codex-test-new-codex-api-present ()
+  "Hard prerequisite: the rebuilt codex build exposes the Task 10 API.
+This test FAILS (never skips) when the API is missing — rerun Task 10
+Step 6 in that case."
+  (should (fboundp 'codex-app-server-detach))
+  (should (fboundp 'codex-app-server-ready-for-turn-p)))
 
-(ert-deftest agent-codex-test-attach-file-reference-app-server ()
-  "App-server sessions attach a native mention and return a detach undo."
-  (skip-unless (fboundp 'codex-app-server-detach))
+(ert-deftest agent-codex-test-terminal-transport-uses-at-token ()
+  "eat/vterm sessions get the CLI's @-mention token; no attach, no undo."
   (with-temp-buffer
+    (setq-local codex-terminal-backend 'eat)
+    (should (equal (agent-codex--file-reference-token
+                    "/tmp/a.el" (current-buffer))
+                   "@/tmp/a.el "))
+    (should (null (agent-codex--attach-file-reference
+                   "/tmp/a.el" (current-buffer))))))
+
+(ert-deftest agent-codex-test-app-server-without-api-is-unsupported ()
+  "An app-server session on an old codex.el reports unsupported (nil
+token) — it must never silently downgrade to an @ token the app-server
+does not parse."
+  (with-temp-buffer
+    (setq-local codex-terminal-backend 'app-server)
+    (cl-letf (((symbol-function 'agent-codex--mention-api-available-p)
+               (lambda () nil)))
+      (should (null (agent-codex--file-reference-token
+                     "/tmp/a.el" (current-buffer))))
+      (should (null (agent-codex--media-token
+                     "/tmp/a.png" (current-buffer)))))))
+
+(ert-deftest agent-codex-test-app-server-mention-token-and-attach ()
+  "App-server sessions get $NAME tokens and a detachable attachment."
+  (with-temp-buffer
+    (setq-local codex-terminal-backend 'app-server)
     (setq-local codex--app-server-pending-mentions nil)
-    (setq-local codex--app-server-process
-                (start-process "ctx-stub" nil "cat"))
-    (unwind-protect
-        (progn
-          ;; Dry run: token only, no side effect.
-          (pcase-let ((`(,token . ,undo)
-                       (agent-codex--attach-file-reference
-                        "/tmp/a.el" (current-buffer) t)))
-            (should (equal token "$a.el"))
-            (should (null undo))
-            (should (null codex--app-server-pending-mentions)))
-          ;; Real run: pending mention plus a working undo.
-          (pcase-let ((`(,token . ,undo)
-                       (agent-codex--attach-file-reference
-                        "/tmp/a.el" (current-buffer))))
-            (should (equal token "$a.el"))
-            (should (= 1 (length codex--app-server-pending-mentions)))
-            (funcall undo)
-            (should (null codex--app-server-pending-mentions))))
-      (delete-process codex--app-server-process))))
+    ;; Pure token: no side effect.
+    (should (equal (agent-codex--file-reference-token
+                    "/tmp/a.el" (current-buffer))
+                   "$a.el"))
+    (should (null codex--app-server-pending-mentions))
+    ;; Effectful attach: pending mention plus a working undo.
+    (let ((undo (agent-codex--attach-file-reference
+                 "/tmp/a.el" (current-buffer))))
+      (should (functionp undo))
+      (should (= 1 (length codex--app-server-pending-mentions)))
+      (funcall undo)
+      (should (null codex--app-server-pending-mentions)))))
+
+(ert-deftest agent-codex-test-ready-to-submit-probe ()
+  "The readiness slot maps the codex predicate to ready/busy/unknown."
+  (with-temp-buffer
+    (setq-local codex-terminal-backend 'app-server)
+    (cl-letf (((symbol-function 'codex-app-server-ready-for-turn-p)
+               (lambda (&optional _) nil)))
+      (should (eq (agent-codex--ready-to-submit-p (current-buffer))
+                  'busy)))
+    (cl-letf (((symbol-function 'codex-app-server-ready-for-turn-p)
+               (lambda (&optional _) t)))
+      (should (eq (agent-codex--ready-to-submit-p (current-buffer))
+                  'ready))))
+  (with-temp-buffer                     ; terminal: no protocol signal
+    (setq-local codex-terminal-backend 'eat)
+    (should (eq (agent-codex--ready-to-submit-p (current-buffer))
+                'unknown))))
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -2491,64 +3211,91 @@ Run: `make test` — FAIL, functions undefined.
 - [ ] **Step 3: Implement**
 
 `agent-claude.el` — add near the other send helpers and register in the
-`agent-register-backend` form (`:attach-file-reference
-#'agent-claude--attach-file-reference :attach-media
-#'agent-claude--attach-media`):
+`agent-register-backend` form (`:file-reference-token
+#'agent-claude--file-reference-token :media-token
+#'agent-claude--media-token`; no attach slots):
 
 ```elisp
-(defun agent-claude--attach-file-reference (path _buffer &optional _dry-run)
+(defun agent-claude--file-reference-token (path _buffer)
   "Return the Claude @-mention token for PATH.
 The Claude CLI expands @-mentions in submitted text; there is no
-out-of-band attachment, so the undo slot is always nil."
-  (cons (format "@%s " (expand-file-name path)) nil))
+out-of-band attachment, so no attach function is registered."
+  (format "@%s " (expand-file-name path)))
 
-(defun agent-claude--attach-media (path buffer &optional dry-run)
+(defun agent-claude--media-token (path buffer)
   "Return the Claude image token for PATH.
 Identical to the file-reference channel: the CLI attaches @-mentioned
 images, exactly as upstream's own image paste does."
-  (agent-claude--attach-file-reference path buffer dry-run))
+  (agent-claude--file-reference-token path buffer))
 ```
 
-`agent-codex.el` — add and register likewise:
+`agent-codex.el` — add and register (`:file-reference-token
+#'agent-codex--file-reference-token :media-token
+#'agent-codex--media-token :attach-file-reference
+#'agent-codex--attach-file-reference :attach-media
+#'agent-codex--attach-media :ready-to-submit-p
+#'agent-codex--ready-to-submit-p`):
 
 ```elisp
-(declare-function codex-app-server-attach-mention "codex-app-server" (path))
+(declare-function codex-app-server-attach-mention "codex-app-server"
+                  (&optional path))
 (declare-function codex-app-server-attach-image "codex-app-server" (path))
 (declare-function codex-app-server-detach "codex-app-server" (handle))
+(declare-function codex-app-server-ready-for-turn-p "codex-app-server"
+                  (&optional buffer))
 
-(defun agent-codex--app-server-attachments-available-p (buffer)
-  "Return non-nil when BUFFER can take native app-server attachments."
-  (and (fboundp 'codex-app-server-detach)
-       (buffer-live-p buffer)
-       (with-current-buffer buffer
-         (agent-codex--app-server-live-p))))
+(defun agent-codex--session-transport (buffer)
+  "Return `app-server' or `terminal' for Codex session BUFFER.
+Decided by the buffer's own terminal-backend configuration, never by
+which codex.el APIs happen to be available."
+  (with-current-buffer buffer
+    (if (eq (bound-and-true-p codex-terminal-backend) 'app-server)
+        'app-server
+      'terminal)))
 
-(defun agent-codex--attach-file-reference (path buffer &optional dry-run)
-  "Return (TOKEN . UNDO) referencing PATH in Codex session BUFFER.
-Terminal sessions embed an @-mention the CLI expands; app-server
-sessions attach a native mention item and embed its $NAME token."
-  (let ((path (expand-file-name path)))
-    (if (not (agent-codex--app-server-attachments-available-p buffer))
-        (cons (format "@%s " path) nil)
-      (let ((token (format "$%s" (file-name-nondirectory path))))
-        (if dry-run
-            (cons token nil)
-          (let ((handle (with-current-buffer buffer
-                          (codex-app-server-attach-mention path))))
-            (cons token (agent-codex--detach-closure buffer handle))))))))
+(defun agent-codex--mention-api-available-p ()
+  "Return non-nil when codex.el provides the programmatic mention API."
+  (fboundp 'codex-app-server-detach))
 
-(defun agent-codex--attach-media (path buffer &optional dry-run)
-  "Return (TOKEN . UNDO) attaching image PATH in Codex session BUFFER."
-  (let ((path (expand-file-name path)))
-    (if (not (agent-codex--app-server-attachments-available-p buffer))
-        (cons (format "@%s " path) nil)
-      (let ((token (format "(image attached: %s)"
-                           (file-name-nondirectory path))))
-        (if dry-run
-            (cons token nil)
-          (let ((handle (with-current-buffer buffer
-                          (codex-app-server-attach-image path))))
-            (cons token (agent-codex--detach-closure buffer handle))))))))
+(defun agent-codex--file-reference-token (path buffer)
+  "Return the mention token for PATH in BUFFER, or nil when unsupported.
+Terminal sessions use the CLI's @-mention expansion.  App-server
+sessions never parse @ tokens, so without the codex mention API the
+transport is honestly unsupported (nil), never a silent downgrade."
+  (pcase (agent-codex--session-transport buffer)
+    ('terminal (format "@%s " (expand-file-name path)))
+    ('app-server
+     (when (agent-codex--mention-api-available-p)
+       (format "$%s" (file-name-nondirectory (expand-file-name path)))))))
+
+(defun agent-codex--media-token (path buffer)
+  "Return the image token for PATH in BUFFER, or nil when unsupported."
+  (pcase (agent-codex--session-transport buffer)
+    ('terminal (format "@%s " (expand-file-name path)))
+    ('app-server
+     (when (agent-codex--mention-api-available-p)
+       (format "(image attached: %s)"
+               (file-name-nondirectory (expand-file-name path)))))))
+
+(defun agent-codex--attach-file-reference (path buffer)
+  "Attach PATH as a native mention when BUFFER is app-server.
+Return an undo closure, or nil for terminal sessions (their token is
+the whole mechanism)."
+  (when (and (eq (agent-codex--session-transport buffer) 'app-server)
+             (agent-codex--mention-api-available-p))
+    (let ((handle (with-current-buffer buffer
+                    (codex-app-server-attach-mention
+                     (expand-file-name path)))))
+      (agent-codex--detach-closure buffer handle))))
+
+(defun agent-codex--attach-media (path buffer)
+  "Attach image PATH natively when BUFFER is app-server; return undo."
+  (when (and (eq (agent-codex--session-transport buffer) 'app-server)
+             (agent-codex--mention-api-available-p))
+    (let ((handle (with-current-buffer buffer
+                    (codex-app-server-attach-image
+                     (expand-file-name path)))))
+      (agent-codex--detach-closure buffer handle))))
 
 (defun agent-codex--detach-closure (buffer handle)
   "Return a closure detaching HANDLE from BUFFER if still pending."
@@ -2556,6 +3303,17 @@ sessions attach a native mention item and embed its $NAME token."
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (codex-app-server-detach handle)))))
+
+(defun agent-codex--ready-to-submit-p (buffer)
+  "Authoritative turn-readiness for Codex session BUFFER.
+App-server sessions answer `ready' or `busy' from the protocol state
+(`busy' covers active turns, pending starts, queued inputs, and
+reasoning-held submissions); terminal sessions have no protocol signal
+and answer `unknown'."
+  (if (and (eq (agent-codex--session-transport buffer) 'app-server)
+           (fboundp 'codex-app-server-ready-for-turn-p))
+      (if (codex-app-server-ready-for-turn-p buffer) 'ready 'busy)
+    'unknown))
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -2598,6 +3356,28 @@ In `test/agent-test.el`:
 In `test/agent-context-test.el`:
 
 ```elisp
+(ert-deftest agent-context-test-add-region-uses-invoking-buffer ()
+  "`agent-context-add-region' reads the buffer it is invoked in."
+  (agent-context-test--with-composer
+   (let ((other (generate-new-buffer "ctx-region-src")))
+     (unwind-protect
+         (progn
+           (with-current-buffer other
+             (insert "from the invoking buffer")
+             (set-mark (point-min))
+             (goto-char (point-max))
+             (activate-mark)
+             (agent-context-add-region))
+           (let ((item (car (agent-context-draft-items
+                             agent-context--current))))
+             (should (equal (agent-context-item-content item)
+                            "from the invoking buffer"))
+             (should (equal (plist-get
+                             (agent-context-item-provenance item)
+                             :buffer-name)
+                            "ctx-region-src"))))
+       (kill-buffer other)))))
+
 (ert-deftest agent-context-test-dired-files-become-items ()
   "Dired marked files become file items in the draft."
   (let ((f1 (make-temp-file "ctx" nil ".el" "a"))
@@ -2648,7 +3428,8 @@ Starts a draft when none exists."
     (unless files (user-error "No marked files"))
     (unless agent-context--current (agent-context-compose))
     (dolist (file files)
-      (agent-context--add-item (agent-context--file-item file)))
+      (agent-context--add-item
+       (agent-context--gate-new-item (agent-context--file-item file))))
     (with-current-buffer agent-context-buffer-name
       (agent-context--refresh))))
 ```
@@ -2695,10 +3476,22 @@ defcustom defaults; URL fetching (explicit, `agent-context-url-timeout`,
 `agent-context-url-max-bytes`, redirects recorded, HTML rendered via shr
 when libxml is available, fetch failure distinct from an empty body, URL
 content treated as untrusted); and failure behavior (busy targets
-refused, unknown state confirmed, every failure preserves the draft and
-undoes out-of-band attachments, "dispatched" for terminal transports
-means inserted-and-submitted at the TUI prompt,
-`agent-context-recompose` rebuilds the last sent composition).
+refused; unknown state confirmed; the authoritative readiness gate —
+Codex app-server sessions with an active or pending turn, queued input,
+or reasoning in flight refuse dispatch, so composition can never queue
+or steer; every pre-submit failure, quit included, preserves the draft,
+undoes out-of-band attachments, and rolls the session state back; after
+a successful submit, cleanup failures warn but never resend;
+"dispatched" for terminal transports means inserted-and-submitted at
+the TUI prompt; `agent-context-recompose` rebuilds the last sent
+composition from independent copies).  Also document the two upstream
+behaviors the composer relies on rather than reimplements: codex.el's
+asynchronous restoration (a `turn/start` that later fails returns the
+submission, attachments included, to that session's own composer), and
+composer-owned temp-file lifetime (clipboard images live in a private
+0600 directory, are deleted when their item is removed or the draft is
+cancelled, and are deliberately kept after dispatch because the CLI may
+read them asynchronously).
 
 - [ ] **Step 2: Regenerate the texi export**
 
@@ -2735,16 +3528,25 @@ same.
    verify contents and single receipt.
 3. Codex app-server session: same three sources; verify the mention
    arrived as a native mention item.
-4. Codex terminal session: region + instruction.
-5. Images: Claude and Codex (app-server at minimum) — verify the model
-   describes the image content, proving it arrived as an image, not a
-   path string.  Remove the media registration for any backend that
-   fails this and re-run the media tests.
+4. Codex terminal session: region + instruction, and a file mention.
+5. Images, all three transports where registered: Claude (`@` token),
+   Codex terminal (`@` token), Codex app-server (native item) — verify
+   the model describes the image content, proving it arrived as an
+   image, not a path string.  Remove the media registration for any
+   transport that fails this and re-run the media tests.
 6. Preview (`p` and `P`), delete, reorder, toggle, cancel.
-7. Induce a dispatch failure (e.g. kill the target between compose and
-   dispatch); verify the draft survives and retry succeeds after
-   retargeting.
-8. Busy policy: dispatch at a mid-turn session; verify refusal and that
-   the running turn is unaffected.
+7. Attachment rollback and retry, with a LIVE target: compose a file
+   mention at an idle app-server session, then induce a submission
+   failure after attachment (e.g. `(advice-add 'agent-submit :before
+   (lambda (&rest _) (error "induced")))`), dispatch, and verify the
+   pending mention was detached (the next manual message carries no
+   stray attachment), the draft survived, and — after removing the
+   advice — retry succeeds and the agent receives the file once.
+8. Dead-target validation, separately: kill the target between compose
+   and dispatch; verify the retarget offer and that the draft survives.
+9. Busy policy: dispatch at a mid-turn session; verify refusal and that
+   the running turn is unaffected.  On app-server, also dispatch in the
+   instant after submitting a prompt by hand (turn/start pending):
+   verify the readiness gate refuses rather than queueing or steering.
 
 - [ ] **Step 3: Commit any fixes discovered live, one logical change each**
