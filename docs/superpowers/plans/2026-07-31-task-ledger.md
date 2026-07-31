@@ -748,11 +748,43 @@ hash cannot tell a CRLF ledger from its LF twin."
                     (set-buffer-multibyte nil)
                     (insert-file-contents-literally file)
                     (buffer-string)))
-           (coding (car (detect-coding-string bytes))))
+           (coding (agent-tasks--snapshot-coding file bytes)))
       (list :bytes bytes
             :token (secure-hash 'sha1 bytes)
             :coding coding
             :text (decode-coding-string bytes coding)))))
+
+(defun agent-tasks--snapshot-coding (file bytes)
+  "Return the coding system Emacs would read FILE with, given its BYTES.
+Applies Emacs's normal coding-selection precedence to the one raw-byte
+snapshot, rather than guessing from content alone:
+
+1. `coding-system-for-read', when a caller bound it;
+2. `find-operation-coding-system', which consults
+   `file-coding-system-alist';
+3. `set-auto-coding', which reads a `-*- coding: -*-' cookie and
+   `auto-coding-alist'/`auto-coding-functions';
+4. content detection, as a last resort.
+
+`detect-coding-string' alone — which is all revision 3 used — is only
+step 4, and it disagrees with `insert-file-contents' whenever any
+earlier step applies.  Verified in batch: for a ledger whose cookie
+says `iso-8859-1' while its bytes are valid UTF-8, detection returns
+`utf-8' and decodes to different text than Emacs would; the chain above
+returns `iso-8859-1' and matches.  The same holds for a
+`file-coding-system-alist' entry.  All four cases round-trip to
+identical bytes when written back with the returned coding."
+  (or coding-system-for-read
+      (let ((operation (find-operation-coding-system 'insert-file-contents file)))
+        (and (consp operation)
+             (not (eq (car operation) 'undecided))
+             (car operation)))
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert bytes)
+        (goto-char (point-min))
+        (set-auto-coding file (buffer-size)))
+      (car (detect-coding-string bytes))))
 
 (defmacro agent-tasks--with-org-text (text &rest body)
   "Evaluate BODY in a temporary `org-mode' buffer holding TEXT.
@@ -1007,8 +1039,7 @@ Apply this only to a body this package encoded; see
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `make test`
-Expected: `0 unexpected`, and the total rises by exactly the number of `ert-deftest` forms this task adds (count them in the diff)
-(362 existing plus the 10 added here).
+Expected: `0 unexpected`, and the total rises by exactly the number of `ert-deftest` forms this task adds (count them in the diff).
 
 - [ ] **Step 6: Byte-compile**
 
@@ -1209,6 +1240,62 @@ Add to `test/agent-tasks-test.el`, before the `provide`:
         ;; would have missed the change.
         (should (equal (plist-get lf :text) (plist-get crlf :text)))))))
 
+(ert-deftest agent-tasks-test-snapshot/honours-emacs-coding-precedence ()
+  "The snapshot decodes the way `insert-file-contents' would.
+Content detection alone disagrees whenever a coding cookie, a
+`file-coding-system-alist' entry, or a `coding-system-for-read' binding
+applies — verified in batch with a ledger whose cookie says
+`iso-8859-1' while its bytes are valid UTF-8."
+  (agent-tasks-test--with-ledger
+      (concat "# -*- coding: iso-8859-1 -*-\n" agent-tasks--header)
+    (let ((reference (with-temp-buffer
+                       (insert-file-contents agent-tasks-file)
+                       (cons buffer-file-coding-system (buffer-string))))
+          (snapshot (agent-tasks--snapshot agent-tasks-file)))
+      ;; Compare the coding *base*, not the symbol: a cookie yields
+      ;; `iso-8859-1' where `insert-file-contents' reports
+      ;; `iso-latin-1-unix' — the same coding under an alias with an
+      ;; eol variant.  What must match exactly is the decoded text and
+      ;; the bytes a write-back produces, which the next two assertions
+      ;; check.
+      (should (eq (coding-system-base (car reference))
+                  (coding-system-base (plist-get snapshot :coding))))
+      (should (equal (cdr reference) (plist-get snapshot :text)))
+      ;; And the bytes survive a write-back with that coding.
+      (let ((out (expand-file-name "copy.org" dir)))
+        (let ((coding-system-for-write (plist-get snapshot :coding)))
+          (with-temp-file out (insert (plist-get snapshot :text))))
+        (should (equal (plist-get snapshot :bytes)
+                       (plist-get (agent-tasks--snapshot out) :bytes))))))
+  ;; An explicit read override wins over everything in the file.
+  (agent-tasks-test--with-ledger agent-tasks--header
+    (let ((coding-system-for-read 'utf-8-unix))
+      (should (eq 'utf-8-unix
+                  (plist-get (agent-tasks--snapshot agent-tasks-file)
+                             :coding)))))
+  ;; So does a `file-coding-system-alist' entry.
+  (agent-tasks-test--with-ledger agent-tasks--header
+    (let ((file-coding-system-alist
+           (cons (cons (regexp-quote agent-tasks-file) 'iso-latin-1-unix)
+                 file-coding-system-alist)))
+      (should (eq 'iso-latin-1-unix
+                  (plist-get (agent-tasks--snapshot agent-tasks-file)
+                             :coding)))))
+  ;; Content detection alone would disagree with Emacs here: the cookie
+  ;; says latin-1 while the bytes are valid UTF-8.
+  (agent-tasks-test--with-ledger
+      (concat "# -*- coding: iso-8859-1 -*-\n" agent-tasks--header "caf\303\251\n")
+    (let ((reference (with-temp-buffer
+                       (insert-file-contents agent-tasks-file)
+                       (buffer-string)))
+          (snapshot (agent-tasks--snapshot agent-tasks-file)))
+      (should (equal reference (plist-get snapshot :text)))
+      (should-not (equal reference
+                         (decode-coding-string
+                          (plist-get snapshot :bytes)
+                          (car (detect-coding-string
+                                (plist-get snapshot :bytes)))))))))
+
 (ert-deftest agent-tasks-test-snapshot/a-rename-between-reads-cannot-slip-through ()
   "A file replaced after the snapshot is a conflict, not a stale write.
 Revision 2 read the token and the text separately; a replacement
@@ -1225,93 +1312,6 @@ landing between them paired old content with the new token."
        :type 'user-error)
       ;; The replacement survived untouched.
       (should (agent-tasks-find (agent-tasks-read) "t-r")))))
-
-(ert-deftest agent-tasks-test-create/concurrent-first-creation-conflicts ()
-  "Two creators that both saw no ledger cannot both publish one.
-The id generator is forced to collide, so the test fails loudly if the
-second creator appends onto the file the first published instead of
-refusing."
-  (agent-tasks-test--with-ledger nil
-    (let ((first-ledger (agent-tasks-read))
-          (second-ledger (agent-tasks-read)))
-      (should (null (agent-tasks-ledger-token first-ledger)))
-      (should (null (agent-tasks-ledger-token second-ledger)))
-      (cl-letf (((symbol-function 'agent-tasks--new-id)
-                 (lambda (_ledger) "t-fixed")))
-        (agent-tasks--append-entry
-         first-ledger
-         (lambda (fresh)
-           (agent-tasks--entry-string :id (agent-tasks--new-id fresh)
-                                      :title "First")))
-        (should-error
-         (agent-tasks--append-entry
-          second-ledger
-          (lambda (fresh)
-            (agent-tasks--entry-string :id (agent-tasks--new-id fresh)
-                                       :title "Second")))
-         :type 'user-error))
-      (let ((ledger (agent-tasks-read)))
-        (should (= 1 (length (agent-tasks-ledger-tasks ledger))))
-        (should (null (agent-tasks-ledger-problems ledger)))))))
-
-(ert-deftest agent-tasks-test-write/interleaved-writers-lose-nothing ()
-  "The exact two-writer race: one commits, the other is refused.
-Both parse the same bytes, so both hold the same token.  Writer B
-commits first; writer A must then be refused rather than renaming its
-own copy over B's change."
-  (agent-tasks-test--with-ledger agent-tasks-test--fixture
-    (let ((writer-a (agent-tasks-read))
-          (writer-b (agent-tasks-read)))
-      (should (equal (agent-tasks-ledger-token writer-a)
-                     (agent-tasks-ledger-token writer-b)))
-      (agent-tasks--update-task
-       writer-b "t-b" (lambda () (agent-tasks--log "B was here")))
-      (should-error
-       (agent-tasks--update-task
-        writer-a "t-a" (lambda () (agent-tasks--log "A was here")))
-       :type 'user-error)
-      (let ((ledger (agent-tasks-read)))
-        ;; B's change survived and A's was not applied.
-        (should (string-match-p "B was here"
-                                (agent-tasks-task-log
-                                 (agent-tasks-find ledger "t-b"))))
-        (should-not (string-match-p "A was here"
-                                    (or (agent-tasks-task-log
-                                         (agent-tasks-find ledger "t-a"))
-                                        "")))
-        ;; Nothing was lost.
-        (should (= 2 (length (agent-tasks-ledger-tasks ledger))))))))
-
-(ert-deftest agent-tasks-test-lock/a-held-lock-refuses-and-changes-nothing ()
-  "A lock another process holds times out with a message naming it."
-  (agent-tasks-test--with-ledger agent-tasks-test--fixture
-    (let ((agent-tasks-lock-timeout 0.2)
-          (lock (agent-tasks--lock-file agent-tasks-file))
-          (before (agent-tasks--file-text agent-tasks-file)))
-      (write-region "999@other 2026-07-31 00:00:00\n" nil lock nil 'silent)
-      (unwind-protect
-          (let ((error-message
-                 (cadr (should-error
-                        (agent-tasks--update-task
-                         (agent-tasks-read) "t-a"
-                         (lambda () (agent-tasks--log "blocked")))
-                        :type 'user-error))))
-            (should (string-match-p "999@other" error-message))
-            (should (string-match-p "agent-tasks-break-lock" error-message))
-            (should (equal before (agent-tasks--file-text agent-tasks-file))))
-        (delete-file lock)))))
-
-(ert-deftest agent-tasks-test-lock/is-released-on-both-paths ()
-  "The lock does not outlive a successful write or a signalling one."
-  (agent-tasks-test--with-ledger agent-tasks-test--fixture
-    (let ((lock (agent-tasks--lock-file agent-tasks-file)))
-      (agent-tasks--update-task
-       (agent-tasks-read) "t-a" (lambda () (agent-tasks--log "fine")))
-      (should-not (file-exists-p lock))
-      (should-error
-       (agent-tasks--update-task
-        (agent-tasks-read) "t-a" (lambda () (error "boom"))))
-      (should-not (file-exists-p lock)))))
 
 (ert-deftest agent-tasks-test-write/appends-to-an-absent-section ()
   "A hand-written entry with no Log section gets one."
@@ -1738,6 +1738,93 @@ Add to `test/agent-tasks-test.el`:
         (should (string-match-p "^ \\* top$" text))
         (should-not (string-match-p "^\\* top$" text))
         (should (string-match-p "^  \\* indented$" text))))))
+
+(ert-deftest agent-tasks-test-create/concurrent-first-creation-conflicts ()
+  "Two creators that both saw no ledger cannot both publish one.
+The id generator is forced to collide, so the test fails loudly if the
+second creator appends onto the file the first published instead of
+refusing."
+  (agent-tasks-test--with-ledger nil
+    (let ((first-ledger (agent-tasks-read))
+          (second-ledger (agent-tasks-read)))
+      (should (null (agent-tasks-ledger-token first-ledger)))
+      (should (null (agent-tasks-ledger-token second-ledger)))
+      (cl-letf (((symbol-function 'agent-tasks--new-id)
+                 (lambda (_ledger) "t-fixed")))
+        (agent-tasks--append-entry
+         first-ledger
+         (lambda (fresh)
+           (agent-tasks--entry-string :id (agent-tasks--new-id fresh)
+                                      :title "First")))
+        (should-error
+         (agent-tasks--append-entry
+          second-ledger
+          (lambda (fresh)
+            (agent-tasks--entry-string :id (agent-tasks--new-id fresh)
+                                       :title "Second")))
+         :type 'user-error))
+      (let ((ledger (agent-tasks-read)))
+        (should (= 1 (length (agent-tasks-ledger-tasks ledger))))
+        (should (null (agent-tasks-ledger-problems ledger)))))))
+
+(ert-deftest agent-tasks-test-write/interleaved-writers-lose-nothing ()
+  "The exact two-writer race: one commits, the other is refused.
+Both parse the same bytes, so both hold the same token.  Writer B
+commits first; writer A must then be refused rather than renaming its
+own copy over B's change."
+  (agent-tasks-test--with-ledger agent-tasks-test--fixture
+    (let ((writer-a (agent-tasks-read))
+          (writer-b (agent-tasks-read)))
+      (should (equal (agent-tasks-ledger-token writer-a)
+                     (agent-tasks-ledger-token writer-b)))
+      (agent-tasks--update-task
+       writer-b "t-b" (lambda () (agent-tasks--log "B was here")))
+      (should-error
+       (agent-tasks--update-task
+        writer-a "t-a" (lambda () (agent-tasks--log "A was here")))
+       :type 'user-error)
+      (let ((ledger (agent-tasks-read)))
+        ;; B's change survived and A's was not applied.
+        (should (string-match-p "B was here"
+                                (agent-tasks-task-log
+                                 (agent-tasks-find ledger "t-b"))))
+        (should-not (string-match-p "A was here"
+                                    (or (agent-tasks-task-log
+                                         (agent-tasks-find ledger "t-a"))
+                                        "")))
+        ;; Nothing was lost.
+        (should (= 2 (length (agent-tasks-ledger-tasks ledger))))))))
+
+(ert-deftest agent-tasks-test-lock/a-held-lock-refuses-and-changes-nothing ()
+  "A lock another process holds times out with a message naming it."
+  (agent-tasks-test--with-ledger agent-tasks-test--fixture
+    (let ((agent-tasks-lock-timeout 0.2)
+          (lock (agent-tasks--lock-file agent-tasks-file))
+          (before (agent-tasks--file-text agent-tasks-file)))
+      (write-region "999@other 2026-07-31 00:00:00\n" nil lock nil 'silent)
+      (unwind-protect
+          (let ((error-message
+                 (cadr (should-error
+                        (agent-tasks--update-task
+                         (agent-tasks-read) "t-a"
+                         (lambda () (agent-tasks--log "blocked")))
+                        :type 'user-error))))
+            (should (string-match-p "999@other" error-message))
+            (should (string-match-p "agent-tasks-break-lock" error-message))
+            (should (equal before (agent-tasks--file-text agent-tasks-file))))
+        (delete-file lock)))))
+
+(ert-deftest agent-tasks-test-lock/is-released-on-both-paths ()
+  "The lock does not outlive a successful write or a signalling one."
+  (agent-tasks-test--with-ledger agent-tasks-test--fixture
+    (let ((lock (agent-tasks--lock-file agent-tasks-file)))
+      (agent-tasks--update-task
+       (agent-tasks-read) "t-a" (lambda () (agent-tasks--log "fine")))
+      (should-not (file-exists-p lock))
+      (should-error
+       (agent-tasks--update-task
+        (agent-tasks-read) "t-a" (lambda () (error "boom"))))
+      (should-not (file-exists-p lock)))))
 
 (ert-deftest agent-tasks-test-create/two-tasks-get-distinct-ids ()
   "Ids are checked against the ledger, not merely generated."
@@ -3988,6 +4075,33 @@ then commits — which is exactly the window revision 1 left open."
                         :type 'user-error)
           (should (null submitted)))))))
 
+(ert-deftest agent-tasks-test-dispatch/reopened-dependency-sends-nothing ()
+  "A dependency reopened after the preview refuses the dispatch.
+The entry token covers this task's bytes only; the dependency verdict
+lives in another task's entry, so nothing about this task changes when
+its dependency is reopened — which is why the verdict is recomputed at
+commit as well."
+  (agent-tasks-test--dispatchable
+    (let ((blocker (agent-tasks-create :title "Blocker")))
+      (agent-tasks-mark-done blocker "succeeded" nil nil)
+      (agent-tasks--update-task
+       (agent-tasks-read) id
+       (lambda () (agent-tasks--set-property "DEPENDS" blocker)))
+      (cl-letf (((symbol-function 'agent-tasks-session-readiness)
+                 (lambda (_buffer) 'ready)))
+        ;; Prepared while the dependency was satisfied, so no override.
+        (let ((prepared (agent-tasks--prepare-dispatch
+                         (agent-tasks-read) id nil)))
+          (should (null (plist-get prepared :override)))
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+            (agent-tasks-reopen blocker))
+          (let ((before (agent-tasks--file-text agent-tasks-file)))
+            (should-error (agent-tasks--perform-dispatch prepared)
+                          :type 'user-error)
+            (should (null submitted))
+            (should (equal before
+                           (agent-tasks--file-text agent-tasks-file)))))))))
+
 (ert-deftest agent-tasks-test-dispatch/records-a-dependency-override ()
   "An override that was asked for is an override that is recorded."
   (agent-tasks-test--dispatchable
@@ -4218,13 +4332,18 @@ what makes it a test."
               (should (eq expected
                           (agent-tasks-session-readiness buffer))))))))))
 
-(ert-deftest agent-tasks-test-dispatch/pending-input-sends-nothing ()
-  "A dirty or uninspectable prompt refuses, with confirmation off.
+(ert-deftest agent-tasks-test-dispatch/pending-input-changes-nothing ()
+  "A dirty or uninspectable prompt refuses before anything is written.
 A warning shown only when `agent-tasks-dispatch-confirm' is non-nil
-protects nobody who turned it off, which is why this is a refusal."
+protects nobody who turned it off, which is why this is a refusal.
+
+Asserting only that nothing was submitted would pass for an
+implementation that wrote RUNNING and *then* refused, so this compares
+the ledger's bytes, the state, the attempt, and the binding."
   (dolist (state '("half-typed prompt" unknown))
     (agent-tasks-test--dispatchable
-      (let ((agent-tasks-dispatch-confirm nil))
+      (let ((agent-tasks-dispatch-confirm nil)
+            (before (agent-tasks--file-text agent-tasks-file)))
         (cl-letf (((symbol-function 'agent-tasks-session-readiness)
                    (lambda (_buffer) 'ready))
                   ((symbol-function 'agent-tasks--check-pending-input)
@@ -4235,7 +4354,12 @@ protects nobody who turned it off, which is why this is a refusal."
                        (user-error "Session %s has unsent input (%s)"
                                    (agent-display-name buffer) state)))))
           (should-error (agent-tasks-dispatch id) :type 'user-error)
-          (should (null submitted)))))))
+          (should (null submitted))
+          (should (equal before (agent-tasks--file-text agent-tasks-file)))
+          (let ((task (agent-tasks-find (agent-tasks-read) id)))
+            (should (equal "PENDING" (agent-tasks-task-state task)))
+            (should (= 0 (agent-tasks-task-attempt task))))
+          (should-not (agent-tasks-bound-task buffer)))))))
 
 (ert-deftest agent-tasks-test-pending-input/refuses-everything-but-nil ()
   "The probe's three answers map to proceed, refuse, refuse."
@@ -4597,6 +4721,15 @@ task's event write during the preview does not refuse this dispatch."
                    (plist-get prepared :entry-token))
       (user-error "Task %s changed since the preview (now %s); nothing was sent"
                   id (agent-tasks-task-state task)))
+    ;; The entry token covers this task's bytes; the dependency verdict
+    ;; lives in *other* tasks' entries, so reopening a dependency that
+    ;; was satisfied at preview changes the decision without touching
+    ;; this entry at all.  Recompute and require the same verdict.
+    (let ((now (agent-tasks-unsatisfied-dependencies ledger task)))
+      (unless (equal now (plist-get prepared :override))
+        (user-error
+         "Task %s's dependencies changed since the preview (%s); nothing was sent"
+         id (if now (agent-tasks--describe-dependencies now) "now satisfied"))))
     ledger))
 
 (defun agent-tasks--perform-dispatch (prepared)
@@ -4841,12 +4974,16 @@ Add to `test/agent-tasks-test.el`:
 
 (defun agent-tasks-test--simulate-restart (buffer session-id starter)
   "Drive a whole `agent-restart'-shaped command for BUFFER.
-Runs the before hook, calls STARTER (which stands in for
-`agent-start-session' and may yield or signal), runs the after hook on
-success, and then runs `post-command-hook' — the boundary the real
-command ends at.  Calling the handlers in a hand-picked order, as
-revision 2's tests did, cannot show whether the finalizer fires at the
-wrong moment."
+Runs the before hook, calls STARTER, runs the after hook on success,
+and then runs `post-command-hook' — the boundary the real command ends
+at.  Calling the handlers in a hand-picked order, as revision 2's tests
+did, cannot show whether the finalizer fires at the wrong moment.
+
+STARTER stands in for everything `agent-restart' does after the before
+hooks: it owns the kill of the old buffer as well as the startup, so a
+test can model a startup that fails *after* the session was killed —
+which is the case that must end UNKNOWN — separately from an abort that
+happens before any kill."
   (agent-tasks--before-restart buffer session-id)
   (unwind-protect
       (let ((new-buffer (funcall starter)))
@@ -4877,6 +5014,31 @@ is why the finalizer is armed on `post-command-hook' instead."
         (should (null agent-tasks--restart-pending))
         (should-not (memq #'agent-tasks--finalize-restart post-command-hook))))))
 
+(ert-deftest agent-tasks-test-restart/a-later-before-hook-signalling-rebinds ()
+  "An abort before the kill leaves the session alive, so the task stays.
+Core runs every before-restart hook before killing the buffer; a later
+hook signalling must not turn a session that is still running into an
+UNKNOWN task."
+  (agent-tasks-test--with-ledger nil
+    (agent-tasks-test--with-session buffer
+      (let* ((agent-tasks--restart-pending nil)
+             (post-command-hook nil)
+             (id (agent-tasks-create :title "Aborted")))
+        (setf (agent-session-id (agent-session buffer)) "sid-5")
+        (agent-tasks--update-task
+         (agent-tasks-read) id
+         (lambda () (agent-tasks--set-state "RUNNING" "setup")))
+        (agent-tasks--bind buffer id)
+        ;; Our hook runs, then a later one signals: no kill, no startup.
+        (agent-tasks--before-restart buffer "sid-5")
+        (should-error (error "a later before-restart hook failed"))
+        (run-hooks 'post-command-hook)
+        (should (equal "RUNNING"
+                       (agent-tasks-task-state
+                        (agent-tasks-find (agent-tasks-read) id))))
+        (should (equal id (agent-tasks-bound-task buffer)))
+        (should (null agent-tasks--restart-pending))))))
+
 (ert-deftest agent-tasks-test-restart/a-signalling-startup-ends-in-unknown ()
   "A detach whose startup signals must not leave the task RUNNING.
 Revision 1's test asserted the abandoned RUNNING state was acceptable;
@@ -4893,7 +5055,10 @@ it is not, because nothing would ever have noticed it."
         (should-error
          (agent-tasks-test--simulate-restart
           buffer "sid-1"
-          (lambda () (error "backend would not start"))))
+          (lambda ()
+            ;; The real command kills first, then starts.
+            (let ((kill-buffer-query-functions nil)) (kill-buffer buffer))
+            (error "backend would not start"))))
         (should (null agent-tasks--restart-pending))
         (let ((task (agent-tasks-find (agent-tasks-read) id)))
           (should (equal "UNKNOWN" (agent-tasks-task-state task)))
@@ -5033,19 +5198,37 @@ underneath itself.  `post-command-hook' runs after `agent-restart'
 returns, whether it succeeded or signalled."
   (when-let* ((id (agent-tasks-bound-task buffer)))
     (setq agent-tasks--restart-pending
-          (list :id id :session-id session-id))
+          (list :id id :session-id session-id :buffer buffer))
     (agent-tasks--unbind buffer)
     (add-hook 'post-command-hook #'agent-tasks--finalize-restart)))
 
 (defun agent-tasks--finalize-restart ()
   "Close out a restart whose after-restart hook never ran.
-One-shot: removes itself from `post-command-hook' however it exits."
+One-shot: removes itself from `post-command-hook' however it exits.
+
+Core runs **every** before-restart hook before killing the buffer, so a
+*later* hook signalling aborts the restart with the original session
+still alive.  Marking the task UNKNOWN there would be wrong: nothing
+happened to the session.  The original buffer is therefore kept in the
+pending record, and when it is still live and still reports the session
+id the detach expected, the binding is simply restored."
   (remove-hook 'post-command-hook #'agent-tasks--finalize-restart)
   (when-let* ((pending agent-tasks--restart-pending))
     (setq agent-tasks--restart-pending nil)
-    (agent-tasks--safe-transition
-     (plist-get pending :id) "UNKNOWN" "a restart did not complete"
-     :only-when agent-tasks--live-states)))
+    (let ((id (plist-get pending :id))
+          (buffer (plist-get pending :buffer))
+          (session-id (plist-get pending :session-id)))
+      (if (and (buffer-live-p buffer)
+               (equal session-id
+                      (when-let* ((session (agent-session buffer)))
+                        (agent-session-id session))))
+          (progn
+            (agent-tasks--bind buffer id)
+            (agent-tasks--safe-log
+             id "restart aborted before the session was replaced; binding restored"))
+        (agent-tasks--safe-transition
+         id "UNKNOWN" "a restart did not complete"
+         :only-when agent-tasks--live-states)))))
 
 (defun agent-tasks--after-restart (buffer session-id)
   "Re-attach the task detached by `agent-tasks--before-restart'.
@@ -6442,133 +6625,74 @@ Expected: both hooks empty (or holding only what other modules put
 there) and `mode=nil`.  A module that installed a hook at load would
 observe sessions for a person who only loaded it.
 
-- [ ] **Step 3: Install the verification harness**
+- [ ] **Step 3: Start a dedicated verification Emacs**
 
-The checks are interactive and span many commands, so a `let` form
-cannot hold the isolation: revision 2 wrote them as a comment inside
-one, and its bindings would have ended before the first check ran.  The
-harness therefore **sets** what it needs after saving the prior values,
-and teardown restores them.
+The checks run against live backends, and the ledger's observers are
+**process-global**: the binding table, the attention item list and its
+counter, and the session-event subscriptions are shared with every real
+session in the Emacs that runs them.  Revision 3 tried to isolate that
+by swapping globals inside the running Emacs, which cannot cover the
+attention inbox and leaves any mistake sitting in the person's working
+session.
 
-Add this to a scratch buffer and evaluate it once:
+Run the checks in a **separate Emacs instead**, so there is nothing to
+isolate: it has no real sessions, no real inbox, and no configured real
+ledger, and killing it disposes of all of it.
 
-```elisp
-(defvar agent-tasks-live--saved nil
-  "Everything the live-verification harness must put back.")
+```bash
+root=$(mktemp -d "${TMPDIR:-/tmp}/agent-tasks-live.XXXXXX") || exit 1
+mkdir -p "$root/project" || exit 1
+git -C "$root/project" init -q || exit 1
+git -C "$root/project" commit -q --allow-empty -m baseline || exit 1
+printf '%s\n' "$root" > "$root/ROOT"
+echo "verification root: $root"
 
-(defun agent-tasks-live-setup ()
-  "Install an isolated scratch harness and return its root."
-  (interactive)
-  (when agent-tasks-live--saved
-    (user-error "Harness already installed; run `agent-tasks-live-teardown'"))
-  (let* ((root (file-name-as-directory (make-temp-file "agent-tasks-live" t)))
-         (project (expand-file-name "project/" root))
-         (real (expand-file-name agent-tasks-file)))
-    (make-directory project t)
-    (setq agent-tasks-live--saved
-          (list :root root
-                :project project
-                :file agent-tasks-file
-                :bindings agent-tasks--bindings
-                :reconciled agent-tasks--reconciled
-                :restart-pending agent-tasks--restart-pending
-                :tasks-mode agent-tasks-mode
-                :attention-mode (bound-and-true-p agent-attention-mode)
-                :real-ledger real
-                :real-hash (and (file-readable-p real)
-                                (secure-hash 'sha1 (agent-tasks--file-text real)))
-                :sessions nil))
-    (setq agent-tasks-file (expand-file-name "tasks.org" project))
-    ;; Replaced, never cleared: `clrhash' on the shared table would
-    ;; destroy bindings belonging to the person's real sessions.
-    (setq agent-tasks--bindings (make-hash-table :test 'eq))
-    (setq agent-tasks--reconciled nil)
-    (setq agent-tasks--restart-pending nil)
-    (agent-tasks-mode 1)
-    (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
-    (let ((default-directory project))
-      (shell-command "git init -q && git commit -q --allow-empty -m baseline"))
-    (message "Harness root: %s" root)
-    root))
+# Record the real ledger's content, to compare after the run.
+real=~/.emacs.d/agent/tasks.org
+if [ -f "$real" ]; then shasum -a 256 "$real" > "$root/real-ledger.sha"; else
+  echo "absent" > "$root/real-ledger.sha"; fi
 
-(defun agent-tasks-live-root ()
-  "Return the harness's generated root, signalling when there is none."
-  (or (plist-get agent-tasks-live--saved :root)
-      (user-error "No harness installed")))
-
-(defun agent-tasks-live-project ()
-  "Return the harness's scratch project directory."
-  (or (plist-get agent-tasks-live--saved :project)
-      (user-error "No harness installed")))
-
-(defun agent-tasks-live-track (buffer)
-  "Record BUFFER as a scratch session for teardown to kill."
-  (plist-put agent-tasks-live--saved :sessions
-             (cons buffer (plist-get agent-tasks-live--saved :sessions)))
-  buffer)
-
-(defun agent-tasks-live-baseline (label)
-  "Commit the scratch ledger as the baseline for the next check."
-  (interactive "sCheck label: ")
-  (let ((default-directory (agent-tasks-live-project)))
-    (shell-command
-     (format "git add -- tasks.org && git commit -q --allow-empty -m %s"
-             (shell-quote-argument (concat "baseline: " label))))))
-
-(defun agent-tasks-live-diff ()
-  "Show the scratch ledger's change since the last baseline."
-  (interactive)
-  (let ((default-directory (agent-tasks-live-project)))
-    (shell-command "git diff -- tasks.org")))
-
-(defun agent-tasks-live-teardown ()
-  "Restore every saved global, close scratch sessions, trash the root."
-  (interactive)
-  (let ((saved (or agent-tasks-live--saved (user-error "No harness installed"))))
-    (dolist (buffer (plist-get saved :sessions))
-      (when (buffer-live-p buffer)
-        (let ((kill-buffer-query-functions nil))
-          (kill-buffer buffer))))
-    (setq agent-tasks-file (plist-get saved :file))
-    (setq agent-tasks--bindings (plist-get saved :bindings))
-    (setq agent-tasks--reconciled (plist-get saved :reconciled))
-    (setq agent-tasks--restart-pending (plist-get saved :restart-pending))
-    (agent-tasks-mode (if (plist-get saved :tasks-mode) 1 -1))
-    (when (fboundp 'agent-attention-mode)
-      (agent-attention-mode (if (plist-get saved :attention-mode) 1 -1)))
-    (let* ((real (plist-get saved :real-ledger))
-           (now (and (file-readable-p real)
-                     (secure-hash 'sha1 (agent-tasks--file-text real)))))
-      (unless (equal now (plist-get saved :real-hash))
-        (display-warning
-         'agent-tasks-live
-         (format "THE REAL LEDGER CHANGED during verification: %s" real)
-         :error)))
-    (call-process "trash" nil nil nil (directory-file-name
-                                       (plist-get saved :root)))
-    (setq agent-tasks-live--saved nil)
-    (message "Harness torn down")))
+emacs -Q --name agent-tasks-live \
+      --eval "(progn
+                (setq server-name \"agent-tasks-live\")
+                (add-to-list 'load-path \"$PWD\")
+                (require 'agent) (require 'agent-tasks)
+                (setq agent-tasks-file \"$root/project/tasks.org\")
+                (agent-tasks-mode 1)
+                (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
+                (server-start))" &
 ```
 
-Then `M-x agent-tasks-live-setup`.  Every later step uses
-`(agent-tasks-live-root)` and `(agent-tasks-live-project)`; **no step
-names a path of its own.**  Task instructions stay inert — "Reply with
-the words `task received` and do nothing else." — because every claim
-under test is about state transitions and bindings, and none needs an
-agent that changes a file.
+`-Q` is what makes this safe: no user init, so no real session buffers,
+no attention items, and no chance of the checks touching the person's
+ledger — `agent-tasks-file` in that process points only at the scratch
+root.  Load whatever backend configuration the checks need *inside*
+that Emacs, by hand.
+
+Every later step runs in that Emacs and uses `$root`; **no step names a
+path of its own.**  Task instructions stay inert — "Reply with the
+words `task received` and do nothing else." — because every claim under
+test is about state transitions and bindings, and none needs an agent
+that changes a file.
+
+Two shell helpers for the checks that compare bytes:
+
+```bash
+baseline() { git -C "$root/project" add -- tasks.org &&
+             git -C "$root/project" commit -q --allow-empty -m "baseline: $1"; }
+ledger_diff() { git -C "$root/project" diff -- tasks.org; }
+```
 
 - [ ] **Step 4: Live verification, both backends**
 
 Run each of these for Claude Code and for Codex, recording the result.
-Wrap each session you start in `agent-tasks-live-track` so teardown
-closes it.
 
 1. **Dispatch into a new session.**  Create a task in
-   `(agent-tasks-live-project)`, dispatch it choosing "new session",
-   confirm from the conversation that the instruction arrived exactly
-   once, and confirm the ledger shows `RUNNING`, the binding, and —
-   once the backend reports one — `SESSION_ID` plus a `Log` line
-   recording the identity confirmation.
+   `$root/project`, dispatch it choosing "new session", confirm from
+   the conversation that the instruction arrived exactly once, and
+   confirm the ledger shows `RUNNING`, the binding, and — once the
+   backend reports one — `SESSION_ID` plus a `Log` line recording the
+   identity confirmation.
 2. **A finished turn does not close the task.**  **First move focus
    away from the session** — select another window, or another frame —
    because `agent-attention-mode` deliberately files no completion item
@@ -6588,11 +6712,11 @@ closes it.
    becomes `UNKNOWN` with a reason, that an attention item was filed,
    and that nothing was re-dispatched.
 5. **Crash recovery, twice.**  With a `RUNNING` task written into the
-   scratch ledger naming a session that does not exist, and the
-   *harness's* binding table holding no entry for it:
+   scratch ledger naming a session that does not exist, and no binding
+   for it:
 
    ```elisp
-   (setq agent-tasks--reconciled nil)   ; harness-owned; restored on teardown
+   (setq agent-tasks--reconciled nil)
    ```
 
    Open the list.  Confirm the summary reports one task reconciled to
@@ -6603,8 +6727,8 @@ closes it.
 6. **Restart.**  `agent-restart` a session holding a `RUNNING` task.
    Confirm the binding follows the resumed session, the state is
    unchanged, and the `Log` records the re-attachment — and that the
-   task is *not* `UNKNOWN`, which is what a finalizer firing mid-startup
-   would have produced.
+   task is *not* `UNKNOWN`, which is what a finalizer firing
+   mid-startup would have produced.
 7. **Dependency gate.**  Dispatch a task whose dependency is not `DONE`
    and confirm the refusal names the dependency and its state; close
    the dependency as `succeeded` and confirm the dispatch proceeds and
@@ -6612,24 +6736,25 @@ closes it.
 8. **Busy target.**  Dispatch into a session mid-turn.  Confirm the
    refusal names the session, mentions `agent-queue-prompt`, and that
    the running turn is unaffected.
-9. **Closing honestly.**  `M-x agent-tasks-live-baseline` with the label
-   `closing`, then close one task with outcome `succeeded`, a result and
-   evidence, and cancel another with a reason.  `M-x
-   agent-tasks-live-diff` and confirm the only changed bytes are the
-   keyword, `UPDATED`, `OUTCOME`, and the new `Result`/`Evidence`/`Log`
-   lines.  Confirm both tasks' sessions are no longer bound.
-10. **Prompt isolation.**  With `agent-tasks-dispatch-confirm` bound to
-    nil, type some text into an idle session's prompt **without**
-    submitting it, then dispatch a task there.  The dispatch must
-    refuse, naming the pending input; the typed text must still be
-    sitting unsent in the prompt; and `agent-tasks-live-diff` must show
-    the ledger unchanged.  Confirmation is off on purpose: that is the
-    configuration in which a warning would have protected nobody.
+9. **Closing honestly.**  Run `baseline closing`, then close one task
+   with outcome `succeeded`, a result and evidence, and cancel another
+   with a reason.  Run `ledger_diff` and confirm the only changed bytes
+   are the keyword, `UPDATED`, `OUTCOME`, and the new
+   `Result`/`Evidence`/`Log` lines.  Confirm both tasks' sessions are
+   no longer bound.
+10. **Prompt isolation.**  Run `baseline isolation` **first** — check 9
+    left its closing changes uncommitted, and without a fresh baseline
+    this check's "ledger unchanged" assertion would be reading check
+    9's diff.  Then, with `agent-tasks-dispatch-confirm` bound to nil,
+    type some text into an idle session's prompt **without** submitting
+    it and dispatch a task there.  The dispatch must refuse, naming the
+    pending input; the typed text must still be sitting unsent in the
+    prompt; the task must still be `PENDING` with attempt 0 and no
+    binding; and `ledger_diff` must print nothing at all.
 
 - [ ] **Step 5: Import and chief context, against copies only**
 
-Copy two or three Org TODOs into
-`(expand-file-name "notes.org" (agent-tasks-live-project))` — never
+Copy two or three Org TODOs into `$root/project/notes.org` — never
 point the import at a real notes file — and confirm: the scope rules
 for region, narrowed subtree, and whole buffer; that `t` jumps back to
 the right heading, including when a heading differing only in case sits
@@ -6638,23 +6763,34 @@ count.
 
 Call `agent-tasks-chief-context` and read its output, checking each
 line carries an age.  Do **not** add it to
-`agent-chief-context-functions` during the check: the chief is a live
-loop that contacts the person, and a verification step has no business
-changing what it says.
+`agent-chief-context-functions`: the chief is a live loop that contacts
+the person, and a verification step has no business changing what it
+says.
 
-- [ ] **Step 6: Tear down and confirm nothing durable changed**
+- [ ] **Step 6: Dispose of the verification Emacs**
 
-```elisp
-(agent-tasks-live-teardown)
+Nothing to restore — the process held no real state — so disposal is
+termination plus cleanup, and both are checked:
+
+```bash
+emacsclient -s agent-tasks-live --eval '(kill-emacs)' 2>/dev/null
+sleep 1
+pgrep -f 'agent-tasks-live' && echo "VERIFICATION EMACS STILL RUNNING" && exit 1
+
+trash "$root" || { echo "CLEANUP FAILED: $root still exists"; exit 1; }
+[ -e "$root" ] && echo "CLEANUP FAILED: $root still exists" && exit 1
+
+# The real ledger must be exactly as it was.
+real=~/.emacs.d/agent/tasks.org
+if [ -f "$real" ]; then shasum -a 256 -c "$root/real-ledger.sha" 2>/dev/null ||
+     echo "THE REAL LEDGER CHANGED"; fi
 ```
 
-Teardown restores every saved global, kills the tracked scratch
-sessions, compares the real ledger's hash against the one recorded at
-setup — warning loudly if it differs — and trashes the generated root.
-Then confirm from the outside that the generated root is gone (use the
-path `agent-tasks-live-setup` printed, not a guessed one), and verify
-by hand that `agent-tasks-file`, `agent-tasks-mode`, and
-`agent-attention-mode` hold the values they had before setup.
+Take the real-ledger hash file out of the root before trashing it, or
+compare it beforehand — the check above is written in the order that
+reads clearly, and either arrangement is fine as long as the comparison
+actually happens.  If the verification Emacs died early, the root still
+needs trashing: run the cleanup regardless of how the run ended.
 
 - [ ] **Step 7: Record the outcome**
 
