@@ -6754,10 +6754,22 @@ start() {
   setup_ok=no
   server_pid=
   launcher_pid=
+  in_spawn=
+  pending_signal=
   cleanup_start() {
     local rc=$?
     set +e                     # a failing kill must not abort cleanup
     trap - EXIT INT TERM
+    # A signal can land between the spawn and `launcher_pid=$!'.  `$!'
+    # still holds the spawned pid here, so recover it rather than
+    # treating the run as having launched nothing and releasing while
+    # Emacs is alive.  `set +u' is required around the expansion:
+    # `${!:-}' is parsed as an *indirect* expansion, not as `$!' with a
+    # default, and aborts the handler under `set -u' when no background
+    # job was ever started.
+    set +u
+    [ -n "$launcher_pid" ] || launcher_pid=$!
+    set -u
     [ "$setup_ok" = yes ] && exit "$rc"
     echo "setup failed ($rc); cleaning up" >&2
     # Before readiness `server_pid' is empty; releasing on the strength
@@ -6773,8 +6785,8 @@ start() {
     exit "$rc"
   }
   trap cleanup_start EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  trap 'if [ -n "${in_spawn:-}" ]; then pending_signal=130; else exit 130; fi' INT
+  trap 'if [ -n "${in_spawn:-}" ]; then pending_signal=143; else exit 143; fi' TERM
 
   set -e
   mkdir "$state"
@@ -6838,6 +6850,12 @@ start() {
   # Claude notification hook among them -- at THIS server.  Without it
   # the hook contacts the person's real Emacs and the ledger sees no
   # lifecycle events at all.
+  #
+  # The spawn and the pid that publishes it are two commands, and an
+  # INT/TERM between them would leave `launcher_pid' empty.  `in_spawn'
+  # defers the signal-triggered exit until the pid is recorded, so
+  # cleanup always has something to stop.
+  in_spawn=yes
   EMACS_SOCKET_NAME="$id" \
   "$emacs_bin" -Q --name "$id" \
     --eval "(progn
@@ -6869,6 +6887,8 @@ start() {
               (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
               (server-start))" &
   launcher_pid=$!
+  in_spawn=
+  if [ -n "$pending_signal" ]; then exit "$pending_signal"; fi
   printf '%s\n' "$launcher_pid" > "$state/launcher-pid"
   printf '%s\n' "$root" > "$state/root"
   printf '%s\n' "$real" > "$state/real-path"
