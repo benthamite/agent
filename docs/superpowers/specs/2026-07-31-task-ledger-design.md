@@ -1,6 +1,19 @@
 # A Small Durable Task Ledger — Design
 
-Revision 1.
+Revision 2.  Revision 1 was reviewed and found not implementation-ready
+on thirteen counts; this revision closes them without changing the
+feature.  Three were reproduced in batch before being fixed: the body
+escape/unescape pair was **not** injective (a line beginning
+`" * text"` came back as `"* text"`, so a dispatched prompt could
+differ from the stored instruction); `grep -c 'agent-tasks.el'` over the
+planned Makefile returns 1, not the 2 the verification step expected;
+and `write-region` with `'excl` does give an atomic exclusive create
+that signals `file-already-exists`, which is what the new interprocess
+lock rests on.  The rest tighten write atomicity across processes,
+duplicate-id handling, the transition matrix, dispatch commit-time
+revalidation, binding bijection, new-session identity, the restart
+failure path, event evidence, refresh semantics, the required UI
+fields, task order, and live-verification isolation.
 
 ## Problem
 
@@ -76,7 +89,12 @@ not assumed.
 | Properties do not leak from a parent heading to a child by default: a `** Log` sub-heading returned `nil` for the parent's `AGENT_TASK_ID` | verified in batch |
 | `org-inhibit-startup` bound to `t` does **not** disturb in-file `#+TODO:` parsing, so a machine write can skip Org's startup work | verified in batch |
 | `org-todo "PENDING"` on a heading that has no keyword adds one rather than failing | verified in batch |
-| `^` in `replace-regexp-in-string` matches after every newline, so the body escape/unescape pair round-trips a multi-line instruction exactly | verified in batch |
+| `^` in `replace-regexp-in-string` matches after every newline, so a line-oriented body codec can be written as two regexp replacements | verified in batch |
+| The revision-1 codec (`^\*+` / `^ \*+`) is **not** injective: `" * a bullet"` decodes to `"* a bullet"`. The revision-2 pair (`^ *\*` / `^ +\*`) round-trips `"* x"`, `" * x"`, `"   ** x"`, `"  *bold* start"`, `"plain"` and `" plain"` exactly | verified in batch |
+| `write-region` with the `'excl` flag is an atomic exclusive create: the second caller signals `file-already-exists`, which is what the interprocess lock rests on | verified in batch |
+| `insert-file-contents` sets `buffer-file-coding-system` even in a non-visiting temp buffer (`undecided-dos` for a CRLF file), and writing back with that value reproduces CRLF and encodes UTF-8 correctly | verified in batch |
+| `agent--dispatch-send` emits the `submit` session event **before** calling the backend's send function, so `submit` cannot be evidence that anything was delivered | `agent.el:1492`-`agent.el:1493` |
+| `agent-claude-submit-command` inserts text into the CLI prompt and then sends return, so a non-empty prompt is submitted along with it, and no backend slot exposes the prompt's contents | `agent-claude.el:269`-`agent-claude.el:272` |
 | `^\*\{1,2\} ` matches `** x` and does **not** match `*** x`, so a third-level heading inside `Comments` is not mistaken for a section boundary | verified in batch |
 | `make-temp-file` accepts an absolute prefix, so the replacement temp file can be created in the ledger's own directory (required for `rename-file` to be atomic) | verified in batch |
 | `agent-capture` already stores durable per-session state as Org files and reads them back with `org-entry-get` | `agent-capture.el:117`–`agent-capture.el:259` |
@@ -206,6 +224,56 @@ the manual:
 `Comments` is written by the ledger (via a command) and freely edited by
 the person; it is displayed but never interpreted.
 
+### The body codec
+
+An instruction may legitimately begin a line with `*`, which Org would
+read as a heading and which would split the entry.  The ledger therefore
+encodes the body on write and decodes it on read, and **the pair must be
+injective** — the decoded instruction is what gets dispatched, so a
+codec that is merely "usually right" sends a prompt that differs from
+what the person wrote.
+
+- **Encode:** prepend one space to every line matching `^ *\*` — any
+  line whose first non-blank character is `*`, at any indentation.
+- **Decode:** remove one leading space from every line matching
+  `^ +\*`.
+- **Decode only runs on bodies this package encoded.**  A task written
+  by `agent-tasks-create` carries `:BODY_ENCODED: t`; an entry without
+  that property has its body returned verbatim.
+
+Both halves are needed, and revision 1 had neither right.
+
+Its pair (`^\*+` encode, `^ \*+` decode) was **not injective**: a line
+the person indented themselves, `" * a bullet"`, did not match the
+encoder and so was written unchanged, then matched the decoder and came
+back as `"* a bullet"`.  Verified in batch.  The pair above round-trips
+`"* x"`, `" * x"`, `"  * x"`, `"   ** deep"`, `"  *bold* start"`,
+`"plain"`, `" plain"` and `""` exactly, no two of those inputs share an
+encoding, and no encoded line begins with `*` at column zero — so Org
+can never read one as a heading.
+
+The `BODY_ENCODED` gate closes the other half.  *Any* prefix-based
+escape is ambiguous when applied to text it did not produce: after
+encoding, `"* x"` and the person's hand-typed `" * x"` are the same
+bytes on disk, so decoding a hand-written body would silently remove a
+space the person meant.  Recording that the ledger encoded this body
+removes the ambiguity, and it costs one property.  A hand-written body
+cannot contain a column-zero `*` anyway — Org would have made it a
+heading and split the entry — so verbatim is the right reading for one.
+
+Two further contract points, stated so they cannot be mistaken for
+losses:
+
+- **The body is stored once, at creation, and never rewritten.**  Every
+  later write edits a property, the heading keyword, or a section — never
+  the body.  So the person's bytes in the file are theirs; the codec
+  only has to survive read-back.
+- **The parsed instruction is the body with outer whitespace trimmed.**
+  Interior blank lines and indentation are preserved exactly; leading
+  and trailing blank lines are not part of an instruction and are not
+  reproduced.  Read → dispatch is therefore stable, and read → write →
+  read is idempotent.
+
 ### State lives in exactly one place
 
 The heading's TODO keyword is the state.  There is deliberately **no**
@@ -217,11 +285,42 @@ is a **problem row**, not a task: it is listed, named, and explained
 ("heading has no ledger state keyword"), it is never dispatched, and it
 is never rewritten.  This case is real rather than theoretical — a
 person editing the file who types `* WAITING …` produces a heading whose
-state is `nil` and whose title silently becomes `"WAITING …"`.  The same
-treatment covers a level-1 heading with no `AGENT_TASK_ID`, a duplicate
-id, and a file whose `#+agent_ledger_version:` is newer than this code
-understands (in which case the whole file is read-only and every write
-is refused by name).
+state is `nil` and whose title silently becomes `"WAITING …"`.
+
+### Every problem class, and what "problem" costs a record
+
+A problem row is not a task.  It never appears in `agent-tasks-find`,
+never satisfies a dependency, is never dispatched, and is never
+rewritten.  The classes:
+
+| Class | Detected as |
+|---|---|
+| no task id | level-1 heading without `AGENT_TASK_ID` |
+| no ledger state | keyword absent or not one of the six |
+| duplicate task id | the id appears on more than one heading |
+| malformed attempt | `ATTEMPT` present and not a non-negative integer |
+| blocked without a reason | state `BLOCKED` and no `BLOCKED_REASON` |
+| done without an outcome | state `DONE` and `OUTCOME` not `succeeded`/`failed` |
+
+**Duplicate ids reject every occurrence, not just the later ones.**
+Revision 1 kept the first heading as a usable task and reported only the
+rest, which is exactly backwards: `org-find-property` returns the first
+match, so a write aimed at the id would silently edit one of two
+headings a person cannot tell apart, and a dispatch would run the
+instruction of whichever came first in the file.  Parsing therefore
+counts ids in a first pass and, for any id seen more than once, emits a
+problem row per occurrence and no task at all.  The person resolves the
+duplication by hand; nothing in the ledger guesses which one was meant.
+
+The malformed-attempt, blocked-without-reason and done-without-outcome
+classes exist because the alternative is silent coercion: reading
+`ATTEMPT: two` as `0` would renumber a real attempt history, and
+accepting a `DONE` record with no outcome would present unverified work
+as characterised.
+
+Separately, a file whose `#+agent_ledger_version:` is newer than this
+code understands is displayed read-only in full, and every write is
+refused by name.
 
 ### Properties
 
@@ -240,6 +339,7 @@ is refused by name).
 | `BLOCKED_REASON` | why a `BLOCKED` task is blocked; required whenever the state is `BLOCKED` |
 | `OUTCOME` | `succeeded` or `failed`; required whenever the state is `DONE` |
 | `SOURCE_FILE`, `SOURCE_HEADING` | provenance of an imported Org TODO: the file, and the heading line **verbatim** |
+| `BODY_ENCODED` | `t` when this package wrote the body through the codec; absent means the body is read verbatim |
 
 `DIRECTORY` is an abbreviated absolute directory with a trailing slash,
 normalised exactly as `agent-session--normalize-directory` does, so a
@@ -250,19 +350,44 @@ reconstructed one, for the same reason `agent-learn` records literal
 headings: any other key fails to find the heading again once the person
 edits it, and the failure is silent.
 
+**Property values are written byte-for-byte**, with exactly one
+exception: a value containing a newline is refused with an error naming
+the property, because an Org property drawer cannot represent one and
+silently substituting a space would corrupt the value.  Revision 1
+collapsed interior whitespace on every property, which contradicted
+`SOURCE_HEADING`'s verbatim contract — a heading with two spaces between
+words was stored with one, and the lookup that searches for it then
+failed.  (Org itself trims leading and trailing whitespace from a
+property value on read; that is Org's behaviour, not a transformation
+this package makes, and the manual says so.)
+
+The source lookup is likewise **anchored**: the heading is matched as a
+whole line, `^<heading>[ \t]*$`, not as a substring.  An unanchored
+search finds `* TODO Ship` inside `* TODO Ship the second thing` and
+sends the person to the wrong heading.
+
 ### Writing
 
-Every write is one function, `agent-tasks--update-task`, and it always
-does all of this:
+Every write is one function, `agent-tasks--update-task`, and **the whole
+of it runs while holding an interprocess lock**:
 
+0. **Acquire the lock.**  `agent-tasks-file` plus `.lock` is created
+   with `write-region`'s `'excl` flag, which is an atomic exclusive
+   create that signals `file-already-exists` when another process holds
+   it — verified in batch.  The lock file records the pid, the host, and
+   the time.  Acquisition retries for `agent-tasks-lock-timeout`
+   (default 5 seconds) and then signals a `user-error` naming the lock
+   file and its contents.  **A stale lock is never broken
+   automatically**: `agent-tasks-break-lock` is an explicit command that
+   shows the contents first.  Silently breaking a lock would reintroduce
+   exactly the race the lock exists to close.
 1. Refuse if a buffer visits `agent-tasks-file` with unsaved changes,
    naming the buffer.  The person's edits are never saved as a side
    effect of a machine write.
-2. Read the file's current bytes and compare their SHA-1 with the hash
+2. Read the file's **raw bytes** and compare their SHA-1 with the token
    recorded when the task list was parsed.  A mismatch is a conflict:
    the write is refused with "the ledger changed on disk since it was
-   read; refresh and retry".  This is what makes two Emacs instances, or
-   an editor and the ledger, safe.
+   read; refresh and retry".
 3. Apply the edit in a temp buffer holding the file's contents, in
    `org-mode`, with `org-mode-hook` bound to nil (the person's org hooks
    have no business running inside a machine write),
@@ -275,12 +400,35 @@ does all of this:
    and `rename-file` it over the original, with the coding system Emacs
    detected when reading, so an interrupted write cannot truncate the
    ledger and a CRLF file stays CRLF.
-5. Revert a clean visiting buffer afterwards, so an open ledger window
-   shows the truth.
+5. Release the lock, then revert a clean visiting buffer, so an open
+   ledger window shows the truth.
 
-Failure at any step is a `user-error` and changes nothing.  Because
-dispatch writes before it sends (§5), an unwritable ledger stops the
-dispatch instead of starting untracked work.
+Steps 0 and 2 are two different guards against two different races, and
+revision 1 had only the second:
+
+- **The hash alone does not make concurrent writers safe.**  Two Emacs
+  processes can both read the same bytes, both compute the same token,
+  both find it matches, and both rename — the later rename wins and the
+  earlier writer's change is gone with no error anywhere.  The hash
+  detects *a change that already landed*; only the lock prevents an
+  interleaving that produces one.  With the lock, the second writer
+  reaches step 2 after the first has renamed, sees a different token,
+  and is refused — which is the intended outcome: one succeeds, one is
+  told to refresh, and nothing is lost.
+- **The token hashes raw bytes, not decoded text.**  A decoded hash
+  cannot distinguish a CRLF file from its LF twin, nor two byte
+  sequences that decode alike under a lenient coding system, so a real
+  concurrent change could pass the check.
+
+**Creating the file is part of the same protocol.**  `agent-tasks-file`
+is created inside the lock, through the same temp-file-plus-rename path,
+so two processes that both find no ledger cannot both publish a header
+and lose one another's first task.
+
+Failure at any step is a `user-error`, changes nothing, and releases the
+lock through `unwind-protect`.  Because dispatch writes before it sends
+(§5), an unwritable ledger stops the dispatch instead of starting
+untracked work.
 
 ## 2. States and transitions
 
@@ -305,13 +453,42 @@ Every transition, its trigger, and **who may cause it**:
 | `PENDING` | `RUNNING` | `agent-tasks-dispatch` | person |
 | `RUNNING` | `BLOCKED` | bound session reported `blocked` (`:kind permission`/`question`) | evidence |
 | `RUNNING`/`BLOCKED` | `BLOCKED` | `agent-tasks-mark-blocked` (reason required) | person |
-| `BLOCKED` | `RUNNING` | bound session reported `submit` or `activity` after the block | evidence |
+| `BLOCKED` | `RUNNING` | bound session reported `activity` after the block | evidence |
 | `RUNNING`/`BLOCKED` | `UNKNOWN` | bound session torn down with no outcome recorded; or reconciliation found no live session; or the dispatch submission signalled; or an `error` event | evidence |
 | any open state | `DONE` | `agent-tasks-mark-done` (outcome required) | person |
 | any open state | `CANCELLED` | `agent-tasks-cancel` (reason required) | person |
 | `UNKNOWN`/`BLOCKED` | `RUNNING` | `agent-tasks-resume` → re-dispatch, or attach to a session the person picks | person |
-| `UNKNOWN` | `PENDING` | `agent-tasks-resume` → "unbind and leave pending" | person |
+| `UNKNOWN`/`BLOCKED` | `PENDING` | `agent-tasks-resume` → "unbind and leave pending" | person |
 | `DONE`/`CANCELLED` | `PENDING` | `agent-tasks-reopen` (confirmation required) | person |
+
+`PENDING` → `BLOCKED` is **not** in the table and is not offered.
+Revision 1's `agent-tasks-mark-blocked` accepted it, which contradicted
+this table; a task that has never run and cannot start is either still
+pending or cancelled, and "blocked" is reserved for a run that started
+and stopped needing a person.
+
+### The matrix is enforced in one place
+
+`agent-tasks-transition` is the only function that changes a state, and
+it validates **every** call against a single constant matrix — the table
+above, transcribed — rather than trusting each caller to pass a correct
+source-state list.  Revision 1 checked only an optional `:only-when`
+argument the caller supplied, so a caller that forgot it could write any
+transition at all, and the table was documentation rather than a rule.
+
+It also validates **destination invariants** after the caller's
+property-setting thunk has run and before the write is committed:
+
+| Destination | Invariant |
+|---|---|
+| `BLOCKED` | `BLOCKED_REASON` is a non-empty string |
+| `DONE` | `OUTCOME` is `succeeded` or `failed` |
+| anything else | `BLOCKED_REASON` and `OUTCOME` are absent |
+
+A violation is an error and the write does not happen, so the ledger
+cannot hold a `DONE` record nobody characterised or a `BLOCKED` record
+that does not say why — the same two conditions the parser reports as
+problem rows, checked on the way in as well as on the way out.
 
 The two rules that matter more than the table:
 
@@ -354,12 +531,40 @@ contract `agent-log`'s bridge already consumes.  A task dispatched into
 a brand-new session has no `SESSION_ID` for a moment, and the record
 says so rather than inventing one.
 
-One session may hold at most one task binding.  Dispatching a second
-task into a session that already has a `RUNNING` bound task is refused
-by name: two tasks sharing one session would make every subsequent
-event ambiguous, and an ambiguous ledger is worse than a small one.  The
-person can bind the second task to that session only after closing or
-unbinding the first.
+### The binding is a bijection, and it is checked before anything is sent
+
+One session holds at most one task **and one task is bound to at most
+one session**.  Revision 1 checked only the first half, so a task could
+be attached to a second buffer while still bound to the first, and both
+buffers' events would then be attributed to it.  Both directions are
+checked.
+
+The check happens **before the message is sent**, not after.  Revision 1
+bound the buffer after `agent-submit` returned, so a dispatch into a
+session that already held another task delivered the prompt and *then*
+signalled — the worst possible order, because the wrong session had
+already been given work.  The bijection is therefore verified twice: once
+while preparing the dispatch, and again in the non-interactive commit
+block immediately before the send.
+
+Closing a task releases its binding.  `agent-tasks-mark-done` and
+`agent-tasks-cancel` unbind **after** the durable write succeeds, so a
+session freed by closing a task can immediately take another, and a
+failed close leaves the binding exactly as it was.
+
+### What Emacs cannot see about a session's prompt
+
+`agent-submit` inserts text into the CLI's prompt and submits it.  For a
+terminal transport that means **anything the person had already typed
+into that prompt is submitted along with the task's message**, and no
+backend exposes the prompt's contents, so Emacs cannot detect the case.
+
+This design does not pretend otherwise and does not add a backend slot
+to fix it.  It does two things instead: the dispatch confirmation states
+plainly that sending will submit whatever is already in the session's
+prompt, and the manual repeats it.  Dispatching into a new session has
+no such hazard.  A person who wants a guaranteed-clean prompt should
+dispatch into a new session.
 
 ## 4. Dependencies
 
@@ -408,15 +613,44 @@ tasks):
    with the prepared dispatch, so the non-interactive re-check
    immediately before the send accepts `unknown` only when it is the
    same `unknown` the person already agreed to.
-7. Show the rendered message and confirm (`agent-tasks-dispatch-confirm`,
-   default `t`).
-8. **Write the ledger** — state `RUNNING`, `ATTEMPT` incremented,
-   binding properties set, `Log` line appended — and only then send.
-9. Send: `agent-submit` for an existing session, `agent-start-session`
-   with `:initial-prompt` for a new one.  Register the in-memory
-   binding.
+7. Check the bijection (§3): the task is bound to no other buffer and
+   the target holds no other task.
+8. Show the rendered message and confirm
+   (`agent-tasks-dispatch-confirm`, default `t`).  The confirmation
+   states, for an existing session, that sending will also submit
+   whatever is already in that session's prompt (§3).
+9. **Commit against the reviewed snapshot** and **write the ledger** —
+   state `RUNNING`, `ATTEMPT` incremented, binding properties set, `Log`
+   line appended — and only then send.
+10. Send: `agent-submit` for an existing session, `agent-start-session`
+    with `:initial-prompt` for a new one.  Register the in-memory
+    binding, then confirm the recorded identity against the live session
+    (§"New-session identity" below).
 
-Steps 8 and 9 are in that order on purpose, and the failure analysis is
+### Committing against the snapshot the person reviewed
+
+Everything the person was shown — the state, the attempt number, the
+instruction that became the message, the dependency verdict — came from
+one parsed snapshot.  Between the preview and the send, another Emacs,
+or the person in another window, can cancel the task, close it, reopen
+it, edit the instruction, or add a dependency.  Revision 1 re-read the
+ledger independently at commit time and wrote whatever it found, so a
+cancelled task could still receive its prompt.
+
+The commit therefore happens **inside the write lock**, and before
+changing anything it re-reads and requires that the task's **state,
+attempt, instruction, and dependency verdict are the ones that were
+reviewed**.  Any difference is a `user-error` naming what changed;
+nothing is written and nothing is sent.  The person refreshes and
+decides again — which is the point, because the thing they approved is
+no longer the thing that would run.
+
+A dependency override is part of the reviewed decision, so it is
+**recorded**: the `Log` line names each dependency that was unsatisfied
+and its state at the time.  Revision 1 asked for the override and then
+discarded it, leaving no trace that the gate had been bypassed.
+
+Steps 9 and 10 are in that order on purpose, and the failure analysis is
 part of the design rather than an afterthought:
 
 - **The write fails** → nothing is sent.  An unwritable ledger must not
@@ -429,6 +663,27 @@ part of the design rather than an afterthought:
   on disk with no live session, which is exactly the case §6's
   reconciliation turns into `UNKNOWN`.  No extra flag is needed, and one
   was deliberately not added.
+
+### New-session identity
+
+`agent-start-session` fills a nil account from `agent-account-resolve`
+and mutates the session struct as it goes, and a backend may choose a
+different instance name when one is already taken.  So the identity
+known *before* the call is a prediction, and reconciliation (§6)
+compares recorded identity for equality — a predicted account or
+instance that turns out wrong makes the task unreconcilable.
+
+The dispatch therefore performs a **post-start identity repair** as a
+distinct, durable step: after `agent-start-session` returns the buffer,
+the backend, account, directory, instance, and native session id are
+read from that live buffer and written to the task, with a `Log` line
+recording the confirmation.  Revision 1 repaired only the session id.
+
+If the repair write fails, the task keeps its `RUNNING` state and the
+failure is reported as a warning naming the task and saying the recorded
+identity may not match the live session, so the person can fix it with
+`e`.  Reporting the dispatch as failed would be worse: the work is
+running.
 
 ### The dispatched message (pure, fixture-tested)
 
@@ -470,10 +725,25 @@ non-fork resume case, the only one where identity is proven.  Any other
 outcome leaves the task `UNKNOWN`, which is the honest answer for a
 session that was replaced rather than resumed.
 
-**Reconciliation (Emacs died).**  The first time the ledger is parsed in
-an Emacs session — and on every explicit refresh — every task recorded
-`RUNNING` or `BLOCKED` that has no in-memory binding is checked against
-the live session buffers:
+**A restart that never completes must still finish the task's story.**
+If `agent-start-session` signals after the binding was detached, the
+after-restart hook never runs, and revision 1 left the task `RUNNING`
+with no binding and nothing scheduled to notice — its own test asserted
+that abandoned state was acceptable, which was wrong.  Detaching
+therefore schedules a zero-delay finalizer: when it fires and the
+detached record is still outstanding (the after-restart hook clears it
+on success), the task moves to `UNKNOWN` with the reason "a restart did
+not complete".  The guarantee is that a detach is always followed by
+either a re-attachment or an `UNKNOWN`, within the same command loop.
+
+**Reconciliation (Emacs died).**  Reconciliation runs the first time the
+ledger is parsed in an Emacs session, and **unconditionally on every
+explicit refresh** — the list's `g` calls it directly rather than
+through the once-per-session guard.  Revision 1 routed `g` through the
+guard, so a session that died after the first refresh was never noticed
+until Emacs restarted, which defeats the point of a refresh key.  Every
+task recorded `RUNNING` or `BLOCKED` that has no in-memory binding is
+checked against the live session buffers:
 
 - A live buffer whose `agent-session` matches the recorded backend,
   account, directory, and instance, **and** whose native id equals the
@@ -508,14 +778,33 @@ For an event whose buffer holds a task binding:
 | Event | Effect |
 |---|---|
 | `blocked` (`:kind permission`/`question`) | state → `BLOCKED`, `BLOCKED_REASON` from the backend-reported detail only |
-| `submit` / `activity` while `BLOCKED` | state → `RUNNING`, logged |
+| `activity` while `BLOCKED` | state → `RUNNING`, logged |
+| `submit` | nothing |
 | `error` | state → `UNKNOWN`, reason = the reported code and message |
 | non-redundant `stop`/`idle-prompt` | `Log` line only; state unchanged |
 | redundant completion | ignored entirely |
 
+**`submit` is not evidence and does not unblock.**  Core emits it
+*before* calling the backend (`agent--dispatch-send`, `agent.el:1492`,
+emits the event and then applies the backend function), and core's own
+documentation says submissions may duplicate and may start no turn.
+Treating it as evidence — which revision 1 did — meant a submission that
+failed, or that the CLI ignored, cleared a real `BLOCKED_REASON` and
+reported the session as working again.  Only `activity`, which a backend
+emits because it observed work, moves a task out of `BLOCKED`.
+
 `BLOCKED_REASON` is copied from what the backend reported and is never
 synthesized; when the backend reported nothing beyond "blocked", the
 reason says exactly that.
+
+**One owner per attention item.**  Session-level facts — blocked,
+errored, completed a turn — belong to `agent-attention-mode`, which
+already files an item for each.  The ledger files an item for exactly
+one thing that no session event covers: **a task moved to `UNKNOWN` by
+its session's teardown**.  In particular the `error` path files no
+attention item of its own; it logs and transitions, and the attention
+module reports the session error.  Revision 1 filed one on both paths,
+which produced two items about one failure.
 
 Ledger writes from the event consumer are best-effort in one specific
 sense: a write that fails (conflict, unwritable file) emits a
@@ -530,10 +819,15 @@ reconciliation re-derives the truth.
 `tabulated-list-mode` derivative — the same convention as the attention
 inbox, the skill history, and the learnings inbox.
 
-Columns: state, title, backend, account, project (the directory's last
-component), session (the bound session's display name, or the recorded
-identity when it is not live), attempt, age, and a dependency marker.
-Sorted: open states first (`BLOCKED`, `UNKNOWN`, `RUNNING`, `PENDING`),
+Columns, all nine of them required rather than illustrative: **state**,
+**title**, **backend**, **account**, **project** (the directory's last
+component), **session** (the bound session's display name, or the
+recorded identity when it is not live), **attempt**, **age**, and
+**deps** rendered as *unsatisfied*/*total* (`1/3`, or empty when the
+task has none).  Revision 1's table omitted account and showed a bare
+total, which answers neither "which account is this running under" nor
+"is this one actually startable" — the two questions the column exists
+for.  Sorted: open states first (`BLOCKED`, `UNKNOWN`, `RUNNING`, `PENDING`),
 then closed, newest first within a group; the order is total, so the
 list does not reshuffle between refreshes.  A header line states how
 many tasks and how many problem rows were read from which file, and
@@ -587,9 +881,12 @@ ledger and dispatches it from there.
 
 **Chief.**  `agent-tasks-chief-context` is a function suitable for
 `agent-chief-context-functions` (`agent-chief.el:92`): it returns a
-compact, deterministic summary of open tasks — one line each, state,
-title, project, age — capped at `agent-tasks-chief-context-max` (default
-20) with a truthful "and N more" line.  It performs no write and starts
+compact, deterministic summary of open tasks — one line each carrying
+**state, title, project, and age**, capped at
+`agent-tasks-chief-context-max` (default 20) with a truthful "and N
+more" line.  Age is required, not decorative: the chief's whole job is
+to notice drift, and "this has been `BLOCKED` for six hours" is the
+observation it exists to make.  It performs no write and starts
 nothing.  Adding it to the hook is the person's choice; nothing in this
 design adds it.  This is the whole of the chief integration, and it is
 enough: the chief's job is to notice and nudge, and it cannot notice
@@ -597,19 +894,18 @@ what it cannot see.
 
 **Attention inbox.**  The ledger files an attention item through
 `agent-attention-file`, when it is `fboundp`, for **exactly one
-situation: a task became `UNKNOWN` while a session buffer existed** —
-that is, on teardown and on an `error` event.  It deliberately files
-nothing for `blocked`, `error`-as-a-session-event, or a completed turn,
-because `agent-attention-mode` already files an item for each of those
-*session* events; a second item would be duplicate noise about the same
-fact.  The ledger's item is about the *task* — a piece of work whose
-outcome is now unknown — which nothing else reports.  It is filed
-against the session buffer, because `agent-attention-file`'s behaviour
-with no buffer is not part of its published contract and this design
-assumes nothing it did not verify.  Reconciliation, which by definition
-has no buffer, therefore files no item and relies on its summary
-message and the list's sort order.  When the attention module is absent,
-the fallback is a `message`, and the manual says so.
+situation: a task moved to `UNKNOWN` because its session was torn
+down**.  Teardown is the one case no session event covers — the
+attention module files items for `blocked`, `error` and completion, and
+a second item about the same fact would be duplicate noise, so the
+`error` path here logs and transitions without filing anything.  The
+item is filed against the session buffer, because
+`agent-attention-file`'s behaviour with no buffer is not part of its
+published contract and this design assumes nothing it did not verify.
+Reconciliation, which by definition has no buffer, therefore files no
+item and relies on its summary message and the list's sort order.  When
+the attention module is absent, the fallback is a `message`, and the
+manual says so.
 
 **Queue.**  No integration.  A busy target is refused by name; the error
 mentions `agent-queue-prompt` for a person who wants to queue prose.
@@ -698,10 +994,33 @@ into a busy session; a second transcript renderer.
 - **Parsing**: a full fixture round-trips every property, the body, and
   the four sub-headings; a missing file yields an empty list; a heading
   with an unrecognised keyword becomes a problem row naming the heading;
-  a heading with no `AGENT_TASK_ID` becomes a problem row; a duplicate
-  id becomes a problem row naming both; sub-heading properties do not
-  leak from the parent; a `Log` sub-heading with list items is preserved
-  and never parsed into state.
+  a heading with no `AGENT_TASK_ID` becomes a problem row; sub-heading
+  properties do not leak from the parent; a `Log` sub-heading with list
+  items is preserved and never parsed into state.
+- **Every problem class**: malformed `ATTEMPT`, `BLOCKED` with no
+  reason, and `DONE` with no or invalid outcome each become problem rows
+  rather than coerced values.
+- **Duplicate ids reject every occurrence**: two headings sharing an id
+  produce two problem rows and **no** task; `agent-tasks-find` returns
+  nil for that id; and dispatch, closing, and commenting all refuse it
+  rather than acting on whichever heading came first.
+- **The body codec is injective**: `"* x"`, `" * x"`, `"  * x"`,
+  `"   ** deep"`, `"  *bold* start"`, `"plain"`, `" plain"` and `""`
+  each survive encode-then-decode byte-for-byte, no two of them share an
+  encoding, and no encoded line begins with `*` at column zero.  A task
+  created through `agent-tasks-create` with a star-heavy instruction
+  reads back exactly.
+- **The decode gate**: an entry *without* `BODY_ENCODED` has its body
+  returned verbatim — a hand-written `" * a bullet"` keeps its space —
+  while an entry created by this package round-trips through the codec.
+  Interior blank lines and indentation are preserved in both cases;
+  outer blank lines are not.
+- **Property bytes**: a `SOURCE_HEADING` containing runs of internal
+  whitespace is stored and read back with those runs intact; a value
+  containing a newline is refused by name.
+- **Anchored source lookup**: with headings `* TODO Ship` and `* TODO
+  Ship the second thing` in one file, the lookup for the first lands on
+  the first, not inside the second.
 - **Version gate**: version 2 parses read-only and every write is
   refused by name; an absent version parses as 1.
 - **Writing**: a state change rewrites exactly the keyword and
@@ -709,17 +1028,33 @@ into a busy session; a second transcript renderer.
   CRLF ledger stays CRLF; with `org-log-done` bound to `note` the write
   completes without prompting and inserts no `CLOSED` stamp; a modified
   visiting buffer refuses the write by name; a file changed since
-  parsing is refused as a conflict; no temporary file survives a write;
-  an interrupted write (fault-injected rename failure) leaves the
-  original intact.
-- **State machine**: every allowed transition; every disallowed one
-  refused; `DONE` without an outcome refused; `BLOCKED` without a reason
-  refused; `CANCELLED` without a reason refused; reopening a closed task
-  requires confirmation.
-- **The never-retry invariant**, as its own test: drive the event
-  consumer with every event type against tasks in every state and assert
-  that no event ever produces `RUNNING` from `UNKNOWN` and no event ever
-  produces `DONE`.
+  parsing is refused as a conflict; no temporary file survives a write
+  (the listing must include dot files, since the temp file is one); an
+  interrupted write (fault-injected rename failure) leaves the original
+  intact.
+- **Concurrency**: the conflict token is computed from raw bytes, so two
+  files that decode alike but differ in bytes produce different tokens.
+  An **interleaved two-writer test** drives the exact race: writer A
+  parses, writer B parses the same bytes, B commits, then A attempts to
+  commit — A is refused with a conflict, B's change is intact, and no
+  task is lost.  A second test proves the lock serialises the sequence:
+  with the lock file already present, a write fails after
+  `agent-tasks-lock-timeout` with a message naming the lock, and the
+  ledger is unchanged.  Lock release is checked on the success path and
+  on a signalling one.
+- **State machine**: every allowed transition in the matrix succeeds and
+  **every pair absent from the matrix is refused**, including
+  `PENDING` → `BLOCKED`, driven as a table rather than a handful of
+  examples; destination invariants are enforced (`DONE` without an
+  outcome, `BLOCKED` without a reason, and a stale `OUTCOME` or
+  `BLOCKED_REASON` surviving a move to another state are each refused);
+  `CANCELLED` without a reason refused; reopening a closed task requires
+  confirmation, tested with the confirmation both accepted and declined.
+- **The event matrix, exactly**: drive the event consumer with every
+  event type against a task in every state and assert the **exact**
+  resulting state for each of the 36 combinations, from a table written
+  out in the test.  Asserting only that the result "is not closed" would
+  pass vacuously for the open states and fail for the closed ones.
 - **Completion does not close**: a non-redundant `stop` on a bound
   session leaves the state unchanged and appends exactly one `Log` line;
   a redundant completion changes nothing at all.
@@ -735,26 +1070,56 @@ into a busy session; a second transcript renderer.
   proceeds; declined confirmation sends and records nothing; a ledger
   write failure prevents the send entirely; a signalling `agent-submit`
   leaves the task `UNKNOWN`, never `PENDING`; a new session receives the
-  message as `:initial-prompt` and the returned buffer is bound; a
-  second dispatch into a session that already holds a running task is
-  refused; `ATTEMPT` increments once per dispatch.
+  message as `:initial-prompt` and the returned buffer is bound;
+  `ATTEMPT` increments once per dispatch.
+- **Commit against the reviewed snapshot**: for each of *cancelled*,
+  *closed*, *reopened*, *instruction edited*, and *a new unsatisfied
+  dependency added* between prepare and commit, the dispatch is refused
+  naming what changed, **nothing is sent**, and the ledger is unchanged.
+  A successful override records each unsatisfied dependency and its
+  state in the `Log`.
+- **Zero-send ownership tests**: dispatching into a session already
+  bound to another task sends nothing (the stub `agent-submit` records
+  no call) and refuses by name; the same for a task already bound to a
+  different buffer.  These assert the *absence* of a send, because the
+  defect they guard against is a prompt delivered before the error.
+- **New-session identity**: a backend that resolves a different account
+  than the task recorded, and one that returns a buffer with a
+  collision-selected instance name, both end with the task's recorded
+  identity matching the live session and a `Log` line noting the
+  confirmation; a failing repair write leaves the task `RUNNING` and
+  warns rather than reporting the dispatch as failed.
 - **Message rendering**: byte-compared fixtures for attempt 1 and a
   re-armed attempt, and a test that `Result` and `Evidence` never appear
   in the message.
 - **Correlation**: `agent-session-id-functions` fills `SESSION_ID` for a
   bound buffer and ignores an unbound one; a task dispatched into a new
   session has no `SESSION_ID` until the id arrives.
+- **Binding lifecycle**: the bijection is enforced in both directions;
+  closing a task with `agent-tasks-mark-done` or `agent-tasks-cancel`
+  releases its binding, while a *failed* close leaves the binding in
+  place; `agent-tasks--attach` refuses a task whose state is not
+  `UNKNOWN` or `BLOCKED`; attaching clears the previous attempt's
+  `SESSION_ID` before recording the new session's.
 - **Teardown and reconciliation**: teardown of a bound buffer moves the
-  task to `UNKNOWN` with a reason; reconciliation re-binds a task whose
-  recorded identity and session id match a live buffer; it refuses to
-  re-bind when the ids differ while both are known; it refuses to
-  re-bind on a directory match alone; everything else becomes `UNKNOWN`
-  once, with a `Log` line and one summary message; reconciliation run
-  twice writes only on the first pass.
+  task to `UNKNOWN` with a reason and files exactly one attention item;
+  reconciliation re-binds a task whose recorded identity and session id
+  match a live buffer; it refuses to re-bind when the ids differ while
+  both are known; it refuses to re-bind on a directory match alone;
+  everything else becomes `UNKNOWN` once, with a `Log` line and one
+  summary message; reconciliation run twice writes only on the first
+  pass.
+- **Refresh always reconciles**: after a first refresh, a bound session
+  buffer is killed *without* its teardown running (the binding table is
+  manipulated directly, simulating a lost hook); the next explicit
+  refresh moves the task to `UNKNOWN`.  A test that only called the
+  once-per-session guard would pass while the feature was broken.
 - **Restart**: with `agent-before-restart-functions` present, a matching
   resumed id re-attaches the binding and keeps the state; a mismatched
   id leaves it `UNKNOWN`; with the hooks absent, teardown's `UNKNOWN`
-  path applies.
+  path applies.  **A detach whose startup signals** — the after-restart
+  hook never runs — leaves the task `UNKNOWN` once the finalizer runs,
+  never `RUNNING` and unbound.
 - **Event write failures**: a conflicting ledger during event handling
   warns and does not signal into hook delivery, and the other consumers
   on the hook still run.
@@ -762,9 +1127,13 @@ into a busy session; a second transcript renderer.
   buffer; the verbatim heading is recorded; a re-import skips already
   imported headings and reports the count; importing from a non-Org
   buffer is refused.
-- **Chief context**: deterministic output, the cap honoured with a
-  truthful "and N more", no writes, and an empty ledger yielding nil
-  rather than an empty heading.
+- **Chief context**: deterministic output that includes each task's
+  **age**, the cap honoured with a truthful "and N more", no writes, and
+  an empty ledger yielding nil rather than an empty heading.
+- **List columns**: a rendered row carries the task's account and a
+  deps cell reading *unsatisfied*/*total*; a task with one satisfied and
+  two unsatisfied dependencies renders `2/3`; a task with none renders
+  an empty cell.
 - **Mode**: with `agent-tasks-mode` off, dispatch is refused naming the
   mode, the list still renders, and the header says the mode is off;
   enabling and disabling the mode installs and removes every hook it
@@ -783,13 +1152,36 @@ that exercises it.
 
 ### Live verification (mutates nothing durable)
 
-Every live check runs against a **scratch ledger** — `agent-tasks-file`
-bound to a file in a throwaway directory — and sessions started in a
-throwaway git repository created for the check.  Task instructions are
-inert: "Reply with the words `task received` and do nothing else."  The
-claims under test are about state transitions and bindings, and none of
-them needs an agent that changes a file.  Every scratch tree is removed
-with `trash` afterwards.
+The checks run in a live Emacs, so isolation is a design problem, not a
+formality.  Revision 1 got several parts of it wrong — a fixed `/tmp`
+path two runs would share, `setq` on the ledger variable, `clrhash` on
+the shared binding table, and a scratch git repository that did not
+contain the ledger whose diff the checks were supposed to read.  The
+rules:
+
+- **One unique scratch repository per run**, created with
+  `make-temp-file` with its directory flag, `git init`-ed, with the
+  **ledger file inside it** and a baseline commit made before anything
+  runs.  That is what makes the byte-level `git diff` checks possible at
+  all.
+- **Every global is dynamically bound, not assigned**, for the duration
+  of the checks: `agent-tasks-file`, `agent-tasks--reconciled`, and
+  `agent-tasks--bindings` (bound to a *fresh* hash table, so the real
+  session bindings are isolated rather than cleared — `clrhash` on the
+  shared table would destroy live bindings belonging to the person's
+  actual sessions).  Modes that must be toggled — `agent-tasks-mode`,
+  and `agent-attention-mode` when it is present — have their prior value
+  recorded and restored afterwards.
+- **The real ledger is hashed before and after** the whole run and the
+  two hashes compared, which is a stronger check than looking at an
+  mtime.
+- **Every scratch session started by a check is closed by it**, so no
+  CLI process outlives the verification.
+- Task instructions are inert: "Reply with the words `task received` and
+  do nothing else."  Every claim under test is about state transitions
+  and bindings; none needs an agent that changes a file.
+- Cleanup removes the scratch tree with `trash`, restores every recorded
+  global, and stages nothing outside the scratch repository.
 
 Both backends:
 
@@ -808,9 +1200,12 @@ Both backends:
 4. Kill the session buffer and confirm the task becomes `UNKNOWN` with a
    reason, and that nothing is re-dispatched.
 5. Simulate a crash without killing Emacs: with a `RUNNING` task written
-   to the scratch ledger naming a session that does not exist, clear the
-   in-memory bindings, open the list, and confirm reconciliation reports
-   it `UNKNOWN` once, logs the reason, and re-binds nothing.
+   to the scratch ledger naming a session that does not exist, and the
+   *scratch* binding table holding no entry for it, open the list and
+   confirm reconciliation reports it `UNKNOWN` once, logs the reason,
+   and re-binds nothing.  Then, still in the same Emacs, confirm that a
+   **second** explicit refresh after another session is lost also
+   reports it — the once-per-session guard must not apply to `g`.
 6. `agent-restart` a session holding a running task and confirm the
    binding follows the resumed session (id matched) and that the state
    is unchanged.
@@ -821,10 +1216,16 @@ Both backends:
    session and does not alter the running turn.
 9. Close a task with an outcome and evidence, cancel another with a
    reason, and confirm both records read truthfully in the file with
-   every other byte unchanged (`git diff` on a scratch ledger under
-   version control).
+   every other byte unchanged — `git diff` inside the scratch
+   repository, which works because the ledger lives there and a
+   baseline was committed.  Confirm the closed tasks' sessions are no
+   longer bound.
+10. Confirm the person-facing prompt caveat: dispatch into an existing
+    session and check that the confirmation buffer says sending will
+    also submit whatever is already in that session's prompt.
 
-Import is verified against a **copy** of a few Org TODOs in the scratch
-directory, never against a real notes file.  The chief context function
-is verified by calling it and reading its output; it is never added to
-`agent-chief-context-functions` in a real Emacs during the check.
+Import is verified against a **copy** of a few Org TODOs inside the
+scratch repository, never against a real notes file.  The chief context
+function is verified by calling it and reading its output; it is never
+added to `agent-chief-context-functions` in a real Emacs during the
+check.
