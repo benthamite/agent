@@ -1,5 +1,33 @@
 # A Small Durable Task Ledger — Design
 
+Revision 3.  Revision 2 was reviewed and eleven blockers remained; this
+revision closes them, again without changing the feature.  Four were
+reproduced in batch first:
+
+- Reading the decoded text and the conflict token in two passes lets a
+  rename between them pair old content with a new token.  A single
+  raw-byte read plus `detect-coding-string`/`decode-coding-string`
+  reproduces `insert-file-contents`' text and coding exactly and
+  round-trips bytes, so the snapshot is now one read.
+- `re-search-forward` is **case-insensitive by default**
+  (`case-fold-search` is `t`), so the anchored source lookup matched
+  `* TODO ship` for `* TODO Ship`.
+- A zero-delay timer **does** fire while a command yields in `sit-for`,
+  so revision 2's restart finalizer could mark a *successful* restart
+  `UNKNOWN` mid-startup.  A one-shot `post-command-hook` finalizer does
+  not fire mid-command.
+- The context-composer project — a prerequisite — already defines
+  `:pending-input-p` and `:submit-literal`
+  (`plans/2026-07-30-context-composer.md`).  Revision 2 claimed Emacs
+  could not inspect a session's prompt and settled for a warning; that
+  is no longer true, and this revision consumes both slots.
+
+The rest: locked first-creation, a per-entry token so a cancel-and-reopen
+cannot pass the dispatch snapshot check, bijection preflighted for a new
+session too, reconciliation routed through the transition API,
+`waiting` treated as ambiguous in the readiness fallback, and a live
+harness that is actually executable and isolated.
+
 Revision 2.  Revision 1 was reviewed and found not implementation-ready
 on thirteen counts; this revision closes them without changing the
 feature.  Three were reproduced in batch before being fixed: the body
@@ -384,10 +412,19 @@ of it runs while holding an interprocess lock**:
 1. Refuse if a buffer visits `agent-tasks-file` with unsaved changes,
    naming the buffer.  The person's edits are never saved as a side
    effect of a machine write.
-2. Read the file's **raw bytes** and compare their SHA-1 with the token
-   recorded when the task list was parsed.  A mismatch is a conflict:
-   the write is refused with "the ledger changed on disk since it was
-   read; refresh and retry".
+2. Take **one snapshot** — a single raw-byte read — and derive the
+   token, the decoded text, and the coding system from it.  Compare the
+   token with the one recorded when the task list was parsed.  A
+   mismatch is a conflict: the write is refused with "the ledger
+   changed on disk since it was read; refresh and retry".
+
+   One read, not two.  Revision 2 read the decoded text and then read
+   again for the token, so a rename landing between the two paired the
+   old content with the new file's token — the check would pass and the
+   write would resurrect stale content.  `detect-coding-string` and
+   `decode-coding-string` over the bytes reproduce
+   `insert-file-contents`' text and coding exactly, verified in batch
+   including a CRLF file, so the single read costs nothing.
 3. Apply the edit in a temp buffer holding the file's contents, in
    `org-mode`, with `org-mode-hook` bound to nil (the person's org hooks
    have no business running inside a machine write),
@@ -420,10 +457,23 @@ revision 1 had only the second:
   sequences that decode alike under a lenient coding system, so a real
   concurrent change could pass the check.
 
-**Creating the file is part of the same protocol.**  `agent-tasks-file`
-is created inside the lock, through the same temp-file-plus-rename path,
-so two processes that both find no ledger cannot both publish a header
-and lose one another's first task.
+**Creating the file is part of the same protocol, and so is the first
+task's id.**  `agent-tasks-file` is created inside the lock, through
+the same temp-file-plus-rename path.  Two further rules close the
+first-creation race that survived revision 2:
+
+- A snapshot taken when the file was **absent** carries a nil token.
+  If the file *exists* when the lock is taken, that is a conflict, not
+  a licence to append: another process published a ledger in between,
+  and its version and contents were never validated against this
+  snapshot.
+- The new task's id is checked for uniqueness **against the ledger
+  re-parsed under the lock**, not against the unlocked snapshot that
+  suggested it.  Ids embed a one-second timestamp and 16 random bits,
+  so two creators in the same second collide with probability 1/65536 —
+  small, and a duplicate id makes *both* tasks unusable (§"Every problem
+  class"), so it is not a risk worth carrying when the fix is one
+  re-check inside a lock that is already held.
 
 Failure at any step is a `user-error`, changes nothing, and releases the
 lock through `unwind-protect`.  Because dispatch writes before it sends
@@ -490,6 +540,20 @@ cannot hold a `DONE` record nobody characterised or a `BLOCKED` record
 that does not say why — the same two conditions the parser reports as
 problem rows, checked on the way in as well as on the way out.
 
+Two more rules make the centrality real rather than nominal:
+
+- **Every transition supplies a non-blank reason.**  `CANCELLED` in
+  particular records why, and revision 2 enforced that only in the
+  command, so a caller reaching the transition API directly could
+  cancel a task with an empty reason.  The check belongs where the
+  matrix check is.
+- **Reconciliation goes through the transition API too.**  Revision 2
+  called the low-level state setter directly, which bypassed both the
+  matrix and the destination invariants — so an orphaned `BLOCKED` task
+  kept its now-meaningless `BLOCKED_REASON` after becoming `UNKNOWN`.
+  There is exactly one way to change a state, and reconciliation is not
+  an exception to it.
+
 The two rules that matter more than the table:
 
 - **No evidence transition ever produces `RUNNING` from `UNKNOWN`, and
@@ -547,24 +611,59 @@ already been given work.  The bijection is therefore verified twice: once
 while preparing the dispatch, and again in the non-interactive commit
 block immediately before the send.
 
+**Both directions are preflighted for both kinds of target.**  Revision
+2 checked the pairing only when an *existing* session was chosen, so a
+task that still held a stale binding could be re-dispatched into a
+brand-new session: `agent-start-session` delivered the initial prompt
+and only then did the bind signal.  The task → buffer direction is
+therefore checked for a new session too, before anything starts.
+
+A fresh attempt never transfers a binding silently.  A task that is
+still bound is refused by name, and the person unbinds it (`u`) or
+attaches it deliberately (`R`).  Automatically stealing a binding would
+mean the ledger deciding that an earlier run is over, which is exactly
+the judgement it refuses to make everywhere else.
+
 Closing a task releases its binding.  `agent-tasks-mark-done` and
 `agent-tasks-cancel` unbind **after** the durable write succeeds, so a
 session freed by closing a task can immediately take another, and a
 failed close leaves the binding exactly as it was.
 
-### What Emacs cannot see about a session's prompt
+### Prompt isolation, through the composer's slots
 
-`agent-submit` inserts text into the CLI's prompt and submits it.  For a
-terminal transport that means **anything the person had already typed
-into that prompt is submitted along with the task's message**, and no
-backend exposes the prompt's contents, so Emacs cannot detect the case.
+`agent-submit` inserts text into the CLI's prompt and submits it, so
+anything the person had already typed there goes out with the task's
+message.  Revision 2 concluded Emacs could not detect this and settled
+for a warning in the confirmation buffer.  That was wrong: the
+context-composer project, which lands before this one, adds two backend
+slots for exactly this problem
+(`plans/2026-07-30-context-composer.md`):
 
-This design does not pretend otherwise and does not add a backend slot
-to fix it.  It does two things instead: the dispatch confirmation states
-plainly that sending will submit whatever is already in the session's
-prompt, and the manual repeats it.  Dispatching into a new session has
-no such hazard.  A person who wants a guaranteed-clean prompt should
-dispatch into a new session.
+- `:pending-input-p` `(BUFFER)` → nil when the session is verifiably
+  clean, a truthy description when something is pending, or `unknown`
+  when the transport cannot be inspected.
+- `:submit-literal` `(TEXT BUFFER)` → submits TEXT as one literal,
+  isolated turn, signalling before anything is sent when its
+  preconditions fail.
+
+The ledger consumes both:
+
+- Dispatch into an **existing** session calls the pending-input probe
+  immediately before submitting and **refuses anything but nil** —
+  including `unknown`, because a blind append is exactly the outcome
+  the check exists to prevent.  The refusal names what is pending, or
+  says the transport cannot be inspected.
+- The send itself goes through `:submit-literal`, not `agent-submit`,
+  so the task's message is one isolated turn.  A backend registering
+  neither slot cannot receive a dispatch into an existing session, and
+  says so.
+
+This replaces the warning entirely.  A refusal that only appears when
+`agent-tasks-dispatch-confirm` is non-nil — which is what a
+confirmation-text warning amounts to — is not a safeguard, because the
+person who turned confirmation off is precisely the one who will not
+see it.  Dispatch into a new session is unaffected: the session is
+created for the task, so there is nothing to collide with.
 
 ## 4. Dependencies
 
@@ -613,19 +712,28 @@ tasks):
    with the prepared dispatch, so the non-interactive re-check
    immediately before the send accepts `unknown` only when it is the
    same `unknown` the person already agreed to.
-7. Check the bijection (§3): the task is bound to no other buffer and
-   the target holds no other task.
+
+   **In the display-state fallback, `waiting` maps to `unknown`, not to
+   `ready`.**  `waiting` means the session stopped and is not
+   proceeding, which covers both "at a fresh prompt" and "stopped at a
+   permission dialog"; only the two authoritative sources can tell them
+   apart, and this branch runs precisely when neither is available.
+   Calling it `ready` would send a task into a dialog.  `busy` maps to
+   `busy` and everything else to `unknown`.
+7. Check the bijection (§3) in **both** directions and for **both**
+   kinds of target: the task is bound to no other buffer, and an
+   existing target holds no other task.
 8. Show the rendered message and confirm
-   (`agent-tasks-dispatch-confirm`, default `t`).  The confirmation
-   states, for an existing session, that sending will also submit
-   whatever is already in that session's prompt (§3).
+   (`agent-tasks-dispatch-confirm`, default `t`).
 9. **Commit against the reviewed snapshot** and **write the ledger** —
    state `RUNNING`, `ATTEMPT` incremented, binding properties set, `Log`
    line appended — and only then send.
-10. Send: `agent-submit` for an existing session, `agent-start-session`
-    with `:initial-prompt` for a new one.  Register the in-memory
-    binding, then confirm the recorded identity against the live session
-    (§"New-session identity" below).
+10. For an existing session, check `:pending-input-p` and refuse
+    anything but nil (§3).  Then send: `:submit-literal` for an
+    existing session, `agent-start-session` with `:initial-prompt` for
+    a new one.  Register the in-memory binding, then confirm the
+    recorded identity against the live session (§"New-session identity"
+    below).
 
 ### Committing against the snapshot the person reviewed
 
@@ -638,12 +746,25 @@ ledger independently at commit time and wrote whatever it found, so a
 cancelled task could still receive its prompt.
 
 The commit therefore happens **inside the write lock**, and before
-changing anything it re-reads and requires that the task's **state,
-attempt, instruction, and dependency verdict are the ones that were
-reviewed**.  Any difference is a `user-error` naming what changed;
-nothing is written and nothing is sent.  The person refreshes and
-decides again — which is the point, because the thing they approved is
-no longer the thing that would run.
+changing anything it re-reads and requires that **the task's whole
+entry is byte-for-byte the one that was reviewed**, by comparing a
+per-entry token: a hash of the entry's text, recorded at parse time and
+carried on the task record.  Any difference is a `user-error` naming
+the task; nothing is written and nothing is sent.
+
+Comparing a handful of fields, as revision 2 did, is not enough, and
+the counter-example is ordinary: cancel a task and reopen it, and its
+state, attempt, and instruction are all back to what the preview saw,
+while the task has been through two decisions the person dispatching
+knows nothing about.  Edits to the recorded target — the directory the
+agent will act in, the backend, the account — were not compared at all
+and would have been silently overwritten by the commit.  One token over
+the whole entry covers every field, present and future, and cannot
+drift out of step with the record the way an enumerated list does.
+
+A per-entry token also keeps the check *narrow*: an unrelated task's
+event write during the preview does not refuse this dispatch, which a
+whole-file token would.
 
 A dependency override is part of the reviewed decision, so it is
 **recorded**: the `Log` line names each dependency that was unsatisfied
@@ -729,12 +850,22 @@ session that was replaced rather than resumed.
 If `agent-start-session` signals after the binding was detached, the
 after-restart hook never runs, and revision 1 left the task `RUNNING`
 with no binding and nothing scheduled to notice — its own test asserted
-that abandoned state was acceptable, which was wrong.  Detaching
-therefore schedules a zero-delay finalizer: when it fires and the
-detached record is still outstanding (the after-restart hook clears it
-on success), the task moves to `UNKNOWN` with the reason "a restart did
-not complete".  The guarantee is that a detach is always followed by
-either a re-attachment or an `UNKNOWN`, within the same command loop.
+that abandoned state was acceptable, which was wrong.
+
+Detaching therefore arms a **one-shot `post-command-hook` finalizer**:
+when it runs and the detached record is still outstanding (the
+after-restart hook clears it on success), the task moves to `UNKNOWN`
+with the reason "a restart did not complete".  The guarantee is that a
+detach is always followed by either a re-attachment or an `UNKNOWN`, by
+the end of the command that started the restart.
+
+It must not be a timer.  Revision 2 used `run-at-time 0`, and a
+zero-delay timer **does** fire while a command yields — verified in
+batch with a `sit-for` standing in for a backend startup that waits on
+process output.  A successful restart that yielded would have been
+marked `UNKNOWN` underneath itself.  `post-command-hook` runs after the
+whole `agent-restart` command returns, whether it succeeded or
+signalled, which is exactly the boundary this needs.
 
 **Reconciliation (Emacs died).**  Reconciliation runs the first time the
 ledger is parsed in an Emacs session, and **unconditionally on every
@@ -1018,9 +1149,11 @@ into a busy session; a second transcript renderer.
 - **Property bytes**: a `SOURCE_HEADING` containing runs of internal
   whitespace is stored and read back with those runs intact; a value
   containing a newline is refused by name.
-- **Anchored source lookup**: with headings `* TODO Ship` and `* TODO
-  Ship the second thing` in one file, the lookup for the first lands on
-  the first, not inside the second.
+- **Anchored, case-sensitive source lookup**: with headings `* TODO
+  Ship`, `* TODO Ship the second thing` and `* TODO ship` in one file,
+  the lookup for `* TODO Ship` lands on exactly that line.
+  `case-fold-search` defaults to `t`, so an unbound search matches the
+  lower-case heading — verified in batch.
 - **Version gate**: version 2 parses read-only and every write is
   refused by name; an absent version parses as 1.
 - **Writing**: a state change rewrites exactly the keyword and
@@ -1042,6 +1175,22 @@ into a busy session; a second transcript renderer.
   `agent-tasks-lock-timeout` with a message naming the lock, and the
   ledger is unchanged.  Lock release is checked on the success path and
   on a signalling one.
+- **The snapshot is one read**: a fault-injected rename between the two
+  reads revision 2 performed is caught, because there are no longer two
+  — the test replaces the file between the token read and the text read
+  and asserts the commit refuses rather than writing stale content.
+  Token, decoded text, and coding all come from one byte string, and a
+  CRLF ledger's coding is detected from it correctly.
+- **Locked first creation**: two creators that both snapshot an absent
+  ledger — the second forced to collide by stubbing the id generator —
+  end with one task created and the other refused as a conflict, never
+  with a duplicated id or an append onto a ledger the snapshot never
+  saw.
+- **Transitions are central**: reconciliation's move to `UNKNOWN` goes
+  through `agent-tasks-transition` — asserted by stubbing that function
+  and observing the call — so an orphaned `BLOCKED` task loses its
+  `BLOCKED_REASON`; and a blank reason is refused by the transition API
+  itself, not only by the cancel command.
 - **State machine**: every allowed transition in the matrix succeeds and
   **every pair absent from the matrix is refused**, including
   `PENDING` → `BLOCKED`, driven as a table rather than a handful of
@@ -1073,16 +1222,34 @@ into a busy session; a second transcript renderer.
   message as `:initial-prompt` and the returned buffer is bound;
   `ATTEMPT` increments once per dispatch.
 - **Commit against the reviewed snapshot**: for each of *cancelled*,
-  *closed*, *reopened*, *instruction edited*, and *a new unsatisfied
-  dependency added* between prepare and commit, the dispatch is refused
-  naming what changed, **nothing is sent**, and the ledger is unchanged.
-  A successful override records each unsatisfied dependency and its
-  state in the `Log`.
+  *closed*, *cancelled-then-reopened* (which restores every field
+  revision 2 compared), *instruction edited*, *recorded directory
+  edited*, and *a new unsatisfied dependency added* between prepare and
+  commit, the dispatch is refused naming the task, **nothing is sent**,
+  and the ledger is unchanged.  A successful override records each
+  unsatisfied dependency and its state in the `Log`.
 - **Zero-send ownership tests**: dispatching into a session already
-  bound to another task sends nothing (the stub `agent-submit` records
-  no call) and refuses by name; the same for a task already bound to a
-  different buffer.  These assert the *absence* of a send, because the
-  defect they guard against is a prompt delivered before the error.
+  bound to another task sends nothing (the stub submitter records no
+  call) and refuses by name; the same for a task already bound to a
+  different buffer; and — the case revision 2 missed — the same for an
+  already-bound task dispatched into a **new** session, where the
+  assertion is that `agent-start-session` was never called.  These
+  assert the *absence* of a send, because the defect they guard against
+  is a prompt delivered before the error.
+- **Prompt isolation**: a target whose `:pending-input-p` reports
+  pending text refuses and sends nothing; a target reporting `unknown`
+  refuses and sends nothing; a backend registering no probe refuses.
+  Each runs with `agent-tasks-dispatch-confirm` **nil**, because a
+  safeguard that only works when confirmation is on is not one.  The
+  send goes through `:submit-literal`, asserted by stubbing it and
+  leaving `agent-submit` stubbed to fail the test if called.
+- **Readiness precedence**: each of the three sources is tested in
+  isolation, with the higher-precedence ones removed via `fmakunbound`
+  or an unregistered slot, so the fallback branch is actually reached —
+  revision 2's fallback test could not run, because the public helper
+  exists once the attention/queue project has landed and always won.
+  The fallback maps `busy` to `busy`, `waiting` to **`unknown`**, and
+  `unknown` to `unknown`.
 - **New-session identity**: a backend that resolves a different account
   than the task recorded, and one that returns a buffer with a
   collision-selected instance name, both end with the task's recorded
@@ -1117,9 +1284,15 @@ into a busy session; a second transcript renderer.
 - **Restart**: with `agent-before-restart-functions` present, a matching
   resumed id re-attaches the binding and keeps the state; a mismatched
   id leaves it `UNKNOWN`; with the hooks absent, teardown's `UNKNOWN`
-  path applies.  **A detach whose startup signals** — the after-restart
-  hook never runs — leaves the task `UNKNOWN` once the finalizer runs,
-  never `RUNNING` and unbound.
+  path applies.  Both paths are driven through a **stand-in for the
+  whole `agent-restart` command** — before-hook, kill, start, after-hook,
+  then `post-command-hook` — rather than by calling the handlers in a
+  hand-picked order:
+  - a startup that **yields** (`sit-for`) and then succeeds ends
+    `RUNNING` and re-bound, proving the finalizer cannot fire
+    mid-command (a zero-delay timer here does, verified in batch);
+  - a startup that **signals** ends `UNKNOWN` once `post-command-hook`
+    runs, never `RUNNING` and unbound.
 - **Event write failures**: a conflicting ledger during event handling
   warns and does not signal into hook delivery, and the other consumers
   on the hook still run.
@@ -1159,29 +1332,48 @@ the shared binding table, and a scratch git repository that did not
 contain the ledger whose diff the checks were supposed to read.  The
 rules:
 
-- **One unique scratch repository per run**, created with
-  `make-temp-file` with its directory flag, `git init`-ed, with the
-  **ledger file inside it** and a baseline commit made before anything
-  runs.  That is what makes the byte-level `git diff` checks possible at
-  all.
-- **Every global is dynamically bound, not assigned**, for the duration
-  of the checks: `agent-tasks-file`, `agent-tasks--reconciled`, and
-  `agent-tasks--bindings` (bound to a *fresh* hash table, so the real
-  session bindings are isolated rather than cleared — `clrhash` on the
-  shared table would destroy live bindings belonging to the person's
-  actual sessions).  Modes that must be toggled — `agent-tasks-mode`,
-  and `agent-attention-mode` when it is present — have their prior value
-  recorded and restored afterwards.
-- **The real ledger is hashed before and after** the whole run and the
-  two hashes compared, which is a stronger check than looking at an
-  mtime.
-- **Every scratch session started by a check is closed by it**, so no
-  CLI process outlives the verification.
+Revision 2's harness was a `let` form with the checks written as a
+comment inside it, which is not executable: the checks are interactive
+and span many commands, so the dynamic bindings would have ended before
+the first one ran.  The harness is therefore a **persistent, explicitly
+installed and explicitly torn down** one:
+
+- **One generated root per run**, created with `make-temp-file` with its
+  directory flag, recorded in a variable, and used by **every**
+  subsequent step — no step names a fixed `/tmp` path.  The root
+  contains a `git init`-ed repository, and the **ledger file lives
+  inside it**, which is what makes the byte-level `git diff` checks
+  possible at all.
+- **Setup saves and setup restores.**  Because the checks outlive any
+  single form, the harness *sets* the globals it needs
+  (`agent-tasks-file`, `agent-tasks--bindings` to a **fresh** table,
+  `agent-tasks--reconciled`, `agent-tasks--restart-pending`) after
+  saving each prior value into a single record, and teardown restores
+  every one of them from that record.  `agent-tasks-mode` and
+  `agent-attention-mode` are likewise saved and restored to their prior
+  values, not switched off.  The binding table is **replaced, never
+  cleared**: `clrhash` on the shared table would destroy bindings
+  belonging to the person's real sessions.
+- **A per-check baseline commit.**  Each check that asserts on a `git
+  diff` commits the ledger first, so the diff shows that check's change
+  and nothing accumulated from earlier ones.
+- **Only the ledger is staged**, by explicit path.  `git add -A` inside
+  a scratch repository is harmless, but the habit is not, and the final
+  repository-state check must not be confused by artifacts.
+- **The real ledger is compared by content**: its hash is recorded
+  before the run and re-computed after, and the two are compared.  A
+  ledger that does not exist before and does not exist after is equally
+  a pass; a ledger that appears during the run is a failure.
+- **Every scratch session is tracked and closed.**  The harness keeps
+  the list of buffers it started and kills them in teardown, so no CLI
+  process outlives the verification.
 - Task instructions are inert: "Reply with the words `task received` and
   do nothing else."  Every claim under test is about state transitions
   and bindings; none needs an agent that changes a file.
-- Cleanup removes the scratch tree with `trash`, restores every recorded
-  global, and stages nothing outside the scratch repository.
+- Teardown removes the generated root with `trash` — the root the
+  harness generated, never a path typed into the procedure — restores
+  every saved global, and writes the outcome of each check into a named
+  verification record.
 
 Both backends:
 
@@ -1189,11 +1381,16 @@ Both backends:
    conversation that the instruction arrived once; confirm the ledger
    shows `RUNNING`, the binding, and — after the backend reports one —
    `SESSION_ID`.
-2. Let the turn complete.  Confirm the task is **still** `RUNNING` and
-   that a `Log` line records the completion.  Confirm the ledger filed
-   no attention item of its own for it, while the attention module's own
-   completion item is present.  This is the design's central claim and
-   the one most likely to have been implemented wrong.
+2. **Move focus to another frame or select a non-session window before
+   the turn ends**, then let it complete.  Confirm the task is **still**
+   `RUNNING` and that a `Log` line records the completion.  Confirm the
+   ledger filed no attention item of its own for it, while the attention
+   module's own completion item is present.  The focus step is not
+   optional: `agent-attention-mode` deliberately files no completion
+   item for a buffer the person is reading right now, so watching the
+   session would make the second half of this check fail for a reason
+   that has nothing to do with the ledger.  This is the design's central
+   claim and the one most likely to have been implemented wrong.
 3. Trigger a real permission prompt in the bound session and confirm the
    task becomes `BLOCKED` with a reason taken from what the backend
    reported; answer it and confirm the task returns to `RUNNING`.
@@ -1214,15 +1411,19 @@ Both backends:
    proceeds.
 8. Dispatch into a mid-turn session and confirm the refusal names the
    session and does not alter the running turn.
-9. Close a task with an outcome and evidence, cancel another with a
-   reason, and confirm both records read truthfully in the file with
-   every other byte unchanged — `git diff` inside the scratch
-   repository, which works because the ledger lives there and a
-   baseline was committed.  Confirm the closed tasks' sessions are no
-   longer bound.
-10. Confirm the person-facing prompt caveat: dispatch into an existing
-    session and check that the confirmation buffer says sending will
-    also submit whatever is already in that session's prompt.
+9. Commit the ledger as this check's baseline, then close a task with an
+   outcome and evidence and cancel another with a reason.  Confirm both
+   records read truthfully with every other byte unchanged — `git diff`
+   inside the scratch repository, which works because the ledger lives
+   there and each check commits its own baseline.  Confirm the closed
+   tasks' sessions are no longer bound.
+10. Confirm prompt isolation for real: type some text into an idle
+    session's prompt without submitting it, then dispatch a task there.
+    The dispatch must **refuse** naming the pending input, the typed
+    text must still be sitting unsent in the prompt, and the ledger must
+    be unchanged.  Run it with `agent-tasks-dispatch-confirm` bound to
+    nil, because that is the configuration in which a
+    confirmation-buffer warning would have protected nobody.
 
 Import is verified against a **copy** of a few Org TODOs inside the
 scratch repository, never against a real notes file.  The chief context

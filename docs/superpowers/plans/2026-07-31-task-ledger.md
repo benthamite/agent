@@ -101,9 +101,12 @@ These apply to every task.  They restate the spec's non-negotiables.
   warning-free.  **Record the baseline count before Task 1** — `make
   test` on the repository as you find it — because this plan lands
   after three others and the absolute total will not be the 362 that
-  `make test` reported when the plan was written.  Each task below
-  states how many tests it adds, not what the total should be; the
-  whole plan adds 101.
+  `make test` reported when the plan was written.  No task states an
+  expected total, and no aggregate is stated here either: after each
+  task the total must rise by exactly the number of `ert-deftest` forms
+  that task's diff added, which is a mechanical check
+  (`grep -c '^(ert-deftest' test/agent-tasks-test.el`) rather than a
+  number in prose that goes stale the moment a test is added.
 - Commit after every task with a single-purpose message.
 
 Run tests with `make test` from the repo root; byte-compile with `make
@@ -142,15 +145,23 @@ Contact points with the other plans:
    (composer), then `agent-session-display-state`.  All three are
    accessed through `fboundp` so the module's tests run in isolation.
    Do not add the slot or the awaiting-reason machinery here.
-2. **Restart hooks.**  Task 9 uses `agent-before-restart-functions` and
+2. **Prompt isolation and the send channel.**  The composer project
+   also adds `:pending-input-p` and `:submit-literal`
+   (`plans/2026-07-30-context-composer.md`).  Task 8 consumes both: a
+   dispatch into an existing session refuses unless the pending-input
+   probe returns nil, and the send goes through the literal submitter
+   rather than `agent-submit`.  Do not add either slot here, and do not
+   fall back to `agent-submit` for an existing session — a backend
+   registering no literal submitter simply cannot receive one.
+3. **Restart hooks.**  Task 9 uses `agent-before-restart-functions` and
    `agent-after-restart-functions` (attention/queue, Task 11) through
    `boundp`.  Do not add them here.
-3. **Attention items.**  Filed through `agent-attention-file` under
+4. **Attention items.**  Filed through `agent-attention-file` under
    `fboundp`, and **only** for a task that became `UNKNOWN` while a
    session buffer existed.  The attention module already files items for
    `blocked`, `error`, and completion events; a second item would be
    duplicate noise.
-4. **`agent-menu` keys.**  Keys must be unique across the *whole*
+5. **`agent-menu` keys.**  Keys must be unique across the *whole*
    prefix, which includes the per-backend columns
    `agent-menu--backend-children` builds at open time.  Taken today:
    static `e w h x r l K f S s n c a d m g T p i`; generated
@@ -158,7 +169,7 @@ Contact points with the other plans:
    `A Q L I E`; composer `C`; skill bundles `W H k v`.  **This plan uses
    `j` and `J`.**  They are not mnemonic; every mnemonic letter is
    already taken, and that is stated in the manual.
-5. **No queue integration.**  A busy target is refused, not queued.  Do
+6. **No queue integration.**  A busy target is refused, not queued.  Do
    not build a submit-and-wait driver here.
 
 ## Deliberate deviations from the spec
@@ -257,9 +268,9 @@ ledger appends to and never reads back for a decision.
   - `agent-tasks-read (&optional FILE)` → an `agent-tasks-ledger`.
   - `agent-tasks-find (LEDGER ID)` → task or nil.
   - `agent-tasks--with-org-text (TEXT &rest BODY)` macro.
-  - `agent-tasks--file-text FILE`, `agent-tasks--file-bytes FILE`,
-    `agent-tasks--file-coding FILE`, `agent-tasks--token FILE`,
-    `agent-tasks--entry-end`, `agent-tasks--property NAME`,
+  - `agent-tasks--snapshot FILE` → `(:bytes :token :coding :text)` from
+    one read, or nil; `agent-tasks--file-text FILE` (auxiliary files
+    only), `agent-tasks--entry-end`, `agent-tasks--property NAME`,
     `agent-tasks--escape-body TEXT`, `agent-tasks--unescape-body TEXT`,
     `agent-tasks--entry-problems ID STATE`.
 
@@ -324,6 +335,8 @@ Create `test/agent-tasks-test.el`:
    ":PROPERTIES:\n"
    ":AGENT_TASK_ID: t-a\n"
    ":CREATED:  [2026-07-31 Fri 14:22]\n"
+   ;; The body below is stored encoded, so the parser must decode it.
+   ":BODY_ENCODED: t\n"
    ":BACKEND:  claude-code\n"
    ":ACCOUNT:  personal\n"
    ":DIRECTORY: ~/repos/agent/\n"
@@ -681,7 +694,12 @@ configuration.")
   backend account directory repository instance session-id
   attempt depends blocked-reason outcome
   source-file source-heading
-  result evidence comments log)
+  result evidence comments log
+  ;; SHA-1 of this entry's whole text as parsed.  The dispatcher
+  ;; compares it at commit time, so *any* change to the entry — not
+  ;; just the handful of fields an enumerated check would list —
+  ;; refuses a send against a task the person no longer reviewed.
+  entry-token)
 
 (cl-defstruct (agent-tasks-problem
                (:constructor agent-tasks-problem--create)
@@ -701,35 +719,40 @@ bytes, so a concurrent edit is refused rather than overwritten."
 ;;;; Reading the file
 
 (defun agent-tasks--file-text (file)
-  "Return FILE's decoded contents, or nil when it cannot be read."
+  "Return FILE's decoded contents, or nil when it cannot be read.
+Used for small auxiliary files such as the lock; the ledger itself is
+always read through `agent-tasks--snapshot', which keeps the text and
+the conflict token in step."
   (when (and file (file-readable-p file))
     (with-temp-buffer
       (insert-file-contents file)
       (buffer-string))))
 
-(defun agent-tasks--file-coding (file)
-  "Return the coding system Emacs detects for FILE, or nil."
-  (when (and file (file-readable-p file))
-    (with-temp-buffer
-      (insert-file-contents file)
-      buffer-file-coding-system)))
+(defun agent-tasks--snapshot (file)
+  "Return one coherent snapshot of FILE, or nil when it cannot be read.
+The plist carries `:bytes', `:token', `:coding' and `:text', **all
+derived from a single read**.
 
-(defun agent-tasks--file-bytes (file)
-  "Return FILE's undecoded bytes as a unibyte string, or nil."
-  (when (and file (file-readable-p file))
-    (with-temp-buffer
-      (set-buffer-multibyte nil)
-      (insert-file-contents-literally file)
-      (buffer-string))))
+Two reads — one for the token and one for the text, as revision 2 did —
+let a rename landing between them pair the old content with the new
+file's token: the conflict check passes and the write resurrects stale
+content.  `detect-coding-string' plus `decode-coding-string' over the
+bytes reproduce `insert-file-contents'' text and coding exactly,
+verified in batch including a CRLF file, and the bytes round-trip when
+written back with that coding.
 
-(defun agent-tasks--token (file)
-  "Return the conflict-detection token for FILE, or nil when absent.
-The token hashes FILE's **raw bytes**.  A hash of the decoded text
-cannot tell a CRLF ledger from its LF twin, nor two byte sequences that
-decode alike under a lenient coding system, so a real concurrent change
-could pass the check."
-  (when-let* ((bytes (agent-tasks--file-bytes file)))
-    (secure-hash 'sha1 bytes)))
+The token hashes raw bytes rather than decoded text, because a decoded
+hash cannot tell a CRLF ledger from its LF twin."
+  (when (and file (file-readable-p file))
+    (let* ((bytes (with-temp-buffer
+                    (set-buffer-multibyte nil)
+                    (insert-file-contents-literally file)
+                    (buffer-string)))
+           (coding (car (detect-coding-string bytes))))
+      (list :bytes bytes
+            :token (secure-hash 'sha1 bytes)
+            :coding coding
+            :text (decode-coding-string bytes coding)))))
 
 (defmacro agent-tasks--with-org-text (text &rest body)
   "Evaluate BODY in a temporary `org-mode' buffer holding TEXT.
@@ -764,24 +787,27 @@ written it by hand."
 FILE defaults to `agent-tasks-file'.  A missing file is an empty
 ledger, not an error."
   (let* ((file (expand-file-name (or file agent-tasks-file)))
-         (text (agent-tasks--file-text file)))
-    (if (null text)
+         (snapshot (agent-tasks--snapshot file)))
+    (if (null snapshot)
         (agent-tasks-ledger--create
          :file file :token nil :version agent-tasks--format-version
          :tasks nil :problems nil)
-      (agent-tasks--parse-text file text))))
+      (agent-tasks--parse-text file snapshot))))
 
-(defun agent-tasks--parse-text (file text)
-  "Parse ledger TEXT read from FILE into an `agent-tasks-ledger'.
+(defun agent-tasks--parse-text (file snapshot)
+  "Parse SNAPSHOT of ledger FILE into an `agent-tasks-ledger'.
+SNAPSHOT comes from `agent-tasks--snapshot', so its text and its token
+describe the same bytes.
 Two passes.  The first counts every `AGENT_TASK_ID' in the file; the
 second builds tasks, and an id seen more than once yields a problem row
 for **every** occurrence and no task at all.  One pass keeping the first
 occurrence would be worse than useless: `org-find-property' returns the
 first match, so a write aimed at that id would silently edit one of two
 headings a person cannot tell apart."
-  (let ((version (agent-tasks--parse-version text))
-        (counts (make-hash-table :test 'equal))
-        tasks problems)
+  (let* ((text (plist-get snapshot :text))
+         (version (agent-tasks--parse-version text))
+         (counts (make-hash-table :test 'equal))
+         tasks problems)
     (agent-tasks--with-org-text text
       ;; Pass 1: count ids.
       (while (re-search-forward "^\\* " nil t)
@@ -797,14 +823,16 @@ headings a person cannot tell apart."
         (let ((end (agent-tasks--entry-end))
               (line (buffer-substring-no-properties
                      (line-beginning-position) (line-end-position))))
-          (pcase (agent-tasks--entry-at-point end line counts)
+          (pcase (agent-tasks--entry-at-point end line counts
+                                              (buffer-substring-no-properties
+                                               (point) end))
             (`(task . ,task) (push task tasks))
             (`(problems . ,found) (setq problems (append (nreverse found)
                                                          problems))))
           (goto-char end))))
     (agent-tasks-ledger--create
      :file file
-     :token (agent-tasks--token file)
+     :token (plist-get snapshot :token)
      :version version
      :tasks (nreverse tasks)
      :problems (nreverse problems))))
@@ -817,11 +845,12 @@ headings a person cannot tell apart."
         (match-beginning 0)
       (point-max))))
 
-(defun agent-tasks--entry-at-point (end line counts)
+(defun agent-tasks--entry-at-point (end line counts entry-text)
   "Return the task or the problems for the level-1 heading at point.
-END bounds the entry, LINE is its raw heading line, and COUNTS maps
-each id in the file to how many headings carry it.  The result is
-\(task . TASK) or (problems . LIST)."
+END bounds the entry, LINE is its raw heading line, COUNTS maps each id
+in the file to how many headings carry it, and ENTRY-TEXT is the
+entry's whole text, hashed into the task's `entry-token'.  The result
+is \(task . TASK) or (problems . LIST)."
   (let* ((state (org-get-todo-state))
          (id (agent-tasks--property "AGENT_TASK_ID"))
          (problems (agent-tasks--entry-problems id state line counts)))
@@ -853,7 +882,8 @@ each id in the file to how many headings carry it.  The result is
              :result (agent-tasks--section "Result" end)
              :evidence (agent-tasks--section "Evidence" end)
              :comments (agent-tasks--section "Comments" end)
-             :log (agent-tasks--section "Log" end))))))
+             :log (agent-tasks--section "Log" end)
+             :entry-token (secure-hash 'sha1 entry-text))))))
 
 (defun agent-tasks--entry-problems (id state line counts)
   "Return the problems of the entry at point, or nil when it is a task.
@@ -1161,14 +1191,68 @@ Add to `test/agent-tasks-test.el`, before the `provide`:
 
 ;;;; Concurrency
 
-(ert-deftest agent-tasks-test-token/hashes-raw-bytes ()
-  "Two files that decode alike but differ in bytes get different tokens."
+(ert-deftest agent-tasks-test-snapshot/is-one-coherent-read ()
+  "Token, text and coding all describe the same bytes."
   (agent-tasks-test--with-ledger agent-tasks-test--fixture
-    (let ((lf (agent-tasks--token agent-tasks-file)))
+    (let ((lf (agent-tasks--snapshot agent-tasks-file)))
+      (should (equal agent-tasks-test--fixture (plist-get lf :text)))
+      (should (equal (secure-hash 'sha1 (plist-get lf :bytes))
+                     (plist-get lf :token)))
+      ;; Raw bytes, not decoded text: a CRLF twin must differ.
       (let ((coding-system-for-write 'utf-8-dos))
         (with-temp-file agent-tasks-file
           (insert agent-tasks-test--fixture)))
-      (should-not (equal lf (agent-tasks--token agent-tasks-file))))))
+      (let ((crlf (agent-tasks--snapshot agent-tasks-file)))
+        (should-not (equal (plist-get lf :token) (plist-get crlf :token)))
+        (should (equal 'utf-8-dos (plist-get crlf :coding)))
+        ;; The decoded text is the same, which is exactly why hashing it
+        ;; would have missed the change.
+        (should (equal (plist-get lf :text) (plist-get crlf :text)))))))
+
+(ert-deftest agent-tasks-test-snapshot/a-rename-between-reads-cannot-slip-through ()
+  "A file replaced after the snapshot is a conflict, not a stale write.
+Revision 2 read the token and the text separately; a replacement
+landing between them paired old content with the new token."
+  (agent-tasks-test--with-ledger agent-tasks-test--fixture
+    (let ((ledger (agent-tasks-read)))
+      (let ((coding-system-for-write 'utf-8-unix))
+        (with-temp-file agent-tasks-file
+          (insert agent-tasks--header
+                  "* PENDING Replaced\n:PROPERTIES:\n:AGENT_TASK_ID: t-r\n:END:\n")))
+      (should-error
+       (agent-tasks--update-task
+        ledger "t-a" (lambda () (agent-tasks--log "stale")))
+       :type 'user-error)
+      ;; The replacement survived untouched.
+      (should (agent-tasks-find (agent-tasks-read) "t-r")))))
+
+(ert-deftest agent-tasks-test-create/concurrent-first-creation-conflicts ()
+  "Two creators that both saw no ledger cannot both publish one.
+The id generator is forced to collide, so the test fails loudly if the
+second creator appends onto the file the first published instead of
+refusing."
+  (agent-tasks-test--with-ledger nil
+    (let ((first-ledger (agent-tasks-read))
+          (second-ledger (agent-tasks-read)))
+      (should (null (agent-tasks-ledger-token first-ledger)))
+      (should (null (agent-tasks-ledger-token second-ledger)))
+      (cl-letf (((symbol-function 'agent-tasks--new-id)
+                 (lambda (_ledger) "t-fixed")))
+        (agent-tasks--append-entry
+         first-ledger
+         (lambda (fresh)
+           (agent-tasks--entry-string :id (agent-tasks--new-id fresh)
+                                      :title "First")))
+        (should-error
+         (agent-tasks--append-entry
+          second-ledger
+          (lambda (fresh)
+            (agent-tasks--entry-string :id (agent-tasks--new-id fresh)
+                                       :title "Second")))
+         :type 'user-error))
+      (let ((ledger (agent-tasks-read)))
+        (should (= 1 (length (agent-tasks-ledger-tasks ledger))))
+        (should (null (agent-tasks-ledger-problems ledger)))))))
 
 (ert-deftest agent-tasks-test-write/interleaved-writers-lose-nothing ()
   "The exact two-writer race: one commits, the other is refused.
@@ -1360,17 +1444,20 @@ effect."
       (user-error "Buffer %s has unsaved ledger changes; save or revert it first"
                   (buffer-name buffer)))))
 
-(defun agent-tasks--current-text (ledger)
-  "Return LEDGER's file text, signalling when its bytes changed since parsing.
+(defun agent-tasks--current-snapshot (ledger)
+  "Return LEDGER's file snapshot, signalling when its bytes changed.
 Call only while holding the lock: the token detects a change that
 already landed, and only the lock stops an interleaving that produces
-one."
-  (let ((file (agent-tasks-ledger-file ledger)))
-    (unless (equal (agent-tasks--token file) (agent-tasks-ledger-token ledger))
+one.  The returned snapshot is a single read, so the text the caller
+edits and the token that authorised the edit describe the same bytes."
+  (let* ((file (agent-tasks-ledger-file ledger))
+         (snapshot (or (agent-tasks--snapshot file)
+                       (user-error "Ledger file is gone: %s" file))))
+    (unless (equal (plist-get snapshot :token)
+                   (agent-tasks-ledger-token ledger))
       (user-error
        "The ledger changed on disk since it was read; refresh and retry"))
-    (or (agent-tasks--file-text file)
-        (user-error "Ledger file is gone: %s" file))))
+    snapshot))
 
 (defun agent-tasks--update-task (ledger id fn)
   "Run FN at task ID's heading in LEDGER's file and save the result.
@@ -1384,43 +1471,65 @@ The whole read-check-edit-rename sequence runs under
   (agent-tasks--check-writable ledger)
   (let ((file (agent-tasks-ledger-file ledger)))
     (agent-tasks--with-lock file
-      (let ((new (agent-tasks--with-org-text (agent-tasks--current-text ledger)
-                   (let ((position (org-find-property "AGENT_TASK_ID" id)))
-                     (unless position
-                       (user-error "No task with id %s in %s" id file))
-                     (goto-char position)
-                     (funcall fn)
-                     (goto-char (org-find-property "AGENT_TASK_ID" id))
-                     (agent-tasks--stamp-updated)
-                     (buffer-string)))))
-        (agent-tasks--replace-file file new)))
+      (let* ((snapshot (agent-tasks--current-snapshot ledger))
+             (new (agent-tasks--with-org-text (plist-get snapshot :text)
+                    (let ((position (org-find-property "AGENT_TASK_ID" id)))
+                      (unless position
+                        (user-error "No task with id %s in %s" id file))
+                      (goto-char position)
+                      (funcall fn)
+                      (goto-char (org-find-property "AGENT_TASK_ID" id))
+                      (agent-tasks--stamp-updated)
+                      (buffer-string)))))
+        (agent-tasks--replace-file file new (plist-get snapshot :coding))))
     (agent-tasks--sync-visiting-buffer file)
     (agent-tasks-read file)))
 
-(defun agent-tasks--append-entry (ledger text)
-  "Append entry TEXT to LEDGER's file and return a freshly parsed ledger.
-Creation and appending share the lock, so two processes that both find
-no ledger cannot both publish a header and lose one another's task."
+(defun agent-tasks--append-entry (ledger builder)
+  "Append the entry BUILDER returns to LEDGER's file; return the new ledger.
+BUILDER is called **under the lock**, with the ledger as re-parsed from
+disk at that moment, and returns the entry text to append.  Minting the
+new task's id from that re-parse rather than from the caller's
+unlocked snapshot is what stops two concurrent creators from choosing
+the same id — ids embed a one-second timestamp and 16 random bits, and
+a duplicated id makes both tasks unusable.
+
+A snapshot taken when the ledger was absent may not append onto one
+that appeared in between: another process published a file whose
+version and contents this snapshot never saw, so that is a conflict."
   (agent-tasks--check-writable ledger)
   (let ((file (agent-tasks-ledger-file ledger)))
     (agent-tasks--with-lock file
-      (agent-tasks--ensure-file file)
-      (let* ((current (if (agent-tasks-ledger-token ledger)
-                          (agent-tasks--current-text ledger)
-                        (agent-tasks--file-text file)))
-             (new (concat (string-trim-right current) "\n\n" text)))
-        (agent-tasks--replace-file file new)))
+      (let ((existed (file-exists-p file)))
+        (when (and (null (agent-tasks-ledger-token ledger)) existed)
+          (user-error
+           "Another process created the ledger since it was read; refresh and retry"))
+        (unless existed (agent-tasks--ensure-file file)))
+      (let ((snapshot (or (agent-tasks--snapshot file)
+                          (user-error "Ledger file is gone: %s" file))))
+        (when (and (agent-tasks-ledger-token ledger)
+                   (not (equal (plist-get snapshot :token)
+                               (agent-tasks-ledger-token ledger))))
+          (user-error
+           "The ledger changed on disk since it was read; refresh and retry"))
+        (let* ((fresh (agent-tasks--parse-text file snapshot))
+               (entry (funcall builder fresh)))
+          (agent-tasks--replace-file
+           file
+           (concat (string-trim-right (plist-get snapshot :text)) "\n\n" entry)
+           (plist-get snapshot :coding)))))
     (agent-tasks--sync-visiting-buffer file)
     (agent-tasks-read file)))
 
-(defun agent-tasks--replace-file (file content)
+(defun agent-tasks--replace-file (file content &optional coding)
   "Replace FILE's contents with CONTENT atomically.
 CONTENT is written to a temporary file in FILE's own directory and
 renamed over it, so an interrupted write cannot truncate the ledger.
-The coding system is the one Emacs detected when reading FILE, so a
-CRLF ledger stays CRLF."
+CODING is the coding system from the caller's snapshot of FILE, so a
+CRLF ledger stays CRLF; it defaults to `utf-8-unix' for a file being
+created."
   (make-directory (file-name-directory file) t)
-  (let ((coding (or (agent-tasks--file-coding file) 'utf-8-unix))
+  (let ((coding (or coding 'utf-8-unix))
         (temp (make-temp-file
                (expand-file-name ".agent-tasks-" (file-name-directory file)))))
     (unwind-protect
@@ -1622,12 +1731,13 @@ Add to `test/agent-tasks-test.el`:
       (should (equal instruction
                      (agent-tasks-task-instruction
                       (agent-tasks-find (agent-tasks-read) id))))
-      ;; The file itself holds no column-zero star inside the body.
-      (should (= 1 (cl-count "* Stars"
-                             (split-string
-                              (agent-tasks--file-text agent-tasks-file) "\n")
-                             :test (lambda (needle line)
-                                     (string-prefix-p needle line))))))))
+      ;; Every body star line was indented, so Org sees exactly one
+      ;; column-zero heading for this entry: its own.
+      (let ((text (agent-tasks--file-text agent-tasks-file)))
+        (should (string-match-p "^\\* PENDING Stars$" text))
+        (should (string-match-p "^ \\* top$" text))
+        (should-not (string-match-p "^\\* top$" text))
+        (should (string-match-p "^  \\* indented$" text))))))
 
 (ert-deftest agent-tasks-test-create/two-tasks-get-distinct-ids ()
   "Ids are checked against the ledger, not merely generated."
@@ -1809,18 +1919,22 @@ through it.  DIRECTORY is normalised the way session identities are,
 so a recorded directory compares `equal' with a live session's."
   (unless (and title (not (string-empty-p (string-trim title))))
     (user-error "A task needs a title"))
-  (let* ((ledger (agent-tasks-read))
-         (id (agent-tasks--new-id ledger))
-         (normalized (and directory
-                          (agent-session--normalize-directory directory))))
+  (let* ((normalized (and directory
+                          (agent-session--normalize-directory directory)))
+         (repository (agent-tasks--repository normalized))
+         (id nil))
     (agent-tasks--append-entry
-     ledger
-     (agent-tasks--entry-string
-      :id id :title title :instruction instruction
-      :directory normalized
-      :repository (agent-tasks--repository normalized)
-      :backend backend :account account :depends depends
-      :source-file source-file :source-heading source-heading))
+     (agent-tasks-read)
+     ;; The id is minted from the ledger as re-parsed under the lock,
+     ;; not from the snapshot above, so two concurrent creators cannot
+     ;; pick the same one.
+     (lambda (fresh)
+       (setq id (agent-tasks--new-id fresh))
+       (agent-tasks--entry-string
+        :id id :title title :instruction instruction
+        :directory normalized :repository repository
+        :backend backend :account account :depends depends
+        :source-file source-file :source-heading source-heading)))
     id))
 
 ;;;###autoload
@@ -2113,6 +2227,16 @@ guards against is a *missing* rule, which examples cannot find."
      :type 'user-error)
     (should-error (agent-tasks-mark-blocked id "stuck") :type 'user-error)))
 
+(ert-deftest agent-tasks-test-transition/requires-a-reason ()
+  "The API refuses a blank reason, not just the cancel command."
+  (agent-tasks-test--with-task "PENDING"
+    (should-error (agent-tasks-transition (agent-tasks-read) id "CANCELLED" "")
+                  :type 'user-error)
+    (should-error (agent-tasks-transition (agent-tasks-read) id "CANCELLED" "  ")
+                  :type 'user-error)
+    (should (equal "PENDING" (agent-tasks-task-state
+                              (agent-tasks-find (agent-tasks-read) id))))))
+
 (ert-deftest agent-tasks-test-transition/enforces-destination-invariants ()
   "A destination's required and forbidden properties are both checked."
   (agent-tasks-test--with-task "RUNNING"
@@ -2294,6 +2418,12 @@ properties the new state requires.
 This is the only function that changes a state.  It is the
 person-initiated entry point and it signals; evidence paths reach it
 through `agent-tasks--safe-transition', which warns instead."
+  (unless (and (stringp reason)
+               (not (string-empty-p (string-trim reason))))
+    ;; Enforced here, not only in `agent-tasks-cancel': a caller
+    ;; reaching this API directly could otherwise cancel a task with no
+    ;; recorded reason, and the reason is the whole record of why.
+    (user-error "A transition needs a non-blank reason"))
   (let* ((task (or (agent-tasks-find ledger id)
                    (user-error "No task with id %s" id)))
          (from (agent-tasks-task-state task))
@@ -2737,6 +2867,20 @@ than a small one."
   (with-current-buffer buffer
     (cl-pushnew #'agent-tasks--session-torn-down agent--teardown-functions))
   id)
+
+(defun agent-tasks--check-task-unbound (id)
+  "Signal when task ID is already bound to a live session.
+Checked for a **new**-session dispatch too, where there is no target
+buffer to check against: revision 2 skipped the pairing entirely in
+that case, so a task holding a stale binding could be re-dispatched
+and `agent-start-session' would deliver the initial prompt before
+`agent-tasks--bind' noticed.
+
+A fresh attempt never steals a binding.  Deciding that an earlier run
+is over is a judgement for the person — `u' to unbind, `R' to attach."
+  (when-let* ((buffer (agent-tasks-task-buffer id)))
+    (user-error "Task %s is already bound to session %s; unbind it first"
+                id (agent-display-name buffer))))
 
 (defun agent-tasks--release-binding (id)
   "Drop task ID's session binding, if it has one.
@@ -3423,6 +3567,32 @@ Add to `test/agent-tasks-test.el`:
                        (agent-tasks-task-state
                         (agent-tasks-find (agent-tasks-read) id))))))))
 
+(ert-deftest agent-tasks-test-reconcile/goes-through-the-transition-api ()
+  "Reconciliation is not an exception to the sole-transition contract.
+An orphaned BLOCKED task must lose its BLOCKED_REASON, which only the
+transition API's destination invariants enforce."
+  (agent-tasks-test--with-ledger nil
+    (let ((agent-tasks--reconciled nil)
+          (agent-tasks--bindings (make-hash-table :test 'eq))
+          (agent-backends nil)
+          (calls nil)
+          (id nil))
+      (setq id (agent-tasks-create :title "Orphan"))
+      (agent-tasks--update-task
+       (agent-tasks-read) id
+       (lambda ()
+         (agent-tasks--set-property "BLOCKED_REASON" "waiting on a decision")
+         (agent-tasks--set-state "BLOCKED" "setup")))
+      (let ((real (symbol-function 'agent-tasks-transition)))
+        (cl-letf (((symbol-function 'agent-tasks-transition)
+                   (lambda (&rest args) (push (nth 2 args) calls)
+                     (apply real args))))
+          (agent-tasks-reconcile)))
+      (should (equal '("UNKNOWN") calls))
+      (let ((task (agent-tasks-find (agent-tasks-read) id)))
+        (should (equal "UNKNOWN" (agent-tasks-task-state task)))
+        (should (null (agent-tasks-task-blocked-reason task)))))))
+
 (ert-deftest agent-tasks-test-reconcile/is-idempotent ()
   "A second pass over the same ledger writes nothing."
   (agent-tasks-test--with-ledger nil
@@ -3513,13 +3683,14 @@ which sessions exist now."
                           "re-bound to live session %s at reconciliation"
                           label))))
                 (cl-incf rebound))
+            ;; Through the transition API, not the raw state setter:
+            ;; that is the only place the matrix and the destination
+            ;; invariants are enforced, so an orphaned BLOCKED task also
+            ;; loses its now-meaningless BLOCKED_REASON here.
             (setq ledger
-                  (agent-tasks--update-task
-                   ledger id
-                   (lambda ()
-                     (agent-tasks--set-state
-                      "UNKNOWN"
-                      "no live session found at reconciliation"))))
+                  (agent-tasks-transition
+                   ledger id "UNKNOWN"
+                   "no live session found at reconciliation"))
             (cl-incf unknown)))))
     (setq agent-tasks--reconciled t)
     (when (> (+ rebound unknown) 0)
@@ -3610,6 +3781,10 @@ git commit -m "feat(tasks): reconcile orphaned running tasks after a crash"
   - `agent-tasks--perform-dispatch PREPARED` → the session buffer.
   - `agent-tasks--confirm-identity BUFFER ID` — the post-start identity
     repair.
+  - `agent-tasks--check-pending-input BUFFER` — refuse unless the
+    composer's `:pending-input-p` reports nil.
+  - `agent-tasks--submit MESSAGE BUFFER` — send through the composer's
+    `:submit-literal` slot.
   - `agent-tasks--check-dependencies` (returns the overridden list),
     `agent-tasks--describe-dependencies`, `agent-tasks--read-target`,
     `agent-tasks--new-session-identity`,
@@ -3637,8 +3812,13 @@ list that records every `agent-submit' call."
               (submitted nil)
               (id (agent-tasks-create :title "Ship it"
                                       :instruction "Do the work")))
-         (cl-letf (((symbol-function 'agent-submit)
+         (cl-letf (((symbol-function 'agent-tasks--submit)
                     (lambda (text target) (push (cons text target) submitted)))
+                   ((symbol-function 'agent-tasks--check-pending-input)
+                    (lambda (_buffer) t))
+                   ((symbol-function 'agent-submit)
+                    (lambda (&rest _)
+                      (error "agent-submit must not be used; use :submit-literal")))
                    ((symbol-function 'agent--read-session-buffer)
                     (lambda () buffer))
                    ((symbol-function 'agent-tasks--read-target)
@@ -3737,7 +3917,7 @@ list that records every `agent-submit' call."
   (agent-tasks-test--dispatchable
     (cl-letf (((symbol-function 'agent-tasks-session-readiness)
                (lambda (_buffer) 'ready))
-              ((symbol-function 'agent-submit)
+              ((symbol-function 'agent-tasks--submit)
                (lambda (&rest _) (error "terminal is gone"))))
       (should-error (agent-tasks-dispatch id))
       (let ((task (agent-tasks-find (agent-tasks-read) id)))
@@ -3779,7 +3959,25 @@ then commits — which is exactly the window revision 1 left open."
                       (agent-tasks--update-task
                        (agent-tasks-read) id
                        (lambda ()
-                         (agent-tasks--set-property "DEPENDS" blocker))))))))
+                         (agent-tasks--set-property "DEPENDS" blocker))))))
+            ;; The case a field-by-field check cannot catch: every
+            ;; compared value is restored, yet the task has been through
+            ;; two decisions the dispatcher never saw.
+            (cons "cancelled then reopened"
+                  (lambda (id)
+                    (agent-tasks-cancel id "changed my mind")
+                    (cl-letf (((symbol-function 'yes-or-no-p)
+                               (lambda (&rest _) t)))
+                      (agent-tasks-reopen id))))
+            ;; Target identity: revision 2 compared none of it and the
+            ;; commit would have overwritten the edit.
+            (cons "recorded directory edited"
+                  (lambda (id)
+                    (agent-tasks--update-task
+                     (agent-tasks-read) id
+                     (lambda ()
+                       (agent-tasks--set-property
+                        "DIRECTORY" "~/somewhere/else/")))))))
     (agent-tasks-test--dispatchable
       (cl-letf (((symbol-function 'agent-tasks-session-readiness)
                  (lambda (_buffer) 'ready)))
@@ -3821,22 +4019,33 @@ then commits — which is exactly the window revision 1 left open."
                        (agent-tasks-task-state
                         (agent-tasks-find (agent-tasks-read) id))))))))
 
-(ert-deftest agent-tasks-test-dispatch/confirms-the-prompt-caveat ()
-  "The confirmation says what Emacs cannot see about the target's prompt."
-  (agent-tasks-test--dispatchable
-    (let ((agent-tasks-dispatch-confirm t)
-          (shown nil))
-      (cl-letf (((symbol-function 'agent-tasks-session-readiness)
-                 (lambda (_buffer) 'ready))
-                ((symbol-function 'display-buffer) (lambda (b &rest _) b))
-                ((symbol-function 'yes-or-no-p)
-                 (lambda (&rest _)
-                   (with-current-buffer "*Agent task dispatch*"
-                     (setq shown (buffer-string)))
-                   t)))
-        (agent-tasks-dispatch id)
-        (should (string-match-p "already typed in that session's prompt"
-                                shown))))))
+(ert-deftest agent-tasks-test-dispatch/sends-through-submit-literal ()
+  "The task message is one isolated turn, not an append to the prompt."
+  (agent-tasks-test--with-ledger nil
+    (agent-tasks-test--with-session buffer
+      (let* ((agent-tasks--reconciled t)
+             (agent-tasks-dispatch-confirm nil)
+             (agent-tasks-mode t)
+             (agent-backends nil)
+             (literal nil)
+             (id (agent-tasks-create :title "Isolated" :instruction "Do it")))
+        (apply #'agent-register-backend 'stub
+               (agent-tasks-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buffer))
+                :find-all-buffers (lambda () (list buffer))
+                :pending-input-p (lambda (_b) nil)
+                :submit-literal (lambda (text target)
+                                  (push (cons text target) literal))))
+        (setq-local agent--backend 'stub)
+        (cl-letf (((symbol-function 'agent-tasks-session-readiness)
+                   (lambda (_buffer) 'ready))
+                  ((symbol-function 'agent-tasks--read-target)
+                   (lambda (_task) (list :buffer buffer)))
+                  ((symbol-function 'agent-submit)
+                   (lambda (&rest _) (error "agent-submit must not be used"))))
+          (agent-tasks-dispatch id)
+          (should (= 1 (length literal)))
+          (should (string-match-p "Do it" (car (car literal)))))))))
 
 (ert-deftest agent-tasks-test-dispatch/confirms-identity-after-start ()
   "A new session's real account and instance reach the record.
@@ -3950,18 +4159,131 @@ prediction."
                          (agent-tasks-task-state
                           (agent-tasks-find (agent-tasks-read) id)))))))))
 
-(ert-deftest agent-tasks-test-readiness/falls-back-to-the-display-state ()
-  "With neither readiness source present, the display state decides."
+(defmacro agent-tasks-test--without-function (symbol &rest body)
+  "Run BODY with SYMBOL temporarily unbound as a function."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let ((saved (and (fboundp ,symbol) (symbol-function ,symbol))))
+     (unwind-protect (progn (fmakunbound ,symbol) ,@body)
+       (when saved (fset ,symbol saved)))))
+
+(ert-deftest agent-tasks-test-readiness/prefers-the-public-helper ()
+  "The attention/queue helper wins when it exists."
   (agent-tasks-test--with-session buffer
-    (cl-letf (((symbol-function 'agent-session-display-state)
-               (lambda (&rest _) 'busy)))
-      (should (eq 'busy (agent-tasks-session-readiness buffer))))
-    (cl-letf (((symbol-function 'agent-session-display-state)
+    (cl-letf (((symbol-function 'agent-session-ready-to-submit-p)
+               (lambda (&rest _) 'busy))
+              ((symbol-function 'agent-session-display-state)
                (lambda (&rest _) 'waiting)))
-      (should (eq 'ready (agent-tasks-session-readiness buffer))))
-    (cl-letf (((symbol-function 'agent-session-display-state)
-               (lambda (&rest _) 'unknown)))
-      (should (eq 'unknown (agent-tasks-session-readiness buffer))))))
+      (should (eq 'busy (agent-tasks-session-readiness buffer))))))
+
+(ert-deftest agent-tasks-test-readiness/falls-back-to-the-backend-slot ()
+  "Without the helper, a registered backend probe decides."
+  (agent-tasks-test--without-function 'agent-session-ready-to-submit-p
+    (let ((agent-backends nil))
+      (with-temp-buffer
+        (rename-buffer "*stub:~/scratch/proj/:default*" t)
+        (let ((buffer (current-buffer)))
+          (apply #'agent-register-backend 'stub
+                 (agent-tasks-test--backend
+                  :buffer-p (lambda (candidate) (eq candidate buffer))
+                  :ready-to-submit-p (lambda (_b) 'busy)))
+          (setq-local agent--backend 'stub)
+          (cl-letf (((symbol-function 'agent-session-display-state)
+                     (lambda (&rest _) 'waiting)))
+            (should (eq 'busy (agent-tasks-session-readiness buffer)))))))))
+
+(ert-deftest agent-tasks-test-readiness/falls-back-to-the-display-state ()
+  "With neither source present, the display state decides — and
+`waiting' is ambiguous, so it asks rather than assuming ready.
+
+Revision 2's version of this test stubbed only the display state while
+the public helper existed, so the fallback branch was never reached and
+the assertions were vacuous.  Removing the higher-precedence sources is
+what makes it a test."
+  (agent-tasks-test--without-function 'agent-session-ready-to-submit-p
+    (let ((agent-backends nil))
+      (with-temp-buffer
+        (rename-buffer "*stub:~/scratch/proj/:default*" t)
+        (let ((buffer (current-buffer)))
+          (apply #'agent-register-backend 'stub
+                 (agent-tasks-test--backend
+                  :buffer-p (lambda (candidate) (eq candidate buffer))))
+          (setq-local agent--backend 'stub)
+          (pcase-dolist (`(,display . ,expected)
+                         '((busy . busy)
+                           (waiting . unknown)
+                           (background-waiting . unknown)
+                           (unknown . unknown)))
+            (cl-letf (((symbol-function 'agent-session-display-state)
+                       (lambda (&rest _) display)))
+              (should (eq expected
+                          (agent-tasks-session-readiness buffer))))))))))
+
+(ert-deftest agent-tasks-test-dispatch/pending-input-sends-nothing ()
+  "A dirty or uninspectable prompt refuses, with confirmation off.
+A warning shown only when `agent-tasks-dispatch-confirm' is non-nil
+protects nobody who turned it off, which is why this is a refusal."
+  (dolist (state '("half-typed prompt" unknown))
+    (agent-tasks-test--dispatchable
+      (let ((agent-tasks-dispatch-confirm nil))
+        (cl-letf (((symbol-function 'agent-tasks-session-readiness)
+                   (lambda (_buffer) 'ready))
+                  ((symbol-function 'agent-tasks--check-pending-input)
+                   (lambda (buffer)
+                     (if (eq state 'unknown)
+                         (user-error "Cannot verify that %s's prompt is empty"
+                                     (agent-display-name buffer))
+                       (user-error "Session %s has unsent input (%s)"
+                                   (agent-display-name buffer) state)))))
+          (should-error (agent-tasks-dispatch id) :type 'user-error)
+          (should (null submitted)))))))
+
+(ert-deftest agent-tasks-test-pending-input/refuses-everything-but-nil ()
+  "The probe's three answers map to proceed, refuse, refuse."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (rename-buffer "*stub:~/scratch/proj/:default*" t)
+      (let ((buffer (current-buffer))
+            (answer nil))
+        (apply #'agent-register-backend 'stub
+               (agent-tasks-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buffer))
+                :pending-input-p (lambda (_b) answer)))
+        (setq-local agent--backend 'stub)
+        (setq answer nil)
+        (should (agent-tasks--check-pending-input buffer))
+        (setq answer "unsent text")
+        (should-error (agent-tasks--check-pending-input buffer)
+                      :type 'user-error)
+        (setq answer 'unknown)
+        (should-error (agent-tasks--check-pending-input buffer)
+                      :type 'user-error)))))
+
+(ert-deftest agent-tasks-test-dispatch/bound-task-never-starts-a-session ()
+  "An already-bound task refuses before `agent-start-session' runs.
+Revision 2 checked the pairing only for an existing target, so the new
+session was created and given the initial prompt first."
+  (agent-tasks-test--with-ledger nil
+    (agent-tasks-test--with-session buffer
+      (let* ((agent-tasks--reconciled t)
+             (agent-tasks-dispatch-confirm nil)
+             (agent-tasks-mode t)
+             (started nil)
+             (id (agent-tasks-create :title "Bound already"
+                                     :directory temporary-file-directory)))
+        (agent-tasks--update-task
+         (agent-tasks-read) id
+         (lambda () (agent-tasks--set-state "UNKNOWN" "setup")))
+        (agent-tasks--bind buffer id)
+        (cl-letf (((symbol-function 'agent-tasks--read-target)
+                   (lambda (task)
+                     (list :session (agent-tasks--new-session-identity task))))
+                  ((symbol-function 'agent-start-session)
+                   (lambda (&rest _) (push t started) buffer)))
+          (should-error (agent-tasks-dispatch id) :type 'user-error)
+          (should (null started))
+          (should (equal "UNKNOWN"
+                         (agent-tasks-task-state
+                          (agent-tasks-find (agent-tasks-read) id)))))))))
 ```
 
 Note the readiness fallback test only exercises the third source: the
@@ -4030,10 +4352,56 @@ session stopped at a permission dialog, which displays as `waiting'."
                 (probe (and (fboundp 'agent-backend-ready-to-submit-p)
                             (agent-backend-ready-to-submit-p struct))))
       (funcall probe buffer)))
-   (t (pcase (agent-session-display-state buffer)
-        ('busy 'busy)
-        ('unknown 'unknown)
-        (_ 'ready)))))
+   (t
+    ;; `waiting' is ambiguous here: it covers both "at a fresh prompt"
+    ;; and "stopped at a permission dialog", and only the two sources
+    ;; above can tell them apart — this branch runs precisely when
+    ;; neither is available.  Calling it `ready' would send a task into
+    ;; a dialog, so it maps to `unknown', which asks.
+    (pcase (agent-session-display-state buffer)
+      ('busy 'busy)
+      (_ 'unknown)))))
+
+(defun agent-tasks--check-pending-input (buffer)
+  "Refuse a dispatch into BUFFER unless its prompt is verifiably clean.
+Consumes the composer project's `:pending-input-p' slot: nil means
+clean, a truthy value names what is pending, and `unknown' means the
+transport cannot be inspected.  Anything but nil refuses — a blind
+append is the outcome this exists to prevent, and `unknown' is not
+evidence of cleanliness.
+
+Revision 2 settled for a line in the confirmation buffer.  That is not
+a safeguard: it disappears exactly when `agent-tasks-dispatch-confirm'
+is nil, which is the configuration of the person who most needs it."
+  (let* ((backend (agent--detect-backend buffer))
+         (struct (and backend (agent-backend backend)))
+         (probe (and struct (fboundp 'agent-backend-pending-input-p)
+                     (agent-backend-pending-input-p struct)))
+         (state (if probe (funcall probe buffer) 'unknown)))
+    (cond
+     ((null state) t)
+     ((eq state 'unknown)
+      (user-error
+       "Cannot verify that %s's prompt is empty, so a task message would not be isolated; nothing was sent"
+       (agent-display-name buffer)))
+     (t
+      (user-error "Session %s has unsent input (%s); nothing was sent"
+                  (agent-display-name buffer) state)))))
+
+(defun agent-tasks--submit (message buffer)
+  "Submit MESSAGE into session BUFFER as one isolated turn.
+Uses the composer project's `:submit-literal' slot rather than
+`agent-submit', so the task's message is a literal turn of its own
+instead of text appended to whatever the prompt already held."
+  (let* ((backend (agent--detect-backend buffer))
+         (struct (and backend (agent-backend backend)))
+         (submit (and struct (fboundp 'agent-backend-submit-literal)
+                      (agent-backend-submit-literal struct))))
+    (unless submit
+      (user-error
+       "Backend `%s' registers no literal submitter, so a task cannot be dispatched into an existing session"
+       backend))
+    (funcall submit message buffer)))
 
 ;;;###autoload
 (defun agent-tasks-dispatch (&optional id override-dependencies)
@@ -4080,10 +4448,13 @@ is a different decision."
            (target (agent-tasks--read-target task))
            (buffer (plist-get target :buffer))
            (readiness (when buffer (agent-tasks--confirm-readiness buffer))))
+      ;; Both directions, both kinds of target.  A new session has no
+      ;; buffer to check against, but the task may still be bound.
+      (agent-tasks--check-task-unbound id)
       (when buffer (agent-tasks--check-bindable buffer id))
       (agent-tasks--confirm-message task message target)
       (list :ledger ledger :id id :attempt attempt :message message
-            :instruction (agent-tasks-task-instruction task)
+            :entry-token (agent-tasks-task-entry-token task)
             :state state :override override
             :buffer buffer :session (plist-get target :session)
             :readiness readiness))))
@@ -4176,13 +4547,7 @@ Signal a `user-error' when the session cannot take a turn."
                               (format "new %s session in %s"
                                       (agent-session-backend session)
                                       (agent-session-directory session))))))
-          ;; Emacs cannot see a terminal session's prompt contents, and
-          ;; `agent-submit' inserts into it before sending return, so
-          ;; anything already typed there goes out with this message.
-          ;; Say so rather than claiming a capability we do not have.
-          (insert (if (plist-get target :buffer)
-                      "Note:   sending also submits anything already typed in that session's prompt.\n\n"
-                    "\n"))
+          (insert "\n")
           (insert message))
         (special-mode)
         (goto-char (point-min)))
@@ -4209,33 +4574,29 @@ Signal a `user-error' when the session cannot take a turn."
                                  (agent-session-instance session)))))
 
 (defun agent-tasks--assert-snapshot (prepared)
-  "Signal unless the ledger still matches what PREPARED reviewed.
-Between the preview and the send, another Emacs — or this one in
-another window — can cancel the task, close it, reopen it, edit the
-instruction, or add a dependency.  Revision 1 re-read the ledger
-independently at commit time and wrote whatever it found, so a
-cancelled task could still receive its prompt.  Return the fresh
-ledger."
+  "Signal unless the task's entry is byte-for-byte the reviewed one.
+Return the fresh ledger.
+
+One token over the whole entry, not a list of compared fields.
+Revision 2 compared state, attempt, instruction and the dependency
+verdict, and an ordinary cancel-then-reopen restores every one of them
+while the task has been through two decisions the dispatcher knows
+nothing about; edits to the recorded directory, backend or account were
+not compared at all and would have been overwritten by the commit.  A
+per-entry token covers every field, present and future, and cannot
+drift out of step with the record.
+
+It is also narrower than a whole-file token would be: an unrelated
+task's event write during the preview does not refuse this dispatch."
   (let* ((ledger (agent-tasks-read))
          (id (plist-get prepared :id))
          (task (or (agent-tasks-find ledger id)
                    (user-error "Task %s is no longer in the ledger; nothing was sent"
                                id))))
-    (unless (equal (agent-tasks-task-state task) (plist-get prepared :state))
-      (user-error "Task %s is now %s, not %s; nothing was sent"
-                  id (agent-tasks-task-state task) (plist-get prepared :state)))
-    (unless (= (agent-tasks-task-attempt task)
-               (1- (plist-get prepared :attempt)))
-      (user-error "Task %s was dispatched elsewhere since the preview; nothing was sent"
-                  id))
-    (unless (equal (agent-tasks-task-instruction task)
-                   (plist-get prepared :instruction))
-      (user-error "Task %s's instruction changed since the preview; nothing was sent"
-                  id))
-    (let ((now (agent-tasks-unsatisfied-dependencies ledger task)))
-      (unless (equal now (plist-get prepared :override))
-        (user-error "Task %s's dependencies changed since the preview (%s); nothing was sent"
-                    id (or (agent-tasks--describe-dependencies now) "now satisfied"))))
+    (unless (equal (agent-tasks-task-entry-token task)
+                   (plist-get prepared :entry-token))
+      (user-error "Task %s changed since the preview (now %s); nothing was sent"
+                  id (agent-tasks-task-state task)))
     ledger))
 
 (defun agent-tasks--perform-dispatch (prepared)
@@ -4252,6 +4613,7 @@ already be running."
          (buffer (plist-get prepared :buffer))
          (session (plist-get prepared :session))
          (override (plist-get prepared :override)))
+    (agent-tasks--check-task-unbound id)
     (when buffer
       (unless (buffer-live-p buffer)
         (user-error "The target session is gone; nothing was sent"))
@@ -4262,7 +4624,8 @@ already be running."
       ;; Re-check ownership immediately before the send.  Binding after
       ;; the send, as revision 1 did, delivers the prompt to a session
       ;; that already holds another task and only then signals.
-      (agent-tasks--check-bindable buffer id))
+      (agent-tasks--check-bindable buffer id)
+      (agent-tasks--check-pending-input buffer))
     (agent-tasks-transition
      (agent-tasks--assert-snapshot prepared) id "RUNNING"
      (format "dispatch attempt %d into %s%s" attempt
@@ -4290,7 +4653,7 @@ already be running."
                                       (agent-session-instance session))))))
     (condition-case err
         (let ((target (if buffer
-                          (progn (agent-submit message buffer) buffer)
+                          (progn (agent-tasks--submit message buffer) buffer)
                         (agent-start-session session :initial-prompt message))))
           (agent-tasks--bind target id)
           (agent-tasks--confirm-identity target id)
@@ -4389,7 +4752,9 @@ Add to `test/agent-tasks-test.el`:
         (agent-tasks--update-task
          (agent-tasks-read) id
          (lambda () (agent-tasks--set-state "UNKNOWN" "setup")))
-        (cl-letf (((symbol-function 'agent-submit)
+        (cl-letf (((symbol-function 'agent-tasks--submit)
+                   (lambda (&rest _) (push t submitted)))
+                  ((symbol-function 'agent-submit)
                    (lambda (&rest _) (push t submitted))))
           (agent-tasks-resume id 'attach)
           (should (null submitted))
@@ -4474,47 +4839,66 @@ Add to `test/agent-tasks-test.el`:
                        (agent-tasks-task-state
                         (agent-tasks-find (agent-tasks-read) id))))))))
 
-(ert-deftest agent-tasks-test-restart/a-failed-startup-ends-in-unknown ()
-  "A detach whose startup signals must not leave the task RUNNING.
-Revision 1's test asserted the abandoned RUNNING state was acceptable;
-it is not, because nothing would ever have noticed it."
-  (agent-tasks-test--with-ledger nil
-    (agent-tasks-test--with-session buffer
-      (let* ((agent-tasks--restart-pending nil)
-             (id (agent-tasks-create :title "Abandoned")))
-        (agent-tasks--update-task
-         (agent-tasks-read) id
-         (lambda () (agent-tasks--set-state "RUNNING" "setup")))
-        (agent-tasks--bind buffer id)
-        (agent-tasks--before-restart buffer "sid-1")
-        (should agent-tasks--restart-pending)
-        ;; The after-restart hook never runs; the finalizer fires.
-        (with-current-buffer buffer (agent-tasks--session-torn-down))
-        (agent-tasks--finalize-restart)
-        (should (null agent-tasks--restart-pending))
-        (let ((task (agent-tasks-find (agent-tasks-read) id)))
-          (should (equal "UNKNOWN" (agent-tasks-task-state task)))
-          (should (string-match-p "a restart did not complete"
-                                  (agent-tasks-task-log task))))))))
+(defun agent-tasks-test--simulate-restart (buffer session-id starter)
+  "Drive a whole `agent-restart'-shaped command for BUFFER.
+Runs the before hook, calls STARTER (which stands in for
+`agent-start-session' and may yield or signal), runs the after hook on
+success, and then runs `post-command-hook' — the boundary the real
+command ends at.  Calling the handlers in a hand-picked order, as
+revision 2's tests did, cannot show whether the finalizer fires at the
+wrong moment."
+  (agent-tasks--before-restart buffer session-id)
+  (unwind-protect
+      (let ((new-buffer (funcall starter)))
+        (agent-tasks--after-restart new-buffer session-id))
+    (run-hooks 'post-command-hook)))
 
-(ert-deftest agent-tasks-test-restart/a-successful-restart-disarms-the-finalizer ()
-  "A re-attached task must not then be marked unknown by the finalizer."
+(ert-deftest agent-tasks-test-restart/a-yielding-startup-still-succeeds ()
+  "A startup that waits on process output must not trip the finalizer.
+A zero-delay timer fires during `sit-for' — verified in batch — which
+is why the finalizer is armed on `post-command-hook' instead."
   (agent-tasks-test--with-ledger nil
     (agent-tasks-test--with-session buffer
       (let* ((agent-tasks--restart-pending nil)
+             (post-command-hook nil)
              (id (agent-tasks-create :title "Restarted")))
         (setf (agent-session-id (agent-session buffer)) "sid-3")
         (agent-tasks--update-task
          (agent-tasks-read) id
          (lambda () (agent-tasks--set-state "RUNNING" "setup")))
         (agent-tasks--bind buffer id)
-        (agent-tasks--before-restart buffer "sid-3")
-        (agent-tasks--after-restart buffer "sid-3")
-        (agent-tasks--finalize-restart)
+        (agent-tasks-test--simulate-restart
+         buffer "sid-3"
+         (lambda () (sit-for 0.2) buffer))
         (should (equal "RUNNING"
                        (agent-tasks-task-state
                         (agent-tasks-find (agent-tasks-read) id))))
-        (should (equal id (agent-tasks-bound-task buffer)))))))
+        (should (equal id (agent-tasks-bound-task buffer)))
+        (should (null agent-tasks--restart-pending))
+        (should-not (memq #'agent-tasks--finalize-restart post-command-hook))))))
+
+(ert-deftest agent-tasks-test-restart/a-signalling-startup-ends-in-unknown ()
+  "A detach whose startup signals must not leave the task RUNNING.
+Revision 1's test asserted the abandoned RUNNING state was acceptable;
+it is not, because nothing would ever have noticed it."
+  (agent-tasks-test--with-ledger nil
+    (agent-tasks-test--with-session buffer
+      (let* ((agent-tasks--restart-pending nil)
+             (post-command-hook nil)
+             (id (agent-tasks-create :title "Abandoned")))
+        (agent-tasks--update-task
+         (agent-tasks-read) id
+         (lambda () (agent-tasks--set-state "RUNNING" "setup")))
+        (agent-tasks--bind buffer id)
+        (should-error
+         (agent-tasks-test--simulate-restart
+          buffer "sid-1"
+          (lambda () (error "backend would not start"))))
+        (should (null agent-tasks--restart-pending))
+        (let ((task (agent-tasks-find (agent-tasks-read) id)))
+          (should (equal "UNKNOWN" (agent-tasks-task-state task)))
+          (should (string-match-p "a restart did not complete"
+                                  (agent-tasks-task-log task))))))))
 
 (ert-deftest agent-tasks-test-attach/refuses-a-wrong-source-state ()
   "Attaching is a resume action, not a way into RUNNING from anywhere."
@@ -4633,20 +5017,30 @@ Member of `agent-before-restart-functions'.  Detaching first is what
 keeps teardown quiet: with no binding it has nothing to report, so no
 special case is needed there.
 
-A zero-delay finalizer is scheduled at the same time.  If
+A one-shot `post-command-hook' finalizer is armed at the same time.  If
 `agent-start-session' signals, the after-restart hook never runs, and
 revision 1 left the task RUNNING with no binding and nothing to notice
 — its own test asserted that abandoned state was acceptable, which was
 wrong.  The guarantee is that a detach is always followed by either a
-re-attachment or an UNKNOWN, within the same command loop."
+re-attachment or an UNKNOWN, by the end of the command that started the
+restart.
+
+It must not be a timer.  Revision 2 used `run-at-time 0', and a
+zero-delay timer **does** fire while a command yields — verified in
+batch with `sit-for' standing in for a backend startup waiting on
+process output — so a successful restart could be marked UNKNOWN
+underneath itself.  `post-command-hook' runs after `agent-restart'
+returns, whether it succeeded or signalled."
   (when-let* ((id (agent-tasks-bound-task buffer)))
     (setq agent-tasks--restart-pending
           (list :id id :session-id session-id))
     (agent-tasks--unbind buffer)
-    (run-at-time 0 nil #'agent-tasks--finalize-restart)))
+    (add-hook 'post-command-hook #'agent-tasks--finalize-restart)))
 
 (defun agent-tasks--finalize-restart ()
-  "Close out a restart whose after-restart hook never ran."
+  "Close out a restart whose after-restart hook never ran.
+One-shot: removes itself from `post-command-hook' however it exits."
+  (remove-hook 'post-command-hook #'agent-tasks--finalize-restart)
   (when-let* ((pending agent-tasks--restart-pending))
     (setq agent-tasks--restart-pending nil)
     (agent-tasks--safe-transition
@@ -4661,6 +5055,7 @@ from and the new buffer reports that same id — the non-fork resume
 case, the only one where identity is proven.  Anything else leaves the
 task UNKNOWN, the honest answer for a session that was replaced rather
 than resumed."
+  (remove-hook 'post-command-hook #'agent-tasks--finalize-restart)
   (let ((pending agent-tasks--restart-pending))
     (setq agent-tasks--restart-pending nil)
     (when pending
@@ -4872,12 +5267,14 @@ meant waiting for an Emacs restart."
                             (agent-tasks-find (agent-tasks-read) id)))))
           (kill-buffer "*Agent tasks*"))))))
 
-(ert-deftest agent-tasks-test-visit-source/is-anchored ()
-  "A heading that is a prefix of another does not match the other."
+(ert-deftest agent-tasks-test-visit-source/is-anchored-and-case-sensitive ()
+  "Neither a longer heading nor a case-differing one may be selected.
+`case-fold-search' defaults to t, so an unbound search lands on
+`* TODO ship' — verified in batch."
   (agent-tasks-test--with-ledger nil
     (let ((source (make-temp-file
                    "agent-tasks-source" nil ".org"
-                   "* TODO Ship the second thing\n* TODO Ship\n")))
+                   "* TODO Ship the second thing\n* TODO ship\n* TODO Ship\n")))
       (unwind-protect
           (let ((id (agent-tasks-create :title "Ship"
                                         :source-file source
@@ -5279,9 +5676,12 @@ person to the wrong heading."
       (user-error "Source file is gone: %s" file))
     (find-file file)
     (goto-char (point-min))
+    ;; `case-fold-search' defaults to t, so an unbound search matches
+    ;; `* TODO ship' for `* TODO Ship' — verified in batch.
     (if (and heading
-             (re-search-forward
-              (concat "^" (regexp-quote heading) "[ \t]*$") nil t))
+             (let ((case-fold-search nil))
+               (re-search-forward
+                (concat "^" (regexp-quote heading) "[ \t]*$") nil t)))
         (beginning-of-line)
       (message "The source heading is no longer in %s; showing the file"
                (abbreviate-file-name file)))))
@@ -5880,6 +6280,21 @@ queues on your behalf; queue text by hand with =agent-queue-prompt= if
 that is what you want.  An unknown state asks before proceeding, and a
 target that changed state between the question and the send is refused.
 
+Two more refusals protect an existing session:
+
+- *Unsent input.*  Before submitting, the ledger asks the backend
+  whether the session's prompt is clean, and refuses unless the answer
+  is a definite yes.  Half-typed text you left in a prompt is never
+  swallowed into a task's turn, and a transport that cannot be
+  inspected refuses too — "cannot verify" is not "clean".
+- *A task already bound elsewhere.*  A fresh attempt never steals a
+  binding.  Unbind it with =u=, or attach it deliberately with =R=.
+
+The message goes out through the backend's literal submitter, so it is
+one isolated turn rather than text appended to the prompt.  A backend
+that offers no literal submitter cannot receive a task dispatch into an
+existing session; dispatch into a new one instead.
+
 The dispatched message is the task's instruction plus a footer telling
 the model that Emacs records the state and will not infer completion.
 =Result= and =Evidence= are never sent: they are your record of an
@@ -6027,79 +6442,144 @@ Expected: both hooks empty (or holding only what other modules put
 there) and `mode=nil`.  A module that installed a hook at load would
 observe sessions for a person who only loaded it.
 
-- [ ] **Step 3: Set up the scratch fixtures**
+- [ ] **Step 3: Install the verification harness**
 
-Every live check runs against throwaway state, in a live Emacs, so
-isolation is part of the procedure rather than a courtesy.  Revision 1
-got four things wrong here: a fixed `/tmp` path two runs would share,
-`setq` on the ledger variable, `clrhash` on the shared binding table
-(which would destroy bindings belonging to the person's real sessions),
-and a scratch repository that did not contain the ledger whose `git
-diff` the checks were supposed to read.
+The checks are interactive and span many commands, so a `let` form
+cannot hold the isolation: revision 2 wrote them as a comment inside
+one, and its bindings would have ended before the first check ran.  The
+harness therefore **sets** what it needs after saving the prior values,
+and teardown restores them.
 
-Record the real ledger's hash first, so the final check is a comparison
-rather than a glance at an mtime:
-
-```bash
-shasum -a 256 ~/.emacs.d/agent/tasks.org 2>/dev/null || echo "no real ledger yet"
-```
-
-Then, in Emacs, run every check inside this one form.  Everything is
-**dynamically bound**, so nothing survives it, and the ledger lives
-**inside** the scratch repository:
+Add this to a scratch buffer and evaluate it once:
 
 ```elisp
-(let* ((root (make-temp-file "agent-tasks-live" t))
-       (project (expand-file-name "project/" root))
-       (agent-tasks-file (expand-file-name "tasks.org" project))
-       (agent-tasks--bindings (make-hash-table :test 'eq))
-       (agent-tasks--reconciled nil)
-       (agent-tasks--restart-pending nil)
-       (tasks-mode-was agent-tasks-mode)
-       (attention-mode-was (bound-and-true-p agent-attention-mode)))
-  (make-directory project t)
-  (let ((default-directory project))
-    (shell-command "git init -q && git commit -q --allow-empty -m baseline"))
-  (unwind-protect
-      (progn
-        (agent-tasks-mode 1)
-        (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
-        ;; ... run the checks of Step 4 here, one at a time ...
-        )
-    (unless tasks-mode-was (agent-tasks-mode -1))
-    (when (and (fboundp 'agent-attention-mode) (not attention-mode-was))
-      (agent-attention-mode -1))
-    (message "Scratch root: %s — close its sessions, then trash it" root)))
+(defvar agent-tasks-live--saved nil
+  "Everything the live-verification harness must put back.")
+
+(defun agent-tasks-live-setup ()
+  "Install an isolated scratch harness and return its root."
+  (interactive)
+  (when agent-tasks-live--saved
+    (user-error "Harness already installed; run `agent-tasks-live-teardown'"))
+  (let* ((root (file-name-as-directory (make-temp-file "agent-tasks-live" t)))
+         (project (expand-file-name "project/" root))
+         (real (expand-file-name agent-tasks-file)))
+    (make-directory project t)
+    (setq agent-tasks-live--saved
+          (list :root root
+                :project project
+                :file agent-tasks-file
+                :bindings agent-tasks--bindings
+                :reconciled agent-tasks--reconciled
+                :restart-pending agent-tasks--restart-pending
+                :tasks-mode agent-tasks-mode
+                :attention-mode (bound-and-true-p agent-attention-mode)
+                :real-ledger real
+                :real-hash (and (file-readable-p real)
+                                (secure-hash 'sha1 (agent-tasks--file-text real)))
+                :sessions nil))
+    (setq agent-tasks-file (expand-file-name "tasks.org" project))
+    ;; Replaced, never cleared: `clrhash' on the shared table would
+    ;; destroy bindings belonging to the person's real sessions.
+    (setq agent-tasks--bindings (make-hash-table :test 'eq))
+    (setq agent-tasks--reconciled nil)
+    (setq agent-tasks--restart-pending nil)
+    (agent-tasks-mode 1)
+    (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
+    (let ((default-directory project))
+      (shell-command "git init -q && git commit -q --allow-empty -m baseline"))
+    (message "Harness root: %s" root)
+    root))
+
+(defun agent-tasks-live-root ()
+  "Return the harness's generated root, signalling when there is none."
+  (or (plist-get agent-tasks-live--saved :root)
+      (user-error "No harness installed")))
+
+(defun agent-tasks-live-project ()
+  "Return the harness's scratch project directory."
+  (or (plist-get agent-tasks-live--saved :project)
+      (user-error "No harness installed")))
+
+(defun agent-tasks-live-track (buffer)
+  "Record BUFFER as a scratch session for teardown to kill."
+  (plist-put agent-tasks-live--saved :sessions
+             (cons buffer (plist-get agent-tasks-live--saved :sessions)))
+  buffer)
+
+(defun agent-tasks-live-baseline (label)
+  "Commit the scratch ledger as the baseline for the next check."
+  (interactive "sCheck label: ")
+  (let ((default-directory (agent-tasks-live-project)))
+    (shell-command
+     (format "git add -- tasks.org && git commit -q --allow-empty -m %s"
+             (shell-quote-argument (concat "baseline: " label))))))
+
+(defun agent-tasks-live-diff ()
+  "Show the scratch ledger's change since the last baseline."
+  (interactive)
+  (let ((default-directory (agent-tasks-live-project)))
+    (shell-command "git diff -- tasks.org")))
+
+(defun agent-tasks-live-teardown ()
+  "Restore every saved global, close scratch sessions, trash the root."
+  (interactive)
+  (let ((saved (or agent-tasks-live--saved (user-error "No harness installed"))))
+    (dolist (buffer (plist-get saved :sessions))
+      (when (buffer-live-p buffer)
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer buffer))))
+    (setq agent-tasks-file (plist-get saved :file))
+    (setq agent-tasks--bindings (plist-get saved :bindings))
+    (setq agent-tasks--reconciled (plist-get saved :reconciled))
+    (setq agent-tasks--restart-pending (plist-get saved :restart-pending))
+    (agent-tasks-mode (if (plist-get saved :tasks-mode) 1 -1))
+    (when (fboundp 'agent-attention-mode)
+      (agent-attention-mode (if (plist-get saved :attention-mode) 1 -1)))
+    (let* ((real (plist-get saved :real-ledger))
+           (now (and (file-readable-p real)
+                     (secure-hash 'sha1 (agent-tasks--file-text real)))))
+      (unless (equal now (plist-get saved :real-hash))
+        (display-warning
+         'agent-tasks-live
+         (format "THE REAL LEDGER CHANGED during verification: %s" real)
+         :error)))
+    (call-process "trash" nil nil nil (directory-file-name
+                                       (plist-get saved :root)))
+    (setq agent-tasks-live--saved nil)
+    (message "Harness torn down")))
 ```
 
-Two points the form encodes and the person must honour:
-
-- `agent-tasks--bindings` is **rebound to a fresh table**, never
-  cleared.  Clearing the shared table would drop the bindings of real
-  sessions running outside the check.
-- Both modes are restored to the value they had, not switched off
-  unconditionally.
-
-Task instructions stay inert — "Reply with the words `task received`
-and do nothing else." — because every claim under test is about state
-transitions and bindings, and none of them needs an agent that changes
-a file.
+Then `M-x agent-tasks-live-setup`.  Every later step uses
+`(agent-tasks-live-root)` and `(agent-tasks-live-project)`; **no step
+names a path of its own.**  Task instructions stay inert — "Reply with
+the words `task received` and do nothing else." — because every claim
+under test is about state transitions and bindings, and none needs an
+agent that changes a file.
 
 - [ ] **Step 4: Live verification, both backends**
 
-Run each of these for Claude Code and for Codex, recording the result:
+Run each of these for Claude Code and for Codex, recording the result.
+Wrap each session you start in `agent-tasks-live-track` so teardown
+closes it.
 
 1. **Dispatch into a new session.**  Create a task in
-   `/tmp/agent-tasks-live/project`, dispatch it choosing "new session",
+   `(agent-tasks-live-project)`, dispatch it choosing "new session",
    confirm from the conversation that the instruction arrived exactly
    once, and confirm the ledger shows `RUNNING`, the binding, and —
-   once the backend reports one — `SESSION_ID`.
-2. **A finished turn does not close the task.**  Let the turn complete.
-   Confirm the task is still `RUNNING`, that its `Log` gained one line
-   naming the completed turn, and that the ledger filed **no** attention
-   item of its own while `agent-attention-mode`'s own completion item is
-   present.  This is the design's central claim and the one most likely
-   to be implemented wrong.
+   once the backend reports one — `SESSION_ID` plus a `Log` line
+   recording the identity confirmation.
+2. **A finished turn does not close the task.**  **First move focus
+   away from the session** — select another window, or another frame —
+   because `agent-attention-mode` deliberately files no completion item
+   for a buffer the person is reading, and watching the session would
+   fail the second half of this check for a reason unrelated to the
+   ledger.  Then let the turn complete.  Confirm the task is still
+   `RUNNING`, that its `Log` gained one line naming the completed turn,
+   and that the ledger filed **no** attention item of its own while
+   `agent-attention-mode`'s own completion item is present.  This is
+   the design's central claim and the one most likely to be
+   implemented wrong.
 3. **Blocked and unblocked.**  Provoke a real permission prompt in the
    bound session.  Confirm the task becomes `BLOCKED` with a reason
    taken from what the backend reported (not a synthesized one), and
@@ -6107,78 +6587,94 @@ Run each of these for Claude Code and for Codex, recording the result:
 4. **Session death.**  Kill the session buffer.  Confirm the task
    becomes `UNKNOWN` with a reason, that an attention item was filed,
    and that nothing was re-dispatched.
-5. **Crash recovery.**  With a `RUNNING` task written into the scratch
-   ledger naming a session that does not exist, clear the in-memory
-   bindings and the reconciliation flag:
+5. **Crash recovery, twice.**  With a `RUNNING` task written into the
+   scratch ledger naming a session that does not exist, and the
+   *harness's* binding table holding no entry for it:
 
    ```elisp
-   (clrhash agent-tasks--bindings)
-   (setq agent-tasks--reconciled nil)
+   (setq agent-tasks--reconciled nil)   ; harness-owned; restored on teardown
    ```
 
    Open the list.  Confirm the summary reports one task reconciled to
-   `UNKNOWN`, that the `Log` records the reason, that nothing was
-   re-bound, and that a second `g` writes nothing further (compare the
-   file's bytes before and after).
+   `UNKNOWN`, that the `Log` records the reason, and that nothing was
+   re-bound.  Then lose a *second* session the same way **without**
+   resetting the flag and press `g`: it must be reported too.  That is
+   the once-per-Emacs guard not applying to an explicit refresh.
 6. **Restart.**  `agent-restart` a session holding a `RUNNING` task.
    Confirm the binding follows the resumed session, the state is
-   unchanged, and the `Log` records the re-attachment.
+   unchanged, and the `Log` records the re-attachment — and that the
+   task is *not* `UNKNOWN`, which is what a finalizer firing mid-startup
+   would have produced.
 7. **Dependency gate.**  Dispatch a task whose dependency is not `DONE`
    and confirm the refusal names the dependency and its state; close
-   the dependency as `succeeded` and confirm the dispatch proceeds.
+   the dependency as `succeeded` and confirm the dispatch proceeds and
+   the `Log` records nothing about an override.
 8. **Busy target.**  Dispatch into a session mid-turn.  Confirm the
    refusal names the session, mentions `agent-queue-prompt`, and that
    the running turn is unaffected.
-9. **Closing honestly.**  Close one task with outcome `succeeded`, a
-   result, and evidence; cancel another with a reason.  With the
-   scratch ledger under git, `git diff` and confirm that the only
-   changed bytes are the keyword, `UPDATED`, `OUTCOME`, and the new
-   `Result`/`Evidence`/`Log` lines.
+9. **Closing honestly.**  `M-x agent-tasks-live-baseline` with the label
+   `closing`, then close one task with outcome `succeeded`, a result and
+   evidence, and cancel another with a reason.  `M-x
+   agent-tasks-live-diff` and confirm the only changed bytes are the
+   keyword, `UPDATED`, `OUTCOME`, and the new `Result`/`Evidence`/`Log`
+   lines.  Confirm both tasks' sessions are no longer bound.
+10. **Prompt isolation.**  With `agent-tasks-dispatch-confirm` bound to
+    nil, type some text into an idle session's prompt **without**
+    submitting it, then dispatch a task there.  The dispatch must
+    refuse, naming the pending input; the typed text must still be
+    sitting unsent in the prompt; and `agent-tasks-live-diff` must show
+    the ledger unchanged.  Confirmation is off on purpose: that is the
+    configuration in which a warning would have protected nobody.
 
 - [ ] **Step 5: Import and chief context, against copies only**
 
 Copy two or three Org TODOs into
-`/tmp/agent-tasks-live/notes.org` — never point the import at a real
-notes file — and confirm: the scope rules for region, narrowed subtree,
-and whole buffer; that `t` jumps back to the right heading; and that a
-re-import creates nothing and reports the skipped count.
+`(expand-file-name "notes.org" (agent-tasks-live-project))` — never
+point the import at a real notes file — and confirm: the scope rules
+for region, narrowed subtree, and whole buffer; that `t` jumps back to
+the right heading, including when a heading differing only in case sits
+above it; and that a re-import creates nothing and reports the skipped
+count.
 
-Call `agent-tasks-chief-context` and read its output.  Do **not** add it
-to `agent-chief-context-functions` during the check: the chief is a
-live loop that contacts the person, and a verification step has no
-business changing what it says.
+Call `agent-tasks-chief-context` and read its output, checking each
+line carries an age.  Do **not** add it to
+`agent-chief-context-functions` during the check: the chief is a live
+loop that contacts the person, and a verification step has no business
+changing what it says.
 
-- [ ] **Step 6: Confirm nothing durable changed**
+- [ ] **Step 6: Tear down and confirm nothing durable changed**
 
-```bash
-git -C /tmp/agent-tasks-live/project status --porcelain
-ls ~/.emacs.d/agent/tasks.org 2>/dev/null && echo "REAL LEDGER EXISTS — check it was not touched"
+```elisp
+(agent-tasks-live-teardown)
 ```
 
-Expected: the scratch project is clean apart from anything an inert
-task legitimately produced (nothing), and the real ledger, if it
-exists, has an unchanged mtime.
+Teardown restores every saved global, kills the tracked scratch
+sessions, compares the real ledger's hash against the one recorded at
+setup — warning loudly if it differs — and trashes the generated root.
+Then confirm from the outside that the generated root is gone (use the
+path `agent-tasks-live-setup` printed, not a guessed one), and verify
+by hand that `agent-tasks-file`, `agent-tasks-mode`, and
+`agent-attention-mode` hold the values they had before setup.
 
-- [ ] **Step 7: Clean up**
+- [ ] **Step 7: Record the outcome**
 
-```bash
-trash /tmp/agent-tasks-live
-```
+Write the result of each of the ten checks, for each backend, into
+`logs/task-ledger-live-verification.md`.  Anything that did not behave
+as specified is a defect to fix with a regression test, not a note to
+file — in particular check 2, which is the whole feature, and check 10,
+which is the one a person cannot recover from by hand.
 
-- [ ] **Step 8: Record the outcome**
-
-Write down, for each of the nine live checks and each backend, what was
-observed.  Anything that did not behave as specified is a defect to fix
-with a regression test, not a note to file — in particular check 2,
-which is the whole feature.
-
-- [ ] **Step 9: Final commit**
+- [ ] **Step 8: Final commit**
 
 ```bash
 make test && make compile
-git add -A
-git commit -m "test(tasks): record live verification of the task ledger"
 ```
+
+Stage **only** the verification record, plus any file you actually
+changed while fixing a defect this step found, each by explicit path.
+`git add -A` would sweep in whatever else happens to be in the working
+tree.  If fixing a defect changed the module, that fix belongs to its
+own task's commit with its own regression test, not to this one.
 
 ---
 
