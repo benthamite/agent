@@ -605,26 +605,32 @@ Any of them resetting it is what made a delayed duplicate look new."
         (should (= alerts 0))
         (should (= steps 0))))))
 
-(ert-deftest agent-test-session-event/error-is-terminal ()
-  "A completion following an `error' duplicates a turn already reported.
-Claude's `StopFailure' and `Stop' are different channels reporting the
-same turn ending, so the second is redundant."
+(ert-deftest agent-test-session-event/error-ends-the-turn-it-reports ()
+  "An `error' ends a turn on its own; no `Stop' follows it.
+Claude Code runs `StopFailure' INSTEAD OF `Stop' on an API error, so
+the next `Stop' belongs to the next, successful turn and must be
+canonical."
   (agent-test--with-event-buffer buf
     (should (equal (agent-test--completion-flags
                     buf
                     '(submit)
                     '(error . (:error "rate_limit"
-                                      :source claude-stop-failure-hook))
+                                      :source claude-stop-failure-hook
+                                      :supersedes (claude-stop-hook)))
+                    ;; No `Stop' for the failed turn.  This one is the
+                    ;; next turn's.
+                    '(submit)
                     '(stop . (:source claude-stop-hook)))
-                   '(t)))))
+                   '(nil)))))
 
-(ert-deftest agent-test-session-event/error-after-normal-turns-is-terminal ()
-  "A failure channel that has missed every good turn still ends this one.
+(ert-deftest agent-test-session-event/failed-turn-does-not-strand-the-next ()
+  "A sparse failure channel neither strands nor duplicates a turn.
 `StopFailure' speaks only when a turn fails, so after two ordinary turns
-its own tally is zero.  Counting it would leave the generation where it
-was, and the `Stop' for the failed turn would then be ranked canonical:
-it would overwrite the recorded reason, advance the before-exit chain,
-and reopen the queue on a session whose turn had just died."
+its own tally is zero: counting it would leave the generation where it
+was.  And Claude runs it INSTEAD OF `Stop', so the `Stop' channel skips
+that turn: declaring the generation without aligning that channel would
+leave its next report -- which belongs to the following, SUCCESSFUL
+turn -- merely catching up, ranked redundant, advancing nothing."
   (agent-test--with-event-buffer buf
     (let ((steps 0))
       (cl-letf (((symbol-function 'agent--before-exit-transition)
@@ -645,28 +651,27 @@ and reopen the queue on a session whose turn had just died."
                         '(stop . (:source claude-stop-hook))
                         '(idle-prompt . (:source claude-idle-notification)))
                        '(nil t nil t)))
+        (should (= steps 2))
         (setq steps 0)
-        ;; The third turn fails, and both of its ordinary reports follow.
-        (should (equal (agent-test--completion-flags
-                        buf
-                        '(submit)
-                        '(error . (:error "rate_limit"
-                                          :source claude-stop-failure-hook))
-                        '(stop . (:source claude-stop-hook))
-                        '(idle-prompt . (:source claude-idle-notification)))
-                       '(t t)))
-        ;; Neither of them advanced anything.
+        ;; The third turn fails.  No `Stop' arrives for it at all.
+        (agent-session-event buf 'submit)
+        (agent-session-event buf 'error
+                             '(:error "rate_limit"
+                                      :source claude-stop-failure-hook
+                                      :supersedes (claude-stop-hook)))
         (should (= steps 0))
         (should (eq (buffer-local-value 'agent--session-awaiting-reason buf)
                     'error))
         (should-not (agent-session-fresh-turn-evidence-p buf))
-        ;; A genuinely new turn still reports normally afterwards.
+        ;; The fourth turn succeeds.  Its `Stop' is the next report from
+        ;; a channel that skipped the failure, and it must be canonical.
         (should (equal (agent-test--completion-flags
                         buf
                         '(submit)
                         '(activity)
-                        '(stop . (:source claude-stop-hook)))
-                       '(nil)))
+                        '(stop . (:source claude-stop-hook))
+                        '(idle-prompt . (:source claude-idle-notification)))
+                       '(nil t)))
         (should (= steps 1))
         (should (agent-session-fresh-turn-evidence-p buf))))))
 
@@ -684,14 +689,17 @@ and reopen the queue on a session whose turn had just died."
 
 (ert-deftest agent-test-session-event/redundant-completion-keeps-the-reason ()
   "A duplicate completion cannot overwrite an `error' as the reason.
-Otherwise the delayed `idle_prompt' of the very turn that died would
-read as fresh evidence that a new turn may start."
+The failed turn's own `idle_prompt' -- if that channel speaks for a
+failed turn at all, which is not established -- must not read as fresh
+evidence that a new turn may start."
   (agent-test--with-event-buffer buf
     (agent-session-event buf 'submit)
     (agent-session-event buf 'error
                          '(:error "rate_limit"
-                                  :source claude-stop-failure-hook))
-    (agent-session-event buf 'stop '(:source claude-stop-hook))
+                                  :source claude-stop-failure-hook
+                                  :supersedes (claude-stop-hook)))
+    (agent-session-event buf 'idle-prompt
+                         '(:source claude-idle-notification))
     (should (eq (buffer-local-value 'agent--session-awaiting-reason buf)
                 'error))
     (should-not (agent-session-fresh-turn-evidence-p buf))))
@@ -906,7 +914,10 @@ is working, for backends whose CLI reports no turn start.
 PAYLOAD is an optional plist of backend-reported facts, such as
 \(:kind permission :tool \"Bash\" :message MSG :error CODE :request-id
 ID :turn-id ID :source SOURCE).  Core copies it verbatim and never
-synthesizes backend facts.  After the state transition, core runs
+synthesizes backend facts.  An `error' payload may also carry
+`:supersedes', the list of channels that will not report this turn
+because this failure replaced them; see
+`agent--session-record-completion'.  After the state transition, core runs
 `agent-session-event-functions' with BUFFER and an event plist built
 from EVENT, PAYLOAD, and the redundancy flag.
 
@@ -992,17 +1003,32 @@ Rule 2 exists because that property does not hold for every channel.
 Claude's `StopFailure' hook is SPARSE: it speaks only when a turn ends
 badly, so its tally counts failures, not turns, and is behind by every
 turn that went well.  Counting it would rank its first report as an
-account of turn one however many turns had already finished -- and,
-worse, would leave the generation unchanged, so the ordinary `Stop' for
-that same failed turn would then be ranked canonical, overwrite the
-recorded reason, advance the before-exit chain, and reopen the queue on
-a session whose turn had just died.
+account of turn one however many turns had already finished, and would
+leave the generation where it was.
 
-So an abnormal report declares instead: it is the end of the next turn,
-whichever channel says so, and its own channel is aligned to that
+So an abnormal report DECLARES instead: it is the end of the next turn,
+whichever channel says so, and that channel is aligned to the declared
 generation so its following report is counted normally like any other.
-The ordinary `Stop' that follows a failure then lands on a generation
-already recorded and is correctly redundant.
+
+An abnormal report also displaces the dense channels that will not
+speak for this turn, named in PAYLOAD's `:supersedes'.  Claude Code
+documents `StopFailure' as running INSTEAD OF `Stop' when a turn ends
+in an API error, so no `Stop' will ever arrive for that turn; without
+aligning the `Stop' channel too, its next report -- which belongs to
+the NEXT, successful turn -- would merely catch up to the declared
+generation and be ranked redundant, and that successful turn would fail
+to advance the before-exit chain or reopen the queue.  The adapter that
+knows which channel was displaced is the one that names it; core does
+not hardcode any channel.
+
+Channels the adapter does NOT name are deliberately left alone.  It is
+not established whether Claude's `idle_prompt' notification fires for a
+failed turn, and the rule is correct either way: if it does, its report
+lands on the declared generation and is redundant; if it does not, that
+channel simply lags, and every one of its reports is redundant while
+the `Stop' channel drives.  Guessing in the other direction -- aligning
+a channel that then does report -- would manufacture a turn, which is
+the one error this design refuses to risk.
 
 The one case this leaves open is two abnormal reports for the same turn
 from different channels, which would declare two generations and put
@@ -1022,8 +1048,12 @@ conservative direction."
        ((and turn (equal turn agent--session-completed-turn-id)) nil)
        (abnormal
         (let ((n (1+ agent--session-completed-turns)))
-          (setf (alist-get source agent--session-channel-turns nil nil #'equal)
-                n)
+          ;; The reporting channel, plus every dense channel this
+          ;; failure displaced, are aligned to the declared generation.
+          (dolist (channel (cons source (plist-get payload :supersedes)))
+            (setf (alist-get channel agent--session-channel-turns
+                             nil nil #'equal)
+                  n))
           (setq agent--session-completed-turns n)
           (setq agent--session-completed-turn-id turn)
           t))
@@ -1337,14 +1367,17 @@ Add to `test/agent-test.el`:
       ;; what refuses it.
       (agent-session-event buf 'error
                            '(:error "rate_limit"
-                                    :source claude-stop-failure-hook))
+                                    :source claude-stop-failure-hook
+                                    :supersedes (claude-stop-hook)))
       (should (eq (agent-session-ready-to-submit-p buf 'unprobed) 'ready))
       (should-not (agent-session-can-start-turn-p buf 'unprobed))
-      ;; The duplicate of that dead turn, from the other channel, is not
-      ;; new evidence however late it arrives.
+      ;; No `Stop' arrives for a failed turn, and the gate stays shut
+      ;; however long the session sits there.
       (agent-test--tick 3600)
+      (should-not (agent-session-can-start-turn-p buf 'unprobed))
+      ;; The next successful turn's `Stop' reopens it.
       (agent-session-event buf 'stop '(:source claude-stop-hook))
-      (should-not (agent-session-can-start-turn-p buf 'unprobed)))))
+      (should (agent-session-can-start-turn-p buf 'unprobed)))))
 
 (ert-deftest agent-test-can-start-turn/protocol-probe-is-evidence ()
   "A backend that answers from a protocol probe needs no event history."
@@ -4376,14 +4409,13 @@ just failed."
     (agent-session-event buffer 'idle-prompt
                          '(:source claude-idle-notification))
     (should (agent-session-fresh-turn-evidence-p buffer))
-    ;; The next turn fails, and its ordinary reports follow.
+    ;; The next turn fails.  Claude runs `StopFailure' instead of
+    ;; `Stop', so no `Stop' arrives for it.
     (agent-session-event buffer 'submit)
     (agent-session-event buffer 'error
                          '(:error "rate_limit"
-                                  :source claude-stop-failure-hook))
-    (agent-session-event buffer 'stop '(:source claude-stop-hook))
-    (agent-session-event buffer 'idle-prompt
-                         '(:source claude-idle-notification))
+                                  :source claude-stop-failure-hook
+                                  :supersedes (claude-stop-hook)))
     (should (eq (buffer-local-value 'agent--session-awaiting-reason buffer)
                 'error))
     (should-not (agent-session-fresh-turn-evidence-p buffer))
@@ -4392,7 +4424,7 @@ just failed."
     (agent-queue--drain buffer)
     (agent-queue--poll buffer)
     (should (null agent-queue-test--submissions))
-    ;; A genuinely new turn ending re-opens the gate.
+    ;; The next successful turn ending re-opens the gate exactly once.
     (agent-session-event buffer 'activity)
     (agent-session-event buffer 'stop '(:source claude-stop-hook))
     (agent-queue--drain buffer)
@@ -7068,7 +7100,11 @@ Add to `test/agent-claude-test.el`:
                 :json-data
                 "{\"error\":\"rate_limit\",\"last_assistant_message\":\"hi\"}"))))
       (should (eq (car (car payloads)) 'error))
-      (should (equal (plist-get (cdr (car payloads)) :error) "rate_limit")))))
+      (should (equal (plist-get (cdr (car payloads)) :error) "rate_limit"))
+      ;; Claude runs StopFailure INSTEAD OF Stop, so the payload must
+      ;; say that the `Stop' channel will skip this turn.
+      (should (equal (plist-get (cdr (car payloads)) :supersedes)
+                     '(claude-stop-hook))))))
 
 (ert-deftest agent-claude-test-setup/adds-both-observer-hooks ()
   "Setup writes fire-and-forget PermissionRequest and StopFailure hooks."
@@ -7242,8 +7278,20 @@ raw JSON.  Nothing is inferred from the tool name."
 (defun agent-claude--handle-stop-failure (message)
   "Translate a Claude `StopFailure' hook event into an `error' event.
 MESSAGE is a plist with `:type', `:buffer-name', `:json-data', and
-`:args'.  An observer: it always returns nil.  Only the reported error
-and last assistant message are carried; nothing else is inferred."
+`:args'.  An observer: it always returns nil.
+
+`:supersedes' names the `Stop' channel because Claude Code documents
+`StopFailure' as running INSTEAD OF `Stop' when a turn ends in an API
+error: no `Stop' will arrive for this turn, so the correlation
+bookkeeping must not go on waiting for one.  The `idle_prompt' channel
+is deliberately not named -- whether it fires for a failed turn is not
+established, and `agent--session-record-completion' is correct either
+way for a channel it was not told about.
+
+Only the reported error and last assistant message are carried, and
+both defensively: the hook's input schema is not documented beyond its
+error-type matcher, so the field names are the plausible ones and the
+payload simply omits whatever is absent."
   (when (eq (plist-get message :type) 'stop-failure)
     (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
       (let* ((data (agent-claude--parse-hook-json
@@ -7252,7 +7300,9 @@ and last assistant message are carried; nothing else is inferred."
              (last (alist-get 'last_assistant_message data)))
         (agent-session-event
          buf 'error
-         (append (list :fidelity 'rich :source 'claude-stop-failure-hook)
+         (append (list :fidelity 'rich
+                       :source 'claude-stop-failure-hook
+                       :supersedes '(claude-stop-hook))
                  (when (stringp code) (list :error code))
                  (when (stringp last) (list :message last)))))))
   nil)
@@ -7558,9 +7608,11 @@ in prose matching the manual's existing style:
   its own channel past the highest count any channel has reached.  A
   report of a turn that *failed* is the exception, because the channel
   that carries it speaks only about failures and so cannot be counted
-  against turns: it simply declares that this turn has ended, and the
-  ordinary `Stop` that follows a failure is recognised as describing
-  that same failed turn.  That
+  against turns: it simply declares that this turn has ended.  Claude
+  runs `StopFailure` instead of `Stop` on an API error, so no ordinary
+  completion arrives for a failed turn at all; the `Stop` channel is
+  told to skip it, and its next report — the next, successful turn's —
+  counts normally.  That
   holds however long a report is delayed and whatever happens in
   between, which is why no threshold and no "a new turn started" flag
   are used: a delayed duplicate and a very short turn cannot be told
@@ -7764,7 +7816,14 @@ of them: each depends on a real CLI's timing, protocol, or UI.
 17. **Claude turn error.**  Induce a `StopFailure` (a rate limit is the
     realistic case; otherwise report this step as unverified rather than
     faking it) and confirm the error item carries the reported code and
-    that the queue pauses instead of feeding the failed session.
+    that the queue pauses instead of feeding the failed session.  Then
+    take the same session through a *successful* turn and confirm that
+    turn advances things normally — its `Stop` must be treated as a new
+    turn's end.  Record whether an `idle_prompt` notification arrived
+    for the failed turn: the plan is correct either way, but the answer
+    is currently unestablished and worth writing down.  This is also the
+    place to confirm the documented contract first-hand — that no `Stop`
+    hook fires for a turn that ended in an API error.
 18. **Unread and seen.**  Leave a session in the background through a
     completed turn; confirm an unread completion item and the `•`
     marker appear.  Repeat with the session visible in an unselected
