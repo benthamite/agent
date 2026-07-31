@@ -20,7 +20,7 @@ detach handles and a public turn-readiness predicate.
 **Plan revision 2** (after Codex review): pure/effectful slot split
 (replaces the DRY-RUN contract; Task 1 amends spec §8 accordingly), a
 final readiness gate so dispatch can never queue or steer, a commit
-boundary at `agent-submit` with isolated post-submit cleanup, core state
+boundary at literal submission with isolated post-submit cleanup, core state
 rollback on synchronous submit failure, `/mention` compatibility and a
 mandatory codex rebuild, transport detection from
 `codex-terminal-backend` with no silent downgrade, complete deferred
@@ -43,8 +43,9 @@ column coverage, and repaired or added tests throughout.
 - Every PRE-submit dispatch failure (including `quit`) leaves the draft
   intact and retryable, runs every collected undo closure independently,
   and rolls the target's session state back with `submit-failed`.  The
-  commit boundary is the successful return of `agent-submit`: after it,
-  no failure may restore the draft or run undos.
+  commit boundary is the successful return of `:submit-literal`: after
+  it, the draft is disarmed first and no failure may restore it or run
+  undos.
 - Busy targets are refused; unknown state requires explicit confirmation;
   and immediately before attachment/submission the backend's
   `:ready-to-submit-p` probe is consulted, treating pending turn starts,
@@ -55,6 +56,19 @@ column coverage, and repaired or added tests throughout.
 - Transport support is decided from the buffer's actual configuration
   (`codex-terminal-backend`), never by API-presence fallbacks; an
   unsupported transport is an honest refusal, not a silent downgrade.
+- Submission must be a literal, isolated, atomic model turn: dispatch
+  goes through the backend's `:submit-literal` slot only (never
+  `agent-submit`), which must reject text the transport would parse as
+  a command (leading `/`, `!`, `$`), and must attempt rollback of
+  partially inserted terminal text on error or quit.  Before attaching,
+  the `:pending-input-p` probe must report the session clean — unsent
+  prompt text or foreign pending attachments refuse dispatch;
+  `unknown` requires explicit user confirmation.  A backend without
+  `:submit-literal` is refused honestly.
+- At the commit boundary the live draft is disarmed FIRST
+  (`agent-context--current` set nil before any copy creation, capture
+  deletion, or buffer kill), so no post-submit cleanup failure can
+  leave a resendable draft.
 - Defcustom defaults exactly as specified: `agent-context-max-files` 40,
   `agent-context-max-file-bytes` 131072, `agent-context-warn-bytes` 65536,
   `agent-context-max-bytes` 262144, `agent-context-url-timeout` 10,
@@ -74,10 +88,29 @@ Byte-compile with `make compile`.
 - Modify: `agent.el` (the `agent-backend` defstruct ~line 123;
   `agent-session-event` ~line 1168)
 - Modify: `docs/superpowers/specs/2026-07-30-context-composer-design.md`
-  §8 (contract refinement, same commit, so the spec stays the source of
-  truth: pure token slots + effectful attach slots replace the
-  `(PATH BUFFER)`→`(TOKEN . UNDO)` single-function contract; add the
-  `:ready-to-submit-p` probe and the `submit-failed` rollback event)
+  — every section this plan's contracts changed, in the same commit, so
+  the spec stays the source of truth:
+  - §6 (dispatch): the commit boundary at successful literal submission
+    (failure preservation applies only before it; afterwards the draft
+    is disarmed first and cleanup failures warn but never resend), the
+    `:ready-to-submit-p` readiness gate, the `:pending-input-p`
+    isolation check, and dispatch via `:submit-literal` instead of
+    `agent-submit`.
+  - §8 (backend integration): the full slot roster — pure token slots,
+    effectful attach slots, `:ready-to-submit-p`, `:pending-input-p`,
+    `:submit-literal` — replacing the two-slot `(TOKEN . UNDO)`
+    contract; the `submit-failed` rollback event.
+  - §8 Codex upstream subsection: replace "No other codex.el changes"
+    with the actual approved API set (programmatic `attach-mention`,
+    attach handles, `codex-app-server-detach`,
+    `codex-app-server-ready-for-turn-p`,
+    `codex-app-server-submit-literal`,
+    `codex-app-server-pending-attachments-p`).
+  - §1/§2 (item model/sources): region provenance keeps live markers
+    plus the display line range; refresh reproduces the exact region.
+  - §7 (safety): secret checks apply to both the chosen path spelling
+    and its truename, at add, preview, and dispatch; explicitly chosen
+    symlinks display their truename and never bypass secret protection.
 - Test: `test/agent-test.el`
 
 **Interfaces:**
@@ -97,6 +130,18 @@ Byte-compile with `make compile`.
     `busy`, `unknown`.  `busy` must cover every state in which a
     submission would not start a fresh turn (active turn, pending
     `turn/start`, queued input, reasoning-held submissions).
+  - `:pending-input-p` — `(BUFFER)` → nil when the session is
+    verifiably clean (no unsent prompt text, no foreign pending
+    attachments), a non-nil truthy description when something is
+    pending, or the symbol `unknown` when the transport cannot be
+    inspected.
+  - `:submit-literal` — `(TEXT BUFFER)`; submits TEXT as one literal,
+    isolated model turn: signals a `user-error` (before sending
+    anything) when the transport would parse TEXT as a command; on
+    error or quit after partial terminal insertion, attempts to clear
+    the inserted text before re-signaling; returns only after the
+    backend accepted the input.  Backends that cannot provide these
+    guarantees do not register the slot, and the composer refuses them.
 - Produces the `submit-failed` session event: rolls the state set by a
   `submit` event back to `awaiting-input` with **no** ready alert, no
   before-exit-chain advancement, no scrolling — for callers whose backend
@@ -122,7 +167,9 @@ Add to `test/agent-test.el`, new section `;;;; Backend attachment and readiness 
      :media-token token
      :attach-file-reference attach
      :attach-media attach
-     :ready-to-submit-p ready)
+     :ready-to-submit-p ready
+     :pending-input-p (lambda (_buffer) nil)
+     :submit-literal (lambda (_text _buffer) t))
     (let ((struct (agent-backend 'stub)))
       (should (eq (agent-backend-file-reference-token struct) token))
       (should (eq (agent-backend-media-token struct) token))
@@ -130,6 +177,8 @@ Add to `test/agent-test.el`, new section `;;;; Backend attachment and readiness 
       (should (eq (agent-backend-attach-media struct) attach))
       (should (eq (funcall (agent-backend-ready-to-submit-p struct) nil)
                   'ready))
+      (should (agent-backend-pending-input-p struct))
+      (should (agent-backend-submit-literal struct))
       (should (equal (funcall (agent-backend-file-reference-token struct)
                               "/tmp/x.el" nil)
                      "@/tmp/x.el ")))))
@@ -166,10 +215,12 @@ In `agent.el`, extend the struct's send-slot line:
 ```elisp
   send-string send-return submit
   file-reference-token media-token attach-file-reference attach-media
-  ready-to-submit-p
+  ready-to-submit-p pending-input-p submit-literal
 ```
 
-Append to the `agent-register-backend` docstring:
+Append to the `agent-register-backend` docstring (also covering the
+`:pending-input-p` and `:submit-literal` contracts exactly as stated in
+this task's Interfaces block):
 
 ```
 Backends that can reference or attach files provide the optional
@@ -204,8 +255,10 @@ advancement, and no scrolling, because nothing new happened in the
 session itself.
 ```
 
-Amend spec §8 in the same commit to describe the five-slot contract and
-the `submit-failed` event exactly as above.
+Amend the spec in the same commit, covering every section listed in this
+task's Files block — §6, §8 (both the slot roster and the Codex upstream
+subsection), §1/§2, and §7 — so the spec and plan describe the same
+contracts.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -377,8 +430,10 @@ later drafts cannot mutate."
 
 (cl-defstruct (agent-context-draft
                (:constructor agent-context-draft-create) (:copier nil))
-  "A composition draft: target session plus ordered items."
-  target items origin-buffer origin-directory)
+  "A composition draft: target session plus ordered items.
+NOTICES are retained warnings (e.g. directory-expansion skip reports)
+rendered in the composer footer until the draft ends."
+  target items origin-buffer origin-directory notices)
 
 (defvar agent-context--current nil
   "The live `agent-context-draft', or nil.")
@@ -412,20 +467,39 @@ later drafts cannot mutate."
 ;;;; Region, buffer, and file sources
 
 (defun agent-context--region-item (buffer beg end)
-  "Return an inline snapshot item for BUFFER's region BEG..END."
+  "Return an inline snapshot item for BUFFER's region BEG..END.
+Provenance keeps the live BUFFER object and a pair of markers (begin
+marker advances with insertions before it; end marker with insertions
+at it), so refresh reproduces the exact — possibly partial-line —
+region even after edits or a buffer rename.  The line range is kept
+for display only."
   (with-current-buffer buffer
     (let ((text (buffer-substring-no-properties beg end))
-          (lines (list (line-number-at-pos beg) (line-number-at-pos end))))
+          (lines (list (line-number-at-pos beg) (line-number-at-pos end)))
+          (beg-marker (copy-marker beg nil))
+          (end-marker (copy-marker end t)))
       (agent-context-item-create
        :id (agent-context--next-id) :kind 'region
        :label (format "%s:%d-%d" (buffer-name) (car lines) (cadr lines))
-       :provenance (list :buffer-name (buffer-name)
+       :provenance (list :buffer buffer
+                         :buffer-name (buffer-name)
                          :path (buffer-file-name)
                          :lines lines
+                         :beg-marker beg-marker
+                         :end-marker end-marker
                          :language (agent-context--language-for major-mode)
                          :captured-at (float-time))
        :transport 'inline :content text
        :size (agent-context--exact-size text)))))
+
+(defun agent-context--release-item (item)
+  "Release ITEM's per-buffer resources (region markers).
+Called when an item is deleted and when a draft ends; markers left
+pointing into source buffers would otherwise linger there."
+  (let ((prov (agent-context-item-provenance item)))
+    (dolist (key '(:beg-marker :end-marker))
+      (when-let* ((marker (plist-get prov key)))
+        (set-marker marker nil)))))
 
 (defun agent-context--buffer-item (buffer)
   "Return an inline snapshot item for all of BUFFER."
@@ -483,12 +557,22 @@ items; non-image binaries are rejected."
                   path))
     (agent-context-item-create
      :id (agent-context--next-id) :kind 'file
-     :label (abbreviate-file-name path)
+     :label (agent-context--file-label path)
      :provenance (list :path path
                        :language (agent-context--language-for path)
                        :captured-at (float-time))
      :transport 'inline :content content
      :size (agent-context--exact-size content))))
+
+(defun agent-context--file-label (path)
+  "Return PATH's display label, showing the truename for symlinks.
+An explicitly chosen symlink is followed, but what will actually be
+read must be visible in the composer and previews."
+  (let ((truename (ignore-errors (file-truename path))))
+    (if (and truename (not (equal truename (expand-file-name path))))
+        (format "%s → %s" (abbreviate-file-name path)
+                (abbreviate-file-name truename))
+      (abbreviate-file-name path))))
 
 (defun agent-context--mention-file-item (path &optional root)
   "Return a deferred mention item for PATH.
@@ -496,7 +580,7 @@ ROOT, when non-nil, records the directory-expansion root so dispatch
 can re-verify that PATH's truename still lies under it."
   (agent-context-item-create
    :id (agent-context--next-id) :kind 'file
-   :label (abbreviate-file-name path)
+   :label (agent-context--file-label path)
    :provenance (append (list :path path) (when root (list :root root)))
    :transport 'mention :content nil
    :size (agent-context--file-size path)))
@@ -508,7 +592,7 @@ the directory-expansion root, as in `agent-context--mention-file-item'."
   (agent-context--assert-safe-path path)
   (agent-context-item-create
    :id (agent-context--next-id) :kind 'image
-   :label (abbreviate-file-name path)
+   :label (agent-context--file-label path)
    :provenance (append (list :path path)
                        (when temp (list :temp-file t))
                        (when root (list :root root)))
@@ -591,6 +675,46 @@ git commit -m "agent-context: add item model and basic sources"
             (should (string-match-p "id_rsa" (cadr err)))
             (should-not (string-match-p "SECRETKEYMATERIAL" (cadr err)))))
       (delete-file file))))
+
+(ert-deftest agent-context-test-symlink-to-secret-rejected ()
+  "An innocently named symlink to a secret path is refused, and the
+error names the truename without printing contents."
+  (let* ((secret (expand-file-name "ctx-credential-store"
+                                   temporary-file-directory))
+         (link (expand-file-name "innocent.txt" temporary-file-directory)))
+    (with-temp-file secret (insert "HUNTER2"))
+    (make-symbolic-link secret link t)
+    (unwind-protect
+        (dolist (transport '(mention inline))
+          (let ((err (should-error (agent-context--file-item link transport)
+                                   :type 'user-error)))
+            (should (string-match-p "ctx-credential-store" (cadr err)))
+            (should-not (string-match-p "HUNTER2" (cadr err)))))
+      (delete-file link)
+      (delete-file secret))))
+
+(ert-deftest agent-context-test-symlink-retargeted-after-add-refused ()
+  "A symlink repointed at a secret between add and dispatch is caught
+by the deferred re-check."
+  (let* ((safe (make-temp-file "ctx-safe" nil ".txt" "ok"))
+         (secret (expand-file-name "ctx-secret-key"
+                                   temporary-file-directory))
+         (link (expand-file-name "swap.txt" temporary-file-directory)))
+    (with-temp-file secret (insert "HUNTER2"))
+    (make-symbolic-link safe link t)
+    (unwind-protect
+        (progn
+          ;; Safe at add time.
+          (should (agent-context--file-item link 'mention))
+          ;; Repointed afterwards: the same safety primitive that the
+          ;; dispatch-time re-check calls must now refuse it.
+          (delete-file link)
+          (make-symbolic-link secret link t)
+          (should-error (agent-context--assert-safe-path link)
+                        :type 'user-error))
+      (delete-file link)
+      (delete-file secret)
+      (delete-file safe))))
 
 (ert-deftest agent-context-test-binary-file-rejected-inline-and-mention ()
   "A NUL-bearing non-image file is rejected for every transport."
@@ -681,17 +805,30 @@ Inside projects, `project-files' (VCS ignore rules) governs instead."
   :type '(repeat regexp) :group 'agent-context)
 
 (defun agent-context--secret-path-p (path)
-  "Return non-nil when PATH matches a secret-path regexp."
-  (let ((expanded (expand-file-name path)))
-    (cl-some (lambda (re) (string-match-p re expanded))
-             agent-context-secret-path-regexps)))
+  "Return non-nil when PATH matches a secret-path regexp.
+Both the chosen spelling and the truename are checked, so an
+innocently named symlink to a secret file never slips through."
+  (let ((spellings (delete-dups
+                    (list (expand-file-name path)
+                          (ignore-errors (file-truename path))))))
+    (cl-some (lambda (spelling)
+               (and spelling
+                    (cl-some (lambda (re) (string-match-p re spelling))
+                             agent-context-secret-path-regexps)))
+             spellings)))
 
 (defun agent-context--assert-safe-path (path)
   "Signal a `user-error' when PATH must not be sent.  Return t.
-The message names the path only; file contents are never read here."
+The message names the path (and its truename when they differ) only;
+file contents are never read here."
   (when (agent-context--secret-path-p path)
-    (user-error "agent-context: refusing to send secret-looking path %s"
-                (abbreviate-file-name path)))
+    (let ((truename (ignore-errors (file-truename path))))
+      (user-error
+       "agent-context: refusing to send secret-looking path %s%s"
+       (abbreviate-file-name path)
+       (if (and truename (not (equal truename (expand-file-name path))))
+           (format " (resolves to %s)" (abbreviate-file-name truename))
+         ""))))
   t)
 ```
 
@@ -1400,9 +1537,10 @@ Run: `make test` — FAIL, `agent-context--render` undefined.
                (plist-get prov :buffer-name) stamp))
       ('file (format "Source: %s, snapshot taken %s"
                      (plist-get prov :path) stamp))
-      ('diff (format "Source: git %s in %s, snapshot taken %s"
+      ('diff (format "Source: git %s in %s at %s, snapshot taken %s"
                      (if (plist-get prov :staged) "diff --cached" "diff")
-                     (plist-get prov :repo) stamp))
+                     (plist-get prov :repo)
+                     (or (plist-get prov :rev) "?") stamp))
       ('commit (format "Source: git show %s in %s"
                        (plist-get prov :rev) (plist-get prov :repo)))
       ('url (format "Source: %s, fetched %s, resolved to %s"
@@ -1521,7 +1659,7 @@ git commit -m "agent-context: add deterministic renderer"
    (agent-context--refresh)
    ;; In the field: plain letters must reach self-insert despite the
    ;; special-mode parent map.
-   (goto-char agent-context--instr-start)
+   (goto-char (agent-context--field-start))
    (should (eq (key-binding "g") #'self-insert-command))
    ;; On an item line: the item keymap wins.
    (agent-context--goto-item-line 1)
@@ -1537,6 +1675,32 @@ git commit -m "agent-context: add deterministic renderer"
    (let ((line (buffer-substring-no-properties (point)
                                                (line-end-position))))
      (should (string-match-p "mention" line)))))
+
+(ert-deftest agent-context-test-region-refresh-exact-and-rename-proof ()
+  "Region refresh reproduces the exact partial-line region via its
+markers, and survives a source-buffer rename."
+  (agent-context-test--with-composer
+   (let ((src (generate-new-buffer "ctx-region-refresh")))
+     (unwind-protect
+         (progn
+           (with-current-buffer src (insert "alpha beta gamma"))
+           ;; Partial-line region: "beta".
+           (agent-context--add-item (agent-context--region-item src 7 11))
+           ;; Unrelated edit before the region, then a rename.
+           (with-current-buffer src
+             (goto-char (point-min)) (insert "XX ")
+             (rename-buffer "ctx-region-renamed" t)
+             ;; Change the region content itself (between b and e).
+             (goto-char 11) (insert "!"))
+           (agent-context--refresh)
+           (agent-context--goto-item-line 1)
+           (agent-context-refresh-item)
+           (let ((item (car (agent-context-draft-items
+                             agent-context--current))))
+             ;; Markers tracked both edits: still the same region,
+             ;; now containing the mutation, not a whole line.
+             (should (equal (agent-context-item-content item) "b!eta"))))
+       (kill-buffer (or (get-buffer "ctx-region-renamed") src))))))
 
 (ert-deftest agent-context-test-refresh-reports-gone-source ()
   "Refreshing an item whose source buffer died errors; the item stays."
@@ -1554,9 +1718,13 @@ git commit -m "agent-context: add deterministic renderer"
 (ert-deftest agent-context-test-instruction-survives-refresh ()
   "Typed instruction text survives an item-list refresh."
   (agent-context-test--with-composer
-   (goto-char agent-context--instr-start)
+   (goto-char (agent-context--field-start))
    (insert "please explain")
    (agent-context--add-item (agent-context-test--mk-inline "x" "y"))
+   (agent-context--refresh)
+   (should (equal (agent-context--instruction) "please explain"))
+   ;; The field is bounded: a second refresh with a populated item
+   ;; table must not leak table or footer text into the instruction.
    (agent-context--refresh)
    (should (equal (agent-context--instruction) "please explain"))
    (should (string-match-p "x .*1 B exact\\|x.*exact"
@@ -1641,10 +1809,13 @@ Run: `make test` — FAIL, `agent-context-compose` undefined.
 (defconst agent-context-buffer-name "*Agent context*"
   "Name of the single composition draft buffer.")
 
-(defvar-local agent-context--instr-start nil
-  "Marker at the start of the editable instruction field.")
-(defvar-local agent-context--instr-end nil
-  "Marker at the end of the editable instruction field.")
+;; The editable instruction field is bounded by the text property
+;; `agent-context-field', not by markers: an end marker would advance
+;; through everything `agent-context--refresh' inserts at its position
+;; (item table, footer), corrupting instruction extraction.  Text typed
+;; in the field inherits the property from the preceding field character
+;; (default rear-stickiness) or, in an empty field, from the following
+;; protected terminator via `front-sticky'.
 
 (defvar agent-context-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1777,17 +1948,20 @@ any retained warning note."
     (insert (agent-context--protected
              (format "Target: %s   [T retarget]\n\nInstruction (type below):\n"
                      (agent-context--target-line))))
-    (setq agent-context--instr-start (point-marker))
-    (set-marker-insertion-type agent-context--instr-start nil)
-    ;; The field text carries the field keymap; the first protected
-    ;; character after the field is front-sticky for `keymap' only, so
-    ;; text typed into an EMPTY field inherits the field keymap from it.
-    (insert (propertize instr 'keymap agent-context--field-map))
-    (setq agent-context--instr-end (point-marker))
-    (set-marker-insertion-type agent-context--instr-end t)
-    (insert (propertize "\n" 'read-only t 'rear-nonsticky t
+    ;; Field text carries the bounding property and the field keymap.
+    (insert (propertize instr
+                        'agent-context-field t
+                        'keymap agent-context--field-map))
+    ;; Protected terminator: it must itself CARRY the field property
+    ;; and keymap (a character only front-propagates properties it
+    ;; has), declared front-sticky so text typed into an empty field
+    ;; inherits them.  It is read-only, and extraction strips it: the
+    ;; instruction is the field run minus read-only characters.
+    (insert (propertize "\n"
+                        'agent-context-field t
+                        'read-only t 'rear-nonsticky t
                         'keymap agent-context--field-map
-                        'front-sticky '(keymap)))
+                        'front-sticky '(keymap agent-context-field)))
     (insert (agent-context--protected
              (concat "\nItems (dispatch order):\n"
                      (if items
@@ -1797,11 +1971,39 @@ any retained warning note."
                                          (cl-incf n) item))
                                       items ""))
                        "  (none — press a to add)\n")
-                     "\n" (agent-context--totals-line items) "\n\n"
+                     "\n" (agent-context--totals-line items) "\n"
+                     (mapconcat (lambda (notice) (concat "! " notice "\n"))
+                                (agent-context-draft-notices
+                                 agent-context--current)
+                                "")
+                     "\n"
                      "a add · p preview · P message preview · d delete · "
                      "t toggle · r refresh · M-↑/↓ move\n"
                      "C-c C-c send · C-c C-k cancel · q bury\n")))
-    (goto-char agent-context--instr-end)))
+    (goto-char (agent-context--field-end))))
+
+(defun agent-context--field-bounds ()
+  "Return (START . END) of the instruction field run, or signal."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((match (text-property-search-forward 'agent-context-field)))
+      (unless match
+        (error "agent-context: no instruction field in %s" (buffer-name)))
+      (cons (prop-match-beginning match) (prop-match-end match)))))
+
+(defun agent-context--field-start ()
+  "Return the start of the editable instruction field."
+  (car (agent-context--field-bounds)))
+
+(defun agent-context--field-end ()
+  "Return the position just before the field's read-only terminator."
+  (let ((bounds (agent-context--field-bounds)))
+    ;; The terminator is the read-only tail of the field run.
+    (let ((end (cdr bounds)))
+      (while (and (> end (car bounds))
+                  (get-text-property (1- end) 'read-only))
+        (setq end (1- end)))
+      end)))
 
 (defun agent-context--protected (string)
   "Return STRING propertized read-only with the item-line keymap.
@@ -1813,10 +2015,14 @@ absent so typing at the field end stays editable too."
               'keymap agent-context--item-line-map))
 
 (defun agent-context--instruction ()
-  "Return the instruction text currently in the composer."
+  "Return the instruction text currently in the composer.
+The field is located by its text property, and its read-only
+terminator is excluded, so item-table and footer text can never leak
+into the instruction."
   (with-current-buffer agent-context-buffer-name
     (string-trim (buffer-substring-no-properties
-                  agent-context--instr-start agent-context--instr-end))))
+                  (agent-context--field-start)
+                  (agent-context--field-end)))))
 ```
 
 Item commands (all `interactive`, all ending in
@@ -1839,6 +2045,7 @@ Deletes any composer-owned temp file backing it."
   (interactive)
   (let ((item (agent-context--item-at-point)))
     (agent-context--delete-item-temp item)
+    (agent-context--release-item item)
     (setf (agent-context-draft-items agent-context--current)
           (delq item (agent-context-draft-items agent-context--current)))
     (agent-context--refresh)))
@@ -1965,26 +2172,31 @@ reports that and stays in the draft unchanged."
       (agent-context--refresh))))
 
 (defun agent-context--live-source-buffer (prov)
-  "Return PROV's source buffer, or signal when it is gone."
-  (let ((buf (get-buffer (plist-get prov :buffer-name))))
+  "Return PROV's source buffer, or signal when it is gone.
+Prefers the stored buffer object (rename-proof); falls back to the
+recorded name for provenance kinds that never stored the object."
+  (let ((buf (or (let ((stored (plist-get prov :buffer)))
+                   (and (buffer-live-p stored) stored))
+                 (get-buffer (plist-get prov :buffer-name)))))
     (unless (buffer-live-p buf)
       (user-error "Source buffer %s is gone" (plist-get prov :buffer-name)))
     buf))
 
 (defun agent-context--refresh-region (prov)
-  "Re-read PROV's recorded line range from its live source buffer.
-The range is line-based, so content that moved lines reads
-differently — that is what refresh is for."
-  (let ((buf (agent-context--live-source-buffer prov)))
-    (with-current-buffer buf
-      (pcase-let ((`(,beg-line ,end-line) (plist-get prov :lines)))
-        (save-excursion
-          (goto-char (point-min))
-          (forward-line (1- beg-line))
-          (let ((beg (point)))
-            (goto-char (point-min))
-            (forward-line end-line)
-            (agent-context--region-item buf beg (point))))))))
+  "Re-read PROV's exact marker-bounded region from its source buffer.
+Markers survive edits and buffer renames, so an unchanged source
+reproduces the original — possibly partial-line — region exactly.
+Signals honestly when the buffer or the markers are gone."
+  (let ((buf (plist-get prov :buffer))
+        (beg (plist-get prov :beg-marker))
+        (end (plist-get prov :end-marker)))
+    (unless (buffer-live-p buf)
+      (user-error "Source buffer %s is gone"
+                  (plist-get prov :buffer-name)))
+    (unless (and (marker-position beg) (marker-position end))
+      (user-error "The region's markers were released; delete and re-add"))
+    (agent-context--region-item buf (marker-position beg)
+                                (marker-position end))))
 
 (defun agent-context--refresh-capture (prov)
   "Re-read PROV's capture entry from its Org file."
@@ -2023,12 +2235,19 @@ Mention and media items the new target cannot take are marked with an
 
 (defun agent-context-preview-item ()
   "Show the exact content of the item at point.
-Deferred items show the file's content as of now, clearly titled."
+Deferred items are re-validated (readability, secret paths including
+truename, type class) BEFORE their file is read, then show the content
+as of now, clearly titled."
   (interactive)
   (let* ((item (agent-context--item-at-point))
          (deferred (not (eq (agent-context-item-transport item) 'inline)))
          (path (plist-get (agent-context-item-provenance item) :path))
          (buf (get-buffer-create "*Agent context preview*")))
+    (when deferred
+      (unless (and path (file-readable-p path))
+        (user-error "agent-context: %s is no longer readable"
+                    (or path (agent-context-item-label item))))
+      (agent-context--assert-safe-path path))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -2076,7 +2295,8 @@ Uses the pure token slots only, so previewing never attaches anything."
   "Clean up when the composer buffer dies without a successful dispatch."
   (when agent-context--current
     (dolist (item (agent-context-draft-items agent-context--current))
-      (agent-context--delete-item-temp item))
+      (agent-context--delete-item-temp item)
+      (agent-context--release-item item))
     (setq agent-context--current nil)))
 ```
 
@@ -2160,12 +2380,17 @@ starts a draft when none exists."
   (agent-context--refresh))
 
 (defun agent-context-add-file (path)
-  "Add the file at PATH to the draft.
-Defaults to the native mention transport when the target supports it;
-otherwise inlines with a message (capability-gated at add time)."
-  (interactive "fContext file: ")
-  (agent-context--add-item
-   (agent-context--gate-new-item (agent-context--file-item path)))
+  "Add one or more files at PATH to the draft.
+PATH may contain wildcards, so a single prompt can add several files.
+Each defaults to the native mention transport when the target supports
+it; otherwise it inlines with a message (capability-gated at add
+time)."
+  (interactive "FContext file(s), wildcards allowed: ")
+  (let ((paths (or (file-expand-wildcards (expand-file-name path))
+                   (user-error "agent-context: no file matches %s" path))))
+    (dolist (file paths)
+      (agent-context--add-item
+       (agent-context--gate-new-item (agent-context--file-item file)))))
   (agent-context--refresh))
 
 (defun agent-context-add-directory (dir)
@@ -2175,6 +2400,12 @@ Each produced item passes the same capability gate as a single add."
   (pcase-let ((`(,items . ,report) (agent-context--directory-items dir)))
     (dolist (item items)
       (agent-context--add-item (agent-context--gate-new-item item)))
+    ;; Retain the skip report where the preview shows it, not only in
+    ;; the transient echo area.
+    (setf (agent-context-draft-notices agent-context--current)
+          (append (agent-context-draft-notices agent-context--current)
+                  (list (format "%s: %s" (abbreviate-file-name dir)
+                                report))))
     (agent-context--refresh)
     (message "agent-context: %s" report)))
 
@@ -2306,7 +2537,8 @@ git commit -m "agent-context: add the composer buffer UI"
 - Test: `test/agent-context-test.el`
 
 **Interfaces:**
-- Consumes: `agent-submit`, `agent-session-event` (`submit-failed`),
+- Consumes: the `:submit-literal`/`:pending-input-p` slots (Task 1),
+  `agent-session-event` (`submit-failed`),
   `agent-session-display-state`, `agent--detect-backend`,
   `agent-backend`, the five Task 1 slots; `agent-capture--delete-prompt`
   (Task 6); `agent-context-item-copy` (Task 2).
@@ -2316,7 +2548,10 @@ git commit -m "agent-context: add the composer buffer UI"
   `agent-context--attach (item target)` → UNDO or nil;
   `agent-context--run-undos (undos)`; `agent-context--recheck-deferred
   (items target)`; `agent-context--final-readiness-check (target)`;
-  `agent-context--finish (draft instruction target)` (never signals);
+  `agent-context--submit-literal-fn (target)` (slot lookup with honest
+  refusal); `agent-context--check-pending-input (target)`;
+  `agent-context--finish (draft instruction target)` (never signals;
+  disarms the draft first);
   `agent-context--detached-copies (items)`; `agent-context-recompose`
   (autoloaded); `agent-context--last` populated on success.
 
@@ -2324,19 +2559,27 @@ Transaction contract implemented here (mirrors the Global Constraints):
 
 1. Validation, deferred re-checks, and the size gate run first and may
    signal freely — nothing has been attached yet.
-2. `agent-context--final-readiness-check` runs immediately before the
-   attach phase; `:ready-to-submit-p` returning `busy` refuses.  Between
-   this check, the attach loop, and `agent-submit` there are no Elisp
-   yields (no `sit-for`, no process waits in this code), so the gate
-   cannot be invalidated mid-dispatch by asynchronous events.
-3. The attach loop plus the single `agent-submit` form the guarded
-   region: any `error` **or `quit`** there runs every collected undo
-   independently, emits `submit-failed` at the live target so the
-   session is retryable, and preserves the draft.
-4. The commit boundary is `agent-submit` returning.  After it, cleanup
-   (bookkeeping, capture deletion, buffer kill) is isolated per phase;
-   a cleanup failure warns but never restores the draft, never runs
-   undos, and never permits a resend.
+2. `agent-context--final-readiness-check` and the `:pending-input-p`
+   isolation check run immediately before the attach phase;
+   `:ready-to-submit-p` returning `busy` refuses, pending input or
+   foreign attachments refuse, and `unknown` pending state requires
+   explicit confirmation.  Between these checks and the attach loop
+   there are no Elisp yields, so the gate cannot be invalidated by
+   asynchronous events; the `:submit-literal` step itself may yield
+   inside the adapter (Claude's insert/Return), and the adapter owns
+   atomicity there, including partial-insertion rollback.
+3. The attach loop plus the single `:submit-literal` call form the
+   guarded region: any `error` **or `quit`** there runs every collected
+   undo independently, emits `submit-failed` at the live target so the
+   session is retryable, and preserves the draft.  Dispatch never goes
+   through `agent-submit`: literal submission (no slash/shell command
+   parsing) is part of the slot's contract, and a backend without the
+   slot is refused honestly.
+4. The commit boundary is `:submit-literal` returning.  The FIRST
+   post-submit action is disarming the draft (`agent-context--current`
+   set nil); only then do detached-copy creation, capture deletion, and
+   buffer kill run, each isolated — any of them failing warns but can
+   never restore the draft, run undos, or permit a resend.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2360,7 +2603,8 @@ requires real files)."
       :find-all-buffers (lambda () (list target))
       :start-session #'ignore
       :label "Stub"
-      :submit (lambda (text _buf) (push text submitted))
+      :submit-literal (lambda (text _buf) (push text submitted))
+      :pending-input-p (lambda (_buf) nil)
       :file-reference-token (lambda (path _buf) (format "@%s " path))
       :media-token (lambda (path _buf) (format "(img %s)" path))
       :attach-file-reference
@@ -2438,42 +2682,70 @@ backend that would queue or steer the submission."
     (should (plist-get agent-context--last :items))))
 
 (ert-deftest agent-context-test-dispatch-failure-rolls-back-and-retries ()
-  "A synchronously failing submit undoes attachments, rolls the target's
-state back so it is not stuck busy, and a retry then succeeds."
+  "A synchronously failing `:submit-literal' undoes attachments, rolls
+the target's state back so it is not stuck busy, and a retry through
+the same registered slot then succeeds."
   (agent-context-test--with-dispatch-env 'awaiting-input
     (agent-context--add-item
      (agent-context--mention-file-item mention-file))
-    (let ((real-submit (symbol-function 'agent-submit))
-          (fail t))
-      (cl-letf (((symbol-function 'agent-submit)
-                 (lambda (text buf)
-                   (agent-session-event buf 'submit) ; what core does
-                   (if fail (error "boom")
-                     (funcall real-submit text buf)))))
-        (ignore real-submit)
-        (agent-context-dispatch)        ; must not signal
-        (should agent-context--current)
-        (should (= attached 1))
-        (should (= undone 1))
-        ;; The submit event marked the target busy; the rollback event
-        ;; must have restored it, or retry would be refused forever.
-        (should-not (eq (agent-session-display-state
-                         (agent-context-draft-target
-                          agent-context--current))
-                        'busy))
-        (setq fail nil)
-        (agent-context-dispatch)
-        (should (= 1 (length submitted)))
-        (should (null agent-context--current))))))
+    (let ((fail t))
+      ;; Fail through the REGISTERED slot, emitting the submit event
+      ;; mid-way exactly as backend submission hooks do.
+      (setf (agent-backend-submit-literal (agent-backend 'stub))
+            (lambda (text buf)
+              (agent-session-event buf 'submit)
+              (if fail (error "boom") (push text submitted))))
+      (agent-context-dispatch)          ; must not signal
+      (should agent-context--current)
+      (should (= attached 1))
+      (should (= undone 1))
+      ;; The submit event marked the target busy; the rollback event
+      ;; must have restored it, or retry would be refused forever.
+      (should-not (eq (agent-session-display-state
+                       (agent-context-draft-target
+                        agent-context--current))
+                      'busy))
+      (setq fail nil)
+      (agent-context-dispatch)
+      (should (= 1 (length submitted)))
+      (should (null agent-context--current)))))
+
+(ert-deftest agent-context-test-dispatch-refuses-without-submit-literal ()
+  "A backend without `:submit-literal' is refused honestly."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (setf (agent-backend-submit-literal (agent-backend 'stub)) nil)
+    (agent-context--add-item (agent-context-test--mk-inline "x" "y"))
+    (should-error (agent-context-dispatch) :type 'user-error)
+    (should (null submitted))
+    (should (= attached 0))
+    (should agent-context--current)))
+
+(ert-deftest agent-context-test-dispatch-pending-input-refuses-or-confirms ()
+  "Pending input refuses; unverifiable pending state needs consent."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (agent-context--add-item (agent-context-test--mk-inline "x" "y"))
+    ;; Verifiably pending: refuse before any attachment.
+    (setf (agent-backend-pending-input-p (agent-backend 'stub))
+          (lambda (_buf) "half-typed prompt"))
+    (should-error (agent-context-dispatch) :type 'user-error)
+    (should (null submitted))
+    ;; Unverifiable: consent gates the dispatch.
+    (setf (agent-backend-pending-input-p (agent-backend 'stub))
+          (lambda (_buf) 'unknown))
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) nil)))
+      (should-error (agent-context-dispatch) :type 'user-error))
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+      (agent-context-dispatch)
+      (should (= 1 (length submitted))))))
 
 (ert-deftest agent-context-test-dispatch-quit-treated-as-failure ()
   "C-g during submission runs undos and preserves the draft."
   (agent-context-test--with-dispatch-env 'awaiting-input
     (agent-context--add-item
      (agent-context--mention-file-item mention-file))
-    (cl-letf (((symbol-function 'agent-submit)
-               (lambda (&rest _) (signal 'quit nil))))
-      (agent-context-dispatch))         ; must not re-signal quit
+    (setf (agent-backend-submit-literal (agent-backend 'stub))
+          (lambda (_text _buf) (signal 'quit nil)))
+    (agent-context-dispatch)            ; must not re-signal quit
     (should agent-context--current)
     (should (= undone 1))))
 
@@ -2491,9 +2763,9 @@ state back so it is not stuck busy, and a retry then succeeds."
        (agent-context--mention-file-item mention-file))
       (agent-context--add-item
        (agent-context--mention-file-item mention-file))
-      (cl-letf (((symbol-function 'agent-submit)
-                 (lambda (&rest _) (error "boom"))))
-        (agent-context-dispatch))
+      (setf (agent-backend-submit-literal (agent-backend 'stub))
+            (lambda (_text _buf) (error "boom")))
+      (agent-context-dispatch)
       (should second-ran)
       (should agent-context--current))))
 
@@ -2582,15 +2854,31 @@ state back so it is not stuck busy, and a retry then succeeds."
       (cl-letf (((symbol-function 'agent-capture--delete-prompt)
                  (lambda (p) (push p deleted))))
         (agent-context--add-item (agent-context--capture-item prompt))
-        (cl-letf (((symbol-function 'agent-submit)
-                   (lambda (buf-text buf)
-                     (ignore buf-text)
-                     (agent-session-event buf 'submit)
-                     (error "boom"))))
-          (agent-context-dispatch))
-        (should (null deleted))
+        (let ((good (agent-backend-submit-literal (agent-backend 'stub))))
+          (setf (agent-backend-submit-literal (agent-backend 'stub))
+                (lambda (text buf)
+                  (agent-session-event buf 'submit)
+                  (error "boom") (ignore text)))
+          (agent-context-dispatch)
+          (should (null deleted))
+          (setf (agent-backend-submit-literal (agent-backend 'stub)) good))
         (agent-context-dispatch)
         (should (equal deleted (list prompt)))))))
+
+(ert-deftest agent-context-test-dispatch-copy-failure-cannot-resend ()
+  "Fault injection at detached-copy creation: the draft is already
+disarmed, so the failure warns but can never cause a resend."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (agent-context--add-item (agent-context-test--mk-inline "x" "y"))
+    (cl-letf (((symbol-function 'agent-context--detached-copies)
+               (lambda (_items) (error "copy exploded"))))
+      (agent-context-dispatch))         ; must not signal
+    (should (= 1 (length submitted)))
+    (should (null agent-context--current))
+    (should (null agent-context--last))
+    (should (= undone 0))
+    (should-error (agent-context-dispatch) :type 'user-error)
+    (should (= 1 (length submitted)))))
 
 (ert-deftest agent-context-test-last-items-are-detached-copies ()
   "`agent-context--last' holds deep copies with temp ownership dropped."
@@ -2750,8 +3038,8 @@ support on the (possibly retargeted) TARGET."
   "Validate, render, and submit the draft exactly once.
 Pre-submit failures (including quit) leave the draft intact, run every
 undo closure, and roll the target's state back with `submit-failed'.
-The commit boundary is `agent-submit' returning: after it, no failure
-restores the draft or runs undos."
+The commit boundary is the `:submit-literal' call returning: after it,
+the draft is disarmed first and no failure restores it or runs undos."
   (interactive)
   (unless agent-context--current
     (user-error "No context draft"))
@@ -2770,17 +3058,20 @@ restores the draft or runs undos."
             instruction items
             (lambda (item) (agent-context--token-for item target)))))
       (agent-context--size-gate message-text)
-      ;; Authoritative readiness, then attach, then one submit.  No
-      ;; Elisp yields separate these steps, so the gate holds.
+      ;; Authoritative readiness and isolation, then attach, then one
+      ;; literal submit.  No Elisp yields separate the checks from the
+      ;; attach loop.
       (agent-context--final-readiness-check target)
-      (let (undos sent)
+      (agent-context--check-pending-input target)
+      (let ((submit-fn (agent-context--submit-literal-fn target))
+            undos sent)
         (condition-case err
             (progn
               (dolist (item items)
                 (unless (eq (agent-context-item-transport item) 'inline)
                   (when-let* ((undo (agent-context--attach item target)))
                     (push undo undos))))
-              (agent-submit message-text target)
+              (funcall submit-fn message-text target)
               (setq sent t))
           ((error quit)
            (agent-context--run-undos undos)
@@ -2792,16 +3083,60 @@ restores the draft or runs undos."
         (when sent
           (agent-context--finish draft instruction target))))))
 
+(defun agent-context--submit-literal-fn (target)
+  "Return TARGET's `:submit-literal' function, or refuse honestly.
+The composer never falls back to `agent-submit': without the literal
+contract a message could be parsed as a slash or shell command or be
+concatenated with unsent prompt text."
+  (let* ((backend (agent--detect-backend target))
+         (struct (and backend (agent-backend backend)))
+         (fn (and struct (agent-backend-submit-literal struct))))
+    (or fn
+        (user-error
+         "agent-context: %s provides no literal submission; cannot dispatch"
+         (or (and struct (agent-backend-label struct)) backend)))))
+
+(defun agent-context--check-pending-input (target)
+  "Refuse or confirm when TARGET may hold unsent input or attachments.
+nil from the probe means verifiably clean; a truthy value names what
+is pending and refuses (dispatching would swallow or ride it);
+`unknown' asks the user; a backend without the probe counts as
+`unknown'."
+  (let* ((backend (agent--detect-backend target))
+         (struct (and backend (agent-backend backend)))
+         (fn (and struct (agent-backend-pending-input-p struct)))
+         (state (if fn (funcall fn target) 'unknown)))
+    (cond
+     ((null state) t)
+     ((eq state 'unknown)
+      (unless (yes-or-no-p
+               (format "Cannot verify %s's prompt is empty — send anyway? "
+                       (agent-display-name target)))
+        (user-error "agent-context: dispatch cancelled")))
+     (t (user-error
+         "agent-context: %s has unsent input or pending attachments; %s"
+         (agent-display-name target)
+         "clear or submit them first")))))
+
 (defun agent-context--finish (draft instruction target)
   "Commit success bookkeeping for DRAFT; never signals.
-Runs only after `agent-submit' returned: the message is sent, so no
+Runs only after `:submit-literal' returned: the message is sent, so no
 failure here may restore the draft, run undos, or permit a resend.
-Irreversible bookkeeping runs first; each cleanup phase is isolated."
-  (setq agent-context--last
-        (list :instruction instruction
-              :items (agent-context--detached-copies
-                      (agent-context-draft-items draft))))
+The VERY FIRST action disarms the live draft; everything that can
+signal — detached-copy creation included — runs after it, isolated."
   (setq agent-context--current nil)
+  (condition-case copy-err
+      (setq agent-context--last
+            (list :instruction instruction
+                  :items (agent-context--detached-copies
+                          (agent-context-draft-items draft))))
+    ((error quit)
+     (setq agent-context--last nil)
+     (display-warning
+      'agent-context
+      (format "sent, but retaining the composition failed: %s"
+              (error-message-string copy-err))
+      :warning)))
   (dolist (item (agent-context-draft-items draft))
     (when-let* (((eq (agent-context-item-kind item) 'capture))
                 (plist (plist-get (agent-context-item-provenance item)
@@ -2856,8 +3191,9 @@ retained record (and vice versa)."
   (with-current-buffer agent-context-buffer-name
     (agent-context--refresh)
     (save-excursion
-      (goto-char agent-context--instr-start)
+      (goto-char (agent-context--field-start))
       (insert (propertize (plist-get agent-context--last :instruction)
+                          'agent-context-field t
                           'keymap agent-context--field-map)))))
 ```
 
@@ -2909,6 +3245,16 @@ repo's checklist asks.
     when BUFFER can start a fresh turn immediately: live process, thread
     started, no active turn, no pending `turn/start`, no queued inputs,
     no reasoning-held or startup submissions.
+  - `codex-app-server-pending-attachments-p (&optional buffer)` — non-nil
+    when pending mentions or images exist in BUFFER.
+  - `codex-app-server-submit-literal (text)` — submits TEXT verbatim as
+    the next turn's input, never parsing slash (`/`) or shell (`!`)
+    prefixes; signals a `user-error' when the composer already holds
+    unsent input, so programmatic submission cannot swallow it; runs
+    `codex-command-submitted-hook', records input history, and echoes
+    the message like an interactive submission; pending attachments are
+    consumed into this turn (the composer guarantees they are its own
+    via the pending-attachments check before it attaches).
 
 Before writing code, `grep -n "attach-mention" codex-app-server.el
 codex.el` and note every caller — the `/mention` slash dispatcher and any
@@ -2939,6 +3285,45 @@ keymap binding call it with **no arguments**, and must keep working.
       (codex-app-server-attach-mention)
       (should (equal codex--app-server-pending-mentions
                      '(("prompted.el" . "/tmp/prompted.el")))))))
+
+(ert-deftest codex-test-app-server-submit-literal-is-literal ()
+  "Literal submission bypasses slash and shell parsing and refuses to
+swallow unsent composer input."
+  (with-temp-buffer
+    (let (sent)
+      (cl-letf (((symbol-function 'codex--app-server-send-turn-input)
+                 (lambda (submission) (push submission sent)))
+                ((symbol-function 'codex-prompt-input)
+                 (lambda (&optional _) nil))
+                ;; Echo/bookkeeping helpers are exercised for real in
+                ;; live testing; stub the buffer-rendering bits here.
+                ((symbol-function 'codex--app-server-insert-message)
+                 #'ignore)
+                ((symbol-function 'codex--app-server-ensure-trailing-newline)
+                 #'ignore))
+        (setq-local codex--app-server-pending-images nil)
+        (setq-local codex--app-server-pending-mentions nil)
+        (codex-app-server-submit-literal "/exit")
+        ;; Sent as turn input, not dispatched as a slash command.
+        (should (= 1 (length sent)))
+        (should (equal (plist-get (car sent) :text) "/exit")))
+      ;; Unsent composer input refuses.
+      (cl-letf (((symbol-function 'codex-prompt-input)
+                 (lambda (&optional _) "half-typed")))
+        (should-error (codex-app-server-submit-literal "hello")
+                      :type 'user-error)))))
+
+(ert-deftest codex-test-app-server-pending-attachments-p ()
+  "The predicate sees both pending mentions and pending images."
+  (with-temp-buffer
+    (setq-local codex--app-server-pending-images nil)
+    (setq-local codex--app-server-pending-mentions nil)
+    (should-not (codex-app-server-pending-attachments-p))
+    (setq-local codex--app-server-pending-mentions '(("a" . "/a")))
+    (should (codex-app-server-pending-attachments-p))
+    (setq-local codex--app-server-pending-mentions nil)
+    (setq-local codex--app-server-pending-images '("/b.png"))
+    (should (codex-app-server-pending-attachments-p))))
 
 (ert-deftest codex-test-app-server-ready-for-turn-p-blocking-states ()
   "Each pending state independently blocks turn readiness."
@@ -3046,6 +3431,32 @@ new submission would be queued or would steer the running turn."
          (null codex--app-server-reasoning-waiting-submissions)
          (null codex--app-server-startup-submissions)
          t)))
+
+(defun codex-app-server-pending-attachments-p (&optional buffer)
+  "Return non-nil when BUFFER has pending mentions or images."
+  (with-current-buffer (or buffer (current-buffer))
+    (or codex--app-server-pending-mentions
+        codex--app-server-pending-images)))
+
+(defun codex-app-server-submit-literal (text)
+  "Submit TEXT verbatim as the current buffer's next turn input.
+Unlike interactive submission, TEXT is never parsed for slash or shell
+prefixes, so it always reaches the model as literal input.  Signal a
+`user-error' when the composer already holds unsent input, so a
+programmatic submission cannot swallow it.  Pending attachments are
+consumed into this turn, as with any submission.  Mirrors
+`codex--app-server-submit-command''s bookkeeping: runs the submitted
+hook, records input history, and echoes the user message."
+  (when (codex-prompt-input)
+    (user-error "Codex composer has unsent input"))
+  (codex--run-command-submitted-hook)
+  (codex--app-server-record-input text)
+  (codex--app-server-insert-message codex--app-server-user-prefix text)
+  (codex--app-server-ensure-trailing-newline)
+  (let ((submission (codex--app-server-take-submission text)))
+    (if codex--app-server-thread-id
+        (codex--app-server-send-turn-input submission)
+      (push submission codex--app-server-startup-submissions))))
 ```
 
 (For the image test to pass, note `memq`/`delq` operate on the *same
@@ -3081,10 +3492,10 @@ then confirm the build actually exposes the new API:
 ```bash
 cd ~/.config/emacs-profiles/8.3.0-dev/elpaca/sources/agent
 emacs --batch --eval '(dolist (dir (file-expand-wildcards "~/.config/emacs-profiles/8.3.0-dev/elpaca/builds/*/")) (add-to-list (quote load-path) dir))' \
-  -l codex-app-server --eval '(prin1 (list (fboundp (quote codex-app-server-detach)) (fboundp (quote codex-app-server-ready-for-turn-p))))'
+  -l codex-app-server --eval '(prin1 (list (fboundp (quote codex-app-server-detach)) (fboundp (quote codex-app-server-ready-for-turn-p)) (fboundp (quote codex-app-server-submit-literal)) (fboundp (quote codex-app-server-pending-attachments-p))))'
 ```
 
-Expected output: `(t t)`.  Do not proceed to Task 11 until it is.
+Expected output: `(t t t t)`.  Do not proceed to Task 11 until it is.
 
 ---
 
@@ -3110,9 +3521,21 @@ Expected output: `(t t)`.  Do not proceed to Task 11 until it is.
     `agent-codex--media-token`, `agent-codex--attach-file-reference`,
     `agent-codex--attach-media`, `agent-codex--detach-closure`,
     `agent-codex--ready-to-submit-p`.
-  - Registrations: Claude gets `:file-reference-token` and
-    `:media-token`; Codex gets all four token/attach slots **and**
-    `:ready-to-submit-p`.
+  - Claude also: `agent-claude--prompt-input` (eat-only input-box scan,
+    `unknown' elsewhere), `agent-claude--pending-input-p`,
+    `agent-claude--submit-literal` (command-prefix refusal; ESC-clear
+    rollback on error/quit after insertion — the ESC-clears-input TUI
+    behavior is live-verified in Task 14 and the rollback is dropped
+    with a documented limitation if that verification fails).
+  - Codex also: `agent-codex--pending-input-p`,
+    `agent-codex--submit-literal` (app-server: upstream literal API;
+    terminal: prompt check via `codex-prompt-input`, synchronous
+    `:return`, ESC-clear rollback — deliberately bypassing
+    `codex--schedule-submit-returns' so acceptance is synchronous).
+  - Registrations: Claude gets `:file-reference-token`, `:media-token`,
+    `:pending-input-p`, `:submit-literal`; Codex gets all four
+    token/attach slots, `:ready-to-submit-p`, `:pending-input-p`, and
+    `:submit-literal`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3143,7 +3566,41 @@ In `test/agent-codex-test.el`:
 This test FAILS (never skips) when the API is missing — rerun Task 10
 Step 6 in that case."
   (should (fboundp 'codex-app-server-detach))
-  (should (fboundp 'codex-app-server-ready-for-turn-p)))
+  (should (fboundp 'codex-app-server-ready-for-turn-p))
+  (should (fboundp 'codex-app-server-submit-literal))
+  (should (fboundp 'codex-app-server-pending-attachments-p)))
+
+(ert-deftest agent-codex-test-submit-literal-refuses-command-prefixes ()
+  "Text the Codex CLI would parse as a command is refused up front."
+  (with-temp-buffer
+    (setq-local codex-terminal-backend 'eat)
+    (dolist (bad '("/exit rest" "!rm -rf" "$skill"))
+      (should-error (agent-codex--submit-literal bad (current-buffer))
+                    :type 'user-error))))
+
+(ert-deftest agent-codex-test-terminal-submit-literal-checks-prompt ()
+  "Terminal literal submission refuses when unsent input is pending."
+  (with-temp-buffer
+    (setq-local codex-terminal-backend 'eat)
+    (cl-letf (((symbol-function 'codex-prompt-input)
+               (lambda (&optional _) "half-typed")))
+      (should-error (agent-codex--submit-literal "hi" (current-buffer))
+                    :type 'user-error))))
+
+(ert-deftest agent-codex-test-pending-input-p-app-server ()
+  "App-server pending state covers prompt text and attachments."
+  (with-temp-buffer
+    (setq-local codex-terminal-backend 'app-server)
+    (cl-letf (((symbol-function 'codex-prompt-input)
+               (lambda (&optional _) nil))
+              ((symbol-function 'codex-app-server-pending-attachments-p)
+               (lambda (&optional _) '(("a" . "/a")))))
+      (should (agent-codex--pending-input-p (current-buffer))))
+    (cl-letf (((symbol-function 'codex-prompt-input)
+               (lambda (&optional _) nil))
+              ((symbol-function 'codex-app-server-pending-attachments-p)
+               (lambda (&optional _) nil)))
+      (should-not (agent-codex--pending-input-p (current-buffer))))))
 
 (ert-deftest agent-codex-test-terminal-transport-uses-at-token ()
   "eat/vterm sessions get the CLI's @-mention token; no attach, no undo."
@@ -3213,7 +3670,9 @@ Run: `make test` — FAIL, functions undefined.
 `agent-claude.el` — add near the other send helpers and register in the
 `agent-register-backend` form (`:file-reference-token
 #'agent-claude--file-reference-token :media-token
-#'agent-claude--media-token`; no attach slots):
+#'agent-claude--media-token :pending-input-p
+#'agent-claude--pending-input-p :submit-literal
+#'agent-claude--submit-literal`; no attach slots):
 
 ```elisp
 (defun agent-claude--file-reference-token (path _buffer)
@@ -3227,6 +3686,59 @@ out-of-band attachment, so no attach function is registered."
 Identical to the file-reference channel: the CLI attaches @-mentioned
 images, exactly as upstream's own image paste does."
   (agent-claude--file-reference-token path buffer))
+
+(defun agent-claude--prompt-input (buffer)
+  "Return BUFFER's pending prompt text, "" when empty, or `unknown'.
+Scans the eat terminal tail for Claude Code's input box (calibrate the
+box-drawing regexp against the live TUI in Task 14); vterm and ghostel
+cannot be inspected and yield `unknown'."
+  (with-current-buffer buffer
+    (if (not (bound-and-true-p eat-terminal))
+        'unknown
+      (save-excursion
+        (goto-char (point-max))
+        (if (not (re-search-backward
+                  "^╭" (max (point-min) (- (point-max) 4000)) t))
+            'unknown
+          (let ((text ""))
+            (while (re-search-forward
+                    "^│ ?[>] ?\\(.*?\\) *│ *$" nil t)
+              (setq text (concat text (match-string 1))))
+            (string-trim text)))))))
+
+(defun agent-claude--pending-input-p (buffer)
+  "Return nil when BUFFER's prompt is verifiably empty.
+A non-empty prompt returns its text; an uninspectable terminal
+returns `unknown'."
+  (let ((input (agent-claude--prompt-input buffer)))
+    (cond ((eq input 'unknown) 'unknown)
+          ((string-empty-p input) nil)
+          (t input))))
+
+(defun agent-claude--submit-literal (text buffer)
+  "Submit TEXT to BUFFER as one literal prompt.
+Refuses text the Claude CLI would parse as a command.  On error or
+quit after insertion, sends ESC to clear the partially inserted
+prompt (live-verified TUI behavior) before re-signaling."
+  (when (string-match-p "\\`[/!]" text)
+    (user-error
+     "agent-claude: message starts with %c, which the CLI parses as a command"
+     (aref text 0)))
+  (let (inserted)
+    (condition-case err
+        (with-current-buffer buffer
+          (claude-code--term-send-string claude-code-terminal-backend text)
+          (setq inserted t)
+          (sit-for 0.1)
+          (claude-code--term-send-string claude-code-terminal-backend
+                                         (kbd "RET")))
+      ((error quit)
+       (when inserted
+         (ignore-errors
+           (with-current-buffer buffer
+             (claude-code--term-send-string claude-code-terminal-backend
+                                            (kbd "ESC")))))
+       (signal (car err) (cdr err))))))
 ```
 
 `agent-codex.el` — add and register (`:file-reference-token
@@ -3234,7 +3746,9 @@ images, exactly as upstream's own image paste does."
 #'agent-codex--media-token :attach-file-reference
 #'agent-codex--attach-file-reference :attach-media
 #'agent-codex--attach-media :ready-to-submit-p
-#'agent-codex--ready-to-submit-p`):
+#'agent-codex--ready-to-submit-p :pending-input-p
+#'agent-codex--pending-input-p :submit-literal
+#'agent-codex--submit-literal`):
 
 ```elisp
 (declare-function codex-app-server-attach-mention "codex-app-server"
@@ -3314,6 +3828,60 @@ and answer `unknown'."
            (fboundp 'codex-app-server-ready-for-turn-p))
       (if (codex-app-server-ready-for-turn-p buffer) 'ready 'busy)
     'unknown))
+
+(declare-function codex-app-server-submit-literal "codex-app-server" (text))
+(declare-function codex-app-server-pending-attachments-p "codex-app-server"
+                  (&optional buffer))
+
+(defun agent-codex--pending-input-p (buffer)
+  "Return nil when BUFFER is verifiably clean of unsent input.
+App-server sessions check the composer text and pending attachments;
+eat sessions check the scanned prompt; vterm prompt inspection is
+unreliable, so it yields `unknown'."
+  (pcase (agent-codex--session-transport buffer)
+    ('app-server
+     (or (codex-prompt-input buffer)
+         (and (fboundp 'codex-app-server-pending-attachments-p)
+              (codex-app-server-pending-attachments-p buffer))))
+    ('terminal
+     (if (with-current-buffer buffer (eq codex-terminal-backend 'eat))
+         (codex-prompt-input buffer)
+       'unknown))))
+
+(defun agent-codex--submit-literal (text buffer)
+  "Submit TEXT to Codex session BUFFER as one literal turn.
+Refuses text the CLI would parse as a slash, shell, or skill command.
+App-server sessions use the upstream literal API (structurally atomic,
+no command parsing, unsent-input check included).  Terminal sessions
+verify the prompt is empty, insert, and send Return synchronously
+(bypassing the async `codex--schedule-submit-returns'); on error or
+quit after insertion, ESC clears the partial input (live-verified)."
+  (when (string-match-p "\\`[/!$]" text)
+    (user-error
+     "agent-codex: message starts with %c, which the CLI parses as a command"
+     (aref text 0)))
+  (pcase (agent-codex--session-transport buffer)
+    ('app-server
+     (unless (fboundp 'codex-app-server-submit-literal)
+       (user-error "agent-codex: codex.el lacks the literal submission API"))
+     (with-current-buffer buffer
+       (codex-app-server-submit-literal text)))
+    ('terminal
+     (when (codex-prompt-input buffer)
+       (user-error "agent-codex: the Codex prompt has unsent input"))
+     (let (inserted)
+       (condition-case err
+           (with-current-buffer buffer
+             (codex--term-send-string codex-terminal-backend text)
+             (setq inserted t)
+             (sit-for 0.1)
+             (codex--term-send-action codex-terminal-backend :return))
+         ((error quit)
+          (when inserted
+            (ignore-errors
+              (with-current-buffer buffer
+                (codex--term-send-action codex-terminal-backend :escape))))
+          (signal (car err) (cdr err))))))))
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -3537,11 +4105,29 @@ same.
 6. Preview (`p` and `P`), delete, reorder, toggle, cancel.
 7. Attachment rollback and retry, with a LIVE target: compose a file
    mention at an idle app-server session, then induce a submission
-   failure after attachment (e.g. `(advice-add 'agent-submit :before
-   (lambda (&rest _) (error "induced")))`), dispatch, and verify the
-   pending mention was detached (the next manual message carries no
-   stray attachment), the draft survived, and — after removing the
-   advice — retry succeeds and the agent receives the file once.
+   failure after attachment with NAMED advice inside `unwind-protect`
+   so it is reliably removed:
+
+   ```elisp
+   (defun agent-context-live-fail (&rest _) (error "induced"))
+   (unwind-protect
+       (progn (advice-add 'agent-codex--submit-literal :before
+                          #'agent-context-live-fail)
+              (agent-context-dispatch))
+     (advice-remove 'agent-codex--submit-literal
+                    #'agent-context-live-fail))
+   ```
+
+   Verify the pending mention was detached (the next manual message
+   carries no stray attachment), the draft survived, and retry then
+   succeeds with the agent receiving the file once.
+7a. ESC rollback calibration: with text partially inserted at each live
+   terminal transport (Claude eat, Codex eat), trigger the adapter's
+   rollback path and verify ESC actually clears the prompt.  If a
+   transport's ESC does not clear input, remove that adapter's rollback
+   claim and document the limitation (partial text may remain; the
+   composer says so on failure).  Also calibrate
+   `agent-claude--prompt-input''s box regexp against the live TUI.
 8. Dead-target validation, separately: kill the target between compose
    and dispatch; verify the retarget offer and that the draft survives.
 9. Busy policy: dispatch at a mid-turn session; verify refusal and that
