@@ -14,12 +14,12 @@ by Task 1.
 
 **Architecture:** A new `agent-context.el` module holds the item model,
 sources, safety layer, renderer, composer buffer, and dispatch pipeline.
-Core gains seven optional backend slots — pure token renderers
+Core gains eight optional backend slots — pure token renderers
 (`:file-reference-token`, `:media-token`), effectful attachers returning
 undo closures (`:attach-file-reference`, `:attach-media`), an
 authoritative `:ready-to-submit-p` probe, a `:pending-input-p` isolation
-probe, and a `:submit-literal` submitter — plus a `submit-failed`
-rollback event.  codex.el (sibling repo) gains a programmatic mention API with
+probe, a `:submit-literal` submitter, and a pure `:dispatchable-p`
+capability probe — plus a `submit-failed` rollback event.  codex.el (sibling repo) gains a programmatic mention API with
 detach handles and a public turn-readiness predicate.
 
 **Plan revision 5 (dispatch transports):** `:submit-literal` is
@@ -146,7 +146,7 @@ Byte-compile with `make compile`.
     and its truename, at add, preview, and dispatch; explicitly chosen
     symlinks display their truename and never bypass secret protection.
   - §9 (module boundaries): "the two backend slots" becomes the full
-    seven-slot roster, matching §8.
+    eight-slot roster, matching §8.
   - Problem/overview wording and §13 (verification): v1 dispatches only
     to Codex app-server sessions; Claude and terminal Codex targets are
     compose-and-preview only (token slots keep previews complete), the
@@ -159,11 +159,12 @@ Byte-compile with `make compile`.
 - Test: `test/agent-test.el`
 
 **Interfaces:**
-- Produces seven optional `agent-backend` slots with accessors
+- Produces eight optional `agent-backend` slots with accessors
   `agent-backend-file-reference-token`, `agent-backend-media-token`,
   `agent-backend-attach-file-reference`, `agent-backend-attach-media`,
   `agent-backend-ready-to-submit-p`, `agent-backend-pending-input-p`,
-  `agent-backend-submit-literal`.  Contract (used by Tasks 8, 9, 11):
+  `agent-backend-submit-literal`, `agent-backend-dispatchable-p`.
+  Contract (used by Tasks 8, 9, 11):
   - `:file-reference-token` / `:media-token` — `(PATH BUFFER)` → TOKEN
     string, **pure** (no side effects; safe for previews and size gates),
     or nil when that transport is unsupported for BUFFER right now.
@@ -207,6 +208,13 @@ Byte-compile with `make compile`.
     the backend provides a tristate prompt-empty probe and an
     acknowledged or safely recoverable submission API; the composer
     refuses them honestly.
+  - `:dispatchable-p` — `(BUFFER)` → non-nil when THIS buffer's
+    transport can actually be dispatched to.  Pure and cheap: the
+    compose/retarget warning and dispatch's capability check share it,
+    so a backend that registers `:submit-literal` globally but
+    supports only some transports (Codex: app-server yes, terminals
+    no) reports its effective capability per target.  Absent slot =
+    `:submit-literal` presence decides.
 - Produces the `submit-failed` session event: rolls the state set by a
   `submit` event back to `awaiting-input` with **no** ready alert, no
   before-exit-chain advancement, no scrolling — for callers whose backend
@@ -234,7 +242,8 @@ Add to `test/agent-test.el`, new section `;;;; Backend attachment and readiness 
      :attach-media attach
      :ready-to-submit-p ready
      :pending-input-p (lambda (_buffer) nil)
-     :submit-literal (lambda (_text _buffer) t))
+     :submit-literal (lambda (_text _buffer) t)
+     :dispatchable-p (lambda (_buffer) t))
     (let ((struct (agent-backend 'stub)))
       (should (eq (agent-backend-file-reference-token struct) token))
       (should (eq (agent-backend-media-token struct) token))
@@ -244,6 +253,7 @@ Add to `test/agent-test.el`, new section `;;;; Backend attachment and readiness 
                   'ready))
       (should (agent-backend-pending-input-p struct))
       (should (agent-backend-submit-literal struct))
+      (should (agent-backend-dispatchable-p struct))
       (should (equal (funcall (agent-backend-file-reference-token struct)
                               "/tmp/x.el" nil)
                      "@/tmp/x.el ")))))
@@ -280,7 +290,7 @@ In `agent.el`, extend the struct's send-slot line:
 ```elisp
   send-string send-return submit
   file-reference-token media-token attach-file-reference attach-media
-  ready-to-submit-p pending-input-p submit-literal
+  ready-to-submit-p pending-input-p submit-literal dispatchable-p
 ```
 
 Append to the `agent-register-backend` docstring (also covering the
@@ -300,6 +310,9 @@ is the whole mechanism register no attach function.
 `:ready-to-submit-p' is a function of BUFFER returning one of the
 symbols `ready', `busy', and `unknown'; `busy' must cover every state
 in which a submission would not start a fresh turn.
+`:dispatchable-p' is a pure function of BUFFER approving that buffer's
+transport for `:submit-literal'; when absent, the slot's presence
+decides.
 ```
 
 In `agent-session-event`, add the event to the docstring list and the
@@ -2314,15 +2327,28 @@ Signals honestly when the buffer or the markers are gone."
 (declare-function agent-capture--read-prompts "agent-capture"
                   (file &optional include-inserted))
 
+(defun agent-context--target-dispatchable-p (target)
+  "Return non-nil when TARGET can actually be dispatched to.
+The single effective-capability predicate: the backend must register
+`:submit-literal', and when it also registers the per-transport
+`:dispatchable-p' probe, that probe must approve THIS buffer — so a
+backend supporting only some transports (Codex: app-server yes,
+terminals no) answers per target.  Shared by the compose/retarget
+warning and dispatch's capability check."
+  (when-let* ((backend (and (buffer-live-p target)
+                            (agent--detect-backend target)))
+              (struct (agent-backend backend))
+              ((agent-backend-submit-literal struct)))
+    (let ((probe (agent-backend-dispatchable-p struct)))
+      (or (null probe) (funcall probe target)))))
+
 (defun agent-context--warn-undispatchable (target)
-  "Message when TARGET's backend registers no `:submit-literal'.
+  "Message when TARGET cannot be dispatched to.
 Composing is still allowed (preview, copy), but dispatch will refuse."
-  (let* ((backend (agent--detect-backend target))
-         (struct (and backend (agent-backend backend))))
-    (unless (and struct (agent-backend-submit-literal struct))
-      (message
-       "agent-context: %s cannot be dispatched to yet (no literal submission); draft will be preview-only"
-       (agent-display-name target)))))
+  (unless (agent-context--target-dispatchable-p target)
+    (message
+     "agent-context: %s cannot be dispatched to yet (no literal submission for this transport); draft will be preview-only"
+     (agent-display-name target))))
 
 (defun agent-context-retarget ()
   "Choose a different target session for the draft.
@@ -2828,6 +2854,27 @@ the same registered slot then succeeds."
     (should (= attached 0))
     (should agent-context--current)))
 
+(ert-deftest agent-context-test-dispatch-transport-limited-refuses ()
+  "A backend whose `:dispatchable-p' rejects this buffer is refused by
+dispatch and flagged by the compose-time warning, even though its
+`:submit-literal' slot exists globally."
+  (agent-context-test--with-dispatch-env 'awaiting-input
+    (setf (agent-backend-dispatchable-p (agent-backend 'stub))
+          (lambda (_buf) nil))
+    (agent-context--add-item (agent-context-test--mk-inline "x" "y"))
+    (let (messages)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (apply #'format fmt args) messages))))
+        (agent-context--warn-undispatchable
+         (agent-context-draft-target agent-context--current)))
+      (should (cl-some (lambda (m) (string-match-p "preview-only" m))
+                       messages)))
+    (should-error (agent-context-dispatch) :type 'user-error)
+    (should (null submitted))
+    (should (= attached 0))
+    (should agent-context--current)))
+
 (ert-deftest agent-context-test-dispatch-pending-input-always-refuses ()
   "Both pending input and uninspectable transports refuse dispatch."
   (agent-context-test--with-dispatch-env 'awaiting-input
@@ -3223,16 +3270,19 @@ the draft is disarmed first and no failure restores it or runs undos."
 
 (defun agent-context--submit-literal-fn (target)
   "Return TARGET's `:submit-literal' function, or refuse honestly.
-The composer never falls back to `agent-submit': without the literal
-contract a message could be parsed as a slash or shell command or be
-concatenated with unsent prompt text."
+Uses the same effective-capability predicate as the compose-time
+warning, so a backend whose slot exists globally but whose transport
+cannot dispatch (Codex terminals) is refused here, before any
+attachment.  The composer never falls back to `agent-submit': without
+the literal contract a message could be parsed as a slash or shell
+command or be concatenated with unsent prompt text."
   (let* ((backend (agent--detect-backend target))
-         (struct (and backend (agent-backend backend)))
-         (fn (and struct (agent-backend-submit-literal struct))))
-    (or fn
-        (user-error
-         "agent-context: %s provides no literal submission; cannot dispatch"
-         (or (and struct (agent-backend-label struct)) backend)))))
+         (struct (and backend (agent-backend backend))))
+    (unless (agent-context--target-dispatchable-p target)
+      (user-error
+       "agent-context: %s provides no literal submission for this transport; cannot dispatch"
+       (or (and struct (agent-backend-label struct)) backend)))
+    (agent-backend-submit-literal struct)))
 
 (defun agent-context--check-pending-input (target)
   "Refuse dispatch unless TARGET is verifiably clean.
@@ -3426,8 +3476,12 @@ repo's checklist asks.
     hook run) or the write completes (possibly/definitely delivered —
     ownership is the response callback's, the submission is NOT
     locally retryable, and a C-g pressed during the write is consumed
-    with a message because there is nothing left to abort).  Quit can
-    therefore only ever fire BEFORE the send, where restoring is
+    with a message because there is nothing left to abort).  The
+    deferred quit is consumed on EVERY synchronous exit of the
+    inhibited region — including the synchronous-error path, BEFORE
+    the failure is re-signaled — so no pending quit can escape to a
+    caller after the submission was already restored locally.  Quit
+    can therefore only ever fire BEFORE the send, where restoring is
     unambiguous.  Interactive submissions gain the same protection and
     failure reporting.
 
@@ -3559,6 +3613,23 @@ callback dead, and no signal to the caller."
     (should (= 1 (length hook-buffers)))
     (should (cl-some (lambda (line) (string-match-p "restored" line))
                      statuses))))
+
+(ert-deftest codex-test-app-server-quit-plus-sync-error-single-surface ()
+  "C-g pending AND a synchronous write error: the submission is
+restored exactly once, the deferred quit is consumed before the
+re-signal, and nothing escapes to give the caller a second retry
+surface."
+  (codex-test--with-literal-env
+    (setq send-behavior (lambda () (setq quit-flag t)
+                          (error "socket closed")))
+    (codex-app-server-submit-literal "hello")   ; must NOT signal
+    (should-not quit-flag)                      ; consumed, not escaped
+    (should (= 1 (length restored)))            ; one retry surface
+    (should (equal hook-buffers (list (current-buffer))))
+    (should-not codex--app-server-turn-start-pending-p)
+    ;; Late response stays dead.
+    (funcall late-callback nil '((code . -32000)))
+    (should (= 1 (length restored)))))
 
 (ert-deftest codex-test-app-server-quit-during-write-not-retryable ()
   "A C-g during the uninterruptible write is consumed: nothing is
@@ -3799,37 +3870,45 @@ asynchronous response runs first wins; the other is a no-op."
                     (run-hook-with-args
                      'codex-app-server-turn-start-failed-functions
                      buffer)))))
-      (condition-case err
-          (codex--app-server-send-request
-           "turn/start"
-           `((threadId . ,codex--app-server-thread-id)
-             (input . ,(codex--app-server-user-input-vector submission))
-             (cwd . ,codex--buffer-directory)
-             (approvalPolicy . ,(codex--app-server-approval-policy))
-             (effort . ,codex-reasoning-effort))
-           (lambda (result error)
-             (when (resolve-once)
-               (if error
-                   (progn
-                     (report-failure)
-                     (codex--app-server-insert-status
-                      (format "Codex turn failed to start: %S" error)))
-                 (with-current-buffer buffer
-                   (codex--app-server-accept-submission submission)
-                   (codex--app-server-turn-started
-                    `((threadId . ,codex--app-server-thread-id)
-                      (turn . ,(alist-get 'turn result)))))))))
-        ;; With quits inhibited, only `error' can reach this handler.
-        (error
-         (when (resolve-once)
-           (report-failure))
-         (signal (car err) (cdr err))))
-      ;; A C-g pressed while the write was in flight is moot now: the
-      ;; request was delivered (a failed write signaled above).  Consume
-      ;; it so it cannot unwind callers into draft-restoring paths.
-      (when quit-flag
-        (setq quit-flag nil)
-        (message "Quit ignored: the Codex turn was already sent")))))
+      (let (failure)
+        (condition-case err
+            (codex--app-server-send-request
+             "turn/start"
+             `((threadId . ,codex--app-server-thread-id)
+               (input . ,(codex--app-server-user-input-vector submission))
+               (cwd . ,codex--buffer-directory)
+               (approvalPolicy . ,(codex--app-server-approval-policy))
+               (effort . ,codex-reasoning-effort))
+             (lambda (result error)
+               (when (resolve-once)
+                 (if error
+                     (progn
+                       (report-failure)
+                       (codex--app-server-insert-status
+                        (format "Codex turn failed to start: %S" error)))
+                   (with-current-buffer buffer
+                     (codex--app-server-accept-submission submission)
+                     (codex--app-server-turn-started
+                      `((threadId . ,codex--app-server-thread-id)
+                        (turn . ,(alist-get 'turn result)))))))))
+          ;; With quits inhibited, only `error' can reach this handler.
+          ;; Do NOT re-signal from here: cleanup below must run first,
+          ;; while quits are still inhibited, or a C-g pressed during
+          ;; the failed write would escape to the caller after the
+          ;; submission was already restored — two retry surfaces.
+          (error
+           (when (resolve-once)
+             (report-failure))
+           (setq failure err)))
+        ;; Cleanup on EVERY synchronous exit path, still inhibited: a
+        ;; deferred C-g is moot whichever way the write went (delivered
+        ;; → nothing to abort; failed → already restored locally).
+        (when quit-flag
+          (setq quit-flag nil)
+          (message "Quit ignored: the Codex submission was already %s"
+                   (if failure "recovered" "sent")))
+        (when failure
+          (signal (car failure) (cdr failure)))))))
 ```
 
 (For the image test to pass, note `memq`/`delq` operate on the *same
@@ -3909,7 +3988,10 @@ Expected output: `(t t t t t)`.  Do not proceed to Task 11 until it is.
     (app-server ONLY: upstream literal API — authoritative fresh-turn
     check, no prefix check, ownership transferred on return; every
     terminal transport refuses until a presence-aware prompt probe
-    exists upstream), and `agent-codex--note-turn-start-failure`
+    exists upstream), `agent-codex--dispatchable-p` (the per-transport
+    capability probe registered as `:dispatchable-p`, so terminal
+    Codex targets get the compose-time preview-only warning),
+    and `agent-codex--note-turn-start-failure`
     (on `codex-app-server-turn-start-failed-functions', added by
     `agent-codex--mode-enable` and removed symmetrically on disable,
     guarded by `boundp`; emits `submit-failed' so a failed literal
@@ -3956,6 +4038,20 @@ Step 6 in that case."
   (should (fboundp 'codex-app-server-ready-for-turn-p))
   (should (fboundp 'codex-app-server-submit-literal))
   (should (fboundp 'codex-app-server-pending-attachments-p)))
+
+(ert-deftest agent-codex-test-dispatchable-p-per-transport ()
+  "Effective dispatch capability is per transport: app-server yes
+(when the upstream API exists), terminals no — so terminal Codex
+targets get the preview-only warning at compose time, not a late
+surprise at dispatch."
+  (dolist (backend '(eat vterm))
+    (with-temp-buffer
+      (setq-local codex-terminal-backend backend)
+      (should-not (agent-codex--dispatchable-p (current-buffer)))))
+  (with-temp-buffer
+    (setq-local codex-terminal-backend 'app-server)
+    (should (eq (agent-codex--dispatchable-p (current-buffer))
+                (fboundp 'codex-app-server-submit-literal)))))
 
 (ert-deftest agent-codex-test-submit-literal-app-server-only ()
   "App-server text is structurally literal — a file-only draft may
@@ -4110,7 +4206,8 @@ images, exactly as upstream's own image paste does."
 #'agent-codex--attach-media :ready-to-submit-p
 #'agent-codex--ready-to-submit-p :pending-input-p
 #'agent-codex--pending-input-p :submit-literal
-#'agent-codex--submit-literal`):
+#'agent-codex--submit-literal :dispatchable-p
+#'agent-codex--dispatchable-p`):
 
 ```elisp
 (declare-function codex-app-server-attach-mention "codex-app-server"
@@ -4179,6 +4276,15 @@ the whole mechanism)."
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (codex-app-server-detach handle)))))
+
+(defun agent-codex--dispatchable-p (buffer)
+  "Return non-nil when BUFFER's transport supports literal dispatch.
+The `:submit-literal' slot exists backend-wide, but only app-server
+sessions (with the upstream literal API present) can honor it; the
+compose-time warning and dispatch's capability check both consult
+this."
+  (and (eq (agent-codex--session-transport buffer) 'app-server)
+       (fboundp 'codex-app-server-submit-literal)))
 
 (defun agent-codex--ready-to-submit-p (buffer)
   "Authoritative turn-readiness for Codex session BUFFER.
@@ -4471,9 +4577,9 @@ same.
 3. Claude session: verify compose warns "preview-only" and dispatch
    refuses with the honest no-literal-submission message; verify `P`
    still renders a complete preview including `@` tokens.
-4. Codex terminal session: verify the composer refuses dispatch with
-   the honest transport message (no literal-isolation support there
-   yet).
+4. Codex terminal session: verify compose/retarget shows the
+   preview-only warning (per-transport capability, not slot presence)
+   and dispatch refuses with the honest transport message.
 5. Image, Codex app-server (native item): verify the model describes
    the image content, proving it arrived as an image, not a path
    string.  Remove the media registration if this fails and re-run the
