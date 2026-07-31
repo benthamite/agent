@@ -1,0 +1,830 @@
+# A Small Durable Task Ledger — Design
+
+Revision 1.
+
+## Problem
+
+`agent` has three places where "a piece of work an agent should do" is
+represented, and none of them survives a restart as a piece of work:
+
+- **Chief scheduling** keeps a day plan and manual notes in an Org state
+  file (`agent-chief-state-file`, `agent-chief.el:84`) that the model
+  reads as prose.  Nothing in it is a record with a state; the chief can
+  nudge, but nothing says which work is running, which is stuck, and
+  which finished.
+- **Claude TODO batching** (`agent-claude-batch-todos`,
+  `agent-claude.el:1416`) collects Org TODOs into an in-memory plist
+  queue (`agent-claude--batch-start`, `agent-claude.el:1501`) and runs
+  them through `claude -p`.  If Emacs dies mid-batch, the queue is gone;
+  the only trace is whatever JSON reached the log directory.  Nothing
+  records that entry 7 of 12 was in flight.
+- **Live sessions** are the practical unit of work today, and they are
+  buffers.  A session buffer that dies takes with it every fact about
+  what it had been asked to do.
+
+So the questions a person actually asks — *what did I ask an agent to
+do, which of those are still running, which stopped without an answer,
+and which of the ones marked finished were actually verified* — have no
+answer anywhere in the package, and cannot have one, because there is no
+durable record whose subject is the task rather than the session.
+
+## What this design deliberately does not do
+
+**It is a ledger, not a worker runtime.**  Nothing here starts work on
+its own, retries work on its own, schedules work, or decides that work
+finished.  There is no dependency-driven scheduler: dependencies gate a
+*human-initiated* dispatch and nothing else.  There is no parallel
+worker pool, no delegation protocol, and no second event loop.  Every
+transition into `running` is caused by an interactive command, and there
+is exactly one such command path.
+
+**It never infers that a task is done.**  A turn ending is not a task
+ending.  A backend `stop` event means the model stopped talking; it says
+nothing about whether the work is complete or correct.  The ledger
+records that a turn completed and **leaves the task `running`**.  (It
+files no attention item for it: `agent-attention-mode` already files one
+for the session event, and a second would be noise.)  Only a person closes a
+task.  This makes `running` sticky and slightly annoying, which is the
+correct trade: the alternative is a board that reports finished work
+that was never checked.
+
+**It never silently retries.**  After an ambiguous end — Emacs died, the
+session buffer vanished, a submission signalled — the task becomes
+`unknown` with a recorded reason, and stays there until a person decides
+what to do.  `unknown` is a state the code can enter automatically;
+`running` is not.
+
+## Verified capabilities this design rests on
+
+Verified by reading the installed tree and by running the checks named,
+not assumed.
+
+| Fact | Where |
+|---|---|
+| `agent-session` is a struct with `backend`, `account`, `directory`, `instance`, and `id` slots | `agent.el:302` |
+| `agent-session-id-functions` runs with the session buffer whenever a native session id is recorded or changes | `agent.el:452`, `agent--note-session-id` at `agent.el:460` |
+| `agent--teardown-functions` is the buffer-local registration point for per-session resources, run exactly once by `agent--session-teardown` | `agent.el:730`, `agent.el:753` |
+| `agent-session-display-state` returns `busy`, `waiting`, `background-waiting`, or `unknown`, and never guesses `unknown` away | `agent.el:1000` |
+| `agent-submit` puts text into a live session and submits it; `agent-start-session` accepts `:initial-prompt` and returns the new buffer | `agent.el:1457`, `agent.el:311` |
+| `agent-display-name` gives a stable human label for a live session buffer | `agent.el:848` |
+| A soft-require delegation command already exists as a pattern (`agent-history` → `agent-log-menu`) | `agent.el:2665` |
+| `agent-log-open-session SESSION-ID` is an autoloaded command that opens a native session's transcript by id | `agent-log/agent-log.el:865` |
+| An Org file that carries its own `#+TODO:` line parses those keywords in a plain temp buffer after `(org-mode)`, with no user configuration | verified in batch: `org-todo-keywords-1` → `("PENDING" "RUNNING" "BLOCKED" "UNKNOWN" "DONE" "CANCELLED")`, `org-done-keywords` → `("DONE" "CANCELLED")` |
+| A heading whose keyword is not declared parses as **no** keyword, and the word is absorbed into the heading text | verified in batch: `* WAITING Mangled` → state `nil`, heading `"WAITING Mangled"` |
+| `org-find-property` locates a heading by property value; `org-set-property` and `org-todo` edit that heading and leave the rest of the buffer alone | verified in batch |
+| `org-inhibit-logging` bound to `t` suppresses `org-log-done`, so a machine write never inserts a `CLOSED` stamp and never prompts for a note — with `org-log-done` set to `note`, the write completed silently in batch | verified in batch |
+| Properties do not leak from a parent heading to a child by default: a `** Log` sub-heading returned `nil` for the parent's `AGENT_TASK_ID` | verified in batch |
+| `org-inhibit-startup` bound to `t` does **not** disturb in-file `#+TODO:` parsing, so a machine write can skip Org's startup work | verified in batch |
+| `org-todo "PENDING"` on a heading that has no keyword adds one rather than failing | verified in batch |
+| `^` in `replace-regexp-in-string` matches after every newline, so the body escape/unescape pair round-trips a multi-line instruction exactly | verified in batch |
+| `^\*\{1,2\} ` matches `** x` and does **not** match `*** x`, so a third-level heading inside `Comments` is not mistaken for a section boundary | verified in batch |
+| `make-temp-file` accepts an absolute prefix, so the replacement temp file can be created in the ledger's own directory (required for `rename-file` to be atomic) | verified in batch |
+| `agent-capture` already stores durable per-session state as Org files and reads them back with `org-entry-get` | `agent-capture.el:117`–`agent-capture.el:259` |
+| The current suite is 362 tests, all passing, and `make compile` is clean | `make test` run at planning time |
+
+**No new `agent-backend` slot is required, and no new core hook.**
+Everything below consumes contracts that either exist today or are
+produced by the attention/queue project.  That is a result, not an
+aspiration: if a task in the plan appears to need a new backend slot,
+the design is wrong.
+
+## Dependencies on the other projects
+
+This is the last of the five areas and it is the only one with a **hard
+functional prerequisite**.
+
+- **Attention/queue (area 2) is required.**  Its `agent-session-event-functions`
+  hook is the ledger's only evidence channel for "the bound session
+  became blocked", "the bound session completed a turn", and "the bound
+  session reported an error"; and its `agent-session-ready-to-submit-p`
+  is the only source that can tell a session stopped at a permission
+  dialog (which displays as `waiting`) from one that can take a turn.
+  Without area 2 the ledger would have to guess, and guessing is the one
+  thing it may not do.  `agent-attention-file` is used through
+  `fboundp`, because the inbox module is optional even after the project
+  lands.
+- **Context composer (area 3)** and **skill bundles (area 4)** are
+  ordering-only dependencies: the Makefile lists and `agent-menu` keys.
+- **agent-log (area 1)** is consumed read-only and optionally, through
+  `agent-log-open-session`, exactly as `agent-history` does.
+
+## Boundary and module layout
+
+One new optional module, in the mould of `agent-capture.el`: loading it
+installs no hook, no timer, and no keymap entry.
+
+- **`agent-tasks.el`** — the ledger store, its state machine, the list
+  UI, and the dispatcher.  Requires `agent` and `org`.
+
+`agent.el` gains **two menu entries and their autoloads, and nothing
+else.**  `agent-chief.el`, `agent-claude.el`, `agent-attention.el`,
+`agent-queue.el`, `agent-context.el`, `agent-skill.el`, `agent-learn.el`
+and `agent-log` are **not modified**.  Every integration with them is
+one-directional and initiated from `agent-tasks.el` behind an `fboundp`
+or `boundp` guard.
+
+A global minor mode `agent-tasks-mode` owns every hook the module
+installs.  With the mode off, the list, the detail view, and manual
+state changes still work; **dispatch does not**, and says so, because a
+dispatch with nothing observing the session would produce a `running`
+task that no evidence could ever move.
+
+## 1. The store
+
+### File and format
+
+`agent-tasks-file`, default
+`(expand-file-name "agent/tasks.org" user-emacs-directory)`.  One global
+ledger across projects — a control plane that is per-project is not a
+control plane.  Filtering by project happens in the UI.
+
+Org, because the three requirements pull the same way: the record must
+survive a restart, a person must be able to read and fix it without
+Emacs Lisp, and the package already stores durable per-session state as
+Org (`agent-capture.el`).  A JSON Lines event log would be more
+crash-proof and completely illegible; the ledger holds tens of records,
+not millions, so the atomic-replace cost is irrelevant and legibility
+wins.
+
+The file carries its own keyword declaration, so it needs no user
+configuration and behaves identically in a scratch fixture and in the
+real ledger:
+
+```org
+#+title: Agent task ledger
+#+agent_ledger_version: 1
+#+TODO: PENDING RUNNING BLOCKED UNKNOWN | DONE CANCELLED
+
+* RUNNING Port the reconciliation pass
+:PROPERTIES:
+:AGENT_TASK_ID: t-20260731T142211-8f3a
+:CREATED:  [2026-07-31 Fri 14:22]
+:UPDATED:  [2026-07-31 Fri 15:01]
+:BACKEND:  claude-code
+:ACCOUNT:  personal
+:DIRECTORY: ~/repos/agent/
+:REPOSITORY: ~/repos/agent/
+:INSTANCE: default
+:SESSION_ID: 0f9c4b12-...
+:ATTEMPT:  2
+:DEPENDS:  t-20260731T140002-11bc
+:SOURCE_FILE: ~/notes/todo.org
+:SOURCE_HEADING: * TODO Port the reconciliation pass
+:END:
+
+Write the pass that turns orphaned running tasks into unknown ones.
+Do not add a retry path.
+
+** Result
+
+** Evidence
+
+** Comments
+
+** Log
+- [2026-07-31 Fri 14:25] pending → running (dispatch attempt 1: claude-code personal ~/repos/agent/ default)
+- [2026-07-31 Fri 14:58] running → unknown (session ended without a recorded outcome)
+- [2026-07-31 Fri 15:01] unknown → running (re-armed by user, attempt 2: "resumed after the crash")
+```
+
+### What is parsed and what is only written
+
+This split is the rule that keeps the format simple, and it is stated in
+the manual:
+
+- **Parsed** (authoritative, round-tripped): the TODO keyword, the
+  heading text, every property in the table below, the body text between
+  the property drawer and the first sub-heading, and the four fixed
+  sub-headings `Result`, `Evidence`, `Comments`, `Log` matched by their
+  literal heading text.
+- **Written only** (append-only prose, never read back for a decision):
+  the contents of `Log`.  The ledger appends one timestamped line per
+  transition and per attempt and never parses one.  Attempt history is
+  therefore complete and legible without being a second source of truth
+  that could disagree with the properties.
+
+`Comments` is written by the ledger (via a command) and freely edited by
+the person; it is displayed but never interpreted.
+
+### State lives in exactly one place
+
+The heading's TODO keyword is the state.  There is deliberately **no**
+`:STATE:` property: two places holding the same fact is how they come to
+disagree.
+
+A level-1 heading that has an `AGENT_TASK_ID` but no recognised keyword
+is a **problem row**, not a task: it is listed, named, and explained
+("heading has no ledger state keyword"), it is never dispatched, and it
+is never rewritten.  This case is real rather than theoretical — a
+person editing the file who types `* WAITING …` produces a heading whose
+state is `nil` and whose title silently becomes `"WAITING …"`.  The same
+treatment covers a level-1 heading with no `AGENT_TASK_ID`, a duplicate
+id, and a file whose `#+agent_ledger_version:` is newer than this code
+understands (in which case the whole file is read-only and every write
+is refused by name).
+
+### Properties
+
+| Property | Meaning |
+|---|---|
+| `AGENT_TASK_ID` | `t-<UTC timestamp>-<4 random hex>`; assigned once, never reused, never rewritten |
+| `CREATED`, `UPDATED` | inactive Org timestamps |
+| `BACKEND` | backend symbol name the task is bound to, or absent |
+| `ACCOUNT` | account name recorded at binding, or absent |
+| `DIRECTORY` | the working directory / worktree the task acts in |
+| `REPOSITORY` | git top level of `DIRECTORY`, resolved once when the field is set, absent when not a repository |
+| `INSTANCE` | session instance name, or absent |
+| `SESSION_ID` | native session id of the current attempt, once the backend reports one |
+| `ATTEMPT` | integer, starts at 1 on the first dispatch |
+| `DEPENDS` | space-separated task ids |
+| `BLOCKED_REASON` | why a `BLOCKED` task is blocked; required whenever the state is `BLOCKED` |
+| `OUTCOME` | `succeeded` or `failed`; required whenever the state is `DONE` |
+| `SOURCE_FILE`, `SOURCE_HEADING` | provenance of an imported Org TODO: the file, and the heading line **verbatim** |
+
+`DIRECTORY` is an abbreviated absolute directory with a trailing slash,
+normalised exactly as `agent-session--normalize-directory` does, so a
+recorded directory and a live session's directory compare with `equal`.
+
+`SOURCE_HEADING` stores the literal heading line rather than a
+reconstructed one, for the same reason `agent-learn` records literal
+headings: any other key fails to find the heading again once the person
+edits it, and the failure is silent.
+
+### Writing
+
+Every write is one function, `agent-tasks--update-task`, and it always
+does all of this:
+
+1. Refuse if a buffer visits `agent-tasks-file` with unsaved changes,
+   naming the buffer.  The person's edits are never saved as a side
+   effect of a machine write.
+2. Read the file's current bytes and compare their SHA-1 with the hash
+   recorded when the task list was parsed.  A mismatch is a conflict:
+   the write is refused with "the ledger changed on disk since it was
+   read; refresh and retry".  This is what makes two Emacs instances, or
+   an editor and the ledger, safe.
+3. Apply the edit in a temp buffer holding the file's contents, in
+   `org-mode`, with `org-mode-hook` bound to nil (the person's org hooks
+   have no business running inside a machine write),
+   `org-inhibit-logging` bound to `t`, and
+   `org-after-todo-state-change-hook` bound to nil.  Without
+   `org-inhibit-logging`, a user with `org-log-done` set to `note` would
+   have every machine state change prompt them for a note — verified in
+   batch, where binding it made the write silent.
+4. Write the temp buffer to a temporary file **in the same directory**
+   and `rename-file` it over the original, with the coding system Emacs
+   detected when reading, so an interrupted write cannot truncate the
+   ledger and a CRLF file stays CRLF.
+5. Revert a clean visiting buffer afterwards, so an open ledger window
+   shows the truth.
+
+Failure at any step is a `user-error` and changes nothing.  Because
+dispatch writes before it sends (§5), an unwritable ledger stops the
+dispatch instead of starting untracked work.
+
+## 2. States and transitions
+
+Six states.  The Hermes note listed five; `CANCELLED` is added because
+without it the only way to close abandoned work is to mark it `DONE`,
+which records something untrue in the one artifact whose whole purpose
+is to be true.
+
+| State | Meaning |
+|---|---|
+| `PENDING` | recorded, never dispatched (or explicitly re-armed) |
+| `RUNNING` | dispatched into a bound session; no outcome recorded |
+| `BLOCKED` | the bound session needs a person, or a person marked it blocked; `BLOCKED_REASON` says why |
+| `UNKNOWN` | the run ended ambiguously; what happened is not known |
+| `DONE` | closed by a person, with `OUTCOME` `succeeded` or `failed` |
+| `CANCELLED` | closed by a person without being run to an outcome; the reason is logged |
+
+Every transition, its trigger, and **who may cause it**:
+
+| From | To | Trigger | Actor |
+|---|---|---|---|
+| `PENDING` | `RUNNING` | `agent-tasks-dispatch` | person |
+| `RUNNING` | `BLOCKED` | bound session reported `blocked` (`:kind permission`/`question`) | evidence |
+| `RUNNING`/`BLOCKED` | `BLOCKED` | `agent-tasks-mark-blocked` (reason required) | person |
+| `BLOCKED` | `RUNNING` | bound session reported `submit` or `activity` after the block | evidence |
+| `RUNNING`/`BLOCKED` | `UNKNOWN` | bound session torn down with no outcome recorded; or reconciliation found no live session; or the dispatch submission signalled; or an `error` event | evidence |
+| any open state | `DONE` | `agent-tasks-mark-done` (outcome required) | person |
+| any open state | `CANCELLED` | `agent-tasks-cancel` (reason required) | person |
+| `UNKNOWN`/`BLOCKED` | `RUNNING` | `agent-tasks-resume` → re-dispatch, or attach to a session the person picks | person |
+| `UNKNOWN` | `PENDING` | `agent-tasks-resume` → "unbind and leave pending" | person |
+| `DONE`/`CANCELLED` | `PENDING` | `agent-tasks-reopen` (confirmation required) | person |
+
+The two rules that matter more than the table:
+
+- **No evidence transition ever produces `RUNNING` from `UNKNOWN`, and
+  no evidence transition ever produces `DONE`.**  The only evidence
+  transition into `RUNNING` is `BLOCKED` → `RUNNING`, which is a
+  correction of the ledger's own earlier evidence about the same live
+  binding, not a restart of anything.
+- **A completion event never changes state.**  A non-redundant
+  `stop`/`idle-prompt` on a bound session appends a `Log` line ("bound
+  session completed a turn").  The state stays as it was, and no
+  attention item is filed — the attention module already files one for
+  the underlying session event.
+
+## 3. Task–session correlation
+
+A binding is claimed only when the identity is **proven**, never
+inferred from a directory:
+
+- **New session**: `agent-tasks-dispatch` calls `agent-start-session`
+  and binds the returned buffer.  That buffer is the session, by
+  construction.
+- **Existing session**: the person picks it from the session picker.
+  Their choice is the proof.
+
+The binding is held two ways at once, and the difference is deliberate:
+
+- **In memory**, `agent-tasks--bindings` maps a live session buffer to a
+  task id.  This is what the event consumer uses; it dies with Emacs,
+  which is correct, because a buffer reference means nothing after a
+  restart.
+- **On disk**, the `BACKEND`/`ACCOUNT`/`DIRECTORY`/`INSTANCE` properties
+  plus `SESSION_ID`.  This is what survives, what reconciliation matches
+  against, and what lets `agent-tasks-open-transcript` hand a session id
+  to `agent-log-open-session`.
+
+`SESSION_ID` is filled by `agent-tasks-mode`'s `agent-session-id-functions`
+consumer, when the backend reports an id for a bound buffer — the same
+contract `agent-log`'s bridge already consumes.  A task dispatched into
+a brand-new session has no `SESSION_ID` for a moment, and the record
+says so rather than inventing one.
+
+One session may hold at most one task binding.  Dispatching a second
+task into a session that already has a `RUNNING` bound task is refused
+by name: two tasks sharing one session would make every subsequent
+event ambiguous, and an ambiguous ledger is worse than a small one.  The
+person can bind the second task to that session only after closing or
+unbinding the first.
+
+## 4. Dependencies
+
+`DEPENDS` lists task ids.  It does exactly two things and nothing else:
+
+- **Dispatch gate.**  A task with an unsatisfied dependency (any
+  dependency not `DONE` with `OUTCOME` `succeeded`) is refused, naming
+  each unsatisfied dependency and its state.  A prefix argument
+  overrides after an explicit confirmation, and the override is logged.
+- **Display.**  The list shows a blocked-by marker and the detail view
+  names the dependencies.
+
+There is no scheduler.  Nothing starts when a dependency clears.
+
+Validation, run whenever the ledger is parsed, reports as problem rows:
+a dependency id that names no task, and a dependency cycle (detected
+with an explicit depth-first walk, reporting the cycle's members — an
+undetected cycle would otherwise make the gate permanently unsatisfiable
+with no explanation).  A self-dependency is a cycle of one.
+
+## 5. Dispatch
+
+`agent-tasks-dispatch` (from the list, or with completion over open
+tasks):
+
+1. Require `agent-tasks-mode`; otherwise `user-error` naming it.
+2. Require state `PENDING`, or `UNKNOWN`/`BLOCKED` reached through
+   `agent-tasks-resume`.  A `RUNNING` task is refused: it is already
+   dispatched.
+3. Check the dependency gate (§4).
+4. Resolve the target: an existing live session (picker) or a new one.
+   For a new session, the backend, the directory, and the account are
+   read the way `agent-start-new-session` reads them, with the task's
+   recorded `DIRECTORY`/`BACKEND`/`ACCOUNT` as the defaults.  A task
+   with no recorded directory prompts for one; the directory decides
+   which project an agent will act in, so it is never defaulted
+   silently.
+5. Check the directory still exists, and refuse by name if not.
+6. Check the target can take a turn, from the most authoritative source
+   available: `agent-session-ready-to-submit-p` (attention/queue
+   project), else the backend `:ready-to-submit-p` slot (composer
+   project), else `agent-session-display-state`.  Not ready → a
+   `user-error` naming the session and the state, and mentioning
+   `agent-queue-prompt` for a person who wants to queue text by hand.
+   `unknown` → explicit confirmation.  The answer is carried forward
+   with the prepared dispatch, so the non-interactive re-check
+   immediately before the send accepts `unknown` only when it is the
+   same `unknown` the person already agreed to.
+7. Show the rendered message and confirm (`agent-tasks-dispatch-confirm`,
+   default `t`).
+8. **Write the ledger** — state `RUNNING`, `ATTEMPT` incremented,
+   binding properties set, `Log` line appended — and only then send.
+9. Send: `agent-submit` for an existing session, `agent-start-session`
+   with `:initial-prompt` for a new one.  Register the in-memory
+   binding.
+
+Steps 8 and 9 are in that order on purpose, and the failure analysis is
+part of the design rather than an afterthought:
+
+- **The write fails** → nothing is sent.  An unwritable ledger must not
+  start untracked work.
+- **The send signals** → the task moves to `UNKNOWN` with the reason
+  "submission signalled; delivery unproven", never back to `PENDING`.
+  Text may have reached the CLI before the signal; `PENDING` would
+  invite a second send of work that may already be running.
+- **Emacs dies between the write and the send** → the task is `RUNNING`
+  on disk with no live session, which is exactly the case §6's
+  reconciliation turns into `UNKNOWN`.  No extra flag is needed, and one
+  was deliberately not added.
+
+### The dispatched message (pure, fixture-tested)
+
+`agent-tasks-message` is a pure function of the task:
+
+```
+[Agent task t-20260731T142211-8f3a — attempt 2]
+
+Write the pass that turns orphaned running tasks into unknown ones.
+Do not add a retry path.
+
+---
+This task is tracked in a durable Emacs ledger that records its state.
+The ledger does not infer completion from your turn ending, and nothing
+marks this task done on your behalf.  When you stop, say plainly what
+you did, what you verified, and what you did not verify.
+```
+
+The `Result` and `Evidence` sections are **not** sent: they are the
+person's record of the outcome, not input to the run.  A task re-armed
+after a failed attempt carries only its instruction; whatever the
+person wants the next attempt to know goes in the instruction body,
+which they can edit.
+
+## 6. Crash recovery and reconciliation
+
+Two mechanisms, covering the two ways a run can end without an outcome.
+
+**Teardown (Emacs is alive).**  On binding, the ledger pushes a closure
+onto the session buffer's `agent--teardown-functions`.  When the buffer
+is torn down, that closure moves any `RUNNING`/`BLOCKED` task bound to
+it to `UNKNOWN`, reason "session ended without a recorded outcome", and
+files an attention item.  `agent-restart` is the one exception: when
+`agent-before-restart-functions`/`agent-after-restart-functions` exist
+(attention/queue project, guarded with `boundp`), the ledger detaches
+the binding before the kill and re-attaches it to the new buffer **only
+when the new session's seeded id equals the expected one** — the
+non-fork resume case, the only one where identity is proven.  Any other
+outcome leaves the task `UNKNOWN`, which is the honest answer for a
+session that was replaced rather than resumed.
+
+**Reconciliation (Emacs died).**  The first time the ledger is parsed in
+an Emacs session — and on every explicit refresh — every task recorded
+`RUNNING` or `BLOCKED` that has no in-memory binding is checked against
+the live session buffers:
+
+- A live buffer whose `agent-session` matches the recorded backend,
+  account, directory, and instance, **and** whose native id equals the
+  recorded `SESSION_ID` when both are known → re-bind, keep the state,
+  log the re-binding.
+- Anything else → `UNKNOWN`, reason "no live session found at
+  reconciliation", logged.  No attention item: there is no session
+  buffer to attach one to, `agent-attention-file`'s behaviour with no
+  buffer is not part of its published contract, and the reconciliation
+  summary plus the list's sort order already put these tasks in front of
+  the person.
+
+Identity matching requires the id when both sides have one.  Matching on
+directory alone would happily re-bind a task to a *different* session
+that happens to run in the same project, and then attribute that
+session's events to it.
+
+Reconciliation writes at most once per task and reports a summary line
+("reconciled 4 tasks: 1 re-bound, 3 unknown").  It never produces
+`RUNNING` from `UNKNOWN` and never re-dispatches anything.
+
+## 7. Evidence consumption
+
+`agent-tasks-mode` subscribes to `agent-session-event-functions` with a
+consumer that is a pure classifier plus a write, and that obeys the
+non-reentrancy contract that hook documents: it never sends session
+input, so nothing it does can nest a `submit` event inside an outer
+delivery.
+
+For an event whose buffer holds a task binding:
+
+| Event | Effect |
+|---|---|
+| `blocked` (`:kind permission`/`question`) | state → `BLOCKED`, `BLOCKED_REASON` from the backend-reported detail only |
+| `submit` / `activity` while `BLOCKED` | state → `RUNNING`, logged |
+| `error` | state → `UNKNOWN`, reason = the reported code and message |
+| non-redundant `stop`/`idle-prompt` | `Log` line only; state unchanged |
+| redundant completion | ignored entirely |
+
+`BLOCKED_REASON` is copied from what the backend reported and is never
+synthesized; when the backend reported nothing beyond "blocked", the
+reason says exactly that.
+
+Ledger writes from the event consumer are best-effort in one specific
+sense: a write that fails (conflict, unwritable file) emits a
+`display-warning` naming the task and the reason and leaves the ledger
+alone.  It never signals into event delivery, because a signalling
+consumer would break the other consumers on the hook.  The next
+reconciliation re-derives the truth.
+
+## 8. Commands and UI
+
+`agent-tasks` (autoloaded) opens `*Agent tasks*`, a
+`tabulated-list-mode` derivative — the same convention as the attention
+inbox, the skill history, and the learnings inbox.
+
+Columns: state, title, backend, account, project (the directory's last
+component), session (the bound session's display name, or the recorded
+identity when it is not live), attempt, age, and a dependency marker.
+Sorted: open states first (`BLOCKED`, `UNKNOWN`, `RUNNING`, `PENDING`),
+then closed, newest first within a group; the order is total, so the
+list does not reshuffle between refreshes.  A header line states how
+many tasks and how many problem rows were read from which file, and
+whether `agent-tasks-mode` is on — a list that looks live while nothing
+is observing sessions would be misleading.
+
+| Key | Action |
+|---|---|
+| `RET` | detail buffer: full instruction, result, evidence, comments, log, and the resolved session identity |
+| `n` | new task (title, instruction, directory, backend, dependencies) |
+| `d` | dispatch (§5) |
+| `s` | switch to the bound session, or say it is gone |
+| `o` | open the bound session's transcript through `agent-log-open-session` |
+| `b` | mark blocked (reason required) |
+| `k` | mark done (outcome `succeeded`/`failed`, optional result and evidence) |
+| `x` | cancel (reason required) |
+| `R` | resume: re-dispatch, attach to a session you pick, or unbind and leave pending |
+| `O` | reopen a closed task (confirmation) |
+| `u` | unbind from its session without changing state |
+| `c` | add a comment |
+| `e` | edit — open the ledger file at this task's heading |
+| `t` | visit the source Org TODO (`SOURCE_FILE`/`SOURCE_HEADING`) |
+| `F` | cycle the project filter |
+| `g` | refresh (re-parse and reconcile); `q` quit |
+
+Every command that changes a task goes through `agent-tasks--update-task`
+(§1), so every one of them gets the visiting-buffer check, the conflict
+check, and the atomic replace.
+
+## 9. Integration boundaries
+
+Each of these is one-directional, initiated here, and guarded.  None
+modifies another module.
+
+**Claude TODO batching.**  `agent-tasks-import-org-todos` creates one
+`PENDING` task per Org TODO in the current buffer, subtree, or region,
+inferring the scope the way `agent-claude-batch-todos` does (region if
+active, subtree if narrowed, buffer otherwise) and recording
+`SOURCE_FILE` and the verbatim `SOURCE_HEADING`.
+`agent-tasks-capture-org-todo` does the same for the TODO at point.
+Re-importing a file skips headings whose literal heading line is already
+recorded on a task, and reports how many were skipped.
+
+`agent-claude-batch-todos` is **not** changed, not deprecated, and not
+reimplemented.  It is a batch runner over `claude -p`; this is a ledger.
+Making the batch runner write ledger records would mean either coupling
+`agent-claude.el` to an optional module or adding a second core observer
+hook, and it would produce records for runs the ledger cannot observe or
+resume.  Import is the honest seam: the person moves the work into the
+ledger and dispatches it from there.
+
+**Chief.**  `agent-tasks-chief-context` is a function suitable for
+`agent-chief-context-functions` (`agent-chief.el:92`): it returns a
+compact, deterministic summary of open tasks — one line each, state,
+title, project, age — capped at `agent-tasks-chief-context-max` (default
+20) with a truthful "and N more" line.  It performs no write and starts
+nothing.  Adding it to the hook is the person's choice; nothing in this
+design adds it.  This is the whole of the chief integration, and it is
+enough: the chief's job is to notice and nudge, and it cannot notice
+what it cannot see.
+
+**Attention inbox.**  The ledger files an attention item through
+`agent-attention-file`, when it is `fboundp`, for **exactly one
+situation: a task became `UNKNOWN` while a session buffer existed** —
+that is, on teardown and on an `error` event.  It deliberately files
+nothing for `blocked`, `error`-as-a-session-event, or a completed turn,
+because `agent-attention-mode` already files an item for each of those
+*session* events; a second item would be duplicate noise about the same
+fact.  The ledger's item is about the *task* — a piece of work whose
+outcome is now unknown — which nothing else reports.  It is filed
+against the session buffer, because `agent-attention-file`'s behaviour
+with no buffer is not part of its published contract and this design
+assumes nothing it did not verify.  Reconciliation, which by definition
+has no buffer, therefore files no item and relies on its summary
+message and the list's sort order.  When the attention module is absent,
+the fallback is a `message`, and the manual says so.
+
+**Queue.**  No integration.  A busy target is refused by name; the error
+mentions `agent-queue-prompt` for a person who wants to queue prose.
+Automatically queueing a task prompt would create a task that is neither
+pending nor running, with no evidence channel that could ever resolve
+it.
+
+**Composer.**  No integration.  The composer builds a message from
+context and sends it; the ledger sends a task's instruction.  A person
+who wants both composes context and sends it into the task's session
+after dispatch.
+
+**Skill bundles.**  No integration.  A task's instruction may name a
+skill or a bundle in prose, like any other instruction.
+
+**agent-log.**  Read-only and optional, through the autoloaded
+`agent-log-open-session`, with the same soft-require pattern as
+`agent-history` (`agent.el:2665`).
+
+## 10. Menu and manual
+
+`agent-menu` gains two entries in the Tools column: `j` "task ledger"
+(`agent-tasks`) and `J` "new task" (`agent-tasks-new`), both autoloaded
+so the menu opens without the module loaded, and neither reading a store
+at menu-construction time.
+
+The keys are the free ones, not the mnemonic ones.  Every mnemonic
+letter is taken by something that ships before this: the static menu
+uses `e w h x r l K f S s n c a d m g T p i`, the per-backend columns
+built at open time by `agent-menu--backend-children` generate
+`B N b t u U -c -w` and `R F -x`, the attention/queue project takes
+`A Q L I E`, the composer takes `C`, and the skill-bundles project takes
+`W H k v`.  A test asserts each new key maps to its own command and that
+no key in the prefix is bound twice **including the generated backend
+columns**, because a test that walks only the static layout cannot see
+that collision — the skill-bundles work hit exactly that.
+
+README.org and its texi export gain a "Task ledger" section covering:
+the file format and the parsed/written-only split; the six states, who
+may cause each transition, and — stated plainly — that the ledger never
+infers completion and never retries; what a binding proves and what it
+does not; the dispatch order and each of its three failure modes; what
+reconciliation does after a crash; the dependency gate and that it is
+not a scheduler; the import seam from Org TODOs and that
+`agent-claude-batch-todos` is unchanged; the chief context function and
+that adding it is opt-in; and that `agent-tasks-mode` must be on to
+dispatch.
+
+## 11. Migration and backward compatibility
+
+There is no prior ledger, so there is nothing to migrate.  What the
+design owes instead is forward compatibility and non-interference:
+
+- The file is created on first write with the header and the `#+TODO:`
+  line.  A missing file is an empty ledger, not an error.
+- `#+agent_ledger_version:` is written as `1`.  A file whose version is
+  absent is treated as version 1 (a person may have hand-written it).  A
+  file whose version is **greater** than this code understands is
+  displayed read-only, with every write refused by name — a newer Emacs
+  may have written fields this code would drop on rewrite.
+- Nothing in the package behaves differently when `agent-tasks.el` is
+  not loaded.  The two menu entries autoload it; nothing else references
+  it.
+- `agent-tasks-mode` off changes no behavior except that dispatch
+  refuses.
+- No existing defcustom changes its default, and no existing command
+  changes its behavior.
+
+## 12. Out of scope
+
+An autonomous worker runtime, a scheduler, or anything that starts work
+without a person; automatic retry of any kind; parallel task execution;
+inferring task completion from backend events; a delegation protocol
+between sessions; sub-tasks or a task hierarchy; time tracking,
+estimates, or burndown; a Kanban board view with drag-and-drop; syncing
+with GitHub issues, Asana, or org-agenda; modifying
+`agent-claude-batch-todos`, `agent-chief.el`, `claude-code.el`,
+`codex.el`, or `agent-log`; new `agent-backend` slots or new core hooks;
+writing back to a source Org TODO automatically; queueing a task prompt
+into a busy session; a second transcript renderer.
+
+## 13. Verification
+
+### ERT (deterministic, stubbed backends, temporary ledger files)
+
+- **Parsing**: a full fixture round-trips every property, the body, and
+  the four sub-headings; a missing file yields an empty list; a heading
+  with an unrecognised keyword becomes a problem row naming the heading;
+  a heading with no `AGENT_TASK_ID` becomes a problem row; a duplicate
+  id becomes a problem row naming both; sub-heading properties do not
+  leak from the parent; a `Log` sub-heading with list items is preserved
+  and never parsed into state.
+- **Version gate**: version 2 parses read-only and every write is
+  refused by name; an absent version parses as 1.
+- **Writing**: a state change rewrites exactly the keyword and
+  `UPDATED`, compared as raw bytes with every other byte unchanged; a
+  CRLF ledger stays CRLF; with `org-log-done` bound to `note` the write
+  completes without prompting and inserts no `CLOSED` stamp; a modified
+  visiting buffer refuses the write by name; a file changed since
+  parsing is refused as a conflict; no temporary file survives a write;
+  an interrupted write (fault-injected rename failure) leaves the
+  original intact.
+- **State machine**: every allowed transition; every disallowed one
+  refused; `DONE` without an outcome refused; `BLOCKED` without a reason
+  refused; `CANCELLED` without a reason refused; reopening a closed task
+  requires confirmation.
+- **The never-retry invariant**, as its own test: drive the event
+  consumer with every event type against tasks in every state and assert
+  that no event ever produces `RUNNING` from `UNKNOWN` and no event ever
+  produces `DONE`.
+- **Completion does not close**: a non-redundant `stop` on a bound
+  session leaves the state unchanged and appends exactly one `Log` line;
+  a redundant completion changes nothing at all.
+- **Dependencies**: unsatisfied dependency refuses dispatch naming each
+  one; a dependency `DONE` with outcome `failed` does not satisfy the
+  gate; the prefix-argument override proceeds and logs; an unknown
+  dependency id is a problem row; a two-node cycle and a
+  self-dependency are both reported with their members.
+- **Dispatch**: not-ready target refused by name, including the case
+  where the display state says `waiting` but the readiness probe says
+  busy; `unknown` requires confirmation, and a target that *became*
+  `unknown` after the confirmation is refused while the confirmed one
+  proceeds; declined confirmation sends and records nothing; a ledger
+  write failure prevents the send entirely; a signalling `agent-submit`
+  leaves the task `UNKNOWN`, never `PENDING`; a new session receives the
+  message as `:initial-prompt` and the returned buffer is bound; a
+  second dispatch into a session that already holds a running task is
+  refused; `ATTEMPT` increments once per dispatch.
+- **Message rendering**: byte-compared fixtures for attempt 1 and a
+  re-armed attempt, and a test that `Result` and `Evidence` never appear
+  in the message.
+- **Correlation**: `agent-session-id-functions` fills `SESSION_ID` for a
+  bound buffer and ignores an unbound one; a task dispatched into a new
+  session has no `SESSION_ID` until the id arrives.
+- **Teardown and reconciliation**: teardown of a bound buffer moves the
+  task to `UNKNOWN` with a reason; reconciliation re-binds a task whose
+  recorded identity and session id match a live buffer; it refuses to
+  re-bind when the ids differ while both are known; it refuses to
+  re-bind on a directory match alone; everything else becomes `UNKNOWN`
+  once, with a `Log` line and one summary message; reconciliation run
+  twice writes only on the first pass.
+- **Restart**: with `agent-before-restart-functions` present, a matching
+  resumed id re-attaches the binding and keeps the state; a mismatched
+  id leaves it `UNKNOWN`; with the hooks absent, teardown's `UNKNOWN`
+  path applies.
+- **Event write failures**: a conflicting ledger during event handling
+  warns and does not signal into hook delivery, and the other consumers
+  on the hook still run.
+- **Import**: scope inference for region, narrowed buffer, and whole
+  buffer; the verbatim heading is recorded; a re-import skips already
+  imported headings and reports the count; importing from a non-Org
+  buffer is refused.
+- **Chief context**: deterministic output, the cap honoured with a
+  truthful "and N more", no writes, and an empty ledger yielding nil
+  rather than an empty heading.
+- **Mode**: with `agent-tasks-mode` off, dispatch is refused naming the
+  mode, the list still renders, and the header says the mode is off;
+  enabling and disabling the mode installs and removes every hook it
+  owns (asserted by comparing hook values before and after).
+- **Menu**: the layout walker is proved against three bindings that
+  exist today (`s`, and `b`/`u` from the generated Claude column) before
+  it is trusted; then `j` and `J` map to their own commands, and no key
+  in the prefix is bound twice across the declared layout *and* the
+  generated columns.
+
+`make test` and `make compile` clean, with `agent-tasks.el` and
+`test/agent-tasks-test.el` **appended** to the Makefile lists with `+=`,
+the addition diffed against the committed lists to prove nothing
+disappeared, and the test file registered before the failing-test step
+that exercises it.
+
+### Live verification (mutates nothing durable)
+
+Every live check runs against a **scratch ledger** — `agent-tasks-file`
+bound to a file in a throwaway directory — and sessions started in a
+throwaway git repository created for the check.  Task instructions are
+inert: "Reply with the words `task received` and do nothing else."  The
+claims under test are about state transitions and bindings, and none of
+them needs an agent that changes a file.  Every scratch tree is removed
+with `trash` afterwards.
+
+Both backends:
+
+1. Create a task, dispatch it into a new session, and confirm from the
+   conversation that the instruction arrived once; confirm the ledger
+   shows `RUNNING`, the binding, and — after the backend reports one —
+   `SESSION_ID`.
+2. Let the turn complete.  Confirm the task is **still** `RUNNING` and
+   that a `Log` line records the completion.  Confirm the ledger filed
+   no attention item of its own for it, while the attention module's own
+   completion item is present.  This is the design's central claim and
+   the one most likely to have been implemented wrong.
+3. Trigger a real permission prompt in the bound session and confirm the
+   task becomes `BLOCKED` with a reason taken from what the backend
+   reported; answer it and confirm the task returns to `RUNNING`.
+4. Kill the session buffer and confirm the task becomes `UNKNOWN` with a
+   reason, and that nothing is re-dispatched.
+5. Simulate a crash without killing Emacs: with a `RUNNING` task written
+   to the scratch ledger naming a session that does not exist, clear the
+   in-memory bindings, open the list, and confirm reconciliation reports
+   it `UNKNOWN` once, logs the reason, and re-binds nothing.
+6. `agent-restart` a session holding a running task and confirm the
+   binding follows the resumed session (id matched) and that the state
+   is unchanged.
+7. Dispatch a task whose dependency is not `DONE` and confirm the
+   refusal names the dependency; satisfy it and confirm the dispatch
+   proceeds.
+8. Dispatch into a mid-turn session and confirm the refusal names the
+   session and does not alter the running turn.
+9. Close a task with an outcome and evidence, cancel another with a
+   reason, and confirm both records read truthfully in the file with
+   every other byte unchanged (`git diff` on a scratch ledger under
+   version control).
+
+Import is verified against a **copy** of a few Org TODOs in the scratch
+directory, never against a real notes file.  The chief context function
+is verified by calling it and reading its output; it is never added to
+`agent-chief-context-functions` in a real Emacs during the check.
