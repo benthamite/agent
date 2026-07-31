@@ -1,5 +1,15 @@
 # Skill Bundles and Reviewable Learning — Design
 
+Revision 4 corrects ten findings from a third review, without changing
+the feature: the landing order now fixes the sequence of all three
+projects rather than only this one's place in it; the menu-layout test
+walker is the shape transient actually stores; a prepared dispatch
+carries the readiness answer it was given; `unknown` dirty state is
+rendered as its own thing everywhere; the directory fingerprint hashes
+bytes; validation survives dotted lists; a new session prompts for its
+directory; and live verification uses inert skills and a synthetic
+candidate.
+
 Revision 3.  Revision 2 was reviewed and found still not
 implementation-ready; this revision closes those findings without
 changing the feature — the readiness fallback chain, the pre-send
@@ -189,8 +199,12 @@ Emacs additionally records it (§4).
    `agent-session-display-state`.  Only the first two can tell that a
    session stopped at a permission dialog, which displays as `waiting`.
    Not-ready → `user-error` naming the session; `unknown` → explicit
-   confirmation; ready proceeds.  This, the backend and directory
-   choices, and account resolution are the *last* interactive steps.
+   confirmation; ready proceeds.  The answer is carried forward with the
+   prepared dispatch, so the non-interactive re-check before the send
+   accepts `unknown` only when it is the same `unknown` the user already
+   agreed to, and refuses a session that has *become* unknown since.
+   This, the backend and directory choices, and account resolution are
+   the *last* interactive steps.
 8. **Re-resolve provenance and compare with the preview**, after every
    prompt above has been answered and immediately before a send that
    asks nothing further.  Any change to a skill's content hash, commit,
@@ -202,7 +216,9 @@ Emacs additionally records it (§4).
 9. Dispatch: `agent-submit` for an existing session;
    `agent-start-session` with `:initial-prompt` for a new one (backend
    and account read the same way `agent-start-new-session` does, in the
-   directory from step 3).
+   directory from step 3).  A caller that supplies no directory for a
+   new session is prompted for one rather than defaulting silently: the
+   directory decides which project the agent will act in.
 10. Record one invocation per step (§3), including a `skipped` record
     for each optional step that was not run — recorded in the history
     but kept out of the session's applied list, which answers "what was
@@ -342,13 +358,18 @@ than assumed:
   repository root git looks in the wrong place, warns, and exits 0 with
   nothing to say.  `:/PATH` resolves from the repository root wherever
   git is run, and because empty output means clean while a failure
-  means "do not know", `:dirty` is tri-state: t, nil, or `unknown`.
+  means "do not know", `:dirty` is tri-state: t, nil, or `unknown`, and all three consumers —
+  the dispatch preview, the history table, and the health check — render
+  the three separately.  Treating any non-nil value as "uncommitted
+  changes" would report a failed check as a positive finding.
 
-- **Fingerprint the directory too.**  Content hash, commit, and a
-  boolean dirty flag are all unchanged when a reference file is edited
-  in a tree that was already dirty.  A hash of the names, sizes, and
-  modification times under the skill directory closes that gap, and it
-  is what the pre-send recheck compares.
+- **Fingerprint the directory too.**  Content hash, commit, and the
+  dirty flag are all unchanged when a reference file is edited in a tree
+  that was already dirty.  A hash of each file's relative name *and
+  bytes* under the skill directory closes that gap, and it is what the
+  pre-send recheck compares.  Metadata alone would miss an edit that
+  keeps the file's size and restores its timestamp; the guarantee is
+  that a changed reference file is noticed, not that most are.
 
 The claim is narrower than it looks, and the manual says so: provenance
 describes the files as of the moment it was resolved, while the CLI
@@ -446,8 +467,9 @@ it never edits a skill, a bundle, or a file.
 
 `agent-skill-validate-bundle NAME BUNDLE` is the one definition of a
 valid bundle, shared by the resolver and the health check so the two
-cannot disagree.  It rejects a non-string bundle name, a non-plist body, an unknown
-top-level key, a `:description`/`:instruction` that is not a string, a
+cannot disagree.  It rejects a non-string bundle name, a body that is not a proper list
+\(a dotted list satisfies `listp` and then makes `length` signal, so the
+check is `proper-list-p`), an unknown top-level key, a `:description`/`:instruction` that is not a string, a
 `:backends` that is not a list of symbols, an empty or non-list
 `:skills`, an entry that is neither a string nor a name-and-plist, an
 unknown entry option, an `:args` that is not a string, and an
@@ -672,8 +694,10 @@ temporary directories:
 
 - Bundle validation: unknown top-level key, unknown entry option,
   non-list `:skills`, non-string `:description`, non-list `:backends`,
-  non-string `:args` — each refused by the shared validator, and a well
-  formed bundle accepted.
+  non-string `:args`, non-string bundle name, non-boolean `:optional`,
+  and a dotted list — each refused by the shared validator rather than
+  signalling from `length`, and a well formed bundle accepted.  The
+  health check reports a malformed bundle instead of aborting the run.
 - Bundle resolution: missing skill aborts; `:optional` missing skill is
   skipped, noted, and recorded with outcome `skipped`; `:backends`
   mismatch refuses; malformed entry refuses; resolution happens in the
@@ -686,7 +710,10 @@ temporary directories:
   unknown state requires confirmation; declined confirmation sends and
   records nothing; new session passes the message as `:initial-prompt`;
   a signalling submit records nothing; a skill that changed between the
-  preview and the submission aborts before anything is sent.
+  preview and the submission aborts before anything is sent; a session
+  that became `unknown` after being checked is refused, while one whose
+  `unknown` the user already confirmed is sent to; a new session with no
+  supplied directory prompts for one.
 - Invocation records: each of the four origins emits with the right
   `:origin`/`:mode` and carries `:path`/`:root`/`:style`; batch origins
   emit a second record correlated by `:id`; a backend that signals at
@@ -697,7 +724,9 @@ temporary directories:
   one correlation record per invocation and none on a repeat.
 - Provenance: content hash matches the file; non-git tree yields nil
   `:repo`/`:commit` without error; a dirty *auxiliary* file marks the
-  skill dirty; a symlinked root asks git about a repository-relative
+  skill dirty, including when the edit keeps the file's size and
+  restores its timestamp; a git failure yields `unknown` rather than
+  nil; a symlinked root asks git about a repository-relative
   path and never an absolute one; `agent-skill-record-git-provenance`
   nil skips git entirely.
 - History: append round-trips through the reader; a malformed line is
@@ -730,16 +759,24 @@ temporary directories:
   sending; prompt contains the patch under its unverified label; writes
   `**Dispatched:**` only after a successful dispatch; a post-send write
   failure reports the prompt as sent-but-unrecorded.
-- Menu: each new key maps to its own command, and no key is bound twice
-  across the declared layout *and* the generated backend columns.
+- Menu: the layout walker is proved to work first, by pinning three
+  bindings that exist today (`s`, and `b`/`u` from the generated Claude
+  column); then each new key maps to its own command, and no key is
+  bound twice across the declared layout *and* the generated columns.
 - History: a late session id is joined onto its invocation row rather
   than shown as a row of its own, and does not consume the limit.
 
-**This work lands after the attention/queue and context-composer
-projects.**  Both of those replace whole Makefile lists and whole menu
-columns; landing this one first would have its entries deleted by
-theirs.  Landing it last, and having it append rather than replace, is
-what keeps all three sets of modules and menu entries alive.
+**The landing order is attention/queue, then context-composer, then
+this work.**  The attention plan sets the Makefile lists to complete
+values naming only its own module, so a composer that landed first
+would have `agent-context.el` deleted from the build; the composer
+appends, so it is safe after that replacement; and this work appends
+and must be last, because either replacement landing after it would
+delete its entries.  The same holds for the menu, where the attention
+plan retypes columns and the other two insert lines.  Verification
+therefore checks not only that nothing already in the Makefile
+disappeared, but that every module and test file in the repository is
+named in it.
 
 `make test` and `make compile` clean, with the two new modules and their
 two test files **appended** to the Makefile lists with `+=`, each
@@ -747,12 +784,17 @@ addition diffed against the committed lists to prove nothing
 disappeared, and each new test file registered before the failing-test
 step that is supposed to exercise it.
 
-Live verification never mutates durable user data.  Both backends:
-dispatch a two-skill bundle into an idle session and confirm from the
-conversation that the model read both skill files in order; dispatch a
-bundle into a new session through `:initial-prompt`; confirm a session
-mid-turn refuses; confirm bundles resolve against the target session's
-project, not the caller's.
+Live verification never mutates durable user data.  The bundle checks
+use two **purpose-built inert skills** whose whole instruction is to
+report that they were read, dispatched into sessions started in a
+throwaway directory: the claim under test is that both files are read in
+order, which needs no skill that does anything, and running real audit
+skills against a real project would edit that project to prove a message
+was formatted correctly.  Both backends: dispatch the two-skill bundle
+into an idle session and confirm from the conversation that the model
+reported reading both, in order; dispatch into a new session through
+`:initial-prompt`; confirm a session mid-turn refuses; confirm bundles
+resolve against the target session's project, not the caller's.
 
 Provenance and history are exercised against a **throwaway git-backed
 skill root** created for the check and removed afterwards: dirty an
@@ -773,7 +815,9 @@ rendering — then confirm with `git status` that nothing changed.  Every
 mutating step (approve, reject, edit, archive, implement, and the
 refusals for modified visiting buffers) runs against copies of a few
 candidates in a temporary directory, which is removed afterwards.  The
-implement check in particular sends its prompt to a session started in
-a throwaway directory: these candidates name real repositories, and
-handing one to a session rooted in the repository it names invites
-exactly the durable edit this design keeps behind a human decision.
+implement check in particular uses a **synthetic candidate** whose
+project, target artifact, and patch all point inside a throwaway
+directory, sent to a session started there: a copied real candidate
+names a real repository in those fields, and an agent that takes it
+seriously will go and edit that repository — exactly the durable change
+this design keeps behind a human decision.
