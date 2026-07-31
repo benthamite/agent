@@ -6853,8 +6853,9 @@ start() {
   #
   # The spawn and the pid that publishes it are two commands, and an
   # INT/TERM between them would leave `launcher_pid' empty.  `in_spawn'
-  # defers the signal-triggered exit until the pid is recorded, so
-  # cleanup always has something to stop.
+  # defers the signal-triggered exit until the pid and the state files
+  # `finish' needs are recorded, so cleanup always has something to
+  # stop and a retained run always stays recoverable.
   in_spawn=yes
   EMACS_SOCKET_NAME="$id" \
   "$emacs_bin" -Q --name "$id" \
@@ -6887,11 +6888,16 @@ start() {
               (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
               (server-start))" &
   launcher_pid=$!
-  in_spawn=
-  if [ -n "$pending_signal" ]; then exit "$pending_signal"; fi
+  # Stay inside the deferral window through these three writes.  A
+  # deferred exit taken before them leaves state that `finish' cannot
+  # process -- it requires `root', and reads `real-path' to compare the
+  # real ledger -- so a run whose Emacs could not be confirmed stopped
+  # would be retained in an unrecoverable form.
   printf '%s\n' "$launcher_pid" > "$state/launcher-pid"
   printf '%s\n' "$root" > "$state/root"
   printf '%s\n' "$real" > "$state/real-path"
+  in_spawn=
+  if [ -n "$pending_signal" ]; then exit "$pending_signal"; fi
 
   # Ready means: the server answers with THIS run's nonce, and both
   # backend modes are on.  The pid it reports is the one recorded and
