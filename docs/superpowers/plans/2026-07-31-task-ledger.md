@@ -6685,23 +6685,48 @@ tooling for this step; do not commit it):
 #   ./scripts/live-verify.sh start | finish
 set -u
 
-# One unique identifier per run, so a stale server from an earlier run
-# can neither satisfy this run's readiness check nor receive its
-# `kill-emacs'.
 state_dir="${TMPDIR:-/tmp}/agent-tasks-live"
 id_file="$state_dir/current"
 
+# Remove this run's state, and its pointer only when the pointer still
+# names this run.  Used by the setup trap and by a successful finish.
+release() {
+  local id="$1" state="$2"
+  [ -n "$state" ] && { trash "$state" 2>/dev/null || rm -rf "$state"; }
+  if [ "$(cat "$id_file" 2>/dev/null)" = "$id" ]; then rm -f "$id_file"; fi
+}
+
 start() {
-  set -e
   mkdir -p "$state_dir"
-  if [ -e "$id_file" ]; then
-    echo "a harness is already recorded ($(cat "$id_file")); run finish first" >&2
+  id="agent-tasks-live-$$-$(date +%s)"
+  state="$state_dir/$id"
+
+  # Claim the run atomically, before anything else exists to clean up.
+  # `noclobber' makes `>' fail when the file is already there, so two
+  # starts cannot both believe they own the harness.
+  if ! (set -o noclobber; printf '%s\n' "$id" > "$id_file") 2>/dev/null; then
+    echo "a harness is already recorded ($(cat "$id_file" 2>/dev/null)); run finish first" >&2
     exit 1
   fi
 
-  id="agent-tasks-live-$$-$(date +%s)"
-  state="$state_dir/$id"
-  mkdir "$state"          # fails if it somehow exists: never reuse state
+  # Installed immediately after the claim, on EXIT so that *every* way
+  # out -- a failing command under `set -e', an explicit `exit 1' from
+  # one of the checks below, or an interrupt -- releases both the state
+  # and the pointer.  An ERR trap alone would miss the explicit exits.
+  setup_ok=no
+  cleanup_start() {
+    rc=$?
+    if [ "$setup_ok" != yes ]; then
+      echo "setup failed ($rc); cleaning up" >&2
+      [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null
+      release "$id" "$state"
+    fi
+    exit $rc
+  }
+  trap cleanup_start EXIT INT TERM
+
+  set -e
+  mkdir "$state"
 
   # Same profile resolution the Makefile uses, so the backends load.
   profile=$(emacsclient -e 'init-current-profile' 2>/dev/null | tr -d '"')
@@ -6726,10 +6751,6 @@ start() {
   [ -n "$accounts" ] || { echo "cannot read account definitions" >&2; exit 1; }
 
   root=$(mktemp -d "$state/root.XXXXXX")
-  trap 'rc=$?; echo "setup failed ($rc); cleaning up" >&2;
-        [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null;
-        trash "$state" 2>/dev/null || rm -rf "$state"; exit $rc' ERR
-
   mkdir -p "$root/project"
   git -C "$root/project" init -q
   git -C "$root/project" commit -q --allow-empty -m baseline
@@ -6780,47 +6801,60 @@ start() {
   printf '%s\n' "$pid"  > "$state/pid"
   printf '%s\n' "$root" > "$state/root"
   printf '%s\n' "$real" > "$state/real-path"
-  printf '%s\n' "$id"   > "$id_file"
 
-  # Ready means: this server answers, AND it is the process we started.
+  # Ready means: this server answers, AND it is the process we started,
+  # AND both backend modes are on.  The connection is *expected* to fail
+  # while the server is still starting, so the assignment must not be
+  # allowed to trip `set -e' -- hence `|| reported='.
+  ready=no
   for _ in $(seq 1 60); do
     reported=$(EMACS_SOCKET_NAME="$id" emacsclient -s "$id" \
                  --eval '(list (emacs-pid) (featurep (quote agent-tasks))
-                               agent-claude-mode agent-codex-mode)' 2>/dev/null)
-    case "$reported" in
-      "($pid t t t)") trap - ERR
-                      echo "ready: id $id, pid $pid, root $root"
-                      echo "run the checks with: EMACS_SOCKET_NAME=$id emacsclient -s $id -c"
-                      return 0 ;;
-    esac
+                               agent-claude-mode agent-codex-mode)' 2>/dev/null) \
+      || reported=
+    if [ "$reported" = "($pid t t t)" ]; then ready=yes; break; fi
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.5
   done
-  echo "verification Emacs did not become ready (or a stale server answered)" >&2
-  false
+  if [ "$ready" != yes ]; then
+    echo "verification Emacs did not become ready (or a stale server answered)" >&2
+    exit 1     # the trap releases the state and the pointer together
+  fi
+  setup_ok=yes
+  echo "ready: id $id, pid $pid, root $root"
+  echo "run the checks with: EMACS_SOCKET_NAME=$id emacsclient -s $id -c"
 }
 
 finish() {
   rc=0
   id=$(cat "$id_file" 2>/dev/null) || { echo "no harness state" >&2; exit 1; }
   state="$state_dir/$id"
-  root=$(cat "$state/root")
+  root=$(cat "$state/root" 2>/dev/null) || { echo "state is incomplete: $state" >&2; exit 1; }
   pid=$(cat "$state/pid")
   real=$(cat "$state/real-path")
 
-  # 1. Stop the exact process first, so nothing it writes at shutdown
-  #    escapes the ledger comparison below.
-  if kill -0 "$pid" 2>/dev/null; then
-    reported=$(EMACS_SOCKET_NAME="$id" emacsclient -s "$id" --eval '(emacs-pid)' 2>/dev/null)
+  # 1. Stop the process first, so nothing it writes at shutdown escapes
+  #    the ledger comparison.  A recorded pid may have been reused by an
+  #    unrelated process, so it is signalled ONLY after the server
+  #    identifies itself as that pid -- never on the strength of the
+  #    recorded number alone.
+  if ! kill -0 "$pid" 2>/dev/null; then
+    : # already gone; nothing to authenticate and nothing to signal
+  else
+    reported=$(EMACS_SOCKET_NAME="$id" emacsclient -s "$id" \
+                 --eval '(emacs-pid)' 2>/dev/null) || reported=
     if [ "$reported" = "$pid" ]; then
-      EMACS_SOCKET_NAME="$id" emacsclient -s "$id" --eval '(kill-emacs)' >/dev/null 2>&1
+      EMACS_SOCKET_NAME="$id" emacsclient -s "$id" --eval '(kill-emacs)' >/dev/null 2>&1 || true
+      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "FAIL: verification Emacs $pid did not stop" >&2
+        rc=1
+      fi
+    else
+      echo "FAIL: pid $pid is alive but did not identify as this run's server" >&2
+      echo "      (reported: ${reported:-no answer}); refusing to signal it" >&2
+      rc=1
     fi
-    for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-    kill -0 "$pid" 2>/dev/null && { kill "$pid" 2>/dev/null; sleep 1; }
-  fi
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "FAIL: verification Emacs $pid still running" >&2
-    rc=1
   fi
 
   # 2. Only now compare the real ledger.
@@ -6847,7 +6881,7 @@ finish() {
     echo "state retained for investigation: $state" >&2
     return 1
   fi
-  rm -rf "$state" "$id_file"
+  release "$id" "$state"
   echo "clean"
 }
 
@@ -6995,12 +7029,23 @@ says.
 
 ```bash
 ./scripts/live-verify.sh finish
-echo "finish exit status: $?"
 ```
 
-Do **not** write `finish || echo ...`: that swallows the status into a
-successful `echo`, and this status is a verification result, not a
-cleanup nuisance.  A non-zero exit fails the verification.
+Run it as the **last command in the block**, so the block's status is
+`finish`'s.  Do not append anything after it — neither `|| echo ...`,
+which swallows the failure into a successful `echo`, nor a trailing
+`echo "$?"`, which reports the status while *returning* the echo's own
+success.  If the surrounding script must do more afterwards, capture
+and re-exit:
+
+```bash
+./scripts/live-verify.sh finish; status=$?
+# ... anything else ...
+exit $status
+```
+
+This status is a verification result, not a cleanup nuisance: a
+non-zero exit fails the verification.
 
 `finish` works in the order the failure modes require: it stops the
 exact process id it recorded — confirming through the server that the
