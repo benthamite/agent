@@ -1405,13 +1405,26 @@ for the verification and killed after it:
   attention items, and no configured real ledger — `agent-tasks-file`
   in it points only at a generated scratch root.  No global is saved or
   restored, because none of the person's globals is ever touched.
-- **It can still start the backends.**  `-Q` suppresses the person's
-  init, not the load path: the harness resolves the active profile and
-  its package builds exactly as the Makefile does, requires `agent`,
-  both backend modules, `agent-tasks` and — when present —
-  `agent-attention`, and the account is selected inside that process
-  before the first check.  A process that cannot start Claude or Codex
-  cannot run any of these checks.
+- **It can still observe and start the backends.**  `-Q` suppresses the
+  person's init, not the load path: the harness resolves the active
+  profile and its package builds exactly as the Makefile does, and
+  requires `agent`, both backend modules, `agent-tasks` and — when
+  present — `agent-attention`.  Loading is not enough, though, and
+  three further things are required:
+  - **`agent-claude-mode` and `agent-codex-mode` are enabled.**  They
+    own every hook and advice their backends install, and nothing is
+    installed at load time, so without them the ledger observes no
+    lifecycle events and the blocked/completed/died checks could not
+    fail even if the feature were broken.
+  - **Account definitions are imported into memory.**  The accounts
+    slot resolves through defcustoms that `-Q` leaves at their
+    defaults, so no configured account could start.  The harness copies
+    the alists and the current selections out of the live Emacs and
+    installs the selection in the in-memory cache — never through the
+    persisting setter, which would rewrite the profile's account file.
+  - **`EMACS_SOCKET_NAME` names this server.**  The Claude notification
+    hook shells out to plain `emacsclient`, which would otherwise reach
+    the person's real Emacs, leaving the verification process blind.
 - **The real ledger's path is resolved from the running profile**, not
   written into the procedure, and its **presence and hash are recorded
   outside the scratch root** so cleanup cannot destroy the evidence
@@ -1424,14 +1437,23 @@ for the verification and killed after it:
   step uses that root; no step names a path of its own.
 - **A fresh baseline commit before every check that reads a diff**, so
   one check's changes cannot be mistaken for the next one's.
-- **Disposal is checked, not assumed.**  Setup runs under a failure
-  trap: any failing step kills whatever process it started and removes
-  the root rather than leaving both behind, and it polls for the
-  process to become ready instead of sleeping a guessed interval.
-  Teardown compares the real ledger first, then kills **the exact
-  process id setup recorded** and confirms it is gone, then trashes the
-  root and confirms it is gone, exiting non-zero if any check fails.
-  It runs however the run ended, including after a crash.
+- **The run has a unique identity.**  Setup generates one identifier
+  for the server, the state directory and the scratch root, refuses to
+  start when a previous run's state is still recorded, and treats the
+  server as ready only when it reports the **same process id setup
+  started**.  A fixed name lets a stale server satisfy readiness or
+  receive the `kill-emacs` meant for this run, and lets a second start
+  overwrite the first's cleanup state.
+- **Disposal is checked, not assumed, and ordered.**  Setup runs under
+  a failure trap: any failing step kills whatever process it started
+  and removes the state rather than leaving both behind, and it polls
+  for readiness instead of sleeping a guessed interval.  Teardown
+  **stops the process first** — a shutting-down Emacs can still write,
+  so a ledger comparison made before termination would miss exactly
+  that — then compares the real ledger's presence and hash, then
+  trashes the root.  Any failure exits non-zero and **retains the
+  state**, so a failed run keeps its own evidence instead of deleting
+  it.  It runs however the run ended, including after a crash.
 - Task instructions are inert: "Reply with the words `task received` and
   do nothing else."  Every claim under test is about state transitions
   and bindings; none needs an agent that changes a file.

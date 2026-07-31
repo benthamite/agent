@@ -6684,114 +6684,171 @@ tooling for this step; do not commit it):
 # Live-verification harness for the task ledger.  Usage:
 #   ./scripts/live-verify.sh start | finish
 set -u
-name=agent-tasks-live
-state="${TMPDIR:-/tmp}/$name.state"
+
+# One unique identifier per run, so a stale server from an earlier run
+# can neither satisfy this run's readiness check nor receive its
+# `kill-emacs'.
+state_dir="${TMPDIR:-/tmp}/agent-tasks-live"
+id_file="$state_dir/current"
 
 start() {
   set -e
+  mkdir -p "$state_dir"
+  if [ -e "$id_file" ]; then
+    echo "a harness is already recorded ($(cat "$id_file")); run finish first" >&2
+    exit 1
+  fi
+
+  id="agent-tasks-live-$$-$(date +%s)"
+  state="$state_dir/$id"
+  mkdir "$state"          # fails if it somehow exists: never reuse state
+
   # Same profile resolution the Makefile uses, so the backends load.
   profile=$(emacsclient -e 'init-current-profile' 2>/dev/null | tr -d '"')
   [ -n "$profile" ] || { echo "cannot resolve the active Emacs profile" >&2; exit 1; }
   elpaca="$HOME/.config/emacs-profiles/$profile/elpaca"
   [ -d "$elpaca/builds" ] || { echo "no package builds at $elpaca" >&2; exit 1; }
 
-  # The real ledger of that profile -- resolved, never hard-coded.
+  # The real ledger of that profile, and the account definitions, read
+  # out of the live Emacs -- never hard-coded, never written back.
   real=$(emacsclient -e '(if (boundp (quote agent-tasks-file))
                              (expand-file-name agent-tasks-file) "")' \
            2>/dev/null | tr -d '"')
   [ -n "$real" ] || real="$HOME/.config/emacs-profiles/$profile/agent/tasks.org"
+  accounts=$(emacsclient -e '(format "%S"
+                               (list (cons (quote claude) agent-claude-accounts)
+                                     (cons (quote codex) agent-codex-accounts)
+                                     (cons (quote claude-current)
+                                           (agent-account-current (quote claude-code)))
+                                     (cons (quote codex-current)
+                                           (agent-account-current (quote codex)))))' \
+              2>/dev/null | sed -e 's/^"//' -e 's/"$//' -e 's/\\"/"/g')
+  [ -n "$accounts" ] || { echo "cannot read account definitions" >&2; exit 1; }
 
-  root=$(mktemp -d "${TMPDIR:-/tmp}/$name.XXXXXX")
-  # From here on, any failure must clean up what was created.
+  root=$(mktemp -d "$state/root.XXXXXX")
   trap 'rc=$?; echo "setup failed ($rc); cleaning up" >&2;
         [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null;
-        trash "$root" 2>/dev/null || rm -rf "$root"; exit $rc' ERR
+        trash "$state" 2>/dev/null || rm -rf "$state"; exit $rc' ERR
 
   mkdir -p "$root/project"
   git -C "$root/project" init -q
   git -C "$root/project" commit -q --allow-empty -m baseline
 
-  # Record presence *and* content, outside the scratch root so cleanup
-  # cannot destroy the evidence before it is compared.
+  # Presence *and* content, recorded outside the scratch root.
   if [ -f "$real" ]; then
-    printf 'present\n' > "$state.real-presence"
-    shasum -a 256 "$real" | awk '{print $1}' > "$state.real-hash"
+    printf 'present\n' > "$state/real-presence"
+    shasum -a 256 "$real" | awk '{print $1}' > "$state/real-hash"
   else
-    printf 'absent\n' > "$state.real-presence"
-    : > "$state.real-hash"
+    printf 'absent\n' > "$state/real-presence"
+    : > "$state/real-hash"
   fi
 
-  emacs -Q --name "$name" \
+  # EMACS_SOCKET_NAME points every `emacsclient' the CLIs run -- the
+  # Claude notification hook among them -- at THIS server.  Without it
+  # the hook contacts the person's real Emacs and the ledger sees no
+  # lifecycle events at all.
+  EMACS_SOCKET_NAME="$id" \
+  emacs -Q --name "$id" \
     --eval "(progn
-              (setq server-name \"$name\")
+              (setq server-name \"$id\")
               (dolist (dir (file-expand-wildcards \"$elpaca/builds/*/\"))
                 (add-to-list 'load-path dir))
               (add-to-list 'load-path \"$PWD\")
               (require 'agent) (require 'agent-claude) (require 'agent-codex)
               (require 'agent-tasks)
               (when (locate-library \"agent-attention\") (require 'agent-attention))
+              (setenv \"EMACS_SOCKET_NAME\" \"$id\")
+              (let ((imported '$accounts))
+                (setq agent-claude-accounts (alist-get 'claude imported))
+                (setq agent-codex-accounts (alist-get 'codex imported))
+                ;; Select in memory only: \`agent-account-set' would write
+                ;; the profile's account file and change the person's
+                ;; selection.
+                (when-let* ((a (alist-get 'claude-current imported)))
+                  (puthash 'claude-code a agent-account--current))
+                (when-let* ((a (alist-get 'codex-current imported)))
+                  (puthash 'codex a agent-account--current)))
+              ;; The backend modes own every lifecycle hook and advice;
+              ;; without them no session event ever reaches the ledger.
+              (agent-claude-mode 1)
+              (agent-codex-mode 1)
               (setq agent-tasks-file \"$root/project/tasks.org\")
               (agent-tasks-mode 1)
               (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
               (server-start))" &
   pid=$!
-  printf '%s\n' "$pid" > "$state.pid"
-  printf '%s\n' "$root" > "$state.root"
-  printf '%s\n' "$real" > "$state.real-path"
+  printf '%s\n' "$pid"  > "$state/pid"
+  printf '%s\n' "$root" > "$state/root"
+  printf '%s\n' "$real" > "$state/real-path"
+  printf '%s\n' "$id"   > "$id_file"
 
-  # Poll for readiness rather than sleeping a guessed interval.
+  # Ready means: this server answers, AND it is the process we started.
   for _ in $(seq 1 60); do
-    if emacsclient -s "$name" --eval '(featurep (quote agent-tasks))' \
-         2>/dev/null | grep -q t; then
-      trap - ERR
-      echo "ready: pid $pid, root $root"
-      echo "run the checks with: emacsclient -s $name -c"
-      return 0
-    fi
+    reported=$(EMACS_SOCKET_NAME="$id" emacsclient -s "$id" \
+                 --eval '(list (emacs-pid) (featurep (quote agent-tasks))
+                               agent-claude-mode agent-codex-mode)' 2>/dev/null)
+    case "$reported" in
+      "($pid t t t)") trap - ERR
+                      echo "ready: id $id, pid $pid, root $root"
+                      echo "run the checks with: EMACS_SOCKET_NAME=$id emacsclient -s $id -c"
+                      return 0 ;;
+    esac
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.5
   done
-  echo "verification Emacs did not become ready" >&2
+  echo "verification Emacs did not become ready (or a stale server answered)" >&2
   false
 }
 
 finish() {
   rc=0
-  root=$(cat "$state.root" 2>/dev/null) || { echo "no harness state" >&2; exit 1; }
-  pid=$(cat "$state.pid" 2>/dev/null)
-  real=$(cat "$state.real-path")
+  id=$(cat "$id_file" 2>/dev/null) || { echo "no harness state" >&2; exit 1; }
+  state="$state_dir/$id"
+  root=$(cat "$state/root")
+  pid=$(cat "$state/pid")
+  real=$(cat "$state/real-path")
 
-  # Compare BEFORE any cleanup, and let a difference fail the run.
-  before_presence=$(cat "$state.real-presence")
-  if [ -f "$real" ]; then now_presence=present; else now_presence=absent; fi
-  if [ "$before_presence" != "$now_presence" ]; then
-    echo "FAIL: real ledger presence changed ($before_presence -> $now_presence): $real" >&2
-    rc=1
-  elif [ "$now_presence" = present ]; then
-    now_hash=$(shasum -a 256 "$real" | awk '{print $1}')
-    if [ "$now_hash" != "$(cat "$state.real-hash")" ]; then
-      echo "FAIL: the real ledger changed: $real" >&2
-      rc=1
+  # 1. Stop the exact process first, so nothing it writes at shutdown
+  #    escapes the ledger comparison below.
+  if kill -0 "$pid" 2>/dev/null; then
+    reported=$(EMACS_SOCKET_NAME="$id" emacsclient -s "$id" --eval '(emacs-pid)' 2>/dev/null)
+    if [ "$reported" = "$pid" ]; then
+      EMACS_SOCKET_NAME="$id" emacsclient -s "$id" --eval '(kill-emacs)' >/dev/null 2>&1
     fi
-  fi
-
-  # Terminate the exact process this harness started, then confirm.
-  if [ -n "$pid" ]; then
-    emacsclient -s "$name" --eval '(kill-emacs)' >/dev/null 2>&1
     for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-    if kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null; sleep 1
-    fi
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "FAIL: verification Emacs $pid still running" >&2; rc=1
-    fi
+    kill -0 "$pid" 2>/dev/null && { kill "$pid" 2>/dev/null; sleep 1; }
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "FAIL: verification Emacs $pid still running" >&2
+    rc=1
   fi
 
+  # 2. Only now compare the real ledger.
+  before=$(cat "$state/real-presence")
+  if [ -f "$real" ]; then now=present; else now=absent; fi
+  if [ "$before" != "$now" ]; then
+    echo "FAIL: real ledger presence changed ($before -> $now): $real" >&2
+    rc=1
+  elif [ "$now" = present ] &&
+       [ "$(shasum -a 256 "$real" | awk '{print $1}')" != "$(cat "$state/real-hash")" ]; then
+    echo "FAIL: the real ledger changed: $real" >&2
+    rc=1
+  fi
+
+  # 3. Clean up only when everything above passed; otherwise keep the
+  #    state so the run can be investigated and re-finished.
+  if [ $rc -ne 0 ]; then
+    echo "state retained for investigation: $state" >&2
+    return $rc
+  fi
   trash "$root" 2>/dev/null || true
-  if [ -e "$root" ]; then echo "FAIL: scratch root not removed: $root" >&2; rc=1; fi
-  rm -f "$state".*
-  [ $rc -eq 0 ] && echo "clean"
-  return $rc
+  if [ -e "$root" ]; then
+    echo "FAIL: scratch root not removed: $root" >&2
+    echo "state retained for investigation: $state" >&2
+    return 1
+  fi
+  rm -rf "$state" "$id_file"
+  echo "clean"
 }
 
 case "${1:-}" in
@@ -6808,26 +6865,43 @@ chmod +x scripts/live-verify.sh
 ./scripts/live-verify.sh start
 ```
 
-Four properties that matter, each of which revision 4 lacked: the
-profile and its package builds are resolved the way the Makefile
-resolves them, so the backends actually load; the real ledger path is
-**resolved from the running profile**, never hard-coded; its presence
-and hash are recorded **outside** the scratch root, so cleanup cannot
-destroy the evidence before it is compared; and setup traps its own
-failures, killing the process and removing the root rather than leaving
-both behind.
+What the isolated process needs beyond a load path, each of which the
+previous revision left out and any of which makes the checks impossible
+rather than merely awkward:
 
-Inside that Emacs, select the backend account the checks should use the
-same way you would in any session (`agent-account`), before check 1.
-Task instructions stay inert — "Reply with the words `task received`
-and do nothing else." — because every claim under test is about state
-transitions and bindings, and none needs an agent that changes a file.
+- **Both backend modes enabled.**  `agent-claude-mode` and
+  `agent-codex-mode` own every hook and advice their backends install
+  (`agent-claude.el:2482`, `agent-codex.el:887`); nothing is installed
+  at load time.  Without them the ledger observes no lifecycle events
+  at all, so checks 2, 3 and 4 could not fail even if the feature were
+  broken.
+- **Account definitions imported, selection in memory only.**
+  `agent-account-list` resolves the backend's `:accounts` slot through
+  `agent-claude-accounts`/`agent-codex-accounts`
+  (`agent-claude.el:227`, `agent-codex.el:154`), which `-Q` leaves at
+  their defaults, so no configured account could start.  The harness
+  copies those alists and the current selections out of the live Emacs
+  and sets the selection with `puthash` into `agent-account--current`
+  — **not** `agent-account-set`, which would write the profile's
+  account file and change the person's selection.  (Use
+  `agent-account-select` inside the verification Emacs only if you want
+  to switch accounts *there*; it persists, so prefer the import.)
+- **`EMACS_SOCKET_NAME` set to this server.**  `hooks/notify-emacs-notification.sh`
+  invokes plain `emacsclient`, which contacts the *default* server —
+  the person's real Emacs — and the verification process would see
+  nothing.  It is exported for the Emacs process and set inside it, so
+  child CLIs inherit it.
 
-Two shell helpers for the checks that compare bytes, using the recorded
-root:
+Every step below runs in that Emacs.  Task instructions stay inert —
+"Reply with the words `task received` and do nothing else." — because
+every claim under test is about state transitions and bindings, and
+none needs an agent that changes a file.
+
+Two shell helpers for the checks that compare bytes:
 
 ```bash
-root=$(cat "${TMPDIR:-/tmp}/agent-tasks-live.state.root")
+state="${TMPDIR:-/tmp}/agent-tasks-live/$(cat "${TMPDIR:-/tmp}/agent-tasks-live/current")"
+root=$(cat "$state/root")
 baseline() { git -C "$root/project" add -- tasks.org &&
              git -C "$root/project" commit -q --allow-empty -m "baseline: $1"; }
 ledger_diff() { git -C "$root/project" diff -- tasks.org; }
@@ -6920,15 +6994,23 @@ says.
 - [ ] **Step 6: Dispose of the verification Emacs**
 
 ```bash
-./scripts/live-verify.sh finish || echo "VERIFICATION CLEANUP FAILED"
+./scripts/live-verify.sh finish
+echo "finish exit status: $?"
 ```
 
-`finish` compares the real ledger's presence and hash **before** it
-touches anything, kills the exact process id it recorded and confirms
-it is gone, trashes the scratch root and confirms it is gone, and exits
-non-zero if any of those checks fails.  Run it however the run ended —
-including after an aborted or crashed session — and treat a non-zero
-exit as a verification failure, not a cleanup nuisance.
+Do **not** write `finish || echo ...`: that swallows the status into a
+successful `echo`, and this status is a verification result, not a
+cleanup nuisance.  A non-zero exit fails the verification.
+
+`finish` works in the order the failure modes require: it stops the
+exact process id it recorded — confirming through the server that the
+pid answering is the one it started — **and only then** compares the
+real ledger's presence and hash, because a shutting-down Emacs can
+still write, and a comparison made first would miss exactly that.  It
+trashes the scratch root last, and **keeps all of its state** when any
+check failed, so a failed run can be investigated and re-finished
+rather than losing its own evidence.  Run it however the run ended,
+including after an aborted or crashed session.
 
 - [ ] **Step 7: Record the outcome**
 
