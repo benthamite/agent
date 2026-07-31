@@ -523,6 +523,91 @@ person cannot tell apart."
               "* PENDING One\n:PROPERTIES:\n:AGENT_TASK_ID: t-e\n:END:\n")
     (should (= 2 (agent-tasks-ledger-version (agent-tasks-read))))))
 
+;;;; Snapshots
+
+(ert-deftest agent-tasks-test-snapshot/is-one-coherent-read ()
+  "Token, text and coding all describe the same bytes."
+  (agent-tasks-test--with-ledger agent-tasks-test--fixture
+    (let ((lf (agent-tasks--snapshot agent-tasks-file)))
+      (should (equal agent-tasks-test--fixture (plist-get lf :text)))
+      (should (equal (secure-hash 'sha1 (plist-get lf :bytes))
+                     (plist-get lf :token)))
+      ;; Raw bytes, not decoded text: a CRLF twin must differ.
+      (let ((coding-system-for-write 'utf-8-dos))
+        (with-temp-file agent-tasks-file
+          (insert agent-tasks-test--fixture)))
+      (let ((crlf (agent-tasks--snapshot agent-tasks-file)))
+        (should-not (equal (plist-get lf :token) (plist-get crlf :token)))
+        (should (equal 'utf-8-dos (plist-get crlf :coding)))
+        ;; The decoded text is the same, which is exactly why hashing it
+        ;; would have missed the change.
+        (should (equal (plist-get lf :text) (plist-get crlf :text)))))))
+
+(ert-deftest agent-tasks-test-snapshot/honours-emacs-coding-precedence ()
+  "The snapshot decodes and re-encodes the way `insert-file-contents' would.
+Content detection alone disagrees whenever a coding cookie, a
+`file-coding-system-alist' entry, or a `coding-system-for-read' binding
+applies; and a cookie says nothing about line endings, so the eol
+variant has to come from the same bytes or a CRLF ledger is rewritten
+as LF."
+  (let ((cookie "# -*- coding: iso-8859-1 -*-\n"))
+    ;; Every case must agree with `insert-file-contents' on the coding
+    ;; system, on the decoded text, and on the bytes a write-back
+    ;; produces.
+    (dolist (case (list
+                   ;; cookie, body valid UTF-8 -> detection would say utf-8
+                   (cons (concat cookie agent-tasks--header "caf\303\251\n") nil)
+                   ;; cookie plus CRLF -> eol must survive
+                   (cons (replace-regexp-in-string
+                          "\n" "\r\n"
+                          (concat cookie agent-tasks--header "caf\303\251\n"))
+                         nil)
+                   ;; plain CRLF, no cookie
+                   (cons (replace-regexp-in-string
+                          "\n" "\r\n" agent-tasks--header)
+                         nil)
+                   ;; plain LF
+                   (cons agent-tasks--header nil)))
+      (agent-tasks-test--with-ledger (car case)
+        (let ((reference (with-temp-buffer
+                           (insert-file-contents agent-tasks-file)
+                           (cons buffer-file-coding-system (buffer-string))))
+              (snapshot (agent-tasks--snapshot agent-tasks-file))
+              (out (expand-file-name "copy.org" dir)))
+          (should (eq (car reference) (plist-get snapshot :coding)))
+          (should (equal (cdr reference) (plist-get snapshot :text)))
+          (let ((coding-system-for-write (plist-get snapshot :coding)))
+            (with-temp-file out (insert (plist-get snapshot :text))))
+          (should (equal (plist-get snapshot :bytes)
+                         (plist-get (agent-tasks--snapshot out) :bytes)))))))
+  ;; An explicit read override wins over everything in the file.
+  (agent-tasks-test--with-ledger agent-tasks--header
+    (let ((coding-system-for-read 'utf-8-unix))
+      (should (eq 'utf-8-unix
+                  (plist-get (agent-tasks--snapshot agent-tasks-file)
+                             :coding)))))
+  ;; A `file-coding-system-alist' entry applies when no cookie does.
+  (agent-tasks-test--with-ledger agent-tasks--header
+    (let ((file-coding-system-alist
+           (cons (cons (regexp-quote agent-tasks-file) 'iso-latin-1-unix)
+                 file-coding-system-alist)))
+      (should (eq 'iso-latin-1-unix
+                  (plist-get (agent-tasks--snapshot agent-tasks-file)
+                             :coding)))))
+  ;; ...but a cookie outranks it, which is the order Emacs uses.
+  (agent-tasks-test--with-ledger
+      (concat "# -*- coding: iso-8859-1 -*-\n" agent-tasks--header)
+    (let ((file-coding-system-alist
+           (cons (cons (regexp-quote agent-tasks-file) 'utf-8-unix)
+                 file-coding-system-alist)))
+      (let ((reference (with-temp-buffer
+                         (insert-file-contents agent-tasks-file)
+                         buffer-file-coding-system))
+            (snapshot (agent-tasks--snapshot agent-tasks-file)))
+        (should (eq reference (plist-get snapshot :coding)))
+        (should (eq 'iso-latin-1 (coding-system-base
+                                  (plist-get snapshot :coding))))))))
+
 (ert-deftest agent-tasks-test-body/codec-is-injective ()
   "Encode-then-decode is the identity for every star shape.
 The revision-1 pair (`^\\*+' / `^ \\*+') failed the second case: a line
@@ -756,35 +841,59 @@ hash cannot tell a CRLF ledger from its LF twin."
 
 (defun agent-tasks--snapshot-coding (file bytes)
   "Return the coding system Emacs would read FILE with, given its BYTES.
-Applies Emacs's normal coding-selection precedence to the one raw-byte
+Applies Emacs's own coding-selection precedence to the one raw-byte
 snapshot, rather than guessing from content alone:
 
 1. `coding-system-for-read', when a caller bound it;
-2. `find-operation-coding-system', which consults
-   `file-coding-system-alist';
-3. `set-auto-coding', which reads a `-*- coding: -*-' cookie and
+2. `set-auto-coding', which reads a `-*- coding: -*-' cookie and
    `auto-coding-alist'/`auto-coding-functions';
+3. `find-operation-coding-system', which consults
+   `file-coding-system-alist';
 4. content detection, as a last resort.
 
-`detect-coding-string' alone — which is all revision 3 used — is only
-step 4, and it disagrees with `insert-file-contents' whenever any
-earlier step applies.  Verified in batch: for a ledger whose cookie
-says `iso-8859-1' while its bytes are valid UTF-8, detection returns
-`utf-8' and decodes to different text than Emacs would; the chain above
-returns `iso-8859-1' and matches.  The same holds for a
-`file-coding-system-alist' entry.  All four cases round-trip to
-identical bytes when written back with the returned coding."
-  (or coding-system-for-read
-      (let ((operation (find-operation-coding-system 'insert-file-contents file)))
-        (and (consp operation)
-             (not (eq (car operation) 'undecided))
-             (car operation)))
-      (with-temp-buffer
-        (set-buffer-multibyte nil)
-        (insert bytes)
-        (goto-char (point-min))
-        (set-auto-coding file (buffer-size)))
-      (car (detect-coding-string bytes))))
+**The cookie outranks `file-coding-system-alist'**, which revision 4
+had the other way round.  Verified in batch: with a cookie saying
+`iso-8859-1' and an alist entry saying `utf-8-unix' for the same file,
+`insert-file-contents' reports `iso-latin-1-unix'.
+
+Content detection alone — all revision 3 used — is only step 4, and it
+disagrees with `insert-file-contents' whenever any earlier step
+applies: for a ledger whose cookie says `iso-8859-1' while its bytes
+are valid UTF-8, detection returns `utf-8' and decodes to different
+text.
+
+The **end-of-line variant is carried over from the same byte
+snapshot**.  A cookie names a character set and says nothing about line
+endings, so `set-auto-coding' returns a coding whose eol type is
+unspecified; writing back with it would use the platform default and
+**rewrite a CRLF ledger as LF** — revision 4 did exactly that, and the
+byte round-trip failed.  Detection over the same bytes supplies the eol
+type, and `coding-system-change-eol-conversion' pins it.
+
+With both corrections every case — cookie, cookie+CRLF, plain CRLF,
+plain LF, alist entry, read override, and cookie-versus-alist conflict
+— returns the same coding system symbol as `insert-file-contents',
+decodes to the same text, and round-trips to identical bytes."
+  (let* ((detected (car (detect-coding-string bytes)))
+         (chosen
+          (or coding-system-for-read
+              (with-temp-buffer
+                (set-buffer-multibyte nil)
+                (insert bytes)
+                (goto-char (point-min))
+                (set-auto-coding file (buffer-size)))
+              (let ((operation (find-operation-coding-system
+                                'insert-file-contents file)))
+                (and (consp operation)
+                     (not (eq (car operation) 'undecided))
+                     (car operation)))
+              detected)))
+    (if (vectorp (coding-system-eol-type chosen))
+        (let ((eol (coding-system-eol-type detected)))
+          (if (integerp eol)
+              (coding-system-change-eol-conversion chosen eol)
+            chosen))
+      chosen)))
 
 (defmacro agent-tasks--with-org-text (text &rest body)
   "Evaluate BODY in a temporary `org-mode' buffer holding TEXT.
@@ -1222,79 +1331,64 @@ Add to `test/agent-tasks-test.el`, before the `provide`:
 
 ;;;; Concurrency
 
-(ert-deftest agent-tasks-test-snapshot/is-one-coherent-read ()
-  "Token, text and coding all describe the same bytes."
+(ert-deftest agent-tasks-test-write/interleaved-writers-lose-nothing ()
+  "The exact two-writer race: one commits, the other is refused.
+Both parse the same bytes, so both hold the same token.  Writer B
+commits first; writer A must then be refused rather than renaming its
+own copy over B's change."
   (agent-tasks-test--with-ledger agent-tasks-test--fixture
-    (let ((lf (agent-tasks--snapshot agent-tasks-file)))
-      (should (equal agent-tasks-test--fixture (plist-get lf :text)))
-      (should (equal (secure-hash 'sha1 (plist-get lf :bytes))
-                     (plist-get lf :token)))
-      ;; Raw bytes, not decoded text: a CRLF twin must differ.
-      (let ((coding-system-for-write 'utf-8-dos))
-        (with-temp-file agent-tasks-file
-          (insert agent-tasks-test--fixture)))
-      (let ((crlf (agent-tasks--snapshot agent-tasks-file)))
-        (should-not (equal (plist-get lf :token) (plist-get crlf :token)))
-        (should (equal 'utf-8-dos (plist-get crlf :coding)))
-        ;; The decoded text is the same, which is exactly why hashing it
-        ;; would have missed the change.
-        (should (equal (plist-get lf :text) (plist-get crlf :text)))))))
+    (let ((writer-a (agent-tasks-read))
+          (writer-b (agent-tasks-read)))
+      (should (equal (agent-tasks-ledger-token writer-a)
+                     (agent-tasks-ledger-token writer-b)))
+      (agent-tasks--update-task
+       writer-b "t-b" (lambda () (agent-tasks--log "B was here")))
+      (should-error
+       (agent-tasks--update-task
+        writer-a "t-a" (lambda () (agent-tasks--log "A was here")))
+       :type 'user-error)
+      (let ((ledger (agent-tasks-read)))
+        ;; B's change survived and A's was not applied.
+        (should (string-match-p "B was here"
+                                (agent-tasks-task-log
+                                 (agent-tasks-find ledger "t-b"))))
+        (should-not (string-match-p "A was here"
+                                    (or (agent-tasks-task-log
+                                         (agent-tasks-find ledger "t-a"))
+                                        "")))
+        ;; Nothing was lost.
+        (should (= 2 (length (agent-tasks-ledger-tasks ledger))))))))
 
-(ert-deftest agent-tasks-test-snapshot/honours-emacs-coding-precedence ()
-  "The snapshot decodes the way `insert-file-contents' would.
-Content detection alone disagrees whenever a coding cookie, a
-`file-coding-system-alist' entry, or a `coding-system-for-read' binding
-applies — verified in batch with a ledger whose cookie says
-`iso-8859-1' while its bytes are valid UTF-8."
-  (agent-tasks-test--with-ledger
-      (concat "# -*- coding: iso-8859-1 -*-\n" agent-tasks--header)
-    (let ((reference (with-temp-buffer
-                       (insert-file-contents agent-tasks-file)
-                       (cons buffer-file-coding-system (buffer-string))))
-          (snapshot (agent-tasks--snapshot agent-tasks-file)))
-      ;; Compare the coding *base*, not the symbol: a cookie yields
-      ;; `iso-8859-1' where `insert-file-contents' reports
-      ;; `iso-latin-1-unix' — the same coding under an alias with an
-      ;; eol variant.  What must match exactly is the decoded text and
-      ;; the bytes a write-back produces, which the next two assertions
-      ;; check.
-      (should (eq (coding-system-base (car reference))
-                  (coding-system-base (plist-get snapshot :coding))))
-      (should (equal (cdr reference) (plist-get snapshot :text)))
-      ;; And the bytes survive a write-back with that coding.
-      (let ((out (expand-file-name "copy.org" dir)))
-        (let ((coding-system-for-write (plist-get snapshot :coding)))
-          (with-temp-file out (insert (plist-get snapshot :text))))
-        (should (equal (plist-get snapshot :bytes)
-                       (plist-get (agent-tasks--snapshot out) :bytes))))))
-  ;; An explicit read override wins over everything in the file.
-  (agent-tasks-test--with-ledger agent-tasks--header
-    (let ((coding-system-for-read 'utf-8-unix))
-      (should (eq 'utf-8-unix
-                  (plist-get (agent-tasks--snapshot agent-tasks-file)
-                             :coding)))))
-  ;; So does a `file-coding-system-alist' entry.
-  (agent-tasks-test--with-ledger agent-tasks--header
-    (let ((file-coding-system-alist
-           (cons (cons (regexp-quote agent-tasks-file) 'iso-latin-1-unix)
-                 file-coding-system-alist)))
-      (should (eq 'iso-latin-1-unix
-                  (plist-get (agent-tasks--snapshot agent-tasks-file)
-                             :coding)))))
-  ;; Content detection alone would disagree with Emacs here: the cookie
-  ;; says latin-1 while the bytes are valid UTF-8.
-  (agent-tasks-test--with-ledger
-      (concat "# -*- coding: iso-8859-1 -*-\n" agent-tasks--header "caf\303\251\n")
-    (let ((reference (with-temp-buffer
-                       (insert-file-contents agent-tasks-file)
-                       (buffer-string)))
-          (snapshot (agent-tasks--snapshot agent-tasks-file)))
-      (should (equal reference (plist-get snapshot :text)))
-      (should-not (equal reference
-                         (decode-coding-string
-                          (plist-get snapshot :bytes)
-                          (car (detect-coding-string
-                                (plist-get snapshot :bytes)))))))))
+(ert-deftest agent-tasks-test-lock/a-held-lock-refuses-and-changes-nothing ()
+  "A lock another process holds times out with a message naming it."
+  (agent-tasks-test--with-ledger agent-tasks-test--fixture
+    (let ((agent-tasks-lock-timeout 0.2)
+          (lock (agent-tasks--lock-file agent-tasks-file))
+          (before (agent-tasks--file-text agent-tasks-file)))
+      (write-region "999@other 2026-07-31 00:00:00\n" nil lock nil 'silent)
+      (unwind-protect
+          (let ((error-message
+                 (cadr (should-error
+                        (agent-tasks--update-task
+                         (agent-tasks-read) "t-a"
+                         (lambda () (agent-tasks--log "blocked")))
+                        :type 'user-error))))
+            (should (string-match-p "999@other" error-message))
+            (should (string-match-p "agent-tasks-break-lock" error-message))
+            (should (equal before (agent-tasks--file-text agent-tasks-file))))
+        (delete-file lock)))))
+
+(ert-deftest agent-tasks-test-lock/is-released-on-both-paths ()
+  "The lock does not outlive a successful write or a signalling one."
+  (agent-tasks-test--with-ledger agent-tasks-test--fixture
+    (let ((lock (agent-tasks--lock-file agent-tasks-file)))
+      (agent-tasks--update-task
+       (agent-tasks-read) "t-a" (lambda () (agent-tasks--log "fine")))
+      (should-not (file-exists-p lock))
+      (should-error
+       (agent-tasks--update-task
+        (agent-tasks-read) "t-a" (lambda () (error "boom"))))
+      (should-not (file-exists-p lock)))))
 
 (ert-deftest agent-tasks-test-snapshot/a-rename-between-reads-cannot-slip-through ()
   "A file replaced after the snapshot is a conflict, not a stale write.
@@ -1766,65 +1860,6 @@ refusing."
       (let ((ledger (agent-tasks-read)))
         (should (= 1 (length (agent-tasks-ledger-tasks ledger))))
         (should (null (agent-tasks-ledger-problems ledger)))))))
-
-(ert-deftest agent-tasks-test-write/interleaved-writers-lose-nothing ()
-  "The exact two-writer race: one commits, the other is refused.
-Both parse the same bytes, so both hold the same token.  Writer B
-commits first; writer A must then be refused rather than renaming its
-own copy over B's change."
-  (agent-tasks-test--with-ledger agent-tasks-test--fixture
-    (let ((writer-a (agent-tasks-read))
-          (writer-b (agent-tasks-read)))
-      (should (equal (agent-tasks-ledger-token writer-a)
-                     (agent-tasks-ledger-token writer-b)))
-      (agent-tasks--update-task
-       writer-b "t-b" (lambda () (agent-tasks--log "B was here")))
-      (should-error
-       (agent-tasks--update-task
-        writer-a "t-a" (lambda () (agent-tasks--log "A was here")))
-       :type 'user-error)
-      (let ((ledger (agent-tasks-read)))
-        ;; B's change survived and A's was not applied.
-        (should (string-match-p "B was here"
-                                (agent-tasks-task-log
-                                 (agent-tasks-find ledger "t-b"))))
-        (should-not (string-match-p "A was here"
-                                    (or (agent-tasks-task-log
-                                         (agent-tasks-find ledger "t-a"))
-                                        "")))
-        ;; Nothing was lost.
-        (should (= 2 (length (agent-tasks-ledger-tasks ledger))))))))
-
-(ert-deftest agent-tasks-test-lock/a-held-lock-refuses-and-changes-nothing ()
-  "A lock another process holds times out with a message naming it."
-  (agent-tasks-test--with-ledger agent-tasks-test--fixture
-    (let ((agent-tasks-lock-timeout 0.2)
-          (lock (agent-tasks--lock-file agent-tasks-file))
-          (before (agent-tasks--file-text agent-tasks-file)))
-      (write-region "999@other 2026-07-31 00:00:00\n" nil lock nil 'silent)
-      (unwind-protect
-          (let ((error-message
-                 (cadr (should-error
-                        (agent-tasks--update-task
-                         (agent-tasks-read) "t-a"
-                         (lambda () (agent-tasks--log "blocked")))
-                        :type 'user-error))))
-            (should (string-match-p "999@other" error-message))
-            (should (string-match-p "agent-tasks-break-lock" error-message))
-            (should (equal before (agent-tasks--file-text agent-tasks-file))))
-        (delete-file lock)))))
-
-(ert-deftest agent-tasks-test-lock/is-released-on-both-paths ()
-  "The lock does not outlive a successful write or a signalling one."
-  (agent-tasks-test--with-ledger agent-tasks-test--fixture
-    (let ((lock (agent-tasks--lock-file agent-tasks-file)))
-      (agent-tasks--update-task
-       (agent-tasks-read) "t-a" (lambda () (agent-tasks--log "fine")))
-      (should-not (file-exists-p lock))
-      (should-error
-       (agent-tasks--update-task
-        (agent-tasks-read) "t-a" (lambda () (error "boom"))))
-      (should-not (file-exists-p lock)))))
 
 (ert-deftest agent-tasks-test-create/two-tasks-get-distinct-ids ()
   "Ids are checked against the ledger, not merely generated."
@@ -6635,49 +6670,164 @@ by swapping globals inside the running Emacs, which cannot cover the
 attention inbox and leaves any mistake sitting in the person's working
 session.
 
-Run the checks in a **separate Emacs instead**, so there is nothing to
-isolate: it has no real sessions, no real inbox, and no configured real
-ledger, and killing it disposes of all of it.
+Run the checks in a **separate Emacs**, so there is nothing to isolate:
+it has no real sessions, no real inbox, and no configured real ledger.
+But it must still be able to *start* Claude and Codex, so it loads the
+same package builds the test suite does — `-Q` for the user's init, not
+for the load path.
+
+Save this as `scripts/live-verify.sh` in the worktree (it is scratch
+tooling for this step; do not commit it):
 
 ```bash
-root=$(mktemp -d "${TMPDIR:-/tmp}/agent-tasks-live.XXXXXX") || exit 1
-mkdir -p "$root/project" || exit 1
-git -C "$root/project" init -q || exit 1
-git -C "$root/project" commit -q --allow-empty -m baseline || exit 1
-printf '%s\n' "$root" > "$root/ROOT"
-echo "verification root: $root"
+#!/usr/bin/env bash
+# Live-verification harness for the task ledger.  Usage:
+#   ./scripts/live-verify.sh start | finish
+set -u
+name=agent-tasks-live
+state="${TMPDIR:-/tmp}/$name.state"
 
-# Record the real ledger's content, to compare after the run.
-real=~/.emacs.d/agent/tasks.org
-if [ -f "$real" ]; then shasum -a 256 "$real" > "$root/real-ledger.sha"; else
-  echo "absent" > "$root/real-ledger.sha"; fi
+start() {
+  set -e
+  # Same profile resolution the Makefile uses, so the backends load.
+  profile=$(emacsclient -e 'init-current-profile' 2>/dev/null | tr -d '"')
+  [ -n "$profile" ] || { echo "cannot resolve the active Emacs profile" >&2; exit 1; }
+  elpaca="$HOME/.config/emacs-profiles/$profile/elpaca"
+  [ -d "$elpaca/builds" ] || { echo "no package builds at $elpaca" >&2; exit 1; }
 
-emacs -Q --name agent-tasks-live \
-      --eval "(progn
-                (setq server-name \"agent-tasks-live\")
-                (add-to-list 'load-path \"$PWD\")
-                (require 'agent) (require 'agent-tasks)
-                (setq agent-tasks-file \"$root/project/tasks.org\")
-                (agent-tasks-mode 1)
-                (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
-                (server-start))" &
+  # The real ledger of that profile -- resolved, never hard-coded.
+  real=$(emacsclient -e '(if (boundp (quote agent-tasks-file))
+                             (expand-file-name agent-tasks-file) "")' \
+           2>/dev/null | tr -d '"')
+  [ -n "$real" ] || real="$HOME/.config/emacs-profiles/$profile/agent/tasks.org"
+
+  root=$(mktemp -d "${TMPDIR:-/tmp}/$name.XXXXXX")
+  # From here on, any failure must clean up what was created.
+  trap 'rc=$?; echo "setup failed ($rc); cleaning up" >&2;
+        [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null;
+        trash "$root" 2>/dev/null || rm -rf "$root"; exit $rc' ERR
+
+  mkdir -p "$root/project"
+  git -C "$root/project" init -q
+  git -C "$root/project" commit -q --allow-empty -m baseline
+
+  # Record presence *and* content, outside the scratch root so cleanup
+  # cannot destroy the evidence before it is compared.
+  if [ -f "$real" ]; then
+    printf 'present\n' > "$state.real-presence"
+    shasum -a 256 "$real" | awk '{print $1}' > "$state.real-hash"
+  else
+    printf 'absent\n' > "$state.real-presence"
+    : > "$state.real-hash"
+  fi
+
+  emacs -Q --name "$name" \
+    --eval "(progn
+              (setq server-name \"$name\")
+              (dolist (dir (file-expand-wildcards \"$elpaca/builds/*/\"))
+                (add-to-list 'load-path dir))
+              (add-to-list 'load-path \"$PWD\")
+              (require 'agent) (require 'agent-claude) (require 'agent-codex)
+              (require 'agent-tasks)
+              (when (locate-library \"agent-attention\") (require 'agent-attention))
+              (setq agent-tasks-file \"$root/project/tasks.org\")
+              (agent-tasks-mode 1)
+              (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
+              (server-start))" &
+  pid=$!
+  printf '%s\n' "$pid" > "$state.pid"
+  printf '%s\n' "$root" > "$state.root"
+  printf '%s\n' "$real" > "$state.real-path"
+
+  # Poll for readiness rather than sleeping a guessed interval.
+  for _ in $(seq 1 60); do
+    if emacsclient -s "$name" --eval '(featurep (quote agent-tasks))' \
+         2>/dev/null | grep -q t; then
+      trap - ERR
+      echo "ready: pid $pid, root $root"
+      echo "run the checks with: emacsclient -s $name -c"
+      return 0
+    fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  echo "verification Emacs did not become ready" >&2
+  false
+}
+
+finish() {
+  rc=0
+  root=$(cat "$state.root" 2>/dev/null) || { echo "no harness state" >&2; exit 1; }
+  pid=$(cat "$state.pid" 2>/dev/null)
+  real=$(cat "$state.real-path")
+
+  # Compare BEFORE any cleanup, and let a difference fail the run.
+  before_presence=$(cat "$state.real-presence")
+  if [ -f "$real" ]; then now_presence=present; else now_presence=absent; fi
+  if [ "$before_presence" != "$now_presence" ]; then
+    echo "FAIL: real ledger presence changed ($before_presence -> $now_presence): $real" >&2
+    rc=1
+  elif [ "$now_presence" = present ]; then
+    now_hash=$(shasum -a 256 "$real" | awk '{print $1}')
+    if [ "$now_hash" != "$(cat "$state.real-hash")" ]; then
+      echo "FAIL: the real ledger changed: $real" >&2
+      rc=1
+    fi
+  fi
+
+  # Terminate the exact process this harness started, then confirm.
+  if [ -n "$pid" ]; then
+    emacsclient -s "$name" --eval '(kill-emacs)' >/dev/null 2>&1
+    for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null; sleep 1
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "FAIL: verification Emacs $pid still running" >&2; rc=1
+    fi
+  fi
+
+  trash "$root" 2>/dev/null || true
+  if [ -e "$root" ]; then echo "FAIL: scratch root not removed: $root" >&2; rc=1; fi
+  rm -f "$state".*
+  [ $rc -eq 0 ] && echo "clean"
+  return $rc
+}
+
+case "${1:-}" in
+  start) start ;;
+  finish) finish ;;
+  *) echo "usage: $0 start|finish" >&2; exit 2 ;;
+esac
 ```
 
-`-Q` is what makes this safe: no user init, so no real session buffers,
-no attention items, and no chance of the checks touching the person's
-ledger — `agent-tasks-file` in that process points only at the scratch
-root.  Load whatever backend configuration the checks need *inside*
-that Emacs, by hand.
-
-Every later step runs in that Emacs and uses `$root`; **no step names a
-path of its own.**  Task instructions stay inert — "Reply with the
-words `task received` and do nothing else." — because every claim under
-test is about state transitions and bindings, and none needs an agent
-that changes a file.
-
-Two shell helpers for the checks that compare bytes:
+Then:
 
 ```bash
+chmod +x scripts/live-verify.sh
+./scripts/live-verify.sh start
+```
+
+Four properties that matter, each of which revision 4 lacked: the
+profile and its package builds are resolved the way the Makefile
+resolves them, so the backends actually load; the real ledger path is
+**resolved from the running profile**, never hard-coded; its presence
+and hash are recorded **outside** the scratch root, so cleanup cannot
+destroy the evidence before it is compared; and setup traps its own
+failures, killing the process and removing the root rather than leaving
+both behind.
+
+Inside that Emacs, select the backend account the checks should use the
+same way you would in any session (`agent-account`), before check 1.
+Task instructions stay inert — "Reply with the words `task received`
+and do nothing else." — because every claim under test is about state
+transitions and bindings, and none needs an agent that changes a file.
+
+Two shell helpers for the checks that compare bytes, using the recorded
+root:
+
+```bash
+root=$(cat "${TMPDIR:-/tmp}/agent-tasks-live.state.root")
 baseline() { git -C "$root/project" add -- tasks.org &&
              git -C "$root/project" commit -q --allow-empty -m "baseline: $1"; }
 ledger_diff() { git -C "$root/project" diff -- tasks.org; }
@@ -6769,28 +6919,16 @@ says.
 
 - [ ] **Step 6: Dispose of the verification Emacs**
 
-Nothing to restore — the process held no real state — so disposal is
-termination plus cleanup, and both are checked:
-
 ```bash
-emacsclient -s agent-tasks-live --eval '(kill-emacs)' 2>/dev/null
-sleep 1
-pgrep -f 'agent-tasks-live' && echo "VERIFICATION EMACS STILL RUNNING" && exit 1
-
-trash "$root" || { echo "CLEANUP FAILED: $root still exists"; exit 1; }
-[ -e "$root" ] && echo "CLEANUP FAILED: $root still exists" && exit 1
-
-# The real ledger must be exactly as it was.
-real=~/.emacs.d/agent/tasks.org
-if [ -f "$real" ]; then shasum -a 256 -c "$root/real-ledger.sha" 2>/dev/null ||
-     echo "THE REAL LEDGER CHANGED"; fi
+./scripts/live-verify.sh finish || echo "VERIFICATION CLEANUP FAILED"
 ```
 
-Take the real-ledger hash file out of the root before trashing it, or
-compare it beforehand — the check above is written in the order that
-reads clearly, and either arrangement is fine as long as the comparison
-actually happens.  If the verification Emacs died early, the root still
-needs trashing: run the cleanup regardless of how the run ended.
+`finish` compares the real ledger's presence and hash **before** it
+touches anything, kills the exact process id it recorded and confirms
+it is gone, trashes the scratch root and confirms it is gone, and exits
+non-zero if any of those checks fails.  Run it however the run ended —
+including after an aborted or crashed session — and treat a non-zero
+exit as a verification failure, not a cleanup nuisance.
 
 - [ ] **Step 7: Record the outcome**
 
@@ -6809,8 +6947,10 @@ make test && make compile
 Stage **only** the verification record, plus any file you actually
 changed while fixing a defect this step found, each by explicit path.
 `git add -A` would sweep in whatever else happens to be in the working
-tree.  If fixing a defect changed the module, that fix belongs to its
-own task's commit with its own regression test, not to this one.
+tree, including `scripts/live-verify.sh`, which is scratch tooling and
+is not committed.  If fixing a defect changed the module, that fix
+belongs to its own task's commit with its own regression test, not to
+this one.
 
 ---
 

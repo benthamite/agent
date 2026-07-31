@@ -425,16 +425,28 @@ of it runs while holding an interprocess lock**:
 
    The coding system is chosen by applying **Emacs's own precedence**
    to that one byte string: `coding-system-for-read`, then
+   `set-auto-coding` (which reads a `-*- coding: -*-` cookie), then
    `find-operation-coding-system` (which consults
-   `file-coding-system-alist`), then `set-auto-coding` (which reads a
-   `-*- coding: -*-` cookie), and only then content detection.
+   `file-coding-system-alist`), and only then content detection.  The
+   **cookie outranks the alist** — verified in batch, where a cookie
+   saying `iso-8859-1` beat an alist entry saying `utf-8-unix`; revision
+   4 had those two the other way round.
+
+   The **end-of-line variant comes from the same bytes**.  A cookie
+   names a character set and says nothing about line endings, so the
+   coding it yields has an unspecified eol type, and writing back with
+   it uses the platform default — which silently **rewrites a CRLF
+   ledger as LF**.  Detection over the same snapshot supplies the eol
+   type and pins it.
+
    Revision 3 used content detection alone, which disagrees with
-   `insert-file-contents` whenever any earlier step applies — verified
-   in batch: for a ledger whose cookie says `iso-8859-1` while its
-   bytes are valid UTF-8, detection returns `utf-8` and decodes to
-   different text.  With the full chain, all four cases decode
-   identically to `insert-file-contents` and round-trip to identical
-   bytes.
+   `insert-file-contents` whenever any earlier step applies: for a
+   ledger whose cookie says `iso-8859-1` while its bytes are valid
+   UTF-8, detection returns `utf-8` and decodes to different text.
+   With both corrections, every case — cookie, cookie plus CRLF, plain
+   CRLF, plain LF, alist entry, read override, and a cookie-versus-alist
+   conflict — yields the same coding system as `insert-file-contents`,
+   decodes to the same text, and round-trips to identical bytes.
 3. Apply the edit in a temp buffer holding the file's contents, in
    `org-mode`, with `org-mode-hook` bound to nil (the person's org hooks
    have no business running inside a machine write),
@@ -1202,10 +1214,15 @@ into a busy session; a second transcript renderer.
   `agent-tasks-lock-timeout` with a message naming the lock, and the
   ledger is unchanged.  Lock release is checked on the success path and
   on a signalling one.
-- **Snapshot coding**: a ledger carrying a `-*- coding: -*-` cookie, one
-  matched by a `file-coding-system-alist` entry, and one read under a
-  `coding-system-for-read` binding each decode to exactly what
-  `insert-file-contents` produces and round-trip to identical bytes.
+- **Snapshot coding**: a ledger carrying a `-*- coding: -*-` cookie, the
+  same one **with CRLF line endings**, a plain CRLF ledger, a plain LF
+  one, one matched by a `file-coding-system-alist` entry, one read under
+  a `coding-system-for-read` binding, and one where a cookie and an
+  alist entry **conflict** each yield the same coding system as
+  `insert-file-contents`, decode to the same text, and round-trip to
+  identical bytes.  The cookie-plus-CRLF case is the one that fails
+  when the eol variant is dropped, and the conflict case is the one
+  that fails when the cookie is ranked below the alist.
 - **The snapshot is one read**: a fault-injected rename between the two
   reads revision 2 performed is caught, because there are no longer two
   — the test replaces the file between the token read and the text read
@@ -1388,18 +1405,33 @@ for the verification and killed after it:
   attention items, and no configured real ledger — `agent-tasks-file`
   in it points only at a generated scratch root.  No global is saved or
   restored, because none of the person's globals is ever touched.
+- **It can still start the backends.**  `-Q` suppresses the person's
+  init, not the load path: the harness resolves the active profile and
+  its package builds exactly as the Makefile does, requires `agent`,
+  both backend modules, `agent-tasks` and — when present —
+  `agent-attention`, and the account is selected inside that process
+  before the first check.  A process that cannot start Claude or Codex
+  cannot run any of these checks.
+- **The real ledger's path is resolved from the running profile**, not
+  written into the procedure, and its **presence and hash are recorded
+  outside the scratch root** so cleanup cannot destroy the evidence
+  before it is compared.  A change in either — content differing, or a
+  ledger appearing where there was none — fails the verification with a
+  non-zero status.
 - **One generated root per run**, created with `mktemp -d`, containing
   a `git init`-ed repository with the **ledger file inside it**, which
   is what makes the byte-level `git diff` checks possible at all.  Every
   step uses that root; no step names a path of its own.
 - **A fresh baseline commit before every check that reads a diff**, so
   one check's changes cannot be mistaken for the next one's.
-- **Disposal is checked, not assumed.**  Setup aborts if any of its
-  `mkdir`/`git init`/`git commit` steps fails, before anything else
-  happens.  Teardown kills the process and then verifies it is gone,
-  trashes the root and then verifies it is gone, and compares the real
-  ledger's hash from before the run against its hash after.  Cleanup
-  runs however the run ended.
+- **Disposal is checked, not assumed.**  Setup runs under a failure
+  trap: any failing step kills whatever process it started and removes
+  the root rather than leaving both behind, and it polls for the
+  process to become ready instead of sleeping a guessed interval.
+  Teardown compares the real ledger first, then kills **the exact
+  process id setup recorded** and confirms it is gone, then trashes the
+  root and confirms it is gone, exiting non-zero if any check fails.
+  It runs however the run ended, including after a crash.
 - Task instructions are inert: "Reply with the words `task received` and
   do nothing else."  Every claim under test is about state transitions
   and bindings; none needs an agent that changes a file.
