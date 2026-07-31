@@ -67,8 +67,14 @@ These apply to every task.  They restate the spec's non-negotiables.
   outside the dying buffer and are written to the session's capture file;
   a failed write keeps them stashed in memory, files an error attention
   item, and warns.  Nothing is cleared by elapsed time.
-- Defcustom defaults exactly as specified: `agent-queue-debounce` 2,
-  `agent-queue-stall-seconds` 30, `agent-queue-poll-interval` 10.
+- Defcustom defaults: `agent-completion-grace` 8,
+  `agent-queue-stall-seconds` 30, `agent-queue-poll-interval` 10.  The
+  spec's `agent-queue-debounce` (2) does not exist; deviation 8 explains
+  why one core-level grace window replaced it.
+- **One correlation contract.**  Whether a completion reports a new turn
+  end is decided once, in `agent-session-event`, and every consumer
+  reads the answer from the delivered `:redundant` flag.  No consumer
+  keeps a second clock or re-derives the verdict.
 - All 362+ existing tests keep passing; `make compile` stays
   warning-free in both repos.
 - Commit after every task with a single-purpose message.
@@ -170,16 +176,22 @@ the implementer does not "fix" it back.
    failed session must not receive automatic input; pausing at the
    moment the backend says the turn died reports the actual reason
    instead of a generic stall, and still sends nothing.
-8. **A reported turn start resolves an item regardless of the debounce.**
-   The spec's rule — "the first non-redundant completion arriving later
-   than `agent-queue-debounce` after dispatch" — strands a turn that
-   starts and ends inside the debounce, which is an ordinary short
-   Claude turn.  Once the backend has said this item's turn began, the
-   next completion is that turn's end however soon it arrives; the
-   debounce is only there to discount completions of the turn that
-   ended *before* the dispatch, and that ambiguity is gone once a start
-   was observed.  The id-mismatch check still applies whenever both
-   sides report an id.
+8. **One core-level `agent-completion-grace` (8 s) replaces the queue's
+   own `agent-queue-debounce` (2 s).**  The spec puts the duplicate
+   guard in the queue and sizes it at two seconds, but the same
+   ambiguity governs the before-exit chain, which submits the next skill
+   synchronously from inside a completion; two consumers with two
+   different clocks can disagree about which turn ended, and the chain
+   had no clock at all.  So the question is answered once, in
+   `agent-session-event`, and delivered as `:redundant`.  Two seconds is
+   also too small: the spec's own capability table measures Claude's
+   notification channel at about six seconds, so a delayed `idle_prompt`
+   would clear a two-second window and be read as a new turn's end.
+   Eight seconds is larger than that delay.  The cost is stated plainly:
+   a Claude turn shorter than the grace is reported by its own second
+   completion instead of its first, so the queue advances a few seconds
+   late rather than wrongly.  Backends that report turn ids are
+   unaffected — correlation short-circuits the timing entirely.
 9. **The queue checks for a blocked dialog itself.**  `blocked` leaves
    a session in `awaiting-input`, so the fallback readiness path —
    Claude and terminal Codex, neither of which can see a dialog — would
@@ -212,7 +224,16 @@ the implementer does not "fix" it back.
     each routed item carries codex.el's own way of asking, and mode
     disable runs it.  An item with no fallback is invalidated with an
     explanation rather than silently abandoned.
-13. **Queue items have five states, not the spec's four.**  `failed` is
+13. **A dispatch that produces no turn stalls on elapsed time alone.**
+    The spec's stall condition also requires the session to look idle
+    ("state stays `awaiting-input`, probes idle"), but a dispatch marks
+    the session busy through its own `submit` event, so a session that
+    swallowed a submission without starting a turn never looks idle
+    again.  Keeping that condition would mean the stall never fires and
+    the prompt is stranded silently — the outcome the stall exists to
+    prevent.  The check is therefore simply: this item was sent, and no
+    backend has reported a turn for it since.
+14. **Queue items have five states, not the spec's four.**  `failed` is
     added for a submission call that signaled: like `stalled`, delivery
     is unproven, and the difference from `queued` is what makes
     at-most-once delivery actually hold — no automatic path returns a
@@ -237,7 +258,15 @@ the implementer does not "fix" it back.
     `(:type EVENT :time FLOAT :source SYMBOL-or-nil :redundant BOOL
     :payload PLIST-or-nil)`.
   - The `error` event symbol.
-  - `agent--session-progress-since-completion` (buffer-local, private).
+  - `agent-completion-grace` (defcustom, default 8).
+  - `agent--session-completion-canonical-p BUFFER PAYLOAD` — the single
+    correlation contract; every at-most-once consumer reads its verdict
+    through the delivered `:redundant` flag rather than re-deriving it.
+  - `agent--session-turn-observed`, `agent--session-quiet-since`,
+    `agent--session-completed-turn-id`, `agent--session-awaiting-reason`
+    (buffer-local, private).
+  - `agent-session-fresh-turn-evidence-p BUFFER` (added in Task 2, but
+    fed by the awaiting reason this task records).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -256,12 +285,25 @@ Add to `test/agent-test.el`, at the end of the file before the final
                                         :directory "~/project/")))
     buffer))
 
+(defvar agent-test--clock 1000.0
+  "Value `float-time' returns inside `agent-test--with-event-buffer'.")
+
+(defun agent-test--tick (seconds)
+  "Advance the test clock by SECONDS."
+  (setq agent-test--clock (+ agent-test--clock seconds)))
+
 (defmacro agent-test--with-event-buffer (var &rest body)
-  "Bind VAR to a disposable session buffer and run BODY."
+  "Bind VAR to a disposable session buffer and run BODY.
+Time is frozen and advanced only by `agent-test--tick', because the
+completion contract is defined in terms of elapsed seconds and a test
+that let real time pass would be timing-dependent."
   (declare (indent 1))
-  `(let ((,var (agent-test--event-buffer)))
-     (unwind-protect (progn ,@body)
-       (kill-buffer ,var))))
+  `(let ((,var (agent-test--event-buffer))
+         (agent-test--clock 1000.0))
+     (cl-letf (((symbol-function 'float-time)
+                (lambda (&optional _time) agent-test--clock)))
+       (unwind-protect (progn ,@body)
+         (kill-buffer ,var)))))
 
 (ert-deftest agent-test-session-event/legacy-two-argument-calls-work ()
   "A two-argument call still drives the state machine."
@@ -312,9 +354,43 @@ Add to `test/agent-test.el`, at the end of the file before the final
                     (when (memq (plist-get plist :type) '(stop idle-prompt))
                       (push (plist-get plist :redundant) flags))))))
       (agent-session-event buf 'submit)
+      (agent-test--tick 30)
       (agent-session-event buf 'stop)
       (agent-session-event buf 'idle-prompt)
       (should (equal (nreverse flags) '(nil t))))))
+
+(ert-deftest agent-test-session-event/turn-ids-need-no-timing ()
+  "A transport with turn ids correlates without waiting for the grace."
+  (agent-test--with-event-buffer buf
+    (let* ((flags nil)
+           (agent-session-event-functions
+            (list (lambda (_buffer plist)
+                    (when (memq (plist-get plist :type) '(stop idle-prompt))
+                      (push (plist-get plist :redundant) flags))))))
+      (agent-session-event buf 'submit)
+      (agent-session-event buf 'idle-prompt '(:turn-id "t1"))
+      (agent-session-event buf 'stop '(:turn-id "t1"))
+      (agent-session-event buf 'submit)
+      (agent-session-event buf 'idle-prompt '(:turn-id "t2"))
+      (should (equal (nreverse flags) '(nil t nil))))))
+
+(ert-deftest agent-test-session-event/short-turn-is-late-not-lost ()
+  "A turn too short to be observed is reported by its own second event.
+Claude's status poll deliberately suppresses `activity' when a turn
+starts and ends between polls, so the first completion falls inside the
+grace window; the `idle_prompt' that follows it does not."
+  (agent-test--with-event-buffer buf
+    (let* ((flags nil)
+           (agent-session-event-functions
+            (list (lambda (_buffer plist)
+                    (when (memq (plist-get plist :type) '(stop idle-prompt))
+                      (push (plist-get plist :redundant) flags))))))
+      (agent-session-event buf 'submit)
+      (agent-test--tick 3)
+      (agent-session-event buf 'stop)
+      (agent-test--tick 6)
+      (agent-session-event buf 'idle-prompt)
+      (should (equal (nreverse flags) '(t nil))))))
 
 (ert-deftest agent-test-session-event/progress-clears-redundancy ()
   "Any observed progress makes the next completion canonical again."
@@ -341,6 +417,7 @@ Add to `test/agent-test.el`, at the end of the file before the final
                 ((symbol-function 'agent--refresh-display-names-deferred)
                  #'ignore))
         (agent-session-event buf 'submit)
+        (agent-test--tick 30)
         (agent-session-event buf 'idle-prompt)
         (agent-session-event buf 'idle-prompt)
         (should (= alerts 2))))))
@@ -357,6 +434,7 @@ Add to `test/agent-test.el`, at the end of the file before the final
                 ((symbol-function 'agent--refresh-display-names-deferred)
                  #'ignore))
         (agent-session-event buf 'submit)
+        (agent-test--tick 30)
         (agent-session-event buf 'stop)
         (agent-session-event buf 'idle-prompt)
         (should (= steps 1))))))
@@ -390,6 +468,7 @@ Add to `test/agent-test.el`, at the end of the file before the final
                     (when (memq (plist-get plist :type) '(stop idle-prompt))
                       (push (plist-get plist :redundant) flags))))))
       (agent-session-event buf 'submit)
+      (agent-test--tick 30)
       (agent-session-event buf 'error '(:error "rate_limit"))
       (agent-session-event buf 'stop)
       (should (equal (nreverse flags) '(t))))))
@@ -405,6 +484,19 @@ Add to `test/agent-test.el`, at the end of the file before the final
                 'stop))
     (agent-session-event buf 'submit)
     (should (null (buffer-local-value 'agent--session-awaiting-reason buf)))))
+
+(ert-deftest agent-test-session-event/redundant-completion-keeps-the-reason ()
+  "A duplicate completion cannot overwrite an `error' as the reason.
+Otherwise the delayed `idle_prompt' of the very turn that died would
+read as fresh evidence that a new turn may start."
+  (agent-test--with-event-buffer buf
+    (agent-session-event buf 'submit)
+    (agent-test--tick 30)
+    (agent-session-event buf 'error '(:error "rate_limit"))
+    (agent-session-event buf 'stop)
+    (should (eq (buffer-local-value 'agent--session-awaiting-reason buf)
+                'error))
+    (should-not (agent-session-fresh-turn-evidence-p buf))))
 
 (ert-deftest agent-test-session-event/before-exit-chain-advances-twice ()
   "A two-skill before-exit chain is not stranded by its own submission.
@@ -430,10 +522,46 @@ synchronously; the second completion must still be canonical."
         ;; Starting the chain submits the first skill and delays the exit,
         ;; so the command returns nil.
         (should-not (agent-run-skill-before-exit 'test buf))
+        (agent-test--tick 30)
         (agent-session-event buf 'stop)
+        (agent-test--tick 30)
         (agent-session-event buf 'stop))
       (should (equal (nreverse submitted) '("/first" "/second")))
       (should (eq (buffer-local-value 'agent--session-state buf) 'closing)))))
+
+(ert-deftest agent-test-session-event/before-exit-chain-advances-once-per-turn ()
+  "A delayed duplicate cannot advance the before-exit chain a second time.
+The first completion advances the chain, which submits the next skill
+synchronously.  The `idle_prompt' that Claude sends seconds later for
+the turn that just ended must not be read as that new skill's
+completion, or the chain would skip a skill and close early."
+  (agent-test--with-event-buffer buf
+    (let ((agent-backends nil)
+          (submitted nil))
+      (apply #'agent-register-backend 'test
+             (agent-test--backend
+              :buffer-p (lambda (b) (eq b buf))
+              :skill-command-prefix "/"
+              :submit (lambda (text _b) (push text submitted))))
+      (with-current-buffer buf (setq-local agent--backend 'test))
+      (cl-letf (((symbol-function 'agent--scroll-to-bottom) #'ignore)
+                ((symbol-function 'agent--refresh-display-names-deferred)
+                 #'ignore)
+                ((symbol-function 'agent--session-notify-ready) #'ignore)
+                ((symbol-function 'agent--before-exit-skill-queue)
+                 (lambda (&rest _) (list "first" "second" "third")))
+                ((symbol-function 'message) #'ignore))
+        (agent-session-event buf 'submit)
+        (should-not (agent-run-skill-before-exit 'test buf))
+        (agent-test--tick 30)
+        ;; The first skill's turn ends; the chain submits the second.
+        (agent-session-event buf 'stop)
+        ;; Claude's delayed notification for that same turn arrives.
+        (agent-test--tick 6)
+        (agent-session-event buf 'idle-prompt))
+      (should (equal (nreverse submitted) '("/first" "/second")))
+      (should-not (eq (buffer-local-value 'agent--session-state buf)
+                      'closing)))))
 
 (ert-deftest agent-test-session-event/consumer-signal-does-not-stop-others ()
   "A signaling consumer is reported and the rest still run."
@@ -465,14 +593,38 @@ In `agent.el`, add next to the other state variables (after
 `agent--session-state-changed-at`, ~line 668):
 
 ```elisp
-(defvar-local agent--session-progress-since-completion t
-  "Non-nil when this session did something since its last turn ended.
-Set by `submit', `activity', and `blocked' events; cleared by the
-terminal events `stop', `idle-prompt', and `error'.  A completion
-arriving while this is nil is a duplicate report of a turn that already
-ended, and is delivered with `:redundant t'.  New buffers start non-nil
-so the first completion observed is always canonical.  Only
+(defcustom agent-completion-grace 8
+  "Seconds a completion must outlast the last submission to count as new.
+Claude Code and terminal Codex report no turn ids, so a completion can
+only be attributed by timing: a duplicate report of a turn that already
+ended arrives within a few seconds of whatever was submitted next, while
+a genuinely new turn's own second completion arrives later than that.
+The default is larger than the roughly six-second delay the spec
+measures on Claude's notification channel; lowering it below that delay
+would let a delayed `idle_prompt' be read as a new turn's end."
+  :type 'number
+  :group 'agent)
+
+(defvar-local agent--session-turn-observed nil
+  "Non-nil when work was observed since this session's last turn ended.
+Set by `activity' and `blocked' events, cleared by a canonical
+completion or an `error'.  Only `agent-session-event' may set this
+variable.")
+
+(defvar-local agent--session-quiet-since nil
+  "`float-time' when this session was last quiet, or nil.
+Quiet means the later of the last canonical completion and the last
+submission.  A completion arriving within `agent-completion-grace' of
+that moment, with no observed work and no turn id, is a duplicate
+report of a turn already accounted for.  Nil in a buffer that has never
+reported anything, whose first completion is therefore canonical.  Only
 `agent-session-event' may set this variable.")
+
+(defvar-local agent--session-completed-turn-id nil
+  "Turn id of this session's last canonical completion, or nil.
+Lets a transport that reports turn ids recognize a repeat of the same
+turn without any timing at all.  Only `agent-session-event' may set
+this variable.")
 
 (defvar-local agent--session-awaiting-reason nil
   "Why this session is waiting on the user, or nil when it is not.
@@ -548,14 +700,14 @@ ignored by the state machine, because backend submission hooks can fire
 multiple times per submission and on submissions that start no turn;
 the observer hook still sees it."
   (when (buffer-live-p buffer)
-    (let ((redundant (agent--session-event-redundant-p buffer event)))
+    (let ((redundant (agent--session-event-redundant-p buffer event payload)))
       ;; Bookkeeping first, side effects second.  A canonical completion
       ;; can advance the before-exit chain, which submits the next skill
-      ;; SYNCHRONOUSLY and so delivers a nested `submit' event.  If this
-      ;; completion cleared the progress flag afterwards it would erase
-      ;; that nested submission, and the chain's next completion would be
-      ;; misread as redundant, stranding a multi-step chain.
-      (agent--session-note-progress buffer event)
+      ;; SYNCHRONOUSLY and so delivers a nested `submit' event.  Recording
+      ;; this completion after that nested submit would rewind the clock
+      ;; the nested submit just set, and the delayed duplicate of THIS
+      ;; turn would then be read as the next turn's completion.
+      (agent--session-note-progress buffer event payload redundant)
       (pcase event
         ((or 'stop 'idle-prompt 'blocked 'error)
          (agent--session-event-awaiting-input buffer event redundant))
@@ -574,32 +726,81 @@ the observer hook still sees it."
              :redundant redundant
              :payload payload)))))
 
-(defun agent--session-event-redundant-p (buffer event)
+(defun agent--session-event-redundant-p (buffer event payload)
   "Return non-nil when EVENT is a completion BUFFER already reported.
-One finished turn can produce several completion events -- Claude's
-`Stop' hook followed by a later `idle_prompt' notification, or the
-Codex app-server's `turn/completed' followed by the CLI `Stop' hook --
-and consumers that must act at most once per turn need to tell them
-apart.  A completion following an `error' is redundant too: the error
-already reported that this turn ended."
+See `agent--session-completion-canonical-p' for the contract."
   (and (memq event '(stop idle-prompt))
-       (not (buffer-local-value 'agent--session-progress-since-completion
-                                buffer))))
+       (not (agent--session-completion-canonical-p buffer payload))))
 
-(defun agent--session-note-progress (buffer event)
-  "Record EVENT in BUFFER's completion-deduplication state.
-Terminal events -- `stop', `idle-prompt', and `error' -- end a turn and
-clear the flag, so any further completion for the same turn is
-redundant.  `submit', `activity', and `blocked' are progress: the
-session did something the next completion will be reporting the end of.
-`blocked' is progress rather than terminal because the turn continues
-once the user answers."
+(defun agent--session-completion-canonical-p (buffer payload)
+  "Return non-nil when a completion with PAYLOAD reports a new turn end.
+This is the single correlation contract every at-most-once consumer
+depends on.  One finished turn can produce several completion events --
+Claude's `Stop' hook followed by an `idle_prompt' notification seconds
+later, or the Codex app-server's `turn/completed' followed by the CLI
+`Stop' hook -- and a completion that merely repeats a turn already
+reported must not advance the before-exit chain or resolve a queued
+prompt a second time.  In order:
+
+1. A completion carrying a turn id is canonical when that id differs
+   from the last one completed.  This is authoritative and needs no
+   timing: only Codex app-server supplies it.
+2. Otherwise, observed work since the last canonical completion --
+   `activity' or `blocked' -- proves a new turn ran, so its end is
+   canonical.
+3. Otherwise, a completion is canonical only once
+   `agent-completion-grace' has passed since the session was last
+   quiet, where \"quiet\" is the later of the last canonical completion
+   and the last submission.  A submission is deliberately NOT proof
+   that a turn started -- the spec is explicit that submissions may
+   duplicate or start no turn -- so it only restarts this clock.
+4. A buffer that has never been quiet has never reported anything, so
+   its first completion is canonical.
+
+Rule 3 is what makes both hard Claude sequences come out right without
+turn ids.  A delayed `idle_prompt' for a turn that already ended arrives
+within a few seconds of the submission the previous completion
+triggered, so it is redundant.  A genuinely new turn that is too short
+to be seen -- Claude suppresses its status-poll `activity' when a turn
+starts and ends between polls -- produces two completions of its own,
+and the second lands outside the window, so the turn is reported late
+rather than lost.  `agent-completion-grace' must therefore stay larger
+than Claude's notification delay, which the spec measures at about six
+seconds."
+  (let ((turn (plist-get payload :turn-id)))
+    (with-current-buffer buffer
+      (cond
+       (turn (not (equal turn agent--session-completed-turn-id)))
+       (agent--session-turn-observed t)
+       ((null agent--session-quiet-since) t)
+       (t (> (- (float-time) agent--session-quiet-since)
+             agent-completion-grace))))))
+
+(defun agent--session-note-progress (buffer event payload redundant)
+  "Record EVENT and PAYLOAD in BUFFER's completion-correlation state.
+REDUNDANT is the verdict already computed for EVENT, passed in rather
+than recomputed so the recorded state and the delivered flag can never
+disagree.
+`activity' and `blocked' are observed work: they prove a turn is
+running, so the next completion is canonical whatever the timing.
+`submit' is not observed work -- it only restarts the quiet clock,
+because a submission may duplicate another or start no turn at all.
+A canonical completion and an `error' both end a turn: they clear the
+observed flag, restart the quiet clock, and record the completed turn
+id.  A redundant completion changes nothing, so a duplicate cannot
+extend the window that identified it as a duplicate."
   (with-current-buffer buffer
     (pcase event
-      ((or 'submit 'activity 'blocked)
-       (setq agent--session-progress-since-completion t))
+      ((or 'activity 'blocked)
+       (setq agent--session-turn-observed t))
+      ('submit
+       (setq agent--session-quiet-since (float-time)))
       ((or 'stop 'idle-prompt 'error)
-       (setq agent--session-progress-since-completion nil)))))
+       (unless redundant
+         (setq agent--session-turn-observed nil)
+         (setq agent--session-quiet-since (float-time))
+         (setq agent--session-completed-turn-id
+               (plist-get payload :turn-id)))))))
 
 (defun agent--run-session-event-functions (buffer event-plist)
   "Run `agent-session-event-functions' with BUFFER and EVENT-PLIST.
@@ -637,7 +838,11 @@ prompt or sitting in a permission dialog, and callers that are about to
 send text need to tell those apart."
   (agent--session-set-state buffer 'awaiting-input)
   (with-current-buffer buffer
-    (setq agent--session-awaiting-reason event))
+    ;; A redundant completion must not overwrite the reason: if the turn
+    ;; ended with `error', the delayed duplicate of that same turn would
+    ;; otherwise look like fresh evidence that a new turn may start.
+    (unless (and (memq event '(stop idle-prompt)) redundant)
+      (setq agent--session-awaiting-reason event)))
   (unless (and (memq event '(stop idle-prompt))
                (not redundant)
                (agent--before-exit-transition buffer 'step))
@@ -687,6 +892,12 @@ git commit -m "agent: add structured session events and canonical completions"
     reported `blocked`.
   - `agent--session-dialog-blocked-p BUFFER` → non-nil while the session
     last reported `blocked`.
+  - `agent-session-fresh-turn-evidence-p BUFFER` → non-nil only after a
+    canonical `stop` or `idle-prompt`.
+  - `agent-session-can-start-turn-p BUFFER &optional BACKEND` → the
+    positive gate every automatic sender must pass.
+  - `agent--backend-reports-readiness-p BACKEND` → non-nil when the
+    backend registers a protocol readiness probe.
   - `agent-session-annotation-functions` — abnormal hook, BUFFER →
     string or nil.
   - `agent--backend-label BACKEND` → string.
@@ -773,6 +984,39 @@ Add to `test/agent-test.el`:
               :ready-to-submit-p (lambda (_b) 'ready)))
       (agent-session-event buf 'blocked '(:kind question))
       (should (eq (agent-session-ready-to-submit-p buf 'optimistic) 'busy)))))
+
+(ert-deftest agent-test-can-start-turn/needs-positive-evidence ()
+  "Without a protocol probe, only a canonical completion opens the gate."
+  (agent-test--with-event-buffer buf
+    (let ((agent-backends nil))
+      (apply #'agent-register-backend 'unprobed
+             (agent-test--backend :buffer-p (lambda (b) (eq b buf))))
+      ;; Nothing reported yet: no evidence, so no automatic send.
+      (should-not (agent-session-can-start-turn-p buf 'unprobed))
+      (agent-session-event buf 'stop)
+      (should (agent-session-can-start-turn-p buf 'unprobed))
+      ;; A failed turn leaves the session in `awaiting-input', which the
+      ;; fallback readiness path reads as ready -- the evidence clause is
+      ;; what refuses it.
+      (agent-test--tick 30)
+      (agent-session-event buf 'error '(:error "rate_limit"))
+      (should (eq (agent-session-ready-to-submit-p buf 'unprobed) 'ready))
+      (should-not (agent-session-can-start-turn-p buf 'unprobed))
+      ;; The delayed duplicate of that dead turn is not new evidence.
+      (agent-session-event buf 'stop)
+      (should-not (agent-session-can-start-turn-p buf 'unprobed)))))
+
+(ert-deftest agent-test-can-start-turn/protocol-probe-is-evidence ()
+  "A backend that answers from a protocol probe needs no event history."
+  (agent-test--with-event-buffer buf
+    (let ((agent-backends nil))
+      (apply #'agent-register-backend 'probed
+             (agent-test--backend
+              :buffer-p (lambda (b) (eq b buf))
+              :ready-to-submit-p (lambda (_b) 'ready)))
+      (should (agent-session-can-start-turn-p buf 'probed))
+      (agent-session-event buf 'blocked '(:kind permission))
+      (should-not (agent-session-can-start-turn-p buf 'probed)))))
 
 (ert-deftest agent-test-annotations/concatenates-every-result ()
   "All non-nil annotations appear after the label, space-separated."
@@ -893,10 +1137,50 @@ stop is `ready', and a session whose state was never observed stays
 A `blocked' report means the CLI is not at a fresh prompt: it is
 showing a permission or input dialog, and anything typed answers that
 dialog.  The flag clears as soon as the session reports progress or a
-completion, so a dialog the user answers in the terminal releases it at
-the next turn boundary.  A session whose dialog is never resolved
-simply keeps refusing automatic input, which is the safe direction."
+canonical completion, so a dialog the user answers in the terminal
+releases it at the next turn boundary.  A session whose dialog is never
+resolved simply keeps refusing automatic input, which is the safe
+direction."
   (eq (buffer-local-value 'agent--session-awaiting-reason buffer) 'blocked))
+
+(defun agent-session-fresh-turn-evidence-p (buffer)
+  "Return non-nil when BUFFER positively reported that a turn ended well.
+True only after a canonical `stop' or `idle-prompt'.  Nil after
+`blocked' and after `error', and nil in a session that has reported no
+lifecycle event at all -- absence of evidence is not evidence, and a
+duplicate completion never overwrites the reason that identified it as
+a duplicate."
+  (memq (buffer-local-value 'agent--session-awaiting-reason buffer)
+        '(stop idle-prompt)))
+
+(defun agent-session-can-start-turn-p (buffer &optional backend)
+  "Return non-nil when text sent to BUFFER now would start a fresh turn.
+This is the gate any automatic sender must pass, and it demands
+positive evidence rather than the absence of a reason to refuse.  The
+readiness probe must say `ready', and on top of that one of:
+
+- the backend registers `:ready-to-submit-p', in which case its verdict
+  is protocol evidence in its own right -- it saw the process, the
+  thread, the turn, and the backend's own queue; or
+- the session itself reported a canonical `stop' or `idle-prompt' as
+  the last thing that happened to it.
+
+Without that second clause a session whose turn died -- `error', with
+the CLI back at its prompt and the lifecycle state back at
+`awaiting-input' -- reads as ready on every transport that has no
+protocol probe, and so does a session that has never reported anything
+at all.  Requiring the evidence rather than the absence of an objection
+is what keeps a prompt queued after a failure from being sent into the
+session that just failed."
+  (let ((backend (or backend (agent--detect-backend buffer))))
+    (and (eq (agent-session-ready-to-submit-p buffer backend) 'ready)
+         (or (agent--backend-reports-readiness-p backend)
+             (agent-session-fresh-turn-evidence-p buffer)))))
+
+(defun agent--backend-reports-readiness-p (backend)
+  "Return non-nil when BACKEND answers readiness from a protocol probe."
+  (when-let* ((struct (and backend (agent-backend backend))))
+    (and (agent-backend-ready-to-submit-p struct) t)))
 ```
 
 Add the annotation hook immediately before `agent--session-suffix-spec`:
@@ -1220,6 +1504,36 @@ Add to `test/agent-capture-test.el`:
                             (plist-get first :file) t))))
         (should (equal texts '("two")))))))
 
+(ert-deftest agent-capture-test-store-prompt/failed-append-leaves-no-trace ()
+  "A failed append cannot be flushed to disk by the next successful one.
+Success, failure, success: the file must end up holding exactly the two
+successful entries, and the handles must name exactly those."
+  (agent-capture-test--with-directory
+    (let* ((session (agent-session-create :backend 'codex
+                                          :directory "~/project/"))
+           (file (agent-capture-session-file session))
+           (first (agent-capture-store-prompt session "p" "one" "q1"))
+           (calls 0))
+      (cl-letf* ((real (symbol-function 'save-buffer))
+                 ((symbol-function 'save-buffer)
+                  (lambda (&rest args)
+                    (cl-incf calls)
+                    (if (= calls 1)
+                        (error "disk full")
+                      (apply real args)))))
+        (should-error (agent-capture-store-prompt session "p" "two" "q2")))
+      (let ((third (agent-capture-store-prompt session "p" "three" "q3")))
+        (should (equal (mapcar (lambda (prompt) (plist-get prompt :text))
+                               (agent-capture--read-prompts file t))
+                       '("one" "three")))
+        (should (equal (plist-get first :text) "one"))
+        (should (equal (plist-get third :text) "three"))
+        ;; Both handles still delete exactly their own entry.
+        (agent-capture--delete-prompt first)
+        (should (equal (mapcar (lambda (prompt) (plist-get prompt :text))
+                               (agent-capture--read-prompts file t))
+                       '("three")))))))
+
 (ert-deftest agent-capture-test-store-prompt/signals-when-unconfirmed ()
   "A write that cannot be confirmed on disk signals."
   (agent-capture-test--with-directory
@@ -1320,7 +1634,17 @@ synchronously, and re-reads it from disk to confirm the entry landed.
 Return the prompt handle plist -- the same shape `agent-capture--prompts'
 returns, accepted by `agent-capture--delete-prompt'.  Signal an error
 when the write cannot be confirmed, so callers can keep the text
-somewhere else instead of assuming it is safe."
+somewhere else instead of assuming it is safe.
+
+The append is a transaction.  The capture file is a shared, long-lived
+buffer, so an append that fails must leave nothing behind: a later
+successful call would otherwise save the earlier failure's text to disk
+as a side effect, producing an entry no caller holds a handle for --
+text that is on disk, invisible to the code that thinks it was lost,
+and unremovable by the handle-based cleanup.  On any failure the
+inserted region is deleted and the buffer is re-read from disk, so the
+shared buffer matches the file again before the next caller touches
+it."
   (require 'org)
   (let* ((file (agent-capture-session-file session))
          (trimmed (string-trim text)))
@@ -1330,12 +1654,36 @@ somewhere else instead of assuming it is safe."
     (let ((buffer (find-file-noselect file)))
       (with-current-buffer buffer
         (org-mode)
-        (agent-capture--ensure-header (agent-session-backend session) label)
-        (goto-char (agent-capture--append-entry tag))
-        (insert trimmed "\n")
-        (save-buffer)))
-    (or (agent-capture--stored-prompt file trimmed tag)
-        (error "Could not confirm the captured prompt in %s" file))))
+        (let ((start (point-max))
+              (was-modified (buffer-modified-p)))
+          (condition-case err
+              (progn
+                (agent-capture--ensure-header
+                 (agent-session-backend session) label)
+                (goto-char (agent-capture--append-entry tag))
+                (insert trimmed "\n")
+                (save-buffer)
+                (unless (agent-capture--stored-prompt file trimmed tag)
+                  (error "Could not confirm the captured prompt in %s" file)))
+            (error
+             (agent-capture--rollback-append start was-modified)
+             (signal (car err) (cdr err)))))))
+    (agent-capture--stored-prompt file trimmed tag)))
+
+(defun agent-capture--rollback-append (start was-modified)
+  "Undo an incomplete capture append in the current buffer back to START.
+WAS-MODIFIED is the buffer's modified flag before the append.  When the
+file exists on disk it is re-read afterwards, because a `save-buffer'
+that signaled may have written part of the append; re-reading is the
+only way to be sure the shared buffer and the file agree.  Rollback
+never signals: it runs while another error is already propagating."
+  (ignore-errors
+    (let ((inhibit-read-only t))
+      (delete-region (min start (point-max)) (point-max)))
+    (unless was-modified
+      (set-buffer-modified-p nil))
+    (when (and buffer-file-name (file-exists-p buffer-file-name))
+      (revert-buffer :ignore-auto :noconfirm :preserve-modes))))
 
 (defun agent-capture--stored-prompt (file text tag)
   "Return the entry in FILE matching TEXT and TAG, re-read from disk."
@@ -1529,6 +1877,50 @@ fidelity-based rule would leave them listed forever."
                            "keyed")))
         (kill-buffer buffer)))))
 
+(ert-deftest agent-attention-test-unkeyed/retires-on-completion-error-teardown ()
+  "A rich unkeyed dialog item dies with the turn, not only on progress.
+Claude's `PermissionRequest' items are rich AND unkeyed, so a rule that
+retired only coarse ones, or only on progress, would leave them listed
+for the rest of the session."
+  (dolist (ending '(stop error teardown))
+    (agent-attention-test--with-store
+      (let ((buffer (agent-attention-test--buffer)))
+        (unwind-protect
+            (cl-letf (((symbol-function 'agent-attention--being-read-p)
+                       (lambda (_b) t)))
+              (agent-attention-file buffer :kind 'permission :title "Bash"
+                                    :detail "rm -rf" :fidelity 'rich)
+              (agent-attention-file buffer :kind 'question :title "which?"
+                                    :fidelity 'coarse)
+              (should (= (length (agent-attention-items)) 2))
+              (pcase ending
+                ('stop (agent-attention--on-event
+                        buffer '(:type stop :redundant nil :payload nil)))
+                ('error (agent-attention--on-event
+                         buffer '(:type error :redundant nil
+                                        :payload (:error "boom"))))
+                ('teardown (with-current-buffer buffer
+                             (agent-attention--teardown-current))))
+              (should (null (seq-filter
+                             (lambda (item)
+                               (memq (agent-attention-item-kind item)
+                                     '(permission question)))
+                             (agent-attention-items)))))
+          (kill-buffer buffer))))))
+
+(ert-deftest agent-attention-test-unkeyed/redundant-completion-retires-nothing ()
+  "A duplicate completion is not a turn end, so it retires nothing."
+  (agent-attention-test--with-store
+    (let ((buffer (agent-attention-test--buffer)))
+      (unwind-protect
+          (progn
+            (agent-attention-file buffer :kind 'permission :title "Bash"
+                                  :fidelity 'rich)
+            (agent-attention--on-event
+             buffer '(:type stop :redundant t :payload nil))
+            (should (= (length (agent-attention-items)) 1)))
+        (kill-buffer buffer)))))
+
 (ert-deftest agent-attention-test-error/invalidates-outstanding-requests ()
   "An abnormal turn end disarms the requests that turn was waiting on."
   (agent-attention-test--with-store
@@ -1594,6 +1986,38 @@ fidelity-based rule would leave them listed forever."
               (agent-attention-mode -1)
               (should (= handed 1))
               (should (null (agent-attention-items))))
+          (when agent-attention-mode (agent-attention-mode -1))
+          (kill-buffer buffer))))))
+
+(ert-deftest agent-attention-test-mode/failed-hand-back-keeps-the-request ()
+  "A fallback that signals leaves the request open and answerable."
+  (let ((agent-attention--items nil)
+        (agent-attention--invoked (make-hash-table :test #'equal))
+        (agent-session-event-functions nil)
+        (agent-session-annotation-functions nil)
+        (window-selection-change-functions nil))
+    (cl-letf (((symbol-function 'agent-display-name)
+               (lambda (&optional _b) "project"))
+              ((symbol-function 'agent--backend-label) (lambda (_b) "Test"))
+              ((symbol-function 'display-warning) #'ignore))
+      (let ((buffer (agent-attention-test--buffer)))
+        (unwind-protect
+            (progn
+              (agent-attention-mode 1)
+              (let ((item (agent-attention-file
+                           buffer :kind 'permission :title "keyed"
+                           :request-key 15 :fidelity 'rich
+                           :actions (list (cons "a" (cons "Allow" #'ignore)))
+                           :fallback (lambda () (error "process gone")))))
+                (agent-attention-mode -1)
+                (should (memq item (agent-attention-items)))
+                (should (eq (agent-attention-item-state item) 'pending))
+                (should (agent-attention-item-actions item))
+                (should-not (gethash (agent-attention-item-id item)
+                                     agent-attention--invoked))
+                (should (string-match-p "failed"
+                                        (agent-attention-item-invalid-reason
+                                         item)))))
           (when agent-attention-mode (agent-attention-mode -1))
           (kill-buffer buffer))))))
 
@@ -1864,7 +2288,10 @@ the way the backend itself would, or nil.  Run when the inbox stops
 being able to present the request -- the mode is disabled -- so an
 outstanding request is handed back to the backend instead of being
 stranded unanswered.")
-  (invalid-reason nil :documentation "Why the actions were disarmed."))
+  (invalid-reason nil :documentation "Why this item cannot be acted on
+as usual: either why its actions were disarmed, or -- when the actions
+are still present -- what went wrong the last time answering it was
+attempted."))
 
 (defconst agent-attention--action-kinds '(permission question error
                                                      queue-failure)
@@ -2014,13 +2441,16 @@ delivery stays non-reentrant."
         :title (or (plist-get payload :error) "turn ended abnormally")
         :detail (plist-get payload :message)
         :fidelity (or (plist-get payload :fidelity) 'coarse))
-       ;; An abnormal end is a turn end: outstanding requests belonging
-       ;; to that turn can no longer be answered.
+       ;; An abnormal end is a turn end: the dialogs that turn was
+       ;; waiting on are gone, and outstanding requests belonging to it
+       ;; can no longer be answered.
+       (agent-attention--retire-unkeyed buffer)
        (agent-attention-invalidate-buffer
         buffer "the turn ended abnormally before this request was answered"))
       ((or 'stop 'idle-prompt)
        (unless (plist-get event-plist :redundant)
          (agent-attention--note-completion buffer)
+         (agent-attention--retire-unkeyed buffer)
          (agent-attention-invalidate-buffer
           buffer "the turn ended before this request was answered")))
       ((or 'submit 'activity)
@@ -2063,6 +2493,27 @@ request is answered or invalidated."
           (memq (agent-attention-item-kind item)
                 '(completion permission question))))))
 
+(defun agent-attention--retire-unkeyed (buffer)
+  "Retire BUFFER's pending permission and question items with no request key.
+A dialog reported without a request identity -- every Claude one, and
+Codex's terminal hook -- can only be tracked by the session's own
+lifecycle, because nothing identifies the dialog itself.  Whatever the
+fidelity of the report, once the turn has ended, ended abnormally, or
+the session has been torn down, that dialog is gone: the item must go
+with it, or a rich Claude permission item stays listed for the rest of
+the session.  Fidelity decides which producer's text survives a merge;
+it never decides whether an item still applies.
+
+Completion items are deliberately not retired here: they are what the
+user has not read yet, and they clear by being read or by the session
+moving on."
+  (agent-attention--drop
+   (lambda (item)
+     (and (eq (agent-attention-item-buffer item) buffer)
+          (eq (agent-attention-item-state item) 'pending)
+          (null (agent-attention-item-request-key item))
+          (memq (agent-attention-item-kind item) '(permission question))))))
+
 ;;;; Clearing and invalidation
 
 (defun agent-attention--drop (predicate)
@@ -2103,18 +2554,26 @@ explanation rather than silently abandoned."
                (not (gethash (agent-attention-item-id item)
                              agent-attention--invoked)))
       (if-let* ((fallback (agent-attention-item-fallback item)))
-          (progn
-            (condition-case err
-                (progn (funcall fallback)
-                       (puthash (agent-attention-item-id item) t
-                                agent-attention--invoked))
-              (error
-               (display-warning
-                'agent
-                (format "could not hand a Codex request back to its backend: %s"
-                        (error-message-string err))
-                :warning)))
-            (agent-attention-resolve item "handed back to the backend"))
+          (condition-case err
+              (progn
+                (funcall fallback)
+                (puthash (agent-attention-item-id item) t
+                         agent-attention--invoked)
+                (agent-attention-resolve item "handed back to the backend"))
+            (error
+             ;; The hand-back failed, so the request is still open.
+             ;; Resolving it here would erase the only record that
+             ;; something is still waiting on an answer.  The item stays
+             ;; pending with its actions intact and says what happened.
+             (setf (agent-attention-item-invalid-reason item)
+                   (format "handing this request back to its backend failed \
+\(%s); re-enable `agent-attention-mode' to answer it"
+                           (error-message-string err)))
+             (display-warning
+              'agent
+              (format "could not hand a request back to its backend: %s"
+                      (error-message-string err))
+              :warning)))
         (setf (agent-attention-item-actions item) nil)
         (setf (agent-attention-item-invalid-reason item)
               "the attention inbox was disabled while this request was open")
@@ -2206,7 +2665,12 @@ inbox with items the user was in fact watching."
                   agent--teardown-functions))))
 
 (defun agent-attention--teardown-current ()
-  "Invalidate the current session buffer's outstanding requests."
+  "Retire and invalidate the current session buffer's open items.
+Dialogs reported without a request identity die with the session, so
+they are retired; requests that carry one are invalidated with an
+explanation, because their record is worth keeping even though no
+answer can reach the backend any more."
+  (agent-attention--retire-unkeyed (current-buffer))
   (agent-attention-invalidate-buffer
    (current-buffer) "the session was torn down"))
 
@@ -2695,13 +3159,19 @@ Create `test/agent-queue-test.el`:
   "Submissions captured by the stubbed `agent-submit'.")
 
 (defmacro agent-queue-test--with-session (var &rest body)
-  "Bind VAR to a queue-ready session buffer and run BODY.
-The buffer belongs to a stub backend that reports `ready', and
-`agent-submit' is captured into `agent-queue-test--submissions'."
+  "Bind VAR to a session buffer with no protocol probe, and run BODY.
+The stub backend deliberately registers no `:ready-to-submit-p', so
+these tests exercise the strict path Claude and terminal Codex take:
+the queue may dispatch only on recorded evidence that a turn ended
+well.  `agent-submit' is captured into `agent-queue-test--submissions',
+and time is frozen, because the completion contract is defined in
+elapsed seconds.  `agent-test--tick' comes from `agent-test.el', which
+`make test' loads first."
   (declare (indent 1))
   `(let ((agent-backends nil)
          (agent-attention--items nil)
          (agent-queue-test--submissions nil)
+         (agent-test--clock 1000.0)
          (,var (generate-new-buffer " *agent-queue-test*")))
      (with-current-buffer ,var
        (setq-local agent--session
@@ -2711,10 +3181,11 @@ The buffer belongs to a stub backend that reports `ready', and
             (list :buffer-p (lambda (b) (eq b ,var))
                   :find-all-buffers (lambda () (list ,var))
                   :start-session #'ignore
-                  :label "Stub"
-                  :ready-to-submit-p (lambda (_b) 'ready)))
+                  :label "Stub"))
      (unwind-protect
-         (cl-letf (((symbol-function 'agent-submit)
+         (cl-letf (((symbol-function 'float-time)
+                    (lambda (&optional _time) agent-test--clock))
+                   ((symbol-function 'agent-submit)
                     (lambda (text &optional buffer)
                       (push (cons text buffer)
                             agent-queue-test--submissions)))
@@ -2722,6 +3193,20 @@ The buffer belongs to a stub backend that reports `ready', and
                     (lambda (&optional _b) "project")))
            ,@body)
        (kill-buffer ,var))))
+
+(defmacro agent-queue-test--with-probed-session (var &rest body)
+  "Like `agent-queue-test--with-session' but with a protocol probe.
+Exercises the Codex app-server path, where the backend's own readiness
+verdict is evidence in its own right."
+  (declare (indent 1))
+  `(agent-queue-test--with-session ,var
+     (apply #'agent-register-backend 'stub
+            (list :buffer-p (lambda (b) (eq b ,var))
+                  :find-all-buffers (lambda () (list ,var))
+                  :start-session #'ignore
+                  :label "Stub"
+                  :ready-to-submit-p (lambda (_b) 'ready)))
+     ,@body))
 
 (ert-deftest agent-queue-test-add/keeps-order-and-counts ()
   "Items are appended in order and counted."
@@ -2866,16 +3351,13 @@ Create `agent-queue.el`:
   "Follow-up prompt queue for AI coding sessions."
   :group 'agent)
 
-(defcustom agent-queue-debounce 2
-  "Seconds a dispatched item ignores completions on uncorrelated transports.
-Claude Code and terminal Codex report no turn ids, so a completion
-arriving within this window after a dispatch is treated as a delayed
-duplicate report of the turn that ended before the dispatch, not as the
-end of the dispatched turn.  This is a duplicate-hook guard, not a
-guess about session state, and it is bypassed entirely once the backend
-reports that the dispatched item's turn started."
-  :type 'number
-  :group 'agent-queue)
+;; There is deliberately no queue-local debounce.  Telling a duplicate
+;; completion from a new turn's completion is `agent-completion-grace''s
+;; job, decided once in `agent-session-event' and delivered to every
+;; consumer as the `:redundant' flag.  A second, differently tuned clock
+;; here would let the queue and the before-exit chain disagree about
+;; which turn ended, which is exactly the class of bug the single
+;; correlation contract exists to remove.
 
 (defcustom agent-queue-stall-seconds 30
   "Seconds a dispatched item may produce no observable turn before pausing.
@@ -3166,9 +3648,10 @@ Stage `agent-queue.el`, `test/agent-queue-test.el`, `Makefile`, and
 - Test: `test/agent-queue-test.el`
 
 **Interfaces:**
-- Consumes: Task 1's event contract and `:redundant` flag, Task 2's
-  `agent-session-ready-to-submit-p` and `agent--session-dialog-blocked-p`,
-  Task 7's item states.
+- Consumes: Task 1's correlation contract, delivered as the `:redundant`
+  flag — the queue keeps no clock of its own and never re-derives that
+  verdict; Task 2's `agent-session-can-start-turn-p` and
+  `agent--session-dialog-blocked-p`; Task 7's item states.
 - Produces: `agent-queue--on-event`, `agent-queue--drain`,
   `agent-queue--drain-ready-p`, `agent-queue--resolve-completion`,
   `agent-queue--poll`, `agent-queue-resume` (command),
@@ -3250,6 +3733,28 @@ and the safety-net poll would type the queued prompt into the dialog."
     (agent-queue--drain buffer)
     (should (= (length agent-queue-test--submissions) 1))))
 
+(ert-deftest agent-queue-test-events/one-completion-schedules-one-drain ()
+  "Resolving an item and resolving nothing both schedule exactly one drain.
+`agent-queue--complete' deliberately does not schedule, so a completion
+that resolves an item cannot enqueue a second drain alongside the
+event handler's."
+  (agent-queue-test--with-session buffer
+    (agent-queue-add buffer "one")
+    (agent-queue-add buffer "two")
+    (agent-session-event buffer 'stop)
+    (let ((scheduled 0))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_secs _rep fn &rest args)
+                   (cl-incf scheduled) (apply fn args) nil)))
+        ;; Nothing in flight: one drain.
+        (agent-queue--on-event buffer '(:type idle-prompt :redundant nil))
+        (should (= scheduled 1))
+        ;; An item in flight resolves: still one drain.
+        (setq scheduled 0)
+        (agent-test--tick 30)
+        (agent-queue--on-event buffer '(:type idle-prompt :redundant nil))
+        (should (= scheduled 1))))))
+
 (ert-deftest agent-queue-test-events/duplicate-stop-drains-once ()
   "A `turn/completed' plus CLI `Stop' pair drains exactly one item."
   (agent-queue-test--with-session buffer
@@ -3297,54 +3802,79 @@ and the safety-net poll would type the queued prompt into the dialog."
                    '("two")))
     (should (= (length agent-queue-test--submissions) 2))))
 
-(ert-deftest agent-queue-test-short-turn/started-resolves-inside-debounce ()
-  "A turn that starts and ends inside the debounce still resolves.
-Without this the item would sit in `started' forever: the stall check
-deliberately never fires for an item whose turn the backend confirmed."
+(ert-deftest agent-queue-test-short-turn/is-resolved-by-the-second-report ()
+  "A short Claude turn resolves without any `activity' event at all.
+Claude's status poll suppresses `activity' when a turn starts and ends
+between two polls, so the queue must not depend on it.  Core marks the
+first completion redundant (it lands inside the grace window) and the
+`idle_prompt' that follows canonical, and that is what resolves the
+item -- late, but never lost.  The whole sequence runs through
+`agent-session-event', so this exercises the real correlation contract
+rather than a hand-written `:redundant' flag."
   (agent-queue-test--with-session buffer
     (agent-queue-add buffer "one")
     (agent-queue-add buffer "two")
+    (agent-test--tick 30)
     (agent-session-event buffer 'stop)
-    (agent-queue--drain buffer)
     (cl-letf (((symbol-function 'run-at-time)
                (lambda (_secs _rep fn &rest args) (apply fn args) nil)))
-      ;; No turn id: Claude's status poll reports only that work began.
-      (agent-queue--on-event buffer '(:type activity :redundant nil))
-      (agent-queue--on-event buffer '(:type idle-prompt :redundant nil)))
+      (let ((agent-session-event-functions (list #'agent-queue--on-event)))
+        (agent-queue--drain buffer)
+        (should (= (length agent-queue-test--submissions) 1))
+        ;; The dispatched turn runs for three seconds and stops.  No
+        ;; `activity' is ever reported.
+        (agent-test--tick 3)
+        (agent-session-event buffer 'stop)
+        (should (= (length (agent-queue-items buffer)) 2))
+        ;; Claude's notification for that same turn arrives later.
+        (agent-test--tick 6)
+        (agent-session-event buffer 'idle-prompt)))
     (should (equal (mapcar (lambda (i) (plist-get i :text))
                            (agent-queue-items buffer))
                    '("two")))
     (should (= (length agent-queue-test--submissions) 2))))
 
-(ert-deftest agent-queue-test-debounce/ignores-a-prompt-completion ()
-  "Without any start evidence a completion inside the debounce resolves nothing."
+(ert-deftest agent-queue-test-duplicate/delayed-report-resolves-nothing ()
+  "A delayed duplicate of the previous turn does not resolve the new item.
+Core flags it redundant, so the queue never sees it as a turn end."
   (agent-queue-test--with-session buffer
     (agent-queue-add buffer "one")
     (agent-queue-add buffer "two")
+    (agent-test--tick 30)
     (agent-session-event buffer 'stop)
-    (agent-queue--drain buffer)
     (cl-letf (((symbol-function 'run-at-time)
                (lambda (_secs _rep fn &rest args) (apply fn args) nil)))
-      (agent-queue--on-event buffer '(:type idle-prompt :redundant nil)))
+      (let ((agent-session-event-functions (list #'agent-queue--on-event)))
+        (agent-queue--drain buffer)
+        ;; The previous turn's `idle_prompt', arriving after the dispatch.
+        (agent-test--tick 2)
+        (agent-session-event buffer 'idle-prompt)))
     (should (= (length agent-queue-test--submissions) 1))
     (should (= (length (agent-queue-items buffer)) 2))))
 
-(ert-deftest agent-queue-test-debounce/resolves-after-the-window ()
-  "After the debounce a completion resolves the dispatched item."
+(ert-deftest agent-queue-test-error/an-item-added-later-is-not-sent ()
+  "A prompt queued after a failed turn is not dispatched by the poll.
+The error arrives while the queue is empty, so nothing is paused; the
+delayed duplicate of that dead turn arrives next and must not be read as
+fresh evidence; only then is a prompt queued.  Without a positive
+fresh-turn requirement the safety-net poll would submit it into the
+session that just failed."
   (agent-queue-test--with-session buffer
-    (agent-queue-add buffer "one")
-    (agent-queue-add buffer "two")
+    (agent-session-event buffer 'submit)
+    (agent-test--tick 30)
+    (agent-session-event buffer 'error '(:error "rate_limit"))
+    (agent-session-event buffer 'stop)          ; redundant duplicate
+    (agent-queue-add buffer "please continue")
+    (should-not (agent-queue--drain-ready-p buffer))
+    (agent-queue--drain buffer)
+    (agent-queue--poll buffer)
+    (should (null agent-queue-test--submissions))
+    ;; A genuinely new turn ending re-opens the gate.
+    (agent-session-event buffer 'activity)
+    (agent-test--tick 5)
     (agent-session-event buffer 'stop)
     (agent-queue--drain buffer)
-    (plist-put (car (agent-queue-items buffer)) :dispatched-at
-               (- (float-time) (* 2 agent-queue-debounce)))
-    (cl-letf (((symbol-function 'run-at-time)
-               (lambda (_secs _rep fn &rest args) (apply fn args) nil)))
-      (agent-queue--on-event buffer '(:type idle-prompt :redundant nil)))
-    (should (equal (mapcar (lambda (i) (plist-get i :text))
-                           (agent-queue-items buffer))
-                   '("two")))
-    (should (= (length agent-queue-test--submissions) 2))))
+    (should (= (length agent-queue-test--submissions) 1))))
 
 (ert-deftest agent-queue-test-failure/never-auto-retries ()
   "A signaling submission is recorded as failed and never resent."
@@ -3416,6 +3946,7 @@ deliberately never fires for an item whose turn the backend confirmed."
                   ((symbol-function 'agent-attention--being-read-p)
                    (lambda (_b) nil)))
           (agent-session-event buffer 'submit)
+          (agent-test--tick 30)
           (agent-session-event buffer 'stop))
         (should (= (length agent-queue-test--submissions) 1))
         (should (= (length (agent-attention-items)) 1))))))
@@ -3445,31 +3976,24 @@ Every condition is re-read here, at the moment of dispatch:
    turn.  This is checked here and not left to the backend probe on
    purpose: the queue does not delegate the one condition whose failure
    would put words in the user's mouth;
-5. the backend's own readiness probe says a submission would start a
-   fresh turn -- which for Codex app-server means an idle thread with an
-   empty native queue and nothing held, and for other transports means
-   the session stopped and reports no work;
-6. on transports without turn ids, the debounce window has passed."
+5. `agent-session-can-start-turn-p' holds.  That is the positive
+   evidence requirement, and it is what the older readiness check
+   lacked: `ready' alone is satisfied by a session whose turn died, by
+   a session that has reported nothing at all, and by any session whose
+   backend cannot see a dialog.  It demands either a protocol probe or
+   a recorded canonical `stop'/`idle-prompt'.
+
+There is no timing condition left in the gate.  A dispatch is now
+allowed only when the last thing the session reported was a turn ending
+well, and the correlation contract in `agent-session-event' has already
+decided which completions count.  Duplicate reports never reach here as
+canonical events, so the queue needs no clock of its own."
   (with-current-buffer buffer
     (and (agent-queue--next-item buffer)
          (null agent-queue--paused)
          (null (agent-queue--dispatched-item buffer))
          (not (agent--session-dialog-blocked-p buffer))
-         (eq (agent-session-ready-to-submit-p buffer) 'ready)
-         (agent-queue--debounce-elapsed-p buffer))))
-
-(defun agent-queue--debounce-elapsed-p (buffer)
-  "Return non-nil when session BUFFER may dispatch again yet."
-  (let ((last (agent-queue--last-dispatch-at buffer)))
-    (or (null last)
-        (> (- (float-time) last) agent-queue-debounce))))
-
-(defun agent-queue--last-dispatch-at (buffer)
-  "Return the most recent dispatch time in session BUFFER, or nil."
-  (let ((times (delq nil (mapcar (lambda (item)
-                                   (plist-get item :dispatched-at))
-                                 (agent-queue-items buffer)))))
-    (and times (apply #'max times))))
+         (agent-session-can-start-turn-p buffer))))
 
 ;;;; Draining
 
@@ -3503,12 +4027,15 @@ Whether it reached the backend is unknown, so it was not resent"
     (agent-queue--refresh-display buffer)))
 
 (defun agent-queue--complete (buffer item)
-  "Remove ITEM from session BUFFER's queue and drain the next one."
+  "Remove ITEM from session BUFFER's queue.
+Deliberately does not schedule the next drain.  Exactly one place
+schedules a drain per completion -- `agent-queue--on-event' -- so that
+resolving an item and finding nothing to resolve lead to the same
+single scheduling, and a completion can never enqueue two drains."
   (with-current-buffer buffer
     (setq agent-queue--items (delq item agent-queue--items))
     (unless agent-queue--items (agent-queue--cancel-timer buffer)))
-  (agent-queue--refresh-display buffer)
-  (agent-queue--schedule-drain buffer))
+  (agent-queue--refresh-display buffer))
 
 ;;;; Evidence from session events
 
@@ -3545,27 +4072,22 @@ input."
       (agent-queue--refresh-display buffer))))
 
 (defun agent-queue--resolve-completion (buffer payload)
-  "Resolve session BUFFER's in-flight item when PAYLOAD proves it ended."
+  "Resolve session BUFFER's in-flight item when PAYLOAD proves it ended.
+Only canonical completions reach here -- the caller filters on the
+`:redundant' flag -- so the timing question has already been decided by
+`agent--session-completion-canonical-p'.  What remains is the one thing
+core cannot decide: whether a completion that names a turn names THIS
+item's turn.  When both sides name a turn, only a match resolves the
+item; otherwise a canonical completion is this item's, because a
+canonical completion means a turn ended and this item's is the only one
+in flight."
   (when-let* ((item (agent-queue--dispatched-item buffer)))
     (let ((reported (plist-get payload :turn-id))
           (recorded (plist-get item :turn-id)))
-      (cond
-       ;; Correlated on both sides: only the turn this item started
-       ;; resolves it, and a different turn id resolves nothing.
-       ((and recorded reported)
-        (when (equal recorded reported) (agent-queue--complete buffer item)))
-       ;; The backend already confirmed this item's turn began, so this
-       ;; completion is that turn's end however soon it arrived.  A short
-       ;; turn finishing inside the debounce would otherwise be stranded:
-       ;; the stall check deliberately never fires for a `started' item.
-       ((eq (plist-get item :state) 'started)
-        (agent-queue--complete buffer item))
-       ;; No start evidence at all: the first completion past the
-       ;; debounce is this item's, and anything sooner is a delayed
-       ;; duplicate of the turn that ended before the dispatch.
-       ((> (- (float-time) (or (plist-get item :dispatched-at) 0))
-           agent-queue-debounce)
-        (agent-queue--complete buffer item))))))
+      (if (and recorded reported)
+          (when (equal recorded reported)
+            (agent-queue--complete buffer item))
+        (agent-queue--complete buffer item)))))
 
 ;;;; Pausing and stalling
 
@@ -3587,7 +4109,15 @@ input."
 Re-reads the same gate the event path uses and invents no state.  The
 stall check applies only to an item still in `dispatched': once the
 backend confirmed a turn started, a long turn is a long turn, not a
-stall."
+stall.
+
+The stall check asks nothing about readiness.  A dispatch marks the
+session busy through its own `submit' event, so a session that swallowed
+a submission without starting a turn never looks idle again, and a
+readiness condition here would mean the stall never fires and the item
+is stranded silently -- the exact outcome the stall exists to prevent.
+The honest statement is the simple one: this item was sent, and after
+`agent-queue-stall-seconds' no backend has reported a turn for it."
   (if (not (buffer-live-p buffer))
       (agent--report-leak "queue timer" "poll timer outlived %s" buffer)
     (let ((item (agent-queue--dispatched-item buffer)))
@@ -3595,8 +4125,7 @@ stall."
        ((and item
              (eq (plist-get item :state) 'dispatched)
              (> (- (float-time) (or (plist-get item :dispatched-at) 0))
-                agent-queue-stall-seconds)
-             (eq (agent-session-ready-to-submit-p buffer) 'ready))
+                agent-queue-stall-seconds))
         (plist-put item :state 'stalled)
         (agent-queue--pause
          buffer
@@ -4693,6 +5222,35 @@ Add to `codex-test.el`, following that file's existing conventions:
           (funcall respond '((decision . "cancel")))))
       (should (= (length sent) 1)))))
 
+(ert-deftest codex-test-app-server-responder-retries-after-a-failed-send ()
+  "A send that fails leaves the request answerable, and the retry sends.
+Marking the responder answered before the write would swallow the retry
+and let the caller record an unsent request as answered."
+  (with-temp-buffer
+    (let ((sent nil)
+          (attempts 0))
+      (cl-letf (((symbol-function 'codex--app-server-send-response)
+                 (lambda (id result)
+                   (cl-incf attempts)
+                   (when (= attempts 1) (error "process is not running"))
+                   (push (cons id result) sent)))
+                ((symbol-function 'message) #'ignore))
+        (let ((respond (codex--app-server-make-responder (current-buffer) 5)))
+          (should-error (funcall respond '((decision . "accept"))))
+          (should (null sent))
+          (funcall respond '((decision . "accept")))
+          (should (equal sent '((5 . ((decision . "accept"))))))
+          ;; Now it really is answered, so a third call sends nothing.
+          (funcall respond '((decision . "cancel")))
+          (should (= (length sent) 1)))))))
+
+(ert-deftest codex-test-app-server-responder-signals-for-a-dead-buffer ()
+  "Answering into a dead session signals instead of silently succeeding."
+  (let ((buffer (generate-new-buffer " *codex-test-dead*")))
+    (kill-buffer buffer)
+    (let ((respond (codex--app-server-make-responder buffer 6)))
+      (should-error (funcall respond '((decision . "accept")))))))
+
 (ert-deftest codex-test-app-server-request-choices-encode-responses ()
   "Choice tables carry the complete response body for each choice."
   (let ((choices (codex-app-server-request-choices
@@ -4905,17 +5463,27 @@ cover."
 
 (defun codex--app-server-make-responder (buffer id)
   "Return a one-shot function answering request ID in BUFFER.
-See `codex-app-server-request-handler' for the calling convention."
+See `codex-app-server-request-handler' for the calling convention.
+
+The one-shot flag is set only after the response has actually been
+written to the process.  Setting it first would make a send that failed
+-- a dead process, a closed pipe -- indistinguishable from a send that
+succeeded: the caller's retry would be silently swallowed, and a caller
+that treats a normal return as delivery would record the request as
+answered when nothing was sent.  A failed send therefore signals and
+leaves the request answerable; a dead buffer signals for the same
+reason."
   (let ((answered nil))
     (lambda (result &optional error)
       (if answered
           (message "codex: app-server request %s was already answered" id)
-        (setq answered t)
-        (when (buffer-live-p buffer)
-          (with-current-buffer buffer
-            (if error
-                (codex--app-server-send-error id (car error) (cdr error))
-              (codex--app-server-send-response id result))))))))
+        (unless (buffer-live-p buffer)
+          (error "Codex session is gone; request %s cannot be answered" id))
+        (with-current-buffer buffer
+          (if error
+              (codex--app-server-send-error id (car error) (cdr error))
+            (codex--app-server-send-response id result)))
+        (setq answered t)))))
 
 (defun codex-app-server-modal-request-handler (buffer id method params respond)
   "Ask about METHOD and PARAMS in the minibuffer and answer with RESPOND.
@@ -5370,6 +5938,44 @@ given it."
           (agent-attention-invoke
            item (car (agent-attention-item-actions item)))
           (should (equal responses '((41 . ((decision . "accept")))))))))))
+
+(ert-deftest agent-codex-test-request-handler/failed-send-keeps-the-item ()
+  "A response that fails to send leaves the item open and retryable.
+Together with codex.el's responder, which marks itself answered only
+after the write succeeds, this is what stops a failed send from being
+recorded as an answer."
+  (with-temp-buffer
+    (let ((agent-attention--items nil)
+          (agent-attention--invoked (make-hash-table :test #'equal))
+          (agent-attention-mode t)
+          (attempts 0)
+          (sent nil))
+      (cl-letf (((symbol-function 'agent-display-name)
+                 (lambda (&optional _b) "project"))
+                ((symbol-function 'agent--backend-label) (lambda (_b) "Codex"))
+                ((symbol-function 'agent-codex-notify) #'ignore)
+                ((symbol-function 'message) #'ignore)
+                ((symbol-function 'codex-app-server-request-choices)
+                 (lambda (&rest _)
+                   '((?y "yes" "apply once" ((decision . "accept")))))))
+        (agent-codex--app-server-request-handler
+         (current-buffer) 46 "item/fileChange/requestApproval" nil
+         (lambda (result &optional _error)
+           (cl-incf attempts)
+           (when (= attempts 1) (error "process is not running"))
+           (push result sent)))
+        (let* ((item (car (agent-attention-items)))
+               (action (car (agent-attention-item-actions item))))
+          (agent-attention-invoke item action)
+          (should (null sent))
+          (should (memq item (agent-attention-items)))
+          (should (agent-attention-item-actions item))
+          (should-not (gethash (agent-attention-item-id item)
+                               agent-attention--invoked))
+          ;; The retry goes through and only then is the item resolved.
+          (agent-attention-invoke item action)
+          (should (equal sent '(((decision . "accept")))))
+          (should (null (agent-attention-items))))))))
 
 (ert-deftest agent-codex-test-request-handler/delegates-free-form-requests ()
   "A request with no choice table falls back to the modal handler."
@@ -6388,14 +6994,29 @@ in prose matching the manual's existing style:
   and the rule that binds them: **only a `queued` item is ever
   dispatched, and nothing automatic ever returns an item to `queued`.**
   A submission event is never treated as proof a turn started.
-- **What "waiting" means to the queue.**  A session showing a permission
-  dialog is in the same lifecycle state as one that finished a turn, so
-  the queue checks explicitly whether the last thing the session
-  reported was a dialog, and refuses to dispatch while it was — that is
-  what stops a queued prompt from being typed into an approval prompt.
-  The check is made by the queue itself and not delegated to the
-  backend.  The flag clears at the next turn boundary, so a dialog
-  answered in the terminal releases the queue when that turn ends.
+- **What counts as permission to send.**  A finished turn, a dialog
+  waiting for an answer, and a turn that died all leave the session in
+  the same lifecycle state, so the queue does not ask whether the
+  session looks idle — it asks for positive evidence that a turn ended
+  well.  That evidence is either the backend's own protocol probe (Codex
+  app-server, which can see the process, the thread, the turn, and its
+  own queue) or a recorded canonical `stop`/`idle-prompt` from the
+  session itself.  A session showing a permission dialog, a session
+  whose turn failed, and a session that has reported nothing at all are
+  all refused, and a delayed duplicate of a dead turn does not count as
+  new evidence.  The dialog check is additionally made by the queue
+  itself rather than delegated, because that is the one condition whose
+  failure would type the user's queued prompt into an approval prompt.
+- **When a completion counts.**  Deciding which completion reports which
+  turn is done once, for every consumer, by
+  `agent-completion-grace` (8 s by default): a completion is a new turn's
+  end when it carries a turn id the last one did not, when work was
+  observed since the last one, or when the session has been quiet for
+  longer than the grace.  A Claude turn shorter than that is reported by
+  its own second completion — a few seconds late rather than wrongly —
+  and a duplicate that arrives sooner is discarded.  Lowering the grace
+  below Claude's roughly six-second notification delay would let those
+  duplicates through.
 - **The delivery guarantees, stated honestly.**  On Codex app-server:
   exactly-once.  Dispatch happens only into a live process with a
   started thread, an idle turn, an empty native queue and nothing held;
@@ -6404,11 +7025,12 @@ in prose matching the manual's existing style:
   human submits by hand into the same idle gap; the item is still
   dispatched exactly once.  On Claude and terminal Codex: at-most-once
   dispatch, best-effort exactly-once turn placement.  No correlation ids
-  exist, so a duplicate completion delayed beyond `agent-queue-debounce`
+  exist, so a duplicate completion delayed beyond `agent-completion-grace`
   could at worst let the *next* item be dispatched while the previous
   queued turn still runs, in which case the CLI's own mid-turn handling
   applies (Claude queues it as the next prompt).  That requires a
-  duplicated hook configuration plus multi-second delivery skew.
+  duplicated hook configuration plus delivery skew larger than the
+  grace window.
 - **Coexistence with Codex's own queue.**  Codex's Tab-queue stays fully
   functional and always drains first: the readiness gate refuses while
   codex.el reports queued input of its own.
@@ -6423,14 +7045,16 @@ in prose matching the manual's existing style:
   `agent-queue-requeue` (=!=), which asks first and says plainly that
   the text may already have been delivered.  A safety-net timer
   (`agent-queue-poll-interval`) re-reads the same gate so a missed
-  backend event delays a drain rather than stranding it.  A short turn
-  that starts and ends inside the debounce is still resolved, because a
-  reported turn start is proof enough on its own.
+  backend event delays a drain rather than stranding it.
 - **Preservation.**  On any teardown, queued prompts move to a stash
   outside the dying buffer — created before the buffer's queue is
   cleared, so no failure in between can lose them — and are written to
-  the session's capture file as ordinary drafts, one at a time.  A write
-  that fails partway keeps every draft it already wrote and reports how
+  the session's capture file as ordinary drafts, one at a time.  Each
+  append is a transaction: one that fails is rolled back out of the
+  shared capture buffer and the buffer re-read from disk, so a later
+  successful append cannot flush the failed one to the file as a side
+  effect and leave an entry no handle points at.  A write that fails
+  partway keeps every draft it already wrote and reports how
   many are held only in memory; an info item names the file on success,
   an error item and a warning describe any shortfall.  Restart is the
   one case where prompts can come back: the queue is detached before the
@@ -6464,7 +7088,7 @@ Also add the new commands (`agent-attention`, `agent-queue-prompt`,
 `agent-claude-ensure-stop-failure-hook-config`) to the commands section,
 the new modes (`agent-attention-mode`, `agent-queue-mode`) to the
 backend-minor-modes section, and the new user options
-(`agent-queue-debounce`, `agent-queue-stall-seconds`,
+(`agent-completion-grace`, `agent-queue-stall-seconds`,
 `agent-queue-poll-interval`, `agent-attention-detail-width`,
 `agent-session-event-functions`, `agent-session-annotation-functions`,
 `agent-before-restart-functions`, `agent-after-restart-functions`) to the
@@ -6591,6 +7215,20 @@ of them: each depends on a real CLI's timing, protocol, or UI.
     session closes — the case where a mis-ordered completion contract
     strands the chain after the first skill — and that the queue drained
     once, not twice.
+19b. **The same chain on Claude, where the duplicate is real.**  Repeat
+    check 19 on a Claude session with three before-exit skills.  This is
+    the sequence the grace window exists for: each skill's `Stop` hook is
+    followed seconds later by an `idle_prompt` for the same turn, and
+    that duplicate must not advance the chain.  Confirm all three skills
+    run, in order, one per turn, and that the session closes after the
+    third rather than after the second.  Time the run: a short skill is
+    expected to advance the chain up to `agent-completion-grace` late,
+    which is correct behaviour, not a hang.
+19c. **A short queued turn on Claude.**  Queue a prompt whose whole
+    answer is one line, so the turn starts and ends between two status
+    polls and no `activity` is ever reported.  Confirm the item resolves
+    and the next one goes out — the case where relying on a turn-start
+    event would strand the queue.
 20. **Restart with a non-empty queue.**  Queue two prompts, run
     `agent-restart`, confirm both return to the new session's queue,
     that their capture drafts were removed, and that nothing was
@@ -6610,6 +7248,18 @@ of them: each depends on a real CLI's timing, protocol, or UI.
     could not be saved, that the stash still holds all of them, and that
     restoring the permissions and re-running preservation is not needed
     for the surviving Emacs session to still show them.
+23b. **Persistence failure between two successes.**  With three prompts
+    queued, arrange for only the second append to fail (make the file
+    read-only for one write, or advise `save-buffer` to signal once).
+    Then read the capture file on disk and confirm it holds exactly the
+    first and third prompts — no orphan copy of the second, which is
+    what a failed append left in the shared buffer would produce once
+    the third save flushed it.
+23c. **A dialog left open across a queue poll.**  Covered by check 3;
+    re-run it here after the queue has already dispatched and resolved
+    one item, so the session has a completion history and the gate is
+    relying on the awaiting reason rather than on never having seen a
+    turn.
 24. **Fork resume.**  Queue a prompt, fork the session; confirm the
     prompts stayed in the stash and the capture file, and that the
     forked session's queue is empty.
