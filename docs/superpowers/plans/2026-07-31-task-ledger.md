@@ -6689,11 +6689,24 @@ state_dir="${TMPDIR:-/tmp}/agent-tasks-live"
 id_file="$state_dir/current"
 
 # Remove this run's state, and its pointer only when the pointer still
-# names this run.  Used by the setup trap and by a successful finish.
+# names this run.  Callers must have confirmed the process is stopped.
 release() {
   local id="$1" state="$2"
   [ -n "$state" ] && { trash "$state" 2>/dev/null || rm -rf "$state"; }
   if [ "$(cat "$id_file" 2>/dev/null)" = "$id" ]; then rm -f "$id_file"; fi
+}
+
+# Stop the Emacs whose pid is $1, politely then firmly, and report
+# whether it is gone.  Never called with an unauthenticated pid.
+stop_emacs() {
+  local id="$1" target="$2" i
+  [ -n "$target" ] || return 0
+  kill -0 "$target" 2>/dev/null || return 0
+  EMACS_SOCKET_NAME="$id" emacsclient -s "$id" --eval '(kill-emacs)' >/dev/null 2>&1
+  for i in $(seq 1 20); do kill -0 "$target" 2>/dev/null || return 0; sleep 0.5; done
+  kill "$target" 2>/dev/null
+  for i in $(seq 1 10); do kill -0 "$target" 2>/dev/null || return 0; sleep 0.5; done
+  return 1
 }
 
 start() {
@@ -6711,19 +6724,31 @@ start() {
 
   # Installed immediately after the claim, on EXIT so that *every* way
   # out -- a failing command under `set -e', an explicit `exit 1' from
-  # one of the checks below, or an interrupt -- releases both the state
-  # and the pointer.  An ERR trap alone would miss the explicit exits.
+  # one of the checks below, or an interrupt -- is covered.  An ERR trap
+  # alone would miss the explicit exits.  The signal traps exit with
+  # 128+signal so an interrupt cannot be reported as success.
   setup_ok=no
+  server_pid=
+  launcher_pid=
   cleanup_start() {
-    rc=$?
-    if [ "$setup_ok" != yes ]; then
-      echo "setup failed ($rc); cleaning up" >&2
-      [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null
+    local rc=$?
+    set +e                     # a failing kill must not abort cleanup
+    trap - EXIT INT TERM
+    [ "$setup_ok" = yes ] && exit "$rc"
+    echo "setup failed ($rc); cleaning up" >&2
+    if stop_emacs "$id" "${server_pid:-}"; then
+      [ -n "${launcher_pid:-}" ] && kill "$launcher_pid" 2>/dev/null
       release "$id" "$state"
+    else
+      echo "FAIL: could not stop the verification Emacs (${server_pid:-unknown});" >&2
+      echo "      state retained: $state" >&2
+      rc=1
     fi
-    exit $rc
+    exit "$rc"
   }
-  trap cleanup_start EXIT INT TERM
+  trap cleanup_start EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
   set -e
   mkdir "$state"
@@ -6733,6 +6758,15 @@ start() {
   [ -n "$profile" ] || { echo "cannot resolve the active Emacs profile" >&2; exit 1; }
   elpaca="$HOME/.config/emacs-profiles/$profile/elpaca"
   [ -d "$elpaca/builds" ] || { echo "no package builds at $elpaca" >&2; exit 1; }
+
+  # The real Emacs executable, asked of the running one.  `emacs' on
+  # PATH may be a shell wrapper that does not `exec' -- this machine has
+  # one -- in which case `$!' is the wrapper and never matches the pid
+  # Emacs reports.  Prefer the binary; the nonce check below is what
+  # makes the harness correct even when this falls back.
+  emacs_bin=$(emacsclient -e '(expand-file-name invocation-name invocation-directory)' \
+                2>/dev/null | tr -d '"')
+  [ -x "$emacs_bin" ] || emacs_bin=emacs
 
   # The real ledger of that profile, and the account definitions, read
   # out of the live Emacs -- never hard-coded, never written back.
@@ -6764,13 +6798,20 @@ start() {
     : > "$state/real-hash"
   fi
 
+  # A per-run secret the server echoes back.  This, not the process
+  # name, is what proves the answering Emacs is the one this run
+  # started: a stale server cannot know it.
+  nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  printf '%s\n' "$nonce" > "$state/nonce"
+
   # EMACS_SOCKET_NAME points every `emacsclient' the CLIs run -- the
   # Claude notification hook among them -- at THIS server.  Without it
   # the hook contacts the person's real Emacs and the ledger sees no
   # lifecycle events at all.
   EMACS_SOCKET_NAME="$id" \
-  emacs -Q --name "$id" \
+  "$emacs_bin" -Q --name "$id" \
     --eval "(progn
+              (defvar agent-tasks-live-nonce \"$nonce\")
               (setq server-name \"$id\")
               (dolist (dir (file-expand-wildcards \"$elpaca/builds/*/\"))
                 (add-to-list 'load-path dir))
@@ -6797,31 +6838,43 @@ start() {
               (agent-tasks-mode 1)
               (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
               (server-start))" &
-  pid=$!
-  printf '%s\n' "$pid"  > "$state/pid"
+  launcher_pid=$!
   printf '%s\n' "$root" > "$state/root"
   printf '%s\n' "$real" > "$state/real-path"
 
-  # Ready means: this server answers, AND it is the process we started,
-  # AND both backend modes are on.  The connection is *expected* to fail
-  # while the server is still starting, so the assignment must not be
-  # allowed to trip `set -e' -- hence `|| reported='.
+  # Ready means: the server answers with THIS run's nonce, and both
+  # backend modes are on.  The pid it reports is the one recorded and
+  # managed -- `$launcher_pid' may be a wrapper rather than Emacs
+  # itself.  The connection is *expected* to fail while the server
+  # starts, so the assignment must not trip `set -e' -- hence
+  # `|| reported='.
   ready=no
   for _ in $(seq 1 60); do
     reported=$(EMACS_SOCKET_NAME="$id" emacsclient -s "$id" \
-                 --eval '(list (emacs-pid) (featurep (quote agent-tasks))
+                 --eval '(list agent-tasks-live-nonce (emacs-pid)
+                               (featurep (quote agent-tasks))
                                agent-claude-mode agent-codex-mode)' 2>/dev/null) \
       || reported=
-    if [ "$reported" = "($pid t t t)" ]; then ready=yes; break; fi
-    kill -0 "$pid" 2>/dev/null || break
+    case "$reported" in
+      "(\"$nonce\" "*" t t t)")
+        server_pid=$(printf '%s' "$reported" | sed -e 's/^("[^"]*" //' -e 's/ t t t)$//')
+        case "$server_pid" in
+          ''|*[!0-9]*) server_pid= ;;
+          *) kill -0 "$server_pid" 2>/dev/null && ready=yes ;;
+        esac
+        ;;
+    esac
+    [ "$ready" = yes ] && break
+    kill -0 "$launcher_pid" 2>/dev/null || break
     sleep 0.5
   done
   if [ "$ready" != yes ]; then
     echo "verification Emacs did not become ready (or a stale server answered)" >&2
-    exit 1     # the trap releases the state and the pointer together
+    exit 1     # the trap stops the child, then releases state and pointer
   fi
+  printf '%s\n' "$server_pid" > "$state/pid"
   setup_ok=yes
-  echo "ready: id $id, pid $pid, root $root"
+  echo "ready: id $id, emacs pid $server_pid, root $root"
   echo "run the checks with: EMACS_SOCKET_NAME=$id emacsclient -s $id -c"
 }
 
@@ -6830,28 +6883,29 @@ finish() {
   id=$(cat "$id_file" 2>/dev/null) || { echo "no harness state" >&2; exit 1; }
   state="$state_dir/$id"
   root=$(cat "$state/root" 2>/dev/null) || { echo "state is incomplete: $state" >&2; exit 1; }
-  pid=$(cat "$state/pid")
+  pid=$(cat "$state/pid" 2>/dev/null || true)
+  nonce=$(cat "$state/nonce" 2>/dev/null || true)
   real=$(cat "$state/real-path")
+  stopped=no
 
   # 1. Stop the process first, so nothing it writes at shutdown escapes
-  #    the ledger comparison.  A recorded pid may have been reused by an
-  #    unrelated process, so it is signalled ONLY after the server
-  #    identifies itself as that pid -- never on the strength of the
-  #    recorded number alone.
-  if ! kill -0 "$pid" 2>/dev/null; then
-    : # already gone; nothing to authenticate and nothing to signal
+  #    the ledger comparison.  A recorded pid may have been reused, so
+  #    it is signalled ONLY after the server echoes this run's nonce
+  #    from that same pid -- never on the strength of the number alone.
+  if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    stopped=yes                # already gone; nothing to signal
   else
     reported=$(EMACS_SOCKET_NAME="$id" emacsclient -s "$id" \
-                 --eval '(emacs-pid)' 2>/dev/null) || reported=
-    if [ "$reported" = "$pid" ]; then
-      EMACS_SOCKET_NAME="$id" emacsclient -s "$id" --eval '(kill-emacs)' >/dev/null 2>&1 || true
-      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-      if kill -0 "$pid" 2>/dev/null; then
+                 --eval '(list agent-tasks-live-nonce (emacs-pid))' 2>/dev/null) || reported=
+    if [ "$reported" = "(\"$nonce\" $pid)" ]; then
+      if stop_emacs "$id" "$pid"; then
+        stopped=yes
+      else
         echo "FAIL: verification Emacs $pid did not stop" >&2
         rc=1
       fi
     else
-      echo "FAIL: pid $pid is alive but did not identify as this run's server" >&2
+      echo "FAIL: pid $pid is alive but did not echo this run's nonce" >&2
       echo "      (reported: ${reported:-no answer}); refusing to signal it" >&2
       rc=1
     fi
@@ -6869,11 +6923,12 @@ finish() {
     rc=1
   fi
 
-  # 3. Clean up only when everything above passed; otherwise keep the
-  #    state so the run can be investigated and re-finished.
-  if [ $rc -ne 0 ]; then
+  # 3. Release only after confirmed termination and a clean comparison;
+  #    otherwise keep everything so the run can be investigated and
+  #    re-finished.
+  if [ $rc -ne 0 ] || [ "$stopped" != yes ]; then
     echo "state retained for investigation: $state" >&2
-    return $rc
+    return 1
   fi
   trash "$root" 2>/dev/null || true
   if [ -e "$root" ]; then
