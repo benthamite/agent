@@ -124,8 +124,8 @@ Byte-compile with `make compile`.
     `agent-submit`.
   - §8 (backend integration): the full slot roster — pure token slots,
     effectful attach slots, `:ready-to-submit-p`, `:pending-input-p`,
-    `:submit-literal` — replacing the two-slot `(TOKEN . UNDO)`
-    contract; the `submit-failed` rollback event.
+    `:submit-literal`, `:dispatchable-p` — replacing the two-slot
+    `(TOKEN . UNDO)` contract; the `submit-failed` rollback event.
   - §8 Codex upstream subsection: replace "No other codex.el changes"
     with the actual approved API set (programmatic `attach-mention`,
     attach handles, `codex-app-server-detach`,
@@ -3999,7 +3999,9 @@ Expected output: `(t t t t t)`.  Do not proceed to Task 11 until it is.
   - Registrations: Claude gets `:file-reference-token` and
     `:media-token` ONLY (no attach, no dispatch slots); Codex gets all
     four token/attach slots, `:ready-to-submit-p`, `:pending-input-p`,
-    and `:submit-literal`.
+    `:submit-literal`, and `:dispatchable-p` (nil for terminal
+    transports; app-server tied to the presence of the upstream
+    literal API).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4039,19 +4041,22 @@ Step 6 in that case."
   (should (fboundp 'codex-app-server-submit-literal))
   (should (fboundp 'codex-app-server-pending-attachments-p)))
 
-(ert-deftest agent-codex-test-dispatchable-p-per-transport ()
-  "Effective dispatch capability is per transport: app-server yes
-(when the upstream API exists), terminals no — so terminal Codex
-targets get the preview-only warning at compose time, not a late
-surprise at dispatch."
-  (dolist (backend '(eat vterm))
+(ert-deftest agent-codex-test-dispatchable-p-registered-per-transport ()
+  "The REGISTERED `:dispatchable-p' slot answers per transport:
+app-server yes (when the upstream API exists), terminals no — so
+terminal Codex targets get the preview-only warning at compose time,
+not a late surprise at dispatch.  Asserting through the backend
+struct proves registration, not just the raw predicate."
+  (let ((probe (agent-backend-dispatchable-p (agent-backend 'codex))))
+    (should (eq probe #'agent-codex--dispatchable-p))
+    (dolist (backend '(eat vterm))
+      (with-temp-buffer
+        (setq-local codex-terminal-backend backend)
+        (should-not (funcall probe (current-buffer)))))
     (with-temp-buffer
-      (setq-local codex-terminal-backend backend)
-      (should-not (agent-codex--dispatchable-p (current-buffer)))))
-  (with-temp-buffer
-    (setq-local codex-terminal-backend 'app-server)
-    (should (eq (agent-codex--dispatchable-p (current-buffer))
-                (fboundp 'codex-app-server-submit-literal)))))
+      (setq-local codex-terminal-backend 'app-server)
+      (should (eq (and (funcall probe (current-buffer)) t)
+                  (fboundp 'codex-app-server-submit-literal))))))
 
 (ert-deftest agent-codex-test-submit-literal-app-server-only ()
   "App-server text is structurally literal — a file-only draft may
