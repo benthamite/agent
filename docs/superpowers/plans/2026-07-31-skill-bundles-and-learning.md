@@ -1859,6 +1859,15 @@ Append to `test/agent-skill-test.el`:
   (should-error (agent-skill-validate-bundle "x" '(:skills ("a" . "b")))
                 :type 'user-error))
 
+(ert-deftest agent-skill-test-bundle-validator-rejects-dotted-backends ()
+  "Refuse a dotted `:backends' with a `user-error', not `cl-every''s.
+`listp' accepts a dotted cons, so the type check has to be
+`proper-list-p'; otherwise the validator signals `wrong-type-argument'
+and the health check reports the wrong thing."
+  (should-error (agent-skill-validate-bundle
+                 "x" '(:skills ("a") :backends (claude-code . codex)))
+                :type 'user-error))
+
 (ert-deftest agent-skill-test-bundle-validator-rejects-a-non-string-name ()
   "A bundle name must be a string."
   (should-error (agent-skill-validate-bundle 'review-pr '(:skills ("a")))
@@ -1988,7 +1997,10 @@ half works."
       (when (and value (not (stringp value)))
         (user-error "Bundle `%s' key `%S' must be a string" name key))))
   (let ((backends (plist-get bundle :backends)))
-    (unless (and (listp backends) (cl-every #'symbolp backends))
+    ;; `proper-list-p' before `cl-every': a dotted cons satisfies
+    ;; `listp', and `cl-every' then signals `wrong-type-argument' out of
+    ;; the validator instead of the `user-error' every caller expects.
+    (unless (and (proper-list-p backends) (cl-every #'symbolp backends))
       (user-error "Bundle `%s' key `:backends' must be a list of symbols"
                   name)))
   (let ((skills (plist-get bundle :skills)))
@@ -2249,13 +2261,17 @@ git commit -m "agent-skill: render a bundle as one deterministic message"
   `agent-session-display-state`, `agent-account-resolve`,
   `agent-skill-bundle-message`, `agent-note-skill-invocation`.
 - Produces (in `agent.el`, for reuse by Task 13):
-  - `agent-ensure-dispatch-target (BUFFER)` → BUFFER; `user-error` when
-    busy; confirms when `unknown`.
+  - `agent-ensure-dispatch-target (BUFFER)` → `ready` or
+    `confirmed-unknown`; `user-error` when busy or when the user
+    declines an `unknown` state.  It returns the decision, not the
+    buffer, because `agent-dispatch-prepared` has to know later whether
+    an `unknown` was already agreed to.
   - `agent-read-dispatch-target (&optional PROMPT)` → a live session
     buffer or the symbol `new`.
   - `agent-prepare-dispatch (TARGET &key backend directory)` → a plan
-    plist, `(:buffer BUFFER)` or `(:session SESSION)`.  All prompting
-    happens here.
+    plist: `(:buffer BUFFER :readiness READINESS)` for a live target,
+    where READINESS is `ready` or `confirmed-unknown`, or
+    `(:session SESSION)` for a new one.  All prompting happens here.
   - `agent-dispatch-prepared (TEXT PLAN)` → the session buffer the text
     was submitted to.  Prompts for nothing.
   - `agent-dispatch-prompt (TEXT TARGET &key backend directory)` → the
@@ -2312,13 +2328,13 @@ whether or not the composer plan (which defines
           (should asked))))))
 
 (ert-deftest agent-test-ensure-dispatch-target-accepts-a-waiting-session ()
-  "Return the buffer when the session is waiting for input."
+  "Report `ready' when the session is waiting for input."
   (with-temp-buffer
     (let ((buffer (current-buffer)))
       (agent-test--without-readiness-probe
         (cl-letf (((symbol-function 'agent-session-display-state)
                    (lambda (&rest _) 'waiting)))
-          (should (eq buffer (agent-ensure-dispatch-target buffer))))))))
+          (should (eq 'ready (agent-ensure-dispatch-target buffer))))))))
 
 (ert-deftest agent-test-ensure-dispatch-target-prefers-the-readiness-probe ()
   "Refuse a session the authoritative probe calls busy, however it displays.
@@ -2349,7 +2365,8 @@ exists it wins."
                  (lambda (&rest _) 'unknown))
                 ((symbol-function 'yes-or-no-p)
                  (lambda (_prompt) (setq asked t) t)))
-        (should (eq buffer (agent-ensure-dispatch-target buffer)))
+        (should (eq 'confirmed-unknown
+                    (agent-ensure-dispatch-target buffer)))
         (should asked)))))
 
 (ert-deftest agent-test-dispatch-prompt-starts-a-new-session ()
@@ -2547,8 +2564,11 @@ TARGET is a live session buffer or the symbol `new'.  This is where all
 prompting happens — backend choice, directory choice, account
 resolution, and the `unknown'-state confirmation — so that a caller can
 finish every question the user has to answer *before* it re-checks
-whatever it is about to send.  Return either (:buffer BUFFER) or
-\(:session SESSION), ready for `agent-dispatch-prepared'."
+whatever it is about to send.  Return either
+\(:buffer BUFFER :readiness READINESS) — where READINESS is `ready' or
+`confirmed-unknown', which is how `agent-dispatch-prepared' tells an
+already-agreed `unknown' from one that appeared since — or
+\(:session SESSION)."
   (if (eq target 'new)
       (let* ((backend (or backend (agent--resolve-backend)))
              (directory (or directory
@@ -2632,6 +2652,22 @@ Append to `test/agent-skill-test.el`:
                 (push (cons text (or (plist-get plan :buffer) 'new)) ,sent)
                 (or (plist-get plan :buffer) (current-buffer)))))
      ,@body))
+
+(ert-deftest agent-skill-test-source-summary-distinguishes-unknown ()
+  "Say `could not check' for an unknown dirty state, not `uncommitted'."
+  (let ((base '(:commit "abc1234567")))
+    (should (equal "abc12345" (agent-skill--source-summary base)))
+    (should (string-match-p
+             "uncommitted changes"
+             (agent-skill--source-summary (append base '(:dirty t)))))
+    (should (string-match-p
+             "could not check"
+             (agent-skill--source-summary
+              (append base '(:dirty unknown)))))
+    (should-not (string-match-p
+                 "uncommitted changes"
+                 (agent-skill--source-summary
+                  (append base '(:dirty unknown)))))))
 
 (ert-deftest agent-skill-test-run-bundle-dispatches-and-records ()
   "Send the rendered message once and record one entry per step."
@@ -3107,6 +3143,20 @@ Append to `test/agent-skill-test.el`:
   (should (string-match-p
            "2 records.*1 unparsable"
            (agent-skill--history-header (list :total 2 :unparsable 1)))))
+
+(ert-deftest agent-skill-test-history-commit-distinguishes-unknown ()
+  "Mark a failed dirty check differently from a positive one.
+The record stores the symbol as the string \"unknown\", so a consumer
+that tests for any non-nil value reports \"uncommitted changes\" for a
+check that never ran."
+  (let ((base '((commit . "abc1234567"))))
+    (should (equal "abc12345"
+                   (agent-skill--history-commit base)))
+    (should (equal "abc12345*"
+                   (agent-skill--history-commit (cons '(dirty . t) base))))
+    (should (equal "abc12345?"
+                   (agent-skill--history-commit
+                    (cons '(dirty . "unknown") base))))))
 ```
 
 - [ ] **Step 2: Run the tests and watch them fail**
@@ -3336,6 +3386,43 @@ Append to `test/agent-skill-test.el`:
                      (lambda (i) (string-match-p "description"
                                                  (plist-get i :issue)))
                      (agent-skill-check-issues)))))
+      (delete-directory root t))))
+
+(ert-deftest agent-skill-test-check-separates-unknown-from-dirty ()
+  "Report a failed dirty check as a warning, not as uncommitted changes."
+  (let ((root (make-temp-file "agent-skill-check" t)))
+    (unwind-protect
+        (progn
+          (agent-skill-test--make-skill
+           root "demo" "---\nname: demo\ndescription: X\n---\n")
+          (agent-skill-test--with-roots (list (cons root 'file))
+            (let ((agent-skill-record-git-provenance t))
+              ;; Dirty: an `info' note naming uncommitted changes.
+              (cl-letf (((symbol-function 'agent-skill-provenance)
+                         (lambda (&rest _) '(:repo "/repo/" :dirty t))))
+                (let ((issue (cl-find-if
+                              (lambda (i)
+                                (string-match-p "uncommitted"
+                                                (plist-get i :issue)))
+                              (agent-skill-check-issues))))
+                  (should issue)
+                  (should (eq 'info (plist-get issue :severity)))))
+              ;; Unknown: a `warning', and never the uncommitted wording.
+              (cl-letf (((symbol-function 'agent-skill-provenance)
+                         (lambda (&rest _) '(:repo "/repo/" :dirty unknown))))
+                (let ((issues (agent-skill-check-issues)))
+                  (should-not (cl-find-if
+                               (lambda (i)
+                                 (string-match-p "uncommitted"
+                                                 (plist-get i :issue)))
+                               issues))
+                  (let ((issue (cl-find-if
+                                (lambda (i)
+                                  (string-match-p "could not report"
+                                                  (plist-get i :issue)))
+                                issues)))
+                    (should issue)
+                    (should (eq 'warning (plist-get issue :severity)))))))))
       (delete-directory root t))))
 
 (ert-deftest agent-skill-test-check-reports-an-invalid-bundle ()

@@ -335,7 +335,7 @@ is a strict addition to an existing public return value.
 | `:content-sha1` | SHA-1 of the `SKILL.md` bytes |
 | `:repo` | git top level, or nil |
 | `:relative-path` | the skill directory, relative to `:repo` |
-| `:tree-fingerprint` | hash of names, sizes and mtimes under the skill directory |
+| `:tree-fingerprint` | hash of each file's relative name and bytes under the skill directory |
 | `:commit` | `HEAD` of that repo, or nil |
 | `:dirty` | t, nil, or `unknown` — uncommitted changes anywhere in the skill directory |
 
