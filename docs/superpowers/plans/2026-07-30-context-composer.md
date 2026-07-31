@@ -5,8 +5,12 @@
 **Goal:** A unified, cross-backend context composer (`agent-context.el`): gather
 region/buffer/file/directory/git/diagnostics/compilation/image/URL/captured-prompt
 context, preview it truthfully in a dedicated draft buffer, and dispatch it
-once to an idle Claude Code or Codex session, per
-`docs/superpowers/specs/2026-07-30-context-composer-design.md`.
+once to an idle **Codex app-server** session — the only transport that can
+prove literal, isolated, atomic submission in v1.  Claude and terminal
+Codex targets are compose-and-preview only until their backends provide
+the required submission contracts.  Per
+`docs/superpowers/specs/2026-07-30-context-composer-design.md` as amended
+by Task 1.
 
 **Architecture:** A new `agent-context.el` module holds the item model,
 sources, safety layer, renderer, composer buffer, and dispatch pipeline.
@@ -143,6 +147,15 @@ Byte-compile with `make compile`.
     symlinks display their truename and never bypass secret protection.
   - §9 (module boundaries): "the two backend slots" becomes the full
     seven-slot roster, matching §8.
+  - Problem/overview wording and §13 (verification): v1 dispatches only
+    to Codex app-server sessions; Claude and terminal Codex targets are
+    compose-and-preview only (token slots keep previews complete), the
+    composer warns at compose/retarget and refuses at dispatch, and the
+    live-verification list matches Task 14 (dispatch workflows on
+    app-server; honest-refusal checks for the others).  The "send to
+    either backend" promise is explicitly deferred to the day
+    claude-code.el/codex.el provide a tristate prompt-empty probe and
+    an acknowledged or safely recoverable submission API.
 - Test: `test/agent-test.el`
 
 **Interfaces:**
@@ -3406,12 +3419,17 @@ repo's checklist asks.
     restored to the composer.
   - `codex--app-server-send-turn-start` is reworked around an
     EXACTLY-ONCE resolver shared by its synchronous handler and its
-    response callback: whichever runs first clears
-    `codex--app-server-turn-start-pending-p' and acts; the other
-    becomes a no-op.  A quit during the synchronous send therefore
-    leaves no pending flag and no live callback that could later act
-    on a submission already restored to the composer.  Interactive
-    submissions gain the same failure reporting.
+    response callback, and its whole body runs under `inhibit-quit`,
+    so the JSON-RPC write is UNINTERRUPTIBLE.  There is no
+    "delivered but restored locally" state: either the write signals
+    synchronously (nothing delivered — restored exactly once, failure
+    hook run) or the write completes (possibly/definitely delivered —
+    ownership is the response callback's, the submission is NOT
+    locally retryable, and a C-g pressed during the write is consumed
+    with a message because there is nothing left to abort).  Quit can
+    therefore only ever fire BEFORE the send, where restoring is
+    unambiguous.  Interactive submissions gain the same protection and
+    failure reporting.
 
 Before writing code, `grep -n "attach-mention" codex-app-server.el
 codex.el` and note every caller — the `/mention` slash dispatcher and any
@@ -3487,53 +3505,91 @@ hold, queue, or steer."
         (should-error (codex-app-server-submit-literal "hello")
                       :type 'user-error)))))
 
-(ert-deftest codex-test-app-server-submit-literal-failure-owned ()
-  "Failed sends — synchronous error and quit — are recovered
-codex-side exactly once: the submission is restored, the failure hook
-runs, the pending flag is cleared, a late-arriving response callback
-is a no-op, and the caller never receives a signal."
-  (dolist (failure '(error quit))
-    (with-temp-buffer
-      (let (restored statuses hook-buffers late-callback)
-        (cl-letf (((symbol-function 'codex-prompt-input)
-                   (lambda (&optional _) nil))
-                  ((symbol-function 'codex-app-server-ready-for-turn-p)
-                   (lambda (&optional _) t))
-                  ((symbol-function 'codex--app-server-insert-message)
-                   #'ignore)
-                  ((symbol-function 'codex--app-server-ensure-trailing-newline)
-                   #'ignore)
-                  ((symbol-function 'codex--app-server-insert-status)
-                   (lambda (text) (push text statuses)))
-                  ((symbol-function 'codex--app-server-restore-submission)
-                   (lambda (submission) (push submission restored)))
-                  ((symbol-function 'codex--app-server-send-request)
-                   (lambda (_method _params callback)
-                     ;; The request layer registered its callback and
-                     ;; THEN the write failed: the worst case.
-                     (setq late-callback callback)
-                     (if (eq failure 'quit)
-                         (signal 'quit nil)
-                       (error "socket closed")))))
-          (let ((codex-app-server-turn-start-failed-functions
-                 (list (lambda (buffer) (push buffer hook-buffers)))))
-            (setq-local codex--app-server-pending-images nil)
-            (setq-local codex--app-server-pending-mentions nil)
-            (setq-local codex--app-server-thread-id "t1")
-            ;; Must NOT signal: ownership already transferred.
-            (codex-app-server-submit-literal "hello")
-            (should (= 1 (length restored)))
-            (should (equal hook-buffers (list (current-buffer))))
-            ;; Pending state resolved: flag cleared...
-            (should-not codex--app-server-turn-start-pending-p)
-            ;; ...and the retained callback is dead: a late response
-            ;; must not act on the already-restored submission.
-            (funcall late-callback nil '((code . -32000)))
-            (should (= 1 (length restored)))
-            (should (= 1 (length hook-buffers)))
-            (should (cl-some (lambda (line)
-                               (string-match-p "restored" line))
-                             statuses))))))))
+(defmacro codex-test--with-literal-env (&rest body)
+  "Bind the literal-submission stubs; expose RESTORED, STATUSES,
+HOOK-BUFFERS, LATE-CALLBACK, and SEND-BEHAVIOR (a function called in
+place of the request write) to BODY."
+  (declare (indent 0))
+  `(with-temp-buffer
+     (let (restored statuses hook-buffers late-callback
+           (send-behavior #'ignore))
+       (ignore restored statuses hook-buffers late-callback)
+       (cl-letf (((symbol-function 'codex-prompt-input)
+                  (lambda (&optional _) nil))
+                 ((symbol-function 'codex-app-server-ready-for-turn-p)
+                  (lambda (&optional _) t))
+                 ((symbol-function 'codex--app-server-insert-message)
+                  #'ignore)
+                 ((symbol-function 'codex--app-server-ensure-trailing-newline)
+                  #'ignore)
+                 ((symbol-function 'codex--app-server-accept-submission)
+                  #'ignore)
+                 ((symbol-function 'codex--app-server-turn-started)
+                  #'ignore)
+                 ((symbol-function 'codex--app-server-insert-status)
+                  (lambda (text) (push text statuses)))
+                 ((symbol-function 'codex--app-server-restore-submission)
+                  (lambda (submission) (push submission restored)))
+                 ((symbol-function 'codex--app-server-send-request)
+                  (lambda (_method _params callback)
+                    ;; The request layer registers its callback and
+                    ;; then attempts the write.
+                    (setq late-callback callback)
+                    (funcall send-behavior))))
+         (let ((codex-app-server-turn-start-failed-functions
+                (list (lambda (buffer) (push buffer hook-buffers)))))
+           (setq-local codex--app-server-pending-images nil)
+           (setq-local codex--app-server-pending-mentions nil)
+           (setq-local codex--app-server-thread-id "t1")
+           ,@body)))))
+
+(ert-deftest codex-test-app-server-submit-literal-sync-error-owned ()
+  "A synchronous write error is recovered codex-side exactly once:
+restored, failure hook run, pending flag cleared, the retained
+callback dead, and no signal to the caller."
+  (codex-test--with-literal-env
+    (setq send-behavior (lambda () (error "socket closed")))
+    (codex-app-server-submit-literal "hello")   ; must NOT signal
+    (should (= 1 (length restored)))
+    (should (equal hook-buffers (list (current-buffer))))
+    (should-not codex--app-server-turn-start-pending-p)
+    ;; A late response must not act on the restored submission.
+    (funcall late-callback nil '((code . -32000)))
+    (should (= 1 (length restored)))
+    (should (= 1 (length hook-buffers)))
+    (should (cl-some (lambda (line) (string-match-p "restored" line))
+                     statuses))))
+
+(ert-deftest codex-test-app-server-quit-during-write-not-retryable ()
+  "A C-g during the uninterruptible write is consumed: nothing is
+restored, the submission is NOT locally retryable, and a late SUCCESS
+response completes the turn normally — no `delivered but restored'
+state can exist."
+  (codex-test--with-literal-env
+    (setq send-behavior (lambda () (setq quit-flag t)))  ; C-g mid-write
+    (codex-app-server-submit-literal "hello")   ; must NOT signal
+    (should-not quit-flag)                      ; consumed, with message
+    (should (null restored))
+    (should (null hook-buffers))
+    ;; The turn is in flight; the callback still owns the outcome.
+    (should codex--app-server-turn-start-pending-p)
+    (funcall late-callback '((turn . ((id . "t-1")))) nil)
+    (should-not codex--app-server-turn-start-pending-p)
+    (should (null restored))
+    (should (null hook-buffers))))
+
+(ert-deftest codex-test-app-server-quit-before-send-restores-once ()
+  "A quit that fires before the write (the only place quit can now
+fire) restores exactly once and runs the failure hook."
+  (codex-test--with-literal-env
+    (cl-letf (((symbol-function 'codex--app-server-send-turn-start)
+               (lambda (_submission) (signal 'quit nil))))
+      (codex-app-server-submit-literal "hello"))  ; must NOT signal
+    (should (= 1 (length restored)))
+    (should (equal hook-buffers (list (current-buffer))))
+    (should (cl-some (lambda (line)
+                       (string-match-p "quit before sending" line))
+                     statuses))))
 
 (ert-deftest codex-test-app-server-pending-attachments-p ()
   "The predicate sees both pending mentions and pending images."
@@ -3686,16 +3742,25 @@ afterwards is restored into this session's composer and announced on
   (codex--app-server-insert-message codex--app-server-user-prefix text)
   (codex--app-server-ensure-trailing-newline)
   (let ((submission (codex--app-server-take-submission text)))
-    ;; `send-turn-start' resolves pending state, restores, and runs the
-    ;; failure hook exactly once for error, quit, and async failure;
-    ;; swallow its re-signal so the caller keeps no second retry copy.
     (condition-case err
         (codex--app-server-send-turn-start submission)
-      ((error quit)
+      (quit
+       ;; Quit cannot escape `send-turn-start' (its body inhibits
+       ;; quits), so this quit fired BEFORE the write: nothing was
+       ;; delivered and nothing was restored yet.  Restore here,
+       ;; exactly once.
+       (codex--app-server-restore-submission submission)
+       (run-hook-with-args 'codex-app-server-turn-start-failed-functions
+                           (current-buffer))
+       (codex--app-server-insert-status
+        "Literal submission quit before sending; input restored"))
+      (error
+       ;; `send-turn-start' already resolved pending state, restored,
+       ;; and ran the failure hook; swallow the re-signal so the
+       ;; caller keeps no second retry copy.
        (codex--app-server-insert-status
         (format "Literal submission failed to start; input restored (%s)"
-                (if (eq (car-safe err) 'quit) "quit"
-                  (error-message-string err))))))))
+                (error-message-string err)))))))
 ```
 
 Rework `codex--app-server-send-turn-start' (currently ~line 4152)
@@ -3707,14 +3772,19 @@ the failure hook once, and can never double-act:
 ```elisp
 (defun codex--app-server-send-turn-start (submission)
   "Send captured SUBMISSION as a new app-server turn.
-The pending flag and the response callback are resolved exactly once:
-whichever of the synchronous failure handler and the asynchronous
-response runs first wins, and the other becomes a no-op.  Every
-failure path restores SUBMISSION to the composer and runs
-`codex-app-server-turn-start-failed-functions'."
-  (setq codex--app-server-turn-start-pending-p t)
+The whole body runs with quits inhibited, so the JSON-RPC write is
+uninterruptible: either it signals synchronously (nothing delivered;
+SUBMISSION is restored exactly once and the failure hook runs) or it
+completes, at which point ownership belongs to the response callback
+and SUBMISSION is not locally retryable — a C-g pressed during the
+write is consumed with a message, because there is nothing left to
+abort.  The pending flag and the response callback are resolved
+exactly once: whichever of the synchronous failure handler and the
+asynchronous response runs first wins; the other is a no-op."
   (let ((buffer (current-buffer))
-        (resolved nil))
+        (resolved nil)
+        (inhibit-quit t))
+    (setq codex--app-server-turn-start-pending-p t)
     (cl-flet ((resolve-once ()
                 (unless resolved
                   (setq resolved t)
@@ -3749,10 +3819,17 @@ failure path restores SUBMISSION to the composer and runs
                    (codex--app-server-turn-started
                     `((threadId . ,codex--app-server-thread-id)
                       (turn . ,(alist-get 'turn result)))))))))
-        ((error quit)
+        ;; With quits inhibited, only `error' can reach this handler.
+        (error
          (when (resolve-once)
            (report-failure))
-         (signal (car err) (cdr err)))))))
+         (signal (car err) (cdr err))))
+      ;; A C-g pressed while the write was in flight is moot now: the
+      ;; request was delivered (a failed write signaled above).  Consume
+      ;; it so it cannot unwind callers into draft-restoring paths.
+      (when quit-flag
+        (setq quit-flag nil)
+        (message "Quit ignored: the Codex turn was already sent")))))
 ```
 
 (For the image test to pass, note `memq`/`delq` operate on the *same
@@ -3837,10 +3914,10 @@ Expected output: `(t t t t t)`.  Do not proceed to Task 11 until it is.
     `agent-codex--mode-enable` and removed symmetrically on disable,
     guarded by `boundp`; emits `submit-failed' so a failed literal
     submission never leaves the session stuck busy).
-  - Registrations: Claude gets `:file-reference-token`, `:media-token`,
-    `:pending-input-p`, `:submit-literal`; Codex gets all four
-    token/attach slots, `:ready-to-submit-p`, `:pending-input-p`, and
-    `:submit-literal`.
+  - Registrations: Claude gets `:file-reference-token` and
+    `:media-token` ONLY (no attach, no dispatch slots); Codex gets all
+    four token/attach slots, `:ready-to-submit-p`, `:pending-input-p`,
+    and `:submit-literal`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4185,7 +4262,7 @@ Run: `make test` — all pass.
 
 ```bash
 git add agent-claude.el agent-codex.el test/agent-claude-test.el test/agent-codex-test.el
-git commit -m "agent: register attachment slots for both backends"
+git commit -m "agent: register composer capability slots per backend"
 ```
 
 ---
