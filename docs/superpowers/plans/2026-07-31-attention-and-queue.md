@@ -70,18 +70,23 @@ These apply to every task.  They restate the spec's non-negotiables.
 - Defcustom defaults: `agent-queue-stall-seconds` 30,
   `agent-queue-poll-interval` 10.  The spec's `agent-queue-debounce` (2)
   does not exist; deviation 8 explains why.
-- **One correlation contract, and it is not a clock.**  Whether a
-  completion reports a new turn end is decided once, in
-  `agent-session-event`, from facts the backends supply — the turn id
-  when there is one, observed work, and otherwise which channel is
-  reporting.  Every consumer reads the answer from the delivered
-  `:redundant` flag; no consumer re-derives it, and nothing anywhere
-  attributes a completion by elapsed time.
-- **Events are delivered in the order they happened.**  No side effect
-  of delivering an event may deliver another event synchronously: the
-  queue drain and the before-exit chain both submit from a zero-delay
-  timer, so every consumer sees a completion before it sees anything
-  that completion caused.
+- **One correlation contract: count turn-end reports per channel.**
+  Whether a completion reports a new turn end is decided once, in
+  `agent-session-event`, from the turn id when there is one and
+  otherwise from how many turn ends the reporting channel has already
+  described.  Every consumer reads the answer from the delivered
+  `:redundant` flag; no consumer re-derives it.  Nothing attributes a
+  completion by elapsed time, and **nothing resets the counts** — no
+  event can invalidate what an earlier one established.
+- **Events are delivered in the order they happened.**  Nothing that
+  delivers a session event may run inside the delivery of another: the
+  queue drain, the before-exit chain's submission, and the before-exit
+  chain's close all run from a zero-delay timer, so every consumer sees
+  an event before it sees anything that event caused.
+- **Persistence is two-valued.**  Storing a prompt either returns a
+  handle naming an entry that is on disk, or signals with the file
+  unchanged.  No path leaves an entry that no handle names, and no
+  failure is reported as success.
 - All 362+ existing tests keep passing; `make compile` stays
   warning-free in both repos.
 - Commit after every task with a single-purpose message.
@@ -115,9 +120,9 @@ places.  Do not edit the composer plan; instead follow these rules:
    optional PAYLOAD argument, an `error` event, and completion
    deduplication.  Whichever lands second adds only its own part.  If
    `submit-failed` already exists when Task 1 runs, keep its `pcase`
-   branch untouched and treat it as a progress event in
-   `agent--session-note-progress` (it means a submission was attempted),
-   and add it to the docstring's event list.
+   branch untouched and add it to the docstring's event list.  It
+   needs no completion bookkeeping: like `submit`, it says nothing about
+   whether a turn ended.
 3. **`codex-app-server-ready-for-turn-p`.**  The composer plan adds this
    boolean to `codex-app-server.el`.  Task 12 adds
    `codex-app-server-turn-state`, a richer read-only probe.  If
@@ -183,25 +188,27 @@ the implementer does not "fix" it back.
    failed session must not receive automatic input; pausing at the
    moment the backend says the turn died reports the actual reason
    instead of a generic stall, and still sends nothing.
-8. **Channel identity replaces the spec's `agent-queue-debounce` (2 s),
-   which is dropped entirely.**  The spec puts the duplicate guard in
-   the queue and sizes it in seconds, but no threshold can work: a
-   delayed `idle_prompt` for a turn that ended and the prompt `Stop` of
-   a turn that started and finished quickly can arrive at any interval,
-   so every value is wrong in one direction or the other — too small and
-   duplicates advance the before-exit chain twice, too large and short
-   turns are lost.  The same ambiguity governs the before-exit chain,
-   which the spec gives no guard at all.  So the question is answered
-   once, in `agent-session-event`, from a fact the backends actually
-   supply: which channel is reporting.  Each channel reports each turn
-   at most once, so a report from a channel that already described the
-   recorded turn end is a new turn, and a first report from a second
-   channel is the turn the first already described.  No timing is
-   involved anywhere, and backends with turn ids short-circuit even
-   that.  The residual case is narrow and nameable: a channel wired up
-   twice in `settings.json` would report one turn twice and look like
-   two turns.  `agent-claude--ensure-hook` already refuses to add a
-   command that is present, and the manual says so.
+8. **Per-channel turn counting replaces the spec's
+   `agent-queue-debounce` (2 s), which is dropped entirely.**  The spec
+   puts the duplicate guard in the queue and sizes it in seconds, but no
+   threshold can work: a delayed `idle_prompt` for a turn that ended and
+   the prompt `Stop` of a turn that started and finished quickly can
+   arrive at any interval, so every value is wrong in one direction or
+   the other.  The same ambiguity governs the before-exit chain, which
+   the spec guards not at all.  So the question is answered once, in
+   `agent-session-event`, from the one thing the backends do guarantee:
+   each reporting channel emits one turn-end event per turn, in order.
+   Counting each channel's reports says which turn each one describes.
+   Nothing resets those counts, so no intervening event can invalidate
+   them — the failure of every earlier attempt here was some piece of
+   shared state that a new turn cleared.  Backends with turn ids
+   short-circuit the counting entirely.  The residual case is narrow and
+   nameable: a channel wired up twice in `settings.json` reports one
+   turn twice and so runs ahead.  `agent-claude--ensure-hook` already
+   refuses to add a command that is present, and the manual says so.
+   The opposite skew — a channel that misses a turn — under-reports,
+   which costs a delay and a notification rather than a stray
+   submission.
 9. **The queue checks for a blocked dialog itself.**  `blocked` leaves
    a session in `awaiting-input`, so the fallback readiness path —
    Claude and terminal Codex, neither of which can see a dialog — would
@@ -268,12 +275,13 @@ the implementer does not "fix" it back.
     `(:type EVENT :time FLOAT :source SYMBOL-or-nil :redundant BOOL
     :payload PLIST-or-nil)`.
   - The `error` event symbol.
-  - `agent--session-completion-canonical-p BUFFER PAYLOAD` — the single
-    correlation contract; every at-most-once consumer reads its verdict
-    through the delivered `:redundant` flag rather than re-deriving it.
-  - `agent--before-exit-submit-next-deferred BUFFER` — the chain's
-    submission, moved out of event delivery.
-  - `agent--session-turn-observed`, `agent--session-completion-sources`,
+  - `agent--session-record-completion BUFFER PAYLOAD` — the single
+    correlation contract: ranks a turn-end report and records it in one
+    step.  Every at-most-once consumer reads its verdict through the
+    delivered `:redundant` flag rather than re-deriving it.
+  - `agent--before-exit-advance-deferred BUFFER` — the chain's
+    submission *and* its close, both moved out of event delivery.
+  - `agent--session-channel-turns`, `agent--session-completed-turns`,
     `agent--session-completed-turn-id`, `agent--session-awaiting-reason`
     (buffer-local, private).
   - `agent-session-fresh-turn-evidence-p BUFFER` (added in Task 2, but
@@ -397,10 +405,44 @@ threshold separates them.  The channel does."
                     '(stop . (:source claude-stop-hook)))
                    '(nil t nil t nil)))))
 
+(ert-deftest agent-test-session-event/late-duplicate-after-activity ()
+  "The sequence that broke every earlier attempt.
+`A Stop → submit B → B activity → delayed A idle_prompt': the
+notification is turn A's, and B has not ended.  An implementation that
+resets its duplicate history when a new turn is observed ranks that
+notification canonical and advances B."
+  (agent-test--with-event-buffer buf
+    (should (equal (agent-test--completion-flags
+                    buf
+                    '(submit)
+                    '(stop . (:source claude-stop-hook))
+                    '(submit)
+                    '(activity)
+                    '(idle-prompt . (:source claude-idle-notification)))
+                   '(nil t)))
+    ;; B's own end is still ahead, and is canonical when it arrives.
+    (should (equal (agent-test--completion-flags
+                    buf '(stop . (:source claude-stop-hook)))
+                   '(nil)))))
+
+(ert-deftest agent-test-session-event/duplicates-may-arrive-out-of-order ()
+  "`A Stop → B Stop → A idle → B idle' ranks two turns, not four.
+The notification channel's first and second reports describe the first
+and second turns however late they arrive, so neither is canonical once
+the hook channel has already reported both."
+  (agent-test--with-event-buffer buf
+    (should (equal (agent-test--completion-flags
+                    buf
+                    '(stop . (:source claude-stop-hook))
+                    '(submit)
+                    '(stop . (:source claude-stop-hook))
+                    '(idle-prompt . (:source claude-idle-notification))
+                    '(idle-prompt . (:source claude-idle-notification)))
+                   '(nil nil t t)))))
+
 (ert-deftest agent-test-session-event/late-duplicate-stays-redundant ()
   "An arbitrarily late duplicate is still a duplicate.
-The delay is irrelevant: only a report from a channel that has already
-described this turn end, or observed work, opens a new turn."
+The delay is irrelevant: nothing in the rule reads a clock."
   (agent-test--with-event-buffer buf
     (should (equal (agent-test--completion-flags
                     buf
@@ -411,6 +453,23 @@ described this turn end, or observed work, opens a new turn."
     (should (equal (agent-test--completion-flags
                     buf '(idle-prompt . (:source claude-idle-notification)))
                    '(t)))))
+
+(ert-deftest agent-test-session-event/a-lagging-channel-catches-up ()
+  "A channel that misses a turn under-reports rather than over-reports.
+The hook channel skips turn two; the notification channel reports it,
+and the hook's next report is ranked redundant instead of inventing a
+turn.  Under-reporting delays; over-reporting sends text twice."
+  (agent-test--with-event-buffer buf
+    (should (equal (agent-test--completion-flags
+                    buf
+                    '(stop . (:source claude-stop-hook))          ; turn 1
+                    '(idle-prompt . (:source claude-idle-notification))
+                    ;; Turn 2: the hook event never arrives.
+                    '(idle-prompt . (:source claude-idle-notification))
+                    ;; Turn 3.
+                    '(stop . (:source claude-stop-hook))
+                    '(idle-prompt . (:source claude-idle-notification)))
+                   '(nil t nil t nil)))))
 
 (ert-deftest agent-test-session-event/short-turn-is-canonical-immediately ()
   "A turn too short for the status poll to see is reported at once.
@@ -440,26 +499,56 @@ turn, which is exactly what makes it canonical."
                     '(idle-prompt . (:turn-id "t2" :source codex-app-server)))
                    '(nil t nil)))))
 
-(ert-deftest agent-test-session-event/untagged-completions-are-canonical ()
-  "A producer that names no channel gets no cross-channel deduplication."
+(ert-deftest agent-test-session-event/one-channel-reports-every-turn ()
+  "A transport with a single reporting channel needs no deduplication.
+Terminal Codex has only its CLI `Stop' hook, so each report is that
+channel's next and every one is canonical.  A producer that names no
+source at all is treated the same way -- one anonymous channel."
   (agent-test--with-event-buffer buf
     (should (equal (agent-test--completion-flags
                     buf '(stop) '(stop) '(stop))
                    '(nil nil nil)))))
 
-(ert-deftest agent-test-session-event/observed-work-clears-the-channels ()
-  "Observed work makes the next report from any channel a new turn."
+(ert-deftest agent-test-session-event/before-exit-defers-the-close ()
+  "The final completion's `exit-request' is delivered after it, not inside.
+Closing the chain emits `exit-request'; doing that from inside the
+delivery of the completion that finished the last skill would show
+observers the caused event before the causing one."
   (agent-test--with-event-buffer buf
-    (should (equal (agent-test--completion-flags
-                    buf
-                    '(stop . (:source claude-stop-hook))
-                    '(activity)
-                    ;; A different channel would be redundant without the
-                    ;; observed work in between.
-                    '(idle-prompt . (:source claude-idle-notification))
-                    '(blocked . (:kind permission))
-                    '(idle-prompt . (:source claude-idle-notification)))
-                   '(nil nil nil)))))
+    (let ((submitted nil)
+          (seen nil)
+          (pending nil))
+      (let ((agent-session-event-functions
+             (list (lambda (_b plist) (push (plist-get plist :type) seen)))))
+        (agent-test--with-before-exit-chain buf '("only") submitted
+          (cl-letf (((symbol-function 'run-at-time)
+                     (lambda (_secs _rep fn &rest args)
+                       (push (cons fn args) pending) nil)))
+            (agent-session-event buf 'submit)
+            (should-not (agent-run-skill-before-exit 'test buf))
+            ;; Draining the timer submits the only skill.
+            (dolist (job (nreverse pending)) (apply (car job) (cdr job)))
+            (setq seen nil pending nil)
+            (agent-session-event buf 'stop '(:source claude-stop-hook))
+            ;; The completion is delivered; no `exit-request' yet.
+            (should (equal seen '(stop)))
+            (dolist (job (nreverse pending)) (apply (car job) (cdr job)))
+            (should (equal (nreverse seen) '(stop exit-request)))))))))
+
+(ert-deftest agent-test-session-event/work-events-record-nothing ()
+  "`activity', `blocked', and `submit' change no turn-end bookkeeping.
+Any of them resetting it is what made a delayed duplicate look new."
+  (agent-test--with-event-buffer buf
+    (agent-session-event buf 'stop '(:source claude-stop-hook))
+    (let ((turns (buffer-local-value 'agent--session-channel-turns buf))
+          (completed (buffer-local-value 'agent--session-completed-turns buf)))
+      (agent-session-event buf 'submit)
+      (agent-session-event buf 'activity)
+      (agent-session-event buf 'blocked '(:kind permission))
+      (should (equal (buffer-local-value 'agent--session-channel-turns buf)
+                     turns))
+      (should (= (buffer-local-value 'agent--session-completed-turns buf)
+                 completed)))))
 
 (ert-deftest agent-test-session-event/redundant-completion-keeps-alerts ()
   "A redundant `idle-prompt' still fires the ready alert."
@@ -671,27 +760,28 @@ In `agent.el`, add next to the other state variables (after
 `agent--session-state-changed-at`, ~line 668):
 
 ```elisp
-(defvar-local agent--session-turn-observed nil
-  "Non-nil when work was observed since this session's last turn ended.
-Set by `activity' and `blocked' events, cleared by a canonical
-completion or an `error'.  Only `agent-session-event' may set this
+(defvar-local agent--session-channel-turns nil
+  "How many turn ends each backend channel has reported in this session.
+An alist of (SOURCE . COUNT).  Every channel that can report a turn
+ending names itself in its payload's `:source', and each reports any one
+turn at most once, in order: Claude Code's `Stop' hook fires once per
+turn and its `idle_prompt' notification fires once per turn, and the
+same holds for the Codex app-server's `turn/completed' and the Codex
+CLI's `Stop' hook.  The Nth report on any of those streams therefore
+describes the Nth turn, whenever it happens to arrive.
+
+Counting per channel is what replaces both guessing from elapsed time
+and any shared \"has this turn been reported\" flag.  Nothing clears
+these counts: they only ever go up, so no later event can invalidate
+what an earlier one established.  Only `agent-session-event' may set
+this variable.")
+
+(defvar-local agent--session-completed-turns 0
+  "How many turns of this session are known to have ended.
+The largest count in `agent--session-channel-turns'.  A turn-end report
+is the first report of a new turn end exactly when it takes its own
+channel past this mark.  Only `agent-session-event' may set this
 variable.")
-
-(defvar-local agent--session-completion-sources nil
-  "Channels that have already reported the current turn's end.
-Each backend channel that can report a turn ending names itself in its
-payload's `:source', and each reports any one turn at most once: Claude
-Code's `Stop' hook fires once per turn and its `idle_prompt'
-notification fires once per turn, and the same holds for the Codex
-app-server's `turn/completed' and the Codex CLI's `Stop' hook.  A
-second channel reporting while this list is non-empty is therefore
-describing the turn already recorded, while the SAME channel reporting
-again can only mean a further turn has ended.
-
-That is what replaces guessing from elapsed time.  Cleared by observed
-work -- `activity' or `blocked' -- because a turn that demonstrably
-started makes the next report from any channel a new one.  Only
-`agent-session-event' may set this variable.")
 
 (defvar-local agent--session-completed-turn-id nil
   "Turn id of this session's last canonical completion, or nil.
@@ -773,15 +863,21 @@ ignored by the state machine, because backend submission hooks can fire
 multiple times per submission and on submissions that start no turn;
 the observer hook still sees it."
   (when (buffer-live-p buffer)
-    (let ((redundant (agent--session-event-redundant-p buffer event payload)))
-      ;; Bookkeeping first, side effects second, and no side effect may
-      ;; deliver another event: the before-exit chain now defers its
-      ;; submission to a zero-delay timer (see
-      ;; `agent--before-exit-submit-next-deferred'), so every consumer
-      ;; sees this completion before it sees anything the completion
-      ;; caused.  Events are therefore delivered in the order they
-      ;; happened, never nested.
-      (agent--session-note-progress buffer event payload redundant)
+    ;; Rank and record the report first, side effects second, and no side
+    ;; effect may deliver another event: the before-exit chain defers
+    ;; both its submission and its close to a zero-delay timer (see
+    ;; `agent--before-exit-advance-deferred'), so every consumer sees
+    ;; this event before it sees anything this event caused.  Events are
+    ;; delivered in the order they happened, never nested.
+    ;;
+    ;; An `error' is counted as a turn-end report like any other, but is
+    ;; never DELIVERED as redundant: reporting a failure twice is
+    ;; harmless, and missing one is not.
+    (let* ((completion (memq event '(stop idle-prompt)))
+           (first-report (and (or completion (eq event 'error))
+                              (agent--session-record-completion
+                               buffer payload)))
+           (redundant (and completion (not first-report))))
       (pcase event
         ((or 'stop 'idle-prompt 'blocked 'error)
          (agent--session-event-awaiting-input buffer event redundant))
@@ -800,14 +896,13 @@ the observer hook still sees it."
              :redundant redundant
              :payload payload)))))
 
-(defun agent--session-event-redundant-p (buffer event payload)
-  "Return non-nil when EVENT is a completion BUFFER already reported.
-See `agent--session-completion-canonical-p' for the contract."
-  (and (memq event '(stop idle-prompt))
-       (not (agent--session-completion-canonical-p buffer payload))))
+(defun agent--session-record-completion (buffer payload)
+  "Record a turn-end report described by PAYLOAD in BUFFER, and rank it.
+Return non-nil when this is the FIRST report of a turn end -- what the
+rest of the code calls canonical.  Deciding and recording happen here
+together, in one place, so the delivered verdict and the state it was
+derived from can never disagree.
 
-(defun agent--session-completion-canonical-p (buffer payload)
-  "Return non-nil when a completion with PAYLOAD reports a new turn end.
 This is the single correlation contract every at-most-once consumer
 depends on.  One finished turn can produce several completion events --
 Claude's `Stop' hook followed by an `idle_prompt' notification seconds
@@ -817,80 +912,93 @@ reported must not advance the before-exit chain or resolve a queued
 prompt a second time.  In order:
 
 1. A completion carrying a turn id is canonical when that id differs
-   from the last one completed.  This is authoritative: only Codex
-   app-server supplies it.
-2. Otherwise, observed work since the last canonical completion --
-   `activity' or `blocked' -- proves a new turn ran, so its end is
-   canonical.
-3. Otherwise the verdict comes from which CHANNEL is reporting, not
-   from how long ago anything happened.  A completion is canonical when
-   its `:source' has already reported the recorded turn end, or when no
-   channel has reported it yet; it is redundant when a different
-   channel reported first.  Each channel reports each turn at most
-   once, so a repeat from the same channel can only be a further turn,
-   and a first report from a second channel can only be the turn the
-   first channel already reported.
+   from the last one completed, and redundant when it repeats it.  Only
+   Codex app-server supplies ids, and there they are authoritative.
+2. Otherwise, count.  Each channel keeps its own tally of the turn ends
+   it has reported.  This report takes its channel's tally to N; the
+   completion is the first report of the Nth turn end -- canonical --
+   when N exceeds every other channel's tally, and a later report of a
+   turn end already counted otherwise.
 
-Rule 3 is deliberately not a clock.  Elapsed time cannot separate
-Claude's delayed `idle_prompt' for a turn that already ended from the
-prompt `Stop' of a turn that started and finished quickly -- both can
-arrive at any interval -- so any threshold is wrong in one direction or
-the other.  The channel identity is a fact the backends actually
-supply, and it separates the two exactly.
-
-Claude's statusline `prompt_id' is deliberately NOT used as a
-completion's turn id.  The poll reports the id current at poll time,
-not the id of the turn a given completion is describing, so stamping
-completions with it would misattribute precisely the delayed-duplicate
-case this contract exists to catch.
-
-A producer that names no `:source' is treated as its own channel, so
-untagged completions are always canonical: no channel identity means no
-cross-channel deduplication.  Every adapter in this package names one,
-and Tasks 13 and 14 fix the names."
-  (let ((turn (plist-get payload :turn-id))
-        (source (plist-get payload :source)))
-    (with-current-buffer buffer
-      (cond
-       (turn (not (equal turn agent--session-completed-turn-id)))
-       (agent--session-turn-observed t)
-       ((null agent--session-completion-sources) t)
-       ((member source agent--session-completion-sources) t)
-       (t nil)))))
-
-(defun agent--session-note-progress (buffer event payload redundant)
-  "Record EVENT and PAYLOAD in BUFFER's completion-correlation state.
-REDUNDANT is the verdict already computed for EVENT, passed in rather
-than recomputed so the recorded state and the delivered flag can never
-disagree.
-`activity' and `blocked' are observed work: they prove a turn is
-running, so the next report from any channel is a new one and the
-recorded channel list is cleared.  `submit' records nothing at all --
-the spec is explicit that a submission may duplicate another or start
-no turn, so it is not evidence about turns.
-
-A canonical completion or an `error' ends a turn: it clears the
-observed flag, records the completed turn id, and makes the reporting
-channel the only one credited with that turn.  A redundant completion
-adds its channel to the list instead, so a third channel reporting the
-same turn is redundant too, and a repeat from any of them is a new
-turn."
+Rule 2 rests on one property of the backends, and on nothing else:
+**each channel reports each turn at most once, in order.**  Claude's
+`Stop' hook fires once per turn; its `idle_prompt' notification fires
+once per turn; the Codex app-server's `turn/completed' and the Codex
+CLI's `Stop' hook likewise.  Two streams of turn-end reports therefore
+run in lockstep, and the Nth report on either stream describes the Nth
+turn.  Counting them separately says which turn a report describes
+without any shared mutable state to get out of step, without any clock,
+and without anything that a later event can reset."
   (with-current-buffer buffer
-    (pcase event
-      ((or 'activity 'blocked)
-       (setq agent--session-turn-observed t)
-       (setq agent--session-completion-sources nil))
-      ('submit nil)
-      ((or 'stop 'idle-prompt 'error)
-       (if redundant
-           (cl-pushnew (plist-get payload :source)
-                       agent--session-completion-sources :test #'equal)
-         (setq agent--session-turn-observed nil)
-         (setq agent--session-completion-sources
-               (list (plist-get payload :source)))
-         (setq agent--session-completed-turn-id
-               (plist-get payload :turn-id)))))))
+    (let* ((source (plist-get payload :source))
+           (turn (plist-get payload :turn-id))
+           (seen (or (alist-get source agent--session-channel-turns
+                                nil nil #'equal)
+                     0)))
+      (cond
+       ;; The channel is repeating the turn id it last reported.  Do not
+       ;; count it: a repeat is not a further turn.
+       ((and turn (equal turn agent--session-completed-turn-id)) nil)
+       (t
+        (let ((n (1+ seen)))
+          (setf (alist-get source agent--session-channel-turns nil nil #'equal)
+                n)
+          (when (> n agent--session-completed-turns)
+            (setq agent--session-completed-turns n)
+            (setq agent--session-completed-turn-id turn)
+            t)))))))
+```
 
+Two properties of this rule are worth stating because they are what the
+earlier attempts got wrong:
+
+- **Nothing resets it.**  `activity`, `blocked`, and `submit` record
+  nothing about turn ends.  A previous revision cleared the duplicate
+  history when a new turn was observed, which is exactly what made
+  `A Stop → submit B → B activity → delayed A idle_prompt` advance B: the
+  `activity` wiped the record that `A Stop` had already reported turn 1,
+  so `A idle_prompt` looked like turn 2's end.  Counting per channel has
+  no state for an intervening event to invalidate.
+- **Ordering between the channels does not matter.**  `A Stop → B Stop →
+  A idle → B idle` ranks as canonical, canonical, redundant, redundant,
+  because the notification channel's first and second reports are still
+  its first and second, whenever they arrive.
+
+**Where this is not reliable, and what happens then.**  The rule is
+exactly as good as the property it rests on.  A channel that reports a
+turn it should not, or fails to report one it should, puts its tally
+out of step with the others:
+
+- A channel wired up twice -- the same hook command listed twice in
+  `settings.json` -- reports one turn twice and so runs ahead, and its
+  extra report is ranked canonical.  `agent-claude--ensure-hook` refuses
+  to add a command already present, so `agent-claude-setup-config`
+  cannot create this; a hand-edited file can.  This is the one case that
+  can over-report, and it is named in the manual.
+- A channel that misses a turn falls one behind, and its reports are
+  ranked redundant until the other channel's tally stops moving; the
+  turn is then reported by whichever channel did see it.  If EVERY
+  channel misses a turn, no completion for it is canonical: the queue
+  does not resolve its item (the stall timer pauses it after
+  `agent-queue-stall-seconds`, with an inbox item) and the before-exit
+  chain does not advance (its watchdog abandons the chain and leaves the
+  session open, with a warning).  Both are visible, recoverable, and on
+  the conservative side -- nothing is sent twice and no skill is
+  skipped.
+
+That asymmetry is deliberate: under-reporting costs a delay and a
+notification, over-reporting sends the user's text somewhere they did
+not ask for.
+
+Claude's statusline `prompt_id` is deliberately not used to stamp
+completions: the poll reports the id current at poll time, not the id
+of the turn a given completion describes, so stamping would
+misattribute exactly the delayed-duplicate case this contract exists to
+catch.
+
+Continuing in the same section:
+
+```elisp
 (defun agent--run-session-event-functions (buffer event-plist)
   "Run `agent-session-event-functions' with BUFFER and EVENT-PLIST.
 Each consumer runs inside its own `condition-case', because the
@@ -942,38 +1050,40 @@ send text need to tell those apart."
 ```
 
 If the composer plan's `submit-failed` branch is already present, keep
-it in the `pcase`, add `submit-failed` to the docstring's event list,
-and give it the same no-op branch in `agent--session-note-progress`
-that `submit` has.
+it in the `pcase` and add `submit-failed` to the docstring's event
+list.  It takes no part in the completion counting: like `submit`, it
+reports nothing about a turn ending.
 
-Finally, stop the before-exit chain from submitting from inside event
-delivery.  In `agent--before-exit-step` (agent.el ~line 1626), replace
-the synchronous submit-or-close with a deferred one:
+Finally, stop the before-exit chain from acting from inside event
+delivery at all.  In `agent--before-exit-step` (agent.el ~line 1626),
+replace the synchronous submit-or-close with a single deferred
+advance:
 
 ```elisp
 (defun agent--before-exit-step (buffer)
-  "Advance BUFFER's running before-exit chain on a completion event.
-Returns non-nil when the chain consumed the event.  The next skill is
-submitted from a zero-delay timer rather than here, so the completion
-that advanced the chain reaches every session-event consumer before the
-submission delivers its own `submit' event; nesting the two reversed
-their order for every observer."
+  "Advance BUFFER's running before-exit chain on a canonical completion.
+Return non-nil when the chain consumed the event.
+
+Neither branch acts here.  Submitting the next skill delivers a
+`submit' event, and closing delivers an `exit-request' event; doing
+either from inside the delivery of the completion that triggered it
+would show every consumer the caused event before the causing one.  So
+this function only decides that the chain advances, and schedules the
+advance."
   (when (eq (plist-get agent--before-exit :state) 'running)
     (let ((backend (agent--detect-backend buffer)))
       (when (agent--before-exit-ready-to-close-p backend buffer)
-        (if (plist-get agent--before-exit :queue)
-            (progn
-              (agent--before-exit-restart-watchdog buffer)
-              (run-at-time 0 nil #'agent--before-exit-submit-next-deferred
-                           buffer)
-              t)
-          (agent--before-exit-close buffer backend))))))
+        (agent--before-exit-restart-watchdog buffer)
+        (run-at-time 0 nil #'agent--before-exit-advance-deferred buffer)
+        t))))
 
-(defun agent--before-exit-submit-next-deferred (buffer)
+(defun agent--before-exit-advance-deferred (buffer)
   "Submit BUFFER's next before-exit skill, or close when none remains.
-Runs from the timer `agent--before-exit-step' scheduled.  Re-checks the
-chain state, because the session may have been torn down or the chain
-abandoned in between."
+Runs from the timer `agent--before-exit-step' scheduled, so both the
+`submit' event of a skill submission and the `exit-request' event of a
+close are delivered after the completion that caused them.  Re-checks
+the chain state, because the session may have been torn down or the
+chain abandoned in between."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when (and agent--before-exit
@@ -982,10 +1092,16 @@ abandoned in between."
           (agent--before-exit-close buffer (agent--detect-backend buffer)))))))
 ```
 
+`agent--before-exit-close` keeps its own `run-at-time` for the actual
+exit; what changes is that its `exit-request` event no longer fires
+inside another event's delivery.  Restarting the watchdog before a
+close is harmless — the close cancels it.
+
 The queue already defers its drain the same way, so after this change
 no consumer of `agent-session-event-functions` can observe a nested
 event, and the deferral rule is uniform rather than a queue-only
-convention.
+convention: **nothing that delivers a session event may run inside the
+delivery of another.**
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1566,8 +1682,7 @@ git commit -m "agent: add separate interrupt and steer commands"
 **Files:**
 - Modify: `agent-capture.el` (`agent-capture--session-identity` ~line 129;
   `agent-capture--ensure-header` ~line 153;
-  `agent-capture--append-entry` ~line 160; new public API at the end of
-  the prompt-capture section)
+  new public API at the end of the prompt-capture section)
 - Test: `test/agent-capture-test.el`
 
 **Interfaces:**
@@ -1576,15 +1691,21 @@ git commit -m "agent: add separate interrupt and steer commands"
   - `agent-capture-store-prompt SESSION LABEL TEXT &optional TAG` →
     prompt handle plist `(:file :title :created :inserted :text)`,
     the same shape `agent-capture--prompts` returns, so
-    `agent-capture--delete-prompt` accepts it.  Signals `error` when the
-    write cannot be confirmed on disk, and in that case the file is byte
-    for byte what it was before the call: the append is all-or-nothing
-    over the FILE, not only over the buffer.
+    `agent-capture--delete-prompt` accepts it.  Two outcomes only: a
+    handle means the entry is on disk and that handle names it; a signal
+    means the file is exactly what it was.  There is no case in which an
+    entry exists that no handle names.
   - `agent-capture-session-file SESSION` → absolute capture file path
     for a session struct, live buffer or not.
-  - `agent-capture--file-bytes FILE` → FILE's exact bytes, or nil.
-  - `agent-capture--rollback-append START WAS-MODIFIED FILE EXISTED
-    PREVIOUS` → restores both the shared buffer and the file.
+  - `agent-capture--file-text FILE` → FILE's decoded contents, or nil.
+  - `agent-capture--entry-string BACKEND LABEL PREVIOUS TEXT TAG` →
+    `(:title :created :text)`; the handle is built from this, not from
+    reading the file back.
+  - `agent-capture--replace-file FILE CONTENT` → atomic replace via a
+    temporary file in the same directory plus `rename-file`.
+  - `agent-capture--check-no-unsaved-edits FILE`,
+    `agent-capture--sync-visiting-buffer FILE`,
+    `agent-capture--verify-stored FILE HANDLE`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1647,24 +1768,26 @@ Add to `test/agent-capture-test.el`:
   (mapcar (lambda (prompt) (plist-get prompt :text))
           (agent-capture--read-prompts file t)))
 
-(ert-deftest agent-capture-test-store-prompt/failed-append-leaves-no-trace ()
-  "A failed append cannot be flushed to disk by the next successful one.
+(defun agent-capture-test--strays (file)
+  "Return leftover temporary files beside FILE."
+  (directory-files (file-name-directory file) nil "\\`\\.agent-capture-"))
+
+(ert-deftest agent-capture-test-store-prompt/failure-before-commit-changes-nothing ()
+  "A failure before the rename leaves the file exactly as it was.
 Success, failure, success: the file must end up holding exactly the two
-successful entries, and the handles must name exactly those."
+successful entries, the handles must name exactly those, and no
+temporary file may survive."
   (agent-capture-test--with-directory
     (let* ((session (agent-session-create :backend 'codex
                                           :directory "~/project/"))
            (file (agent-capture-session-file session))
            (first (agent-capture-store-prompt session "p" "one" "q1"))
-           (calls 0))
-      (cl-letf* ((real (symbol-function 'save-buffer))
-                 ((symbol-function 'save-buffer)
-                  (lambda (&rest args)
-                    (cl-incf calls)
-                    (if (= calls 1)
-                        (error "disk full")
-                      (apply real args)))))
+           (before (agent-capture--file-text file)))
+      (cl-letf (((symbol-function 'rename-file)
+                 (lambda (&rest _) (error "disk full"))))
         (should-error (agent-capture-store-prompt session "p" "two" "q2")))
+      (should (equal (agent-capture--file-text file) before))
+      (should (null (agent-capture-test--strays file)))
       (let ((third (agent-capture-store-prompt session "p" "three" "q3")))
         (should (equal (agent-capture-test--texts file) '("one" "three")))
         (should (equal (plist-get first :text) "one"))
@@ -1673,76 +1796,97 @@ successful entries, and the handles must name exactly those."
         (agent-capture--delete-prompt first)
         (should (equal (agent-capture-test--texts file) '("three")))))))
 
-(ert-deftest agent-capture-test-store-prompt/write-then-signal-is-undone ()
-  "A save that writes the file and THEN signals leaves no orphan entry.
-This is the `after-save-hook' case: the bytes really did reach the disk
-before the error, so undoing the buffer edit is not enough -- the file
-itself has to go back to what it was."
+(ert-deftest agent-capture-test-store-prompt/post-commit-failure-returns-a-handle ()
+  "Anything failing AFTER the rename still returns the entry's handle.
+This is the write-then-signal shape.  The entry is on disk, so the only
+safe outcome is to hand back the handle that tracks it; signalling here
+would tell the caller nothing was written and create an orphan."
   (agent-capture-test--with-directory
     (let* ((session (agent-session-create :backend 'codex
                                           :directory "~/project/"))
            (file (agent-capture-session-file session))
-           (calls 0))
+           (warned nil))
       (agent-capture-store-prompt session "p" "one" "q1")
-      (cl-letf* ((real (symbol-function 'save-buffer))
-                 ((symbol-function 'save-buffer)
-                  (lambda (&rest args)
-                    (cl-incf calls)
-                    (apply real args)
-                    (when (= calls 1) (error "after-save-hook failed")))))
-        (should-error (agent-capture-store-prompt session "p" "two" "q2"))
-        ;; The write happened; the rollback undid it.
-        (should (= calls 1))
-        (should (equal (agent-capture-test--texts file) '("one"))))
-      (let ((third (agent-capture-store-prompt session "p" "three" "q3")))
-        (should (equal (agent-capture-test--texts file) '("one" "three")))
-        (should (equal (plist-get third :text) "three"))
-        ;; The live buffer agrees with the file, so nothing stale can be
-        ;; flushed by a later save.
-        (with-current-buffer (find-file-noselect file)
-          (should-not (buffer-modified-p))
-          (should-not (string-match-p "two" (buffer-string))))))))
+      (let ((handle
+             (cl-letf (((symbol-function 'agent-capture--verify-stored)
+                        (lambda (&rest _) (error "post-commit failure")))
+                       ((symbol-function 'display-warning)
+                        (lambda (&rest _) (setq warned t))))
+               (agent-capture-store-prompt session "p" "two" "q2"))))
+        (should warned)
+        (should handle)
+        (should (equal (agent-capture-test--texts file) '("one" "two")))
+        ;; The handle really does name the entry that was written.
+        (agent-capture--delete-prompt handle)
+        (should (equal (agent-capture-test--texts file) '("one")))))))
 
-(ert-deftest agent-capture-test-store-prompt/unconfirmed-write-is-undone ()
-  "A write that lands but cannot be confirmed is rolled back, not kept.
-An entry the confirmation cannot see is an entry no handle names."
+(ert-deftest agent-capture-test-store-prompt/verification-failure-is-not-fatal ()
+  "A cross-check that cannot read the entry back warns and returns.
+The handle was built from the entry this call composed, so it is valid
+whatever the re-read does."
   (agent-capture-test--with-directory
     (let* ((session (agent-session-create :backend 'codex
                                           :directory "~/project/"))
            (file (agent-capture-session-file session))
-           (calls 0))
-      (agent-capture-store-prompt session "p" "one" "q1")
-      (cl-letf* ((real (symbol-function 'agent-capture--stored-prompt))
-                 ((symbol-function 'agent-capture--stored-prompt)
-                  (lambda (&rest args)
-                    (cl-incf calls)
-                    (if (= calls 1) nil (apply real args)))))
-        (should-error (agent-capture-store-prompt session "p" "two" "q2")))
-      (should (equal (agent-capture-test--texts file) '("one"))))))
+           (warned nil))
+      (let ((handle
+             (cl-letf (((symbol-function 'agent-capture--read-prompts)
+                        (lambda (&rest _) nil))
+                       ((symbol-function 'display-warning)
+                        (lambda (&rest _) (setq warned t))))
+               (agent-capture-store-prompt session "p" "one" "q1"))))
+        (should warned)
+        (should (equal (plist-get handle :text) "one"))
+        (should (equal (agent-capture-test--texts file) '("one")))))))
 
-(ert-deftest agent-capture-test-store-prompt/first-append-failure-removes-the-file ()
-  "When the file did not exist before, a failed first append leaves none."
+(ert-deftest agent-capture-test-store-prompt/first-write-failure-leaves-no-file ()
+  "When the file did not exist, a failed first store creates none."
   (agent-capture-test--with-directory
     (let* ((session (agent-session-create :backend 'codex
                                           :directory "~/project/"))
            (file (agent-capture-session-file session)))
-      (cl-letf* ((real (symbol-function 'save-buffer))
-                 ((symbol-function 'save-buffer)
-                  (lambda (&rest args)
-                    (apply real args)
-                    (error "after-save-hook failed"))))
+      (cl-letf (((symbol-function 'rename-file)
+                 (lambda (&rest _) (error "disk full"))))
         (should-error (agent-capture-store-prompt session "p" "one" "q1")))
-      (should-not (file-exists-p file)))))
+      (should-not (file-exists-p file))
+      (should (null (agent-capture-test--strays file))))))
 
-(ert-deftest agent-capture-test-store-prompt/signals-when-unconfirmed ()
-  "A write that cannot be confirmed on disk signals."
+(ert-deftest agent-capture-test-store-prompt/unsaved-edits-are-refused ()
+  "Storing into a file with unsaved edits fails closed, changing nothing."
   (agent-capture-test--with-directory
-    (let ((session (agent-session-create :backend 'codex
-                                         :directory "~/project/")))
-      (cl-letf (((symbol-function 'agent-capture--read-prompts)
-                 (lambda (&rest _) nil)))
-        (should-error
-         (agent-capture-store-prompt session "p" "lost" "q3"))))))
+    (let* ((session (agent-session-create :backend 'codex
+                                          :directory "~/project/"))
+           (file (agent-capture-session-file session)))
+      (agent-capture-store-prompt session "p" "one" "q1")
+      (let ((buffer (find-file-noselect file)))
+        (unwind-protect
+            (progn
+              (with-current-buffer buffer
+                (goto-char (point-max))
+                (insert "\n* Prompt hand-written\n\nmine\n"))
+              (should-error (agent-capture-store-prompt session "p" "two" "q2")
+                            :type 'error)
+              ;; The user's edits are still theirs, and unsaved.
+              (should (equal (agent-capture-test--texts file) '("one")))
+              (should (buffer-modified-p buffer)))
+          (with-current-buffer buffer (set-buffer-modified-p nil))
+          (kill-buffer buffer))))))
+
+(ert-deftest agent-capture-test-store-prompt/visiting-buffer-is-refreshed ()
+  "A buffer visiting the capture file shows the entry after a store."
+  (agent-capture-test--with-directory
+    (let* ((session (agent-session-create :backend 'codex
+                                          :directory "~/project/"))
+           (file (agent-capture-session-file session)))
+      (agent-capture-store-prompt session "p" "one" "q1")
+      (let ((buffer (find-file-noselect file)))
+        (unwind-protect
+            (progn
+              (agent-capture-store-prompt session "p" "two" "q2")
+              (with-current-buffer buffer
+                (should-not (buffer-modified-p))
+                (should (string-match-p "two" (buffer-string)))))
+          (kill-buffer buffer))))))
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1782,16 +1926,20 @@ SESSION is an `agent-session' struct; no session buffer need exist."
    agent-prompt-capture-directory))
 ```
 
-Change `agent-capture--ensure-header` to take the display label directly
-so both callers can use it:
+Split the file header out so the interactive path and the store path
+share one definition:
 
 ```elisp
+(defun agent-capture--header-string (backend label)
+  "Return the prompt capture file header for BACKEND session LABEL."
+  (concat "#+title: Agent prompt captures\n"
+          "#+agent_backend: " (symbol-name backend) "\n"
+          "#+agent_session: " (or label "") "\n\n"))
+
 (defun agent-capture--ensure-header (backend label)
   "Insert the prompt capture file header for BACKEND session LABEL."
   (when (zerop (buffer-size))
-    (insert "#+title: Agent prompt captures\n")
-    (insert "#+agent_backend: " (symbol-name backend) "\n")
-    (insert "#+agent_session: " (or label "") "\n\n")))
+    (insert (agent-capture--header-string backend label))))
 ```
 
 and update its caller in `agent-capture--open-file`:
@@ -1800,23 +1948,10 @@ and update its caller in `agent-capture--open-file`:
       (agent-capture--ensure-header backend (agent-display-name buffer))
 ```
 
-Give `agent-capture--append-entry` an optional tag so stored entries are
-individually identifiable:
-
-```elisp
-(defun agent-capture--append-entry (&optional tag)
-  "Append a new prompt capture entry at the end of the current buffer.
-TAG, when non-nil, is appended to the heading so the entry can be told
-apart from others created in the same minute with the same text."
-  (goto-char (point-max))
-  (unless (bolp) (insert "\n"))
-  (insert "* Prompt " (format-time-string "%Y-%m-%d %H:%M")
-          (if tag (format " [%s]" tag) "") "\n")
-  (insert ":PROPERTIES:\n")
-  (insert ":CREATED: " (format-time-string "[%Y-%m-%d %a %H:%M]") "\n")
-  (insert ":END:\n\n")
-  (point))
-```
+`agent-capture--append-entry` is left exactly as it is.  The store path
+below does not use it: it builds the entry text itself, because knowing
+the entry's own title and timestamp is what lets it return a usable
+handle without depending on reading the file back.
 
 Add the public store function at the end of the prompt-capture section:
 
@@ -1828,105 +1963,152 @@ buffer has already died; LABEL is the display name written into the
 file header; TAG, when non-nil, is appended to the entry heading so the
 entry can be matched unambiguously later.
 
-This is the noninteractive, durability-confirming counterpart to
-`agent-capture-prompt': it appends the entry, saves the file
-synchronously, and re-reads it from disk to confirm the entry landed.
 Return the prompt handle plist -- the same shape `agent-capture--prompts'
-returns, accepted by `agent-capture--delete-prompt'.  Signal an error
-when the write cannot be confirmed, so callers can keep the text
-somewhere else instead of assuming it is safe.
+returns, accepted by `agent-capture--delete-prompt'.
 
-The append is a transaction over the FILE, not merely over the buffer.
-`save-buffer' can write the file completely and then signal -- an
-`after-save-hook' that fails is enough -- so undoing the buffer edit
-and reloading would only pull the orphan back in: an entry on disk that
-no caller holds a handle for, invisible to code that believes the write
-failed, and unreachable by the handle-based cleanup.  The previous
-bytes are therefore snapshotted before the append and written back on
-any failure, which also covers the case where the write succeeded but
-the confirming re-read did not find the entry.  The capture file has a
-single writer -- this Emacs -- so restoring it cannot discard anyone
-else's work."
+The contract is deliberately two-valued, with no third outcome:
+
+- **It returns a handle.**  The entry is on disk and that handle names
+  it.  The caller may record it and later delete it.
+- **It signals.**  The file is byte for byte what it was before the
+  call.  Nothing was stored, and the caller must keep the text itself.
+
+There is no \"probably written\" case, and in particular no case where
+an entry exists that no handle names.  Two decisions get that:
+
+1. The write is an atomic replace, not an append to a shared buffer.
+   The new contents are built in memory, written to a temporary file
+   beside the capture file, and renamed over it.  The rename is the
+   commit point: everything before it can fail without touching the
+   file, and the rename either happens or does not.  This is what
+   `save-buffer' could not give -- it can write the file completely and
+   then signal from `after-save-hook', leaving an entry that a caller
+   who saw the error believes does not exist.
+2. The handle does not depend on reading the file back.  The entry text
+   is built here, so its title and timestamp are known; the handle is
+   constructed from them.  Re-reading afterwards can therefore only
+   ever be a cross-check, never the thing that decides whether the
+   caller gets a handle.
+
+After the commit point nothing is allowed to signal out of this
+function: the entry exists, and the caller must receive the handle that
+tracks it.  Post-commit failures are reported with `display-warning'."
   (require 'org)
   (let* ((file (agent-capture-session-file session))
          (trimmed (string-trim text)))
     (when (string-empty-p trimmed)
       (error "Refusing to store an empty prompt"))
+    (agent-capture--check-no-unsaved-edits file)
     (make-directory (file-name-directory file) t)
-    (let ((buffer (find-file-noselect file))
-          (existed (file-exists-p file))
-          (previous (agent-capture--file-bytes file)))
-      (with-current-buffer buffer
-        (org-mode)
-        (let ((start (point-max))
-              (was-modified (buffer-modified-p)))
-          (condition-case err
-              (progn
-                (agent-capture--ensure-header
-                 (agent-session-backend session) label)
-                (goto-char (agent-capture--append-entry tag))
-                (insert trimmed "\n")
-                (save-buffer)
-                (unless (agent-capture--stored-prompt file trimmed tag)
-                  (error "Could not confirm the captured prompt in %s" file)))
-            (error
-             (agent-capture--rollback-append start was-modified
-                                             file existed previous)
-             (signal (car err) (cdr err)))))))
-    (agent-capture--stored-prompt file trimmed tag)))
+    (let* ((previous (or (agent-capture--file-text file) ""))
+           (entry (agent-capture--entry-string
+                   (agent-session-backend session) label previous trimmed tag))
+           (handle (list :file file
+                         :title (plist-get entry :title)
+                         :created (plist-get entry :created)
+                         :inserted nil
+                         :text trimmed)))
+      (agent-capture--replace-file file (concat previous
+                                                (plist-get entry :text)))
+      ;; Committed.  From here the entry is on disk; nothing may signal.
+      (condition-case err
+          (progn (agent-capture--sync-visiting-buffer file)
+                 (agent-capture--verify-stored file handle))
+        (error
+         (display-warning
+          'agent
+          (format "stored a prompt in %s but could not verify it: %s"
+                  file (error-message-string err))
+          :warning)))
+      handle)))
 
-(defun agent-capture--file-bytes (file)
-  "Return FILE's exact bytes as a unibyte string, or nil when absent."
+(defun agent-capture--check-no-unsaved-edits (file)
+  "Signal when a live buffer visiting FILE has unsaved edits.
+Storing replaces FILE wholesale, so those edits would be discarded when
+the buffer is next reverted, or would resurrect the pre-store contents
+when it is next saved.  Refusing is fail-closed: the caller records the
+prompt as unwritten and keeps it in memory rather than risking either."
+  (when-let* ((buffer (find-buffer-visiting file)))
+    (when (buffer-modified-p buffer)
+      (error "%s has unsaved edits; refusing to store into it" file))))
+
+(defun agent-capture--file-text (file)
+  "Return FILE's decoded contents, or nil when it does not exist."
   (when (file-exists-p file)
     (with-temp-buffer
-      (set-buffer-multibyte nil)
-      (insert-file-contents-literally file)
+      (let ((coding-system-for-read 'utf-8))
+        (insert-file-contents file))
       (buffer-string))))
 
-(defun agent-capture--rollback-append (start was-modified file existed
-                                             previous)
-  "Undo a failed capture append and put FILE back as it was.
-START is where the append began in the current buffer and WAS-MODIFIED
-its modified flag beforehand; EXISTED and PREVIOUS are FILE's presence
-and exact bytes from before the attempt.
+(defun agent-capture--entry-string (backend label previous text tag)
+  "Return the Org text to append for TEXT, with its title and timestamp.
+PREVIOUS is FILE's current text; when it is empty the file header for
+BACKEND and LABEL is included.  TAG, when non-nil, goes in the heading.
+The result is a plist with `:title', `:created', and `:text', where
+`:text' is the exact string to append and the other two are the fields
+`agent-capture--read-prompts' will parse back out -- so a caller can
+build a handle for this entry without reading the file."
+  (let* ((title (concat "Prompt " (format-time-string "%Y-%m-%d %H:%M")
+                        (if tag (format " [%s]" tag) "")))
+         (created (format-time-string "[%Y-%m-%d %a %H:%M]"))
+         (header (when (string-empty-p (string-trim previous))
+                   (agent-capture--header-string backend label)))
+         (separator (if (or header (string-empty-p previous)
+                            (string-suffix-p "\n" previous))
+                        "" "\n")))
+    (list :title title
+          :created created
+          :text (concat header separator
+                        "* " title "\n"
+                        ":PROPERTIES:\n"
+                        ":CREATED: " created "\n"
+                        ":END:\n\n"
+                        text "\n"))))
 
-The file is restored, not just the buffer.  `save-buffer' can write the
-file and then signal -- an `after-save-hook' failure is the ordinary
-way -- and the confirming re-read can fail after a successful write, so
-undoing only the buffer would leave a complete entry on disk that no
-caller holds a handle for.  Writing the previous bytes back is what
-makes the append all-or-nothing; a file that did not exist before is
-deleted.  Rollback never signals: it runs while another error is
-already propagating."
-  (ignore-errors
-    (let ((inhibit-read-only t))
-      (delete-region (min start (point-max)) (point-max)))
-    (unless was-modified
-      (set-buffer-modified-p nil))
-    (if existed
-        (let ((coding-system-for-write 'no-conversion))
-          (write-region previous nil file nil 'silent))
-      (when (file-exists-p file) (delete-file file)))
-    (if (file-exists-p file)
-        (revert-buffer :ignore-auto :noconfirm :preserve-modes)
-      (erase-buffer)
-      (set-buffer-modified-p nil))))
+(defun agent-capture--replace-file (file content)
+  "Replace FILE's contents with CONTENT atomically.
+Writes CONTENT to a temporary file in FILE's own directory and renames
+it over FILE, so FILE is never seen partly written and any failure
+before the rename leaves it exactly as it was.  The rename is the
+commit point.  Signals when the replacement did not happen; the
+temporary is removed either way."
+  (let ((temp (make-temp-file (concat (file-name-directory file)
+                                      ".agent-capture-")))
+        (coding-system-for-write 'utf-8-unix))
+    (unwind-protect
+        (progn
+          (with-temp-file temp (insert content))
+          (rename-file temp file t)
+          (setq temp nil))
+      (when (and temp (file-exists-p temp))
+        (ignore-errors (delete-file temp))))))
 
-(defun agent-capture--stored-prompt (file text tag)
-  "Return the entry in FILE matching TEXT and TAG, re-read from disk."
-  (when (file-exists-p file)
-    (car (last (seq-filter
-                (lambda (prompt)
-                  (and (equal (plist-get prompt :text) text)
-                       (or (null tag)
-                           (string-match-p (regexp-quote tag)
-                                           (or (plist-get prompt :title) "")))))
-                (agent-capture--read-prompts file t))))))
+(defun agent-capture--sync-visiting-buffer (file)
+  "Reload a live buffer visiting FILE, which was just replaced.
+Only ever called on a buffer with no unsaved edits: storing refuses
+otherwise."
+  (when-let* ((buffer (find-buffer-visiting file)))
+    (with-current-buffer buffer
+      (revert-buffer :ignore-auto :noconfirm :preserve-modes))))
+
+(defun agent-capture--verify-stored (file handle)
+  "Signal unless HANDLE's entry can be read back out of FILE.
+A cross-check only: the caller runs it after the commit point and turns
+a failure into a warning, because by then the entry is on disk and the
+handle is already valid."
+  (unless (seq-find (lambda (prompt)
+                      (and (equal (plist-get prompt :title)
+                                  (plist-get handle :title))
+                           (equal (plist-get prompt :text)
+                                  (plist-get handle :text))))
+                    (agent-capture--read-prompts file t))
+    (error "The stored prompt could not be read back from %s" file)))
 ```
 
 `agent-capture--read-prompts` reads FILE from disk into a temp buffer,
-so the confirmation genuinely checks what was written, not the live
-buffer's contents.
+so the cross-check genuinely inspects what was written.  Note that
+`agent-capture--replace-file` uses `make-temp-file` in the capture
+directory itself, so the rename never crosses a filesystem boundary.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -3581,7 +3763,7 @@ Create `agent-queue.el`:
 
 ;; There is deliberately no queue-local debounce, and no clock of any
 ;; kind.  Telling a duplicate completion from a new turn's completion is
-;; `agent--session-completion-canonical-p''s job, decided once in
+;; `agent--session-record-completion''s job, decided once in
 ;; `agent-session-event' from the reporting channel and delivered to
 ;; every consumer as the `:redundant' flag.  A second rule here would
 ;; let the queue and the before-exit chain disagree about which turn
@@ -4060,8 +4242,11 @@ hand-written `:redundant' flag."
 
 (ert-deftest agent-queue-test-duplicate/late-report-resolves-nothing ()
   "A duplicate of the previous turn does not resolve the new item.
-Core flags it redundant from its channel, so the queue never sees it as
-a turn end -- however long after the dispatch it arrives."
+Core ranks it redundant, so the queue never sees it as a turn end --
+however long after the dispatch it arrives, and even though the
+dispatched turn demonstrably started in between.  This is the sequence
+`A Stop → submit B → B activity → delayed A idle_prompt': resolving the
+item here would dispatch the next prompt while B is still running."
   (agent-queue-test--with-session buffer
     (agent-queue-add buffer "one")
     (agent-queue-add buffer "two")
@@ -4070,12 +4255,19 @@ a turn end -- however long after the dispatch it arrives."
                (lambda (_secs _rep fn &rest args) (apply fn args) nil)))
       (let ((agent-session-event-functions (list #'agent-queue--on-event)))
         (agent-queue--drain buffer)
+        ;; The dispatched turn starts.
+        (agent-session-event buffer 'activity)
+        (should (eq (plist-get (car (agent-queue-items buffer)) :state)
+                    'started))
         ;; The previous turn's `idle_prompt', an hour after the dispatch.
         (agent-test--tick 3600)
         (agent-session-event buffer 'idle-prompt
                              '(:source claude-idle-notification))))
     (should (= (length agent-queue-test--submissions) 1))
-    (should (= (length (agent-queue-items buffer)) 2))))
+    (should (= (length (agent-queue-items buffer)) 2))
+    ;; The dispatched item is still in flight, so nothing else may go out.
+    (should (eq (plist-get (car (agent-queue-items buffer)) :state)
+                'started))))
 
 (ert-deftest agent-queue-test-error/an-item-added-later-is-not-sent ()
   "A prompt queued after a failed turn is not dispatched by the poll.
@@ -4299,7 +4491,7 @@ input."
   "Resolve session BUFFER's in-flight item when PAYLOAD proves it ended.
 Only canonical completions reach here -- the caller filters on the
 `:redundant' flag -- so the timing question has already been decided by
-`agent--session-completion-canonical-p'.  What remains is the one thing
+`agent--session-record-completion'.  What remains is the one thing
 core cannot decide: whether a completion that names a turn names THIS
 item's turn.  When both sides name a turn, only a match resolves the
 item; otherwise a canonical completion is this item's, because a
@@ -4910,10 +5102,13 @@ BUFFER is the session buffer the items came from; it may already be
 dead, in which case the attention item still identifies the session
 from ENTRY's snapshot.
 
-Items are written one at a time, so a failure partway keeps every
-handle already earned and records only the remainder as unwritten.  A
-partial or total failure files an error attention item and warns; it
-never drops an item from the stash."
+Items are written one at a time, and each write is all-or-nothing: it
+either returns a handle for an entry that is on disk or signals with
+the file unchanged.  A failure partway therefore keeps every handle
+already earned and records exactly the remainder as unwritten, with no
+possibility of an entry that this list does not account for.  A partial
+or total failure files an error attention item and warns; it never
+drops an item from the stash."
   (let (handles unwritten)
     (dolist (item (plist-get entry :items))
       (condition-case err
@@ -6890,7 +7085,7 @@ Name the `Stop` hook's channel too, in `agent-claude--handle-stop`
 
 Every channel that can report a turn ending must name itself, and no
 two channels may share a name: that is the whole basis of
-`agent--session-completion-canonical-p`'s rule 3.  Claude's four are
+`agent--session-record-completion`'s counting rule.  Claude's four are
 `claude-stop-hook`, `claude-idle-notification`,
 `claude-stop-failure-hook`, and `claude-permission-request-hook`; Codex
 uses `codex-app-server` and `codex-stop-hook`.  A channel that reports
@@ -7249,22 +7444,27 @@ in prose matching the manual's existing style:
   failure would type the user's queued prompt into an approval prompt.
 - **When a completion counts.**  Deciding which completion reports which
   turn is done once, for every consumer, and it is not a matter of
-  timing.  A completion is a new turn's end when it carries a turn id
-  the last one did not (Codex app-server), when work was observed since
-  the last one, or — for the transports with no ids — when it comes from
-  a channel that has already described the recorded turn end.  Each
-  channel reports each turn at most once: Claude's `Stop` hook fires
-  once per turn and its `idle_prompt` notification fires once per turn,
-  so a second `Stop` is a second turn while a first `idle_prompt` after
-  a `Stop` is the same turn.  That holds however long the delay, which
-  is why no threshold is used: a delayed duplicate and a very short turn
-  cannot be told apart by elapsed time, and are told apart exactly by
-  channel.  Claude's statusline `prompt_id` is not used to stamp
-  completions, because the poll reports the id current at poll time
-  rather than the id of the turn a given completion describes.  The one
-  configuration that defeats this is the same hook wired into
-  `settings.json` twice, which `agent-claude-setup-config` will not
-  create.
+  timing.  Codex app-server labels its turns, and there the label
+  decides.  For Claude and terminal Codex there are no labels, so Agent
+  counts instead: each reporting channel emits one turn-end event per
+  turn, in order — Claude's `Stop` hook once per turn, its `idle_prompt`
+  notification once per turn — so the Nth event on either stream is
+  about the Nth turn.  A completion is a new turn's end when it takes
+  its own channel past the highest count any channel has reached.  That
+  holds however long a report is delayed and whatever happens in
+  between, which is why no threshold and no "a new turn started" flag
+  are used: a delayed duplicate and a very short turn cannot be told
+  apart by elapsed time, and a session that starts another turn does not
+  make an old report new.  Claude's statusline `prompt_id` is not used
+  to stamp completions, because the poll reports the id current at poll
+  time rather than the id of the turn a given completion describes.
+  Two ways to skew this are worth knowing.  The same hook wired into
+  `settings.json` twice reports one turn twice and runs ahead;
+  `agent-claude-setup-config` will not create that.  A channel that
+  misses a turn falls behind, and that turn is then reported by
+  whichever channel did see it — or, if none did, not at all, in which
+  case the queue pauses on its stall timer and the before-exit chain
+  stops on its watchdog.  Both say so; neither sends anything twice.
 - **The delivery guarantees, stated honestly.**  On Codex app-server:
   exactly-once.  Dispatch happens only into a live process with a
   started thread, an idle turn, an empty native queue and nothing held;
@@ -7298,11 +7498,15 @@ in prose matching the manual's existing style:
   outside the dying buffer — created before the buffer's queue is
   cleared, so no failure in between can lose them — and are written to
   the session's capture file as ordinary drafts, one at a time.  Each
-  append is a transaction: one that fails is rolled back out of the
-  shared capture buffer and the buffer re-read from disk, so a later
-  successful append cannot flush the failed one to the file as a side
-  effect and leave an entry no handle points at.  A write that fails
-  partway keeps every draft it already wrote and reports how
+  write replaces the file atomically — a temporary file beside it,
+  renamed into place — so it either happens completely or not at all,
+  and it can never leave a draft that nothing points at: the handle is
+  built from the entry being written rather than by reading the file
+  back, so even a failure after the file was replaced still hands the
+  caller the handle for what is now on disk.  A capture file with
+  unsaved edits in a live buffer is refused outright rather than
+  overwritten, and the prompt is recorded as unwritten.  A write that
+  fails partway keeps every draft it already wrote and reports how
   many are held only in memory; an info item names the file on success,
   an error item and a warning describe any shortfall.  Restart is the
   one case where prompts can come back: the queue is detached before the
@@ -7479,6 +7683,15 @@ of them: each depends on a real CLI's timing, protocol, or UI.
     polls and no `activity` is ever reported.  Confirm the item resolves
     and the next one goes out — the case where relying on a turn-start
     event would strand the queue.
+19d. **A long queued turn on Claude, spanning the previous turn's
+    notification.**  Queue a prompt that takes minutes.  Its dispatch
+    happens right after the previous turn's `Stop`, so the previous
+    turn's `idle_prompt` arrives seconds later — while the queued turn
+    is demonstrably running and `activity` has been reported.  Confirm
+    from the session log that the queued item was NOT resolved then,
+    that no further prompt was dispatched, and that the item resolved
+    only when its own turn ended.  This is the sequence every earlier
+    design got wrong.
 20. **Restart with a non-empty queue.**  Queue two prompts, run
     `agent-restart`, confirm both return to the new session's queue,
     that their capture drafts were removed, and that nothing was
@@ -7505,13 +7718,19 @@ of them: each depends on a real CLI's timing, protocol, or UI.
     first and third prompts — no orphan copy of the second, which is
     what a failed append left in the shared buffer would produce once
     the third save flushed it.
-23d. **Failure after the bytes reached the disk.**  Repeat 23b with an
-    `after-save-hook` that signals for one save, so the write itself
-    succeeds and the error arrives afterwards.  Confirm the capture file
-    on disk still holds only the first and third prompts, that the live
-    capture buffer shows the same, and that the inbox reports the
-    second as unwritten.  This is the case a buffer-only rollback
-    cannot reach.
+23d. **Failure after the file was replaced.**  Repeat 23b, but make the
+    failure happen after the rename rather than before it — advise
+    `agent-capture--verify-stored` to signal once.  Confirm that the
+    store still returned a handle, that all three prompts are on disk,
+    that the inbox reports none of them unwritten, and that deleting by
+    the returned handle removes exactly the middle entry.  A store whose
+    file was replaced must never be reported as a failure: that is what
+    would create an entry no handle names.
+23e. **A capture file with unsaved edits.**  Open the session's capture
+    file, type into it without saving, then kill the session with two
+    prompts queued.  Confirm the store refused, the edits are still
+    there and still unsaved, and the inbox reports both prompts as held
+    in memory rather than saved.
 23c. **A dialog left open across a queue poll.**  Covered by check 3;
     re-run it here after the queue has already dispatched and resolved
     one item, so the session has a completion history and the gate is
