@@ -18,6 +18,19 @@ probe, and a `:submit-literal` submitter — plus a `submit-failed`
 rollback event.  codex.el (sibling repo) gains a programmatic mention API with
 detach handles and a public turn-readiness predicate.
 
+**Plan revision 5 (dispatch transports):** `:submit-literal` is
+registered ONLY for Codex app-server in this plan.  Claude (every
+terminal backend) and Codex terminal sessions are refused honestly:
+a terminal write has no acknowledgment, so no ownership boundary can
+distinguish "Return failed before delivery" from "delivered", and the
+prompt scanners cannot positively verify emptiness.  Supporting them
+later requires upstream contracts — a presence-aware (tristate)
+prompt-empty probe and an acknowledged or safely recoverable
+submission API — in claude-code.el/codex.el respectively.  Claude
+keeps its pure token slots (preview-complete, dispatch-ready for the
+day that API exists); the composer warns at compose/retarget time and
+refuses at dispatch.
+
 **Plan revision 2** (after Codex review): pure/effectful slot split
 (replaces the DRY-RUN contract; Task 1 amends spec §8 accordingly), a
 final readiness gate so dispatch can never queue or steer, a commit
@@ -64,17 +77,16 @@ column coverage, and repaired or added tests throughout.
   unsupported transport is an honest refusal, not a silent downgrade.
 - Submission must be a literal, isolated, atomic model turn: dispatch
   goes through the backend's `:submit-literal` slot only (never
-  `agent-submit`), which must reject text the transport would parse as
-  a command on transports whose CLI parses prefixes, must attempt
-  rollback of partially inserted terminal text ONLY while Return cannot
-  yet have been delivered (never afterwards — that would be an
-  interrupt), and owns the backend's ordinary submission bookkeeping
-  (hooks/advice-visible events) so state and session-id tracking see
-  the turn.  Before attaching, the `:pending-input-p` probe must report
-  the session verifiably clean — unsent prompt text, foreign pending
-  attachments, and UNINSPECTABLE (`unknown`) transports all refuse
-  dispatch.  A backend or transport without these guarantees is refused
-  honestly.
+  `agent-submit`), which owns the backend's ordinary submission
+  bookkeeping (hooks/advice-visible events) so state and session-id
+  tracking see the turn.  In this plan ONLY Codex app-server registers
+  the slot: terminal transports (all Claude backends, Codex eat/vterm)
+  have no submission acknowledgment and no positively verifiable
+  prompt-empty probe, so they are refused honestly until those
+  upstream contracts exist.  Before attaching, the `:pending-input-p`
+  probe must report the session verifiably clean — unsent prompt text,
+  foreign pending attachments, and UNINSPECTABLE (`unknown`)
+  transports all refuse dispatch.
 - At the commit boundary the live draft is disarmed FIRST
   (`agent-context--current` set nil before any copy creation, capture
   deletion, or buffer kill), so no post-submit cleanup failure can
@@ -159,33 +171,29 @@ Byte-compile with `make compile`.
     `unknown` refuses too (a blind append would violate isolation);
     it exists only so the refusal message can say "cannot verify".
   - `:submit-literal` — `(TEXT BUFFER)`; submits TEXT as one literal,
-    isolated model turn.  Contract: signals a `user-error` (before
-    sending anything) for transports it cannot guarantee — in this
-    plan that is every transport except Codex app-server and Claude
-    eat; Codex terminal is refused entirely because
-    `codex-prompt-input''s terminal parser cannot distinguish an empty
-    prompt from an unlocatable one, and stays refused until a
-    presence-aware (tristate) probe exists upstream — and for TEXT the
-    transport's CLI would parse as a command (terminal transports only
-    — structurally literal channels need no prefix check); attempts
-    rollback of partially inserted terminal text ONLY while Return
-    cannot yet have been delivered; once the Return send has begun,
-    OWNERSHIP is transferred and the function must not signal at all —
-    post-Return bookkeeping failures are downgraded to warnings, so
-    dispatch can never mistake a delivered turn for a pre-submit
-    failure and preserve a resendable draft; performs the backend's
+    isolated model turn.  Contract: preconditions signal a
+    `user-error` before anything is sent; the channel must be
+    structurally literal (no CLI command parsing) or reject
+    command-parseable TEXT; the function performs the backend's
     ordinary submission bookkeeping — the same hooks/advice-visible
     events as interactive submission — so session state and session-id
-    tracking observe the turn; and returns once the backend has taken
-    ownership of delivery, which includes backend-side failure
-    recovery with failure-state notification (a Codex app-server turn
-    that fails to start — synchronously, asynchronously, or via quit —
-    is restored into that session's own composer AND announced through
-    the upstream failure hook, which agent-codex translates into a
-    `submit-failed' event, leaving exactly one retry surface and no
-    stuck-busy session).  Backends that cannot provide these
-    guarantees do not register the slot, and the composer refuses
-    them.
+    tracking observe the turn; and returning normally transfers
+    OWNERSHIP of delivery, including backend-side failure recovery
+    with failure-state notification, resolved exactly once across
+    synchronous errors, quits, and asynchronous responses (a Codex
+    app-server turn that fails to start is restored into that
+    session's own composer AND announced through the upstream failure
+    hook, which agent-codex translates into a `submit-failed' event —
+    one retry surface, no stuck-busy session).  In this plan ONLY the
+    Codex app-server adapter can meet the contract and registers the
+    slot.  Terminal transports register nothing: a terminal write has
+    no acknowledgment, so no ownership boundary can distinguish
+    "Return failed before delivery" (draft must survive) from
+    "delivered" (draft must be disarmed), and their prompt scanners
+    cannot positively verify emptiness.  They stay unsupported until
+    the backend provides a tristate prompt-empty probe and an
+    acknowledged or safely recoverable submission API; the composer
+    refuses them honestly.
 - Produces the `submit-failed` session event: rolls the state set by a
   `submit` event back to `awaiting-input` with **no** ready alert, no
   before-exit-chain advancement, no scrolling — for callers whose backend
@@ -1948,6 +1956,7 @@ otherwise the session picker chooses one."
              :target target :items nil
              :origin-buffer (current-buffer)
              :origin-directory default-directory))
+      (agent-context--warn-undispatchable target)
       (with-current-buffer (get-buffer-create agent-context-buffer-name)
         (agent-context-mode)
         (add-hook 'kill-buffer-hook #'agent-context--on-kill nil t)
@@ -2292,6 +2301,16 @@ Signals honestly when the buffer or the markers are gone."
 (declare-function agent-capture--read-prompts "agent-capture"
                   (file &optional include-inserted))
 
+(defun agent-context--warn-undispatchable (target)
+  "Message when TARGET's backend registers no `:submit-literal'.
+Composing is still allowed (preview, copy), but dispatch will refuse."
+  (let* ((backend (agent--detect-backend target))
+         (struct (and backend (agent-backend backend))))
+    (unless (and struct (agent-backend-submit-literal struct))
+      (message
+       "agent-context: %s cannot be dispatched to yet (no literal submission); draft will be preview-only"
+       (agent-display-name target)))))
+
 (defun agent-context-retarget ()
   "Choose a different target session for the draft.
 Mention and media items the new target cannot take are marked with an
@@ -2299,6 +2318,8 @@ Mention and media items the new target cannot take are marked with an
   (interactive)
   (setf (agent-context-draft-target agent-context--current)
         (agent--read-session-buffer))
+  (agent-context--warn-undispatchable
+   (agent-context-draft-target agent-context--current))
   (dolist (item (agent-context-draft-items agent-context--current))
     (let ((transport (agent-context-item-transport item))
           (path (plist-get (agent-context-item-provenance item) :path)))
@@ -2638,12 +2659,10 @@ Transaction contract implemented here (mirrors the Global Constraints):
    isolation check run immediately before the attach phase;
    `:ready-to-submit-p` returning `busy` refuses, and anything but a
    verifiably clean `:pending-input-p` — pending input, foreign
-   attachments, or `unknown` — refuses.  Between these checks and the
-   attach loop there are no Elisp yields, so the gate cannot be
-   invalidated by asynchronous events; the `:submit-literal` step
-   itself may yield inside the adapter (Claude's insert/Return), and
-   the adapter owns atomicity there, including pre-Return rollback and
-   the post-Return no-signal rule.
+   attachments, or `unknown` — refuses.  Between these checks, the
+   attach loop, and the `:submit-literal` call there are no Elisp
+   yields (the app-server submitter is a synchronous JSON-RPC write),
+   so the gate cannot be invalidated by asynchronous events.
 3. The attach loop plus the single `:submit-literal` call form the
    guarded region: any `error` **or `quit`** there runs every collected
    undo independently, emits `submit-failed` at the live target so the
@@ -3152,6 +3171,9 @@ the draft is disarmed first and no failure restores it or runs undos."
          (target (agent-context--validated-target)))
     (when (and (string-empty-p instruction) (null items))
       (user-error "agent-context: nothing to send"))
+    ;; Capability first: an undispatchable transport should say so,
+    ;; not fail a later prompt-verification check confusingly.
+    (agent-context--submit-literal-fn target)
     (agent-context--check-target-ready target)
     (agent-context--recheck-deferred items target)
     ;; Tokens are pure and deterministic, so this render is byte-equal
@@ -3379,11 +3401,17 @@ repo's checklist asks.
     keeps no retry copy and can roll its own state back.
   - `codex-app-server-turn-start-failed-functions` — abnormal hook run
     with the session buffer whenever a started submission fails to
-    become a turn (synchronous send error, asynchronous `turn/start'
-    error response, or quit), after the submission has been restored
-    to the composer.  Also wired into
-    `codex--app-server-send-turn-start''s existing error paths, so
-    interactive submissions report failure state the same way.
+    become a turn (synchronous send error, quit, or asynchronous
+    `turn/start' error response), after the submission has been
+    restored to the composer.
+  - `codex--app-server-send-turn-start` is reworked around an
+    EXACTLY-ONCE resolver shared by its synchronous handler and its
+    response callback: whichever runs first clears
+    `codex--app-server-turn-start-pending-p' and acts; the other
+    becomes a no-op.  A quit during the synchronous send therefore
+    leaves no pending flag and no live callback that could later act
+    on a submission already restored to the composer.  Interactive
+    submissions gain the same failure reporting.
 
 Before writing code, `grep -n "attach-mention" codex-app-server.el
 codex.el` and note every caller — the `/mention` slash dispatcher and any
@@ -3461,12 +3489,12 @@ hold, queue, or steer."
 
 (ert-deftest codex-test-app-server-submit-literal-failure-owned ()
   "Failed sends — synchronous error and quit — are recovered
-codex-side (restored into the composer), announced on the failure
-hook, and never signal to the caller: one retry surface, and the
-caller can roll its state back."
+codex-side exactly once: the submission is restored, the failure hook
+runs, the pending flag is cleared, a late-arriving response callback
+is a no-op, and the caller never receives a signal."
   (dolist (failure '(error quit))
     (with-temp-buffer
-      (let (restored statuses hook-buffers)
+      (let (restored statuses hook-buffers late-callback)
         (cl-letf (((symbol-function 'codex-prompt-input)
                    (lambda (&optional _) nil))
                   ((symbol-function 'codex-app-server-ready-for-turn-p)
@@ -3480,7 +3508,10 @@ caller can roll its state back."
                   ((symbol-function 'codex--app-server-restore-submission)
                    (lambda (submission) (push submission restored)))
                   ((symbol-function 'codex--app-server-send-request)
-                   (lambda (&rest _)
+                   (lambda (_method _params callback)
+                     ;; The request layer registered its callback and
+                     ;; THEN the write failed: the worst case.
+                     (setq late-callback callback)
                      (if (eq failure 'quit)
                          (signal 'quit nil)
                        (error "socket closed")))))
@@ -3488,10 +3519,18 @@ caller can roll its state back."
                  (list (lambda (buffer) (push buffer hook-buffers)))))
             (setq-local codex--app-server-pending-images nil)
             (setq-local codex--app-server-pending-mentions nil)
+            (setq-local codex--app-server-thread-id "t1")
             ;; Must NOT signal: ownership already transferred.
             (codex-app-server-submit-literal "hello")
             (should (= 1 (length restored)))
             (should (equal hook-buffers (list (current-buffer))))
+            ;; Pending state resolved: flag cleared...
+            (should-not codex--app-server-turn-start-pending-p)
+            ;; ...and the retained callback is dead: a late response
+            ;; must not act on the already-restored submission.
+            (funcall late-callback nil '((code . -32000)))
+            (should (= 1 (length restored)))
+            (should (= 1 (length hook-buffers)))
             (should (cl-some (lambda (line)
                                (string-match-p "restored" line))
                              statuses))))))))
@@ -3646,33 +3685,74 @@ afterwards is restored into this session's composer and announced on
   (codex--app-server-record-input text)
   (codex--app-server-insert-message codex--app-server-user-prefix text)
   (codex--app-server-ensure-trailing-newline)
-  (let ((submission (codex--app-server-take-submission text))
-        (buffer (current-buffer)))
+  (let ((submission (codex--app-server-take-submission text)))
+    ;; `send-turn-start' resolves pending state, restores, and runs the
+    ;; failure hook exactly once for error, quit, and async failure;
+    ;; swallow its re-signal so the caller keeps no second retry copy.
     (condition-case err
         (codex--app-server-send-turn-start submission)
-      (quit
-       ;; `send-turn-start' restores on `error' but not on quit; keep
-       ;; the single retry surface and announce the failure ourselves.
-       (codex--app-server-restore-submission submission)
-       (run-hook-with-args 'codex-app-server-turn-start-failed-functions
-                           buffer)
-       (codex--app-server-insert-status
-        "Literal submission quit; input restored"))
-      (error
-       ;; Restore and hook already ran inside `send-turn-start'.
+      ((error quit)
        (codex--app-server-insert-status
         (format "Literal submission failed to start; input restored (%s)"
-                (error-message-string err)))))))
+                (if (eq (car-safe err) 'quit) "quit"
+                  (error-message-string err))))))))
 ```
 
-Also wire the failure hook into `codex--app-server-send-turn-start''s
-two existing error paths (the synchronous `condition-case' handler and
-the asynchronous error branch of the `turn/start' response callback),
-immediately after each calls `codex--app-server-restore-submission':
+Rework `codex--app-server-send-turn-start' (currently ~line 4152)
+around an exactly-once resolver.  Behavior for the success path is
+unchanged; the failure paths — synchronous error, quit, and the
+asynchronous error response — all resolve the pending flag once, run
+the failure hook once, and can never double-act:
 
 ```elisp
-(run-hook-with-args 'codex-app-server-turn-start-failed-functions
-                    (current-buffer))
+(defun codex--app-server-send-turn-start (submission)
+  "Send captured SUBMISSION as a new app-server turn.
+The pending flag and the response callback are resolved exactly once:
+whichever of the synchronous failure handler and the asynchronous
+response runs first wins, and the other becomes a no-op.  Every
+failure path restores SUBMISSION to the composer and runs
+`codex-app-server-turn-start-failed-functions'."
+  (setq codex--app-server-turn-start-pending-p t)
+  (let ((buffer (current-buffer))
+        (resolved nil))
+    (cl-flet ((resolve-once ()
+                (unless resolved
+                  (setq resolved t)
+                  (when (buffer-live-p buffer)
+                    (with-current-buffer buffer
+                      (setq codex--app-server-turn-start-pending-p nil)))
+                  t))
+              (report-failure ()
+                (when (buffer-live-p buffer)
+                  (with-current-buffer buffer
+                    (codex--app-server-restore-submission submission)
+                    (run-hook-with-args
+                     'codex-app-server-turn-start-failed-functions
+                     buffer)))))
+      (condition-case err
+          (codex--app-server-send-request
+           "turn/start"
+           `((threadId . ,codex--app-server-thread-id)
+             (input . ,(codex--app-server-user-input-vector submission))
+             (cwd . ,codex--buffer-directory)
+             (approvalPolicy . ,(codex--app-server-approval-policy))
+             (effort . ,codex-reasoning-effort))
+           (lambda (result error)
+             (when (resolve-once)
+               (if error
+                   (progn
+                     (report-failure)
+                     (codex--app-server-insert-status
+                      (format "Codex turn failed to start: %S" error)))
+                 (with-current-buffer buffer
+                   (codex--app-server-accept-submission submission)
+                   (codex--app-server-turn-started
+                    `((threadId . ,codex--app-server-thread-id)
+                      (turn . ,(alist-get 'turn result)))))))))
+        ((error quit)
+         (when (resolve-once)
+           (report-failure))
+         (signal (car err) (cdr err)))))))
 ```
 
 (For the image test to pass, note `memq`/`delq` operate on the *same
@@ -3737,15 +3817,14 @@ Expected output: `(t t t t t)`.  Do not proceed to Task 11 until it is.
     `agent-codex--media-token`, `agent-codex--attach-file-reference`,
     `agent-codex--attach-media`, `agent-codex--detach-closure`,
     `agent-codex--ready-to-submit-p`.
-  - Claude also: `agent-claude--prompt-input` (eat-only input-box scan,
-    `unknown' elsewhere; the composer refuses `unknown'),
-    `agent-claude--pending-input-p`, `agent-claude--submit-literal`
-    (eat-only — vterm/ghostel refuse; command-prefix refusal; ESC-clear
-    rollback only before the Return attempt — the ESC-clears-input TUI
-    behavior is live-verified in Task 14 and the rollback is dropped
-    with a documented limitation if that verification fails; emits the
-    `submit' session event on success, since it bypasses the advised
-    interactive paths).
+  - Claude registers NO dispatch slots (`:pending-input-p',
+    `:submit-literal').  Terminal writes have no acknowledgment and
+    the input box cannot be positively verified empty, so Claude
+    targets are compose-and-preview only: the composer warns at
+    compose/retarget and refuses at dispatch.  The pure token slots
+    stay registered so previews are complete and dispatch support can
+    land the day claude-code.el provides a tristate prompt probe and
+    an acknowledged (or safely recoverable) submission API.
   - Codex also: `agent-codex--pending-input-p` (`unknown' for every
     terminal transport — `codex-prompt-input''s terminal parser cannot
     distinguish empty from unlocatable, so nil proves nothing; the
@@ -3775,60 +3854,18 @@ In `test/agent-claude-test.el`:
   (should (equal (agent-claude--media-token "/tmp/a.png" nil)
                  "@/tmp/a.png ")))
 
-(ert-deftest agent-claude-test-submit-literal-eat-only-and-bookkeeping ()
-  "Literal dispatch refuses non-eat Claude sessions; on eat, success
-emits the submit event and rollback never follows a Return attempt."
-  (with-temp-buffer                     ; no eat-terminal here
-    (should-error (agent-claude--submit-literal "hi" (current-buffer))
-                  :type 'user-error))
-  (with-temp-buffer
-    (setq-local eat-terminal t)
-    (let (sends events)
-      (cl-letf (((symbol-function 'get-buffer-process)
-                 (lambda (_buf) 'stub-proc))
-                ((symbol-function 'process-live-p)
-                 (lambda (proc) (eq proc 'stub-proc)))
-                ((symbol-function 'claude-code--term-send-string)
-                 (lambda (_backend text) (push text sends)))
-                ((symbol-function 'agent-session-event)
-                 (lambda (_buf event &optional _payload)
-                   (push event events)))
-                ((symbol-function 'sit-for) #'ignore))
-        (agent-claude--submit-literal "hi there" (current-buffer))
-        (should (equal (reverse sends) (list "hi there" (kbd "RET"))))
-        (should (equal events '(submit))))
-      ;; Failure during the Return send: ownership already transferred,
-      ;; so no signal (a warning instead), no ESC rollback, and dispatch
-      ;; therefore cannot preserve a resendable draft.
-      (setq sends nil)
-      (let (warnings)
-        (cl-letf (((symbol-function 'claude-code--term-send-string)
-                   (lambda (_backend text)
-                     (push text sends)
-                     (when (equal text (kbd "RET")) (error "boom"))))
-                  ((symbol-function 'display-warning)
-                   (lambda (_type message &rest _) (push message warnings)))
-                  ((symbol-function 'sit-for) #'ignore))
-          (agent-claude--submit-literal "x" (current-buffer))
-          (should warnings)
-          (should-not (member (kbd "ESC") sends))))
-      ;; Failure BEFORE the Return attempt: ESC rollback fires and the
-      ;; error propagates (pre-submit failure; draft stays retryable).
-      (setq sends nil)
-      (cl-letf (((symbol-function 'claude-code--term-send-string)
-                 (lambda (_backend text) (push text sends)))
-                ((symbol-function 'sit-for)
-                 (lambda (&rest _) (signal 'quit nil))))
-        (should-error (agent-claude--submit-literal "x" (current-buffer)))
-        (should (member (kbd "ESC") sends))))))
-
 (ert-deftest agent-claude-test-registers-token-slots-only ()
-  "Claude registers pure tokens and no attach functions."
+  "Claude registers pure tokens and no attach or dispatch slots.
+Terminal writes have no acknowledgment, so until claude-code.el grows
+a tristate prompt probe and an acknowledged submission API, Claude
+targets are compose-and-preview only and dispatch refuses them."
   (let ((struct (agent-backend 'claude-code)))
     (should (agent-backend-file-reference-token struct))
     (should (agent-backend-media-token struct))
     (should (null (agent-backend-attach-file-reference struct)))
-    (should (null (agent-backend-attach-media struct)))))
+    (should (null (agent-backend-attach-media struct)))
+    (should (null (agent-backend-pending-input-p struct)))
+    (should (null (agent-backend-submit-literal struct)))))
 ```
 
 In `test/agent-codex-test.el`:
@@ -3969,9 +4006,8 @@ Run: `make test` — FAIL, functions undefined.
 `agent-claude.el` — add near the other send helpers and register in the
 `agent-register-backend` form (`:file-reference-token
 #'agent-claude--file-reference-token :media-token
-#'agent-claude--media-token :pending-input-p
-#'agent-claude--pending-input-p :submit-literal
-#'agent-claude--submit-literal`; no attach slots):
+#'agent-claude--media-token`; no attach slots and — deliberately — no
+dispatch slots):
 
 ```elisp
 (defun agent-claude--file-reference-token (path _buffer)
@@ -3986,87 +4022,8 @@ Identical to the file-reference channel: the CLI attaches @-mentioned
 images, exactly as upstream's own image paste does."
   (agent-claude--file-reference-token path buffer))
 
-(defun agent-claude--prompt-input (buffer)
-  "Return BUFFER's pending prompt text, "" when empty, or `unknown'.
-Scans the eat terminal tail for Claude Code's input box (calibrate the
-box-drawing regexp against the live TUI in Task 14); vterm and ghostel
-cannot be inspected and yield `unknown'."
-  (with-current-buffer buffer
-    (if (not (bound-and-true-p eat-terminal))
-        'unknown
-      (save-excursion
-        (goto-char (point-max))
-        (if (not (re-search-backward
-                  "^╭" (max (point-min) (- (point-max) 4000)) t))
-            'unknown
-          (let ((text ""))
-            (while (re-search-forward
-                    "^│ ?[>] ?\\(.*?\\) *│ *$" nil t)
-              (setq text (concat text (match-string 1))))
-            (string-trim text)))))))
-
-(defun agent-claude--pending-input-p (buffer)
-  "Return nil when BUFFER's prompt is verifiably empty.
-A non-empty prompt returns its text; an uninspectable terminal
-returns `unknown'."
-  (let ((input (agent-claude--prompt-input buffer)))
-    (cond ((eq input 'unknown) 'unknown)
-          ((string-empty-p input) nil)
-          (t input))))
-
-(defun agent-claude--submit-literal (text buffer)
-  "Submit TEXT to BUFFER as one literal prompt.
-Only the eat transport is supported: other terminal backends cannot be
-inspected, so literal isolation cannot be guaranteed there.  Refuses
-text the Claude CLI would parse as a command.  Rollback (ESC clears
-the partially inserted prompt; live-verified TUI behavior) runs ONLY
-while Return cannot yet have been delivered — once the Return send has
-begun, a failure re-signals without touching the session, because
-clearing then could interrupt a started turn.  On success, emits the
-same submission bookkeeping as the advised interactive send paths."
-  (with-current-buffer buffer
-    (unless (bound-and-true-p eat-terminal)
-      (user-error
-       "agent-claude: literal dispatch supports only eat sessions")))
-  (when (string-match-p "\\`[/!]" text)
-    (user-error
-     "agent-claude: message starts with %c, which the CLI parses as a command"
-     (aref text 0)))
-  (with-current-buffer buffer
-    (unless (process-live-p (get-buffer-process buffer))
-      (user-error "agent-claude: the session process is dead")))
-  (let (inserted return-attempted)
-    (condition-case err
-        (with-current-buffer buffer
-          (claude-code--term-send-string claude-code-terminal-backend text)
-          (setq inserted t)
-          (sit-for 0.1)
-          ;; Ownership boundary: once the Return send begins, this
-          ;; function may not signal — dispatch would misread a
-          ;; delivered turn as a pre-submit failure and keep a
-          ;; resendable draft.  Everything from here on is isolated.
-          (setq return-attempted t)
-          (condition-case post-err
-              (progn
-                (claude-code--term-send-string claude-code-terminal-backend
-                                               (kbd "RET"))
-                ;; The advised interactive paths emit the submit event;
-                ;; this path bypasses them, so it owns the bookkeeping.
-                (agent-session-event buffer 'submit))
-            ((error quit)
-             (display-warning
-              'agent-claude
-              (format "literal submit: post-Return step failed (%s); %s"
-                      (error-message-string post-err)
-                      "review the session before retrying")
-              :warning))))
-      ((error quit)
-       (when (and inserted (not return-attempted))
-         (ignore-errors
-           (with-current-buffer buffer
-             (claude-code--term-send-string claude-code-terminal-backend
-                                            (kbd "ESC")))))
-       (signal (car err) (cdr err))))))
+;; Claude registers no dispatch slots: see the Interfaces note.  The
+;; token functions above are the whole Claude registration surface.
 ```
 
 `agent-codex.el` — add and register (`:file-reference-token
@@ -4386,9 +4343,13 @@ or reasoning in flight refuse dispatch, so composition can never queue
 or steer; every pre-submit failure, quit included, preserves the draft,
 undoes out-of-band attachments, and rolls the session state back; after
 a successful submit, cleanup failures warn but never resend;
-"dispatched" for terminal transports means inserted-and-submitted at
-the TUI prompt; `agent-context-recompose` rebuilds the last sent
-composition from independent copies).  Also document the two upstream
+only Codex app-server sessions can be dispatched to in this version —
+Claude and terminal Codex targets are compose-and-preview only, with
+the composer warning at compose time and refusing at dispatch, until
+those backends provide a positively verifiable prompt-empty probe and
+an acknowledged or safely recoverable submission API;
+`agent-context-recompose` rebuilds the last sent composition from
+independent copies).  Also document the two upstream
 behaviors the composer relies on rather than reimplements: codex.el's
 asynchronous restoration (a `turn/start` that later fails returns the
 submission, attachments included, to that session's own composer), and
@@ -4426,20 +4387,20 @@ same.
 - [ ] **Step 2: Live verification checklist** (performed in the running
   Emacs with real sessions; report results honestly, per the spec's §13)
 
-1. Claude session: compose region + instruction; verify from the
-   conversation that the agent received the region exactly once.
-2. Claude session: compose a file (mention) and a working-tree diff;
-   verify contents and single receipt.
-3. Codex app-server session: same three sources; verify the mention
-   arrived as a native mention item.
+1. Codex app-server session: compose region + instruction; verify from
+   the conversation that the agent received the region exactly once.
+2. Codex app-server session: compose a file (native mention item) and
+   a working-tree diff; verify contents and single receipt.
+3. Claude session: verify compose warns "preview-only" and dispatch
+   refuses with the honest no-literal-submission message; verify `P`
+   still renders a complete preview including `@` tokens.
 4. Codex terminal session: verify the composer refuses dispatch with
    the honest transport message (no literal-isolation support there
-   yet); the region/file workflows run on the app-server transport.
-5. Images, on the transports that can dispatch: Claude eat (`@` token)
-   and Codex app-server (native item) — verify the model describes the
-   image content, proving it arrived as an image, not a path string.
-   Remove the media registration for any transport that fails this and
-   re-run the media tests.
+   yet).
+5. Image, Codex app-server (native item): verify the model describes
+   the image content, proving it arrived as an image, not a path
+   string.  Remove the media registration if this fails and re-run the
+   media tests.
 6. Preview (`p` and `P`), delete, reorder, toggle, cancel.
 7. Attachment rollback and retry, with a LIVE target: compose a file
    mention at an idle app-server session, then induce a submission
@@ -4459,17 +4420,6 @@ same.
    Verify the pending mention was detached (the next manual message
    carries no stray attachment), the draft survived, and retry then
    succeeds with the agent receiving the file once.
-7a. ESC rollback calibration (Claude eat — the only terminal transport
-   registering `:submit-literal'): with text partially inserted,
-   trigger the adapter's rollback path and verify ESC actually clears
-   the prompt.  If it does not, DISABLE the transport: remove Claude's
-   `:submit-literal'/`:pending-input-p' registrations so the composer
-   refuses Claude targets honestly, and record the gap as the
-   transport's limitation — do not merely document that partial text
-   may remain.  Also calibrate `agent-claude--prompt-input''s box
-   regexp against the live TUI; if the input box cannot be located
-   reliably, the probe must return `unknown', which the composer
-   refuses.
 8. Dead-target validation, separately: kill the target between compose
    and dispatch; verify the retarget offer and that the draft survives.
 9. Busy policy: dispatch at a mid-turn session; verify refusal and that
