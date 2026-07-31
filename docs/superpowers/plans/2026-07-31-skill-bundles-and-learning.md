@@ -2,6 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+Revision 3.  Revision 2 was reviewed and found still not
+implementation-ready on fourteen counts; this revision closes them
+without changing the feature.  Three were again reproduced against this
+machine first: the Claude backend column already binds `b` and `u`, so
+the keys revision 2 chose were shadowed by suffixes that never appear in
+`agent.el`; `git status --porcelain -- REPO-RELATIVE-PATH` run from a
+skill directory resolves the pathspec from the *working* directory,
+warns, exits 0, and reports every nested skill clean; and writing a
+candidate file back as `utf-8-unix` rewrites every line ending of a CRLF
+file.  The rest tightened task ordering, dispatch phasing, validation,
+history joins, and the live-verification procedure.
+
 Revision 2.  Revision 1 was reviewed and found not implementation-ready
 on thirteen counts, three of which were reproduced against this machine
 before being fixed here: `git status` rejects an absolute path reached
@@ -83,14 +95,24 @@ These apply to every task.  They restate the spec's non-negotiables.
 Run tests with `make test` from the repo root; byte-compile with `make
 compile`.  Both must be clean before each commit.
 
-## Relationship to the other planned work
+## Landing order
 
-Neither the attention/queue plan
-(`docs/superpowers/plans/2026-07-31-attention-and-queue.md`) nor the
-context-composer plan
-(`docs/superpowers/plans/2026-07-30-context-composer.md`) has been
-implemented.  This plan does not depend on either and must not edit
-either.  Three contact points:
+**This plan lands last, after the attention/queue plan and the
+context-composer plan.**  That is a requirement, not a preference.  Both
+of those plans edit the same three places this one does — the Makefile
+lists, the `agent-menu` columns, and the readiness contract — and both
+do it by *replacing* whole lists and columns.  Landing this plan first
+and either of theirs second would silently delete this plan's Makefile
+entries and menu entries; landing this one last means their replacements
+happen before its additions, and its additions are additive.
+
+If this plan must land first anyway, then before starting: change Task 2
+and Task 9 to verify their Makefile additions after *each* later plan
+lands, and change Task 14 to re-assert the menu tests then.  Do not skip
+the checks — the failure mode is silent.
+
+Neither of the other plans has been implemented yet.  This plan does not
+depend on either and must not edit either.  Contact points:
 
 1. **Readiness policy.**  All three plans refuse to submit into a
    session that cannot start a fresh turn.  The other two can see more
@@ -103,21 +125,35 @@ either.  Three contact points:
    `ready`, `busy`, or `unknown`, and "never `ready` for a session that
    last reported `blocked`".  This plan therefore **defers to it when it
    exists and falls back to the display state when it does not**:
-   `agent-ensure-dispatch-target` (Task 6) calls it when it is `fboundp`
-   and only otherwise reads `agent-session-display-state`.  Do not add
-   the slot or the awaiting-reason machinery here.
-2. **`agent-menu` keys.**  This plan uses `b`, `u`, `k` (Tools) and `v`
-   (Prompts & learning).  The queue plan takes `Q`, `L`, `I`, `E`
-   (Sessions) and the composer takes `C` (Prompts): **`L` belongs to
+   `agent-ensure-dispatch-target` (Task 6) prefers it.  The composer
+   plan, however, adds only the **backend slot** `:ready-to-submit-p`
+   and its accessor `agent-backend-ready-to-submit-p`, not the public
+   session helper — so with the composer landed and the queue not, the
+   public helper is absent while real readiness information exists.
+   Task 6 therefore checks three sources in order: the public helper,
+   then the backend slot, then the display state.  Do not add the slot
+   or the awaiting-reason machinery here.
+2. **`agent-menu` keys.**  Keys must be unique across the *whole*
+   prefix, and the prefix is not only what `agent-menu` declares: it
+   also includes the per-backend columns built at open time by
+   `agent-menu--backend-children` from each backend's `:menu-suffixes`.
+   Today `agent-claude--menu-suffixes` generates `B N b t u U -c -w` and
+   `agent-codex--menu-suffixes` generates `R F -x`, so **`b` and `u` are
+   already taken** — an earlier revision of this plan claimed them, and
+   a test that only walked the static layout could not see the clash.
+   This plan uses `W` (run skill bundle), `H` (skill usage history),
+   `k` (check skills) and `v` (review learnings).  The queue plan takes
+   `Q`, `L`, `I`, `E` and the composer takes `C`: **`L` belongs to
    `agent-queue-list`, not to this plan.**  Every menu edit in Task 14
-   inserts single lines into the existing columns; do not retype a
-   column, or you will delete whichever of `C`/`Q`/`L`/`I`/`E` landed
-   first.  Task 14's test asserts exact key-to-command mappings and that
-   no key in the whole prefix is bound twice.
-3. **Makefile lists.**  Both other plans add their own modules and test
-   files.  This plan therefore **appends with `+=` on new lines** rather
-   than restating `SRC :=`/`TEST_FILES :=`, and Task 2 verifies that no
-   entry present in the committed Makefile disappeared.
+   inserts single lines; Task 14's test asserts exact key-to-command
+   mappings and prefix-wide uniqueness *including generated backend
+   suffixes*.
+3. **Makefile lists.**  Both other plans add their own modules by
+   restating `SRC :=` and `TEST_FILES :=` in full.  This plan **appends
+   with `+=` on new lines** and never restates either list, and Tasks 2
+   and 9 each verify that no entry present in the committed Makefile
+   disappeared.  Combined with the landing order above, that is what
+   keeps all three sets of modules in the build.
 4. **Step-at-a-time dispatch** is explicitly deferred to the queue
    project (spec §2).  Do not build a submit-and-wait driver here.
 
@@ -174,7 +210,26 @@ Each is a decision made while planning; do not "fix" it back.
     fed by every session-mode record.**  Populating it from the bundle
     command alone would have missed before-exit skills, and the
     describe command would have reported a session as having loaded no
-    instructions when it had.
+    instructions when it had.  Skipped steps are excluded: the list
+    answers "what was this session given".
+12. **Dispatch is two functions, not one.**  `agent-prepare-dispatch`
+    does all the asking; `agent-dispatch-prepared` does the sending and
+    asks nothing.  A caller that must re-check something — the bundle
+    command re-checking provenance, the learning command re-checking
+    approval — runs its check between the two, so no prompt can sit on
+    screen between the check and the send.  `agent-dispatch-prompt`
+    remains as the one-step convenience form.
+13. **`:dirty` is tri-state.**  t, nil, or `unknown`.  Empty `git
+    status` output means clean and a git failure means the code does not
+    know; collapsing them into nil is how a modified skill gets reported
+    as pristine.
+14. **Candidate files are written back with the coding system they were
+    read with**, not a fixed `utf-8-unix`, so CRLF and mixed-ending
+    files keep their bytes.
+15. **Menu keys are `W`, `H`, `k`, `v`.**  `b` and `u` read better but
+    the Claude backend column already generates them; the keys are
+    chosen from what is actually free once generated suffixes are
+    counted.
 
 ---
 
@@ -331,6 +386,27 @@ Append to `test/agent-test.el`, before the final `provide`:
     (let ((record (car records)))
       (should (equal "/s" (plist-get record :root)))
       (should (eq 'slash (plist-get record :style))))))
+
+(ert-deftest agent-test-audit-discovers-skills-in-the-audited-project ()
+  "Resolve audit skills where the audit runs, not where the user stands."
+  (let ((agent-backends nil)
+        (seen nil))
+    (apply #'agent-register-backend
+           'stub
+           (agent-test--backend
+            :run-prompt (cl-function
+                         (lambda (_prompt &key directory callback)
+                           (ignore directory callback)
+                           nil))))
+    (cl-letf (((symbol-function 'agent-discover-skills)
+               (lambda (_backend) (push default-directory seen) nil))
+              ((symbol-function 'agent--audit-finish) #'ignore))
+      (let ((default-directory "/tmp/project-a/"))
+        (agent--audit-run-next
+         (list :backend 'stub :queue '("code-audit") :results nil
+               :dir "/tmp/project-b/" :start-time (current-time)))))
+    (should (member "/tmp/project-b/" seen))
+    (should-not (member "/tmp/project-a/" seen))))
 
 (ert-deftest agent-test-before-exit-record-carries-the-skill-path ()
   "Resolve the before-exit skill so its record names a source file."
@@ -519,8 +595,23 @@ outcome record can carry it even when the callback runs first.
 
 - [ ] **Step 6: Emit from the audit runner**
 
-In `agent--audit-run-next`, add a `facts` binding after `run` and wrap
-the call the same way, so a backend that cannot start records nothing:
+Two changes here.  First, the existing `skill` binding resolves the
+audit skill with `agent-discover-skills` in whatever directory the user
+happened to be in, while the audit runs in `(plist-get state :dir)`.
+Auditing project B from a buffer in project A therefore finds project
+A's skills and runs them against B.  Bind the audited directory around
+the lookup:
+
+```elisp
+           (skill (let ((default-directory (plist-get state :dir)))
+                    (or (cl-find name (agent-discover-skills backend)
+                                 :key (lambda (s) (plist-get s :name))
+                                 :test #'equal)
+                        (list :name name :style 'slash))))
+```
+
+Second, add a `facts` binding after `run` and wrap the call the same
+way, so a backend that cannot start records nothing:
 
 ```elisp
            (facts (list :id (agent--skill-invocation-id)
@@ -728,24 +819,57 @@ RESPONSES is an alist mapping an argument list to (EXIT . OUTPUT)."
   "Report repository, commit, and a clean worktree."
   (agent-skill-test--with-skill skill
     (let* ((agent-skill-record-git-provenance t)
-           (repo (file-truename (plist-get skill :root)))
-           (relative "demo"))
+           (repo (file-truename (plist-get skill :root))))
       (cl-letf (((symbol-function 'process-file)
                  (agent-skill-test--stub-git
                   `((("rev-parse" "--show-toplevel") . (0 . ,repo))
                     (("rev-parse" "HEAD") . (0 . "abc123\n"))
-                    (("status" "--porcelain" "--" ,relative) . (0 . ""))))))
+                    (("status" "--porcelain" "--" ":/demo") . (0 . ""))))))
         (let ((prov (agent-skill-provenance skill)))
           (should (equal (file-name-as-directory repo)
                          (plist-get prov :repo)))
           (should (equal "abc123" (plist-get prov :commit)))
-          (should (equal relative (plist-get prov :relative-path)))
+          (should (equal "demo" (plist-get prov :relative-path)))
           (should-not (plist-get prov :dirty)))))))
 
 (ert-deftest agent-skill-test-provenance-reports-a-dirty-auxiliary-file ()
   "Set `:dirty' for a change anywhere in the skill directory.
-The skill file itself is untouched here; a modified reference file must
-still make the provenance dirty, because the model reads it too."
+Runs against a real nested git repository rather than a stub, because
+the bug this guards against is in how git resolves the pathspec: a
+repository-root-relative path is resolved from the working directory,
+so for any skill below the repository root git looks in the wrong place
+and reports nothing."
+  (let* ((repo (make-temp-file "agent-skill-repo" t))
+         (dir (expand-file-name "nested/skills/demo" repo))
+         (default-directory repo))
+    (unwind-protect
+        (progn
+          (make-directory dir t)
+          (with-temp-file (expand-file-name "SKILL.md" dir)
+            (insert "---\nname: demo\n---\n"))
+          (dolist (args '(("init" "-q" ".")
+                          ("add" "-A")
+                          ("-c" "user.email=t@t" "-c" "user.name=t"
+                           "commit" "-qm" "init")))
+            (apply #'process-file "git" nil nil nil args))
+          ;; The skill file itself stays committed and unchanged; only a
+          ;; reference file appears.
+          (with-temp-file (expand-file-name "notes.md" dir) (insert "hi\n"))
+          (let* ((agent-skill-record-git-provenance t)
+                 (skill (list :name "demo" :style 'file
+                              :root (expand-file-name "nested/skills" repo)
+                              :path (expand-file-name "SKILL.md" dir)))
+                 (prov (agent-skill-provenance skill)))
+            (should (equal "nested/skills/demo"
+                           (plist-get prov :relative-path)))
+            (should (eq t (plist-get prov :dirty)))))
+      (delete-directory repo t))))
+
+(ert-deftest agent-skill-test-provenance-dirty-is-unknown-on-git-failure ()
+  "Report `unknown', never nil, when git could not answer.
+Empty output means clean; a failure means the code does not know, and
+folding the two together is how a modified skill gets reported as
+pristine."
   (agent-skill-test--with-skill skill
     (let* ((agent-skill-record-git-provenance t)
            (repo (file-truename (plist-get skill :root))))
@@ -753,9 +877,24 @@ still make the provenance dirty, because the model reads it too."
                  (agent-skill-test--stub-git
                   `((("rev-parse" "--show-toplevel") . (0 . ,repo))
                     (("rev-parse" "HEAD") . (0 . "abc123\n"))
-                    (("status" "--porcelain" "--" "demo")
-                     . (0 . " M demo/references/notes.md\n"))))))
-        (should (plist-get (agent-skill-provenance skill) :dirty))))))
+                    (("status" "--porcelain" "--" ":/demo")
+                     . (128 . "fatal: bad thing\n"))))))
+        (should (eq 'unknown (plist-get (agent-skill-provenance skill)
+                                        :dirty)))))))
+
+(ert-deftest agent-skill-test-provenance-fingerprints-the-directory ()
+  "Change the fingerprint when a reference file changes."
+  (agent-skill-test--with-skill skill
+    (let* ((agent-skill-record-git-provenance nil)
+           (before (agent-skill-provenance skill))
+           (notes (expand-file-name
+                   "notes.md"
+                   (file-name-directory (plist-get skill :path)))))
+      (with-temp-file notes (insert "new reference material\n"))
+      (let ((after (agent-skill-provenance skill)))
+        (should (equal (plist-get before :content-sha1)
+                       (plist-get after :content-sha1)))
+        (should (agent-skill-provenance-changed-p before after))))))
 
 (ert-deftest agent-skill-test-provenance-through-a-symlinked-root ()
   "Ask git about a repository-relative path, not the symlinked one.
@@ -790,7 +929,7 @@ with `outside repository', which a naive implementation reads as
                                (insert out))))
                          0)))
               (should (plist-get (agent-skill-provenance skill) :dirty))
-              (should (member '("status" "--porcelain" "--" "demo") asked))
+              (should (member '("status" "--porcelain" "--" ":/demo") asked))
               (should-not
                (cl-find-if (lambda (args)
                              (cl-find-if (lambda (a)
@@ -896,25 +1035,44 @@ records the path, root, style, and content hash only."
       (insert-file-contents-literally path)
       (secure-hash 'sha1 (buffer-string)))))
 
-(defun agent-skill--git-output (&rest args)
-  "Return the trimmed output of git ARGS, or nil.
-Return nil when git exits non-zero or prints nothing, so a caller
-cannot mistake a failure for an answer."
+(defun agent-skill--git (&rest args)
+  "Run git ARGS and return (EXIT . TRIMMED-OUTPUT).
+The exit status is returned rather than folded into the output,
+because for `git status' an empty result means \"clean\" and a failure
+means \"do not know\", and those must not collapse into the same value."
   (with-temp-buffer
     (let ((exit (apply #'process-file "git" nil t nil args)))
-      (when (eq exit 0)
-        (let ((output (string-trim (buffer-string))))
-          (unless (string-empty-p output) output))))))
+      (cons exit (string-trim (buffer-string))))))
+
+(defun agent-skill--git-output (&rest args)
+  "Return the trimmed output of git ARGS, or nil.
+Return nil when git exits non-zero or prints nothing."
+  (let ((result (apply #'agent-skill--git args)))
+    (when (and (eq (car result) 0) (not (string-empty-p (cdr result))))
+      (cdr result))))
 
 (defun agent-skill--git-provenance (truename)
   "Return the git provenance plist for the skill file at TRUENAME.
 TRUENAME must already be symlink-resolved.  Git is asked about the
-skill's whole *directory*, addressed relative to the repository root:
-the model reads the skill's reference files too, and an absolute path
-that reaches the repository through a symlink — which is how
-`~/.claude/skills' is set up on the author's machine — makes git fail
-with `outside repository', which a caller would otherwise read as a
-clean tree."
+skill's whole *directory*, because the model reads the skill's
+reference files too.
+
+The directory is named with a **top-anchored pathspec** (`:/PATH',
+which git resolves from the repository root regardless of the working
+directory).  Two failure modes make this necessary, both reproduced on
+the author's machine:
+
+  * An absolute path that reaches the repository through a symlink —
+    `~/.claude/skills' is one — makes git exit with `outside
+    repository'.
+  * A repository-root-relative path is resolved relative to the
+    *current* directory, so for any skill below the repository root git
+    looks in the wrong place, prints a warning, exits 0, and produces no
+    output.
+
+Either one reads as a clean tree to a caller that only sees empty
+output.  `:dirty' is therefore t, nil, or the symbol `unknown', and a
+git failure yields `unknown' rather than nil."
   (let* ((directory (file-name-directory truename))
          (default-directory directory)
          (repo (agent-skill--git-output "rev-parse" "--show-toplevel")))
@@ -922,13 +1080,16 @@ clean tree."
         (list :repo nil :relative-path nil :commit nil :dirty nil)
       (let* ((root (file-name-as-directory (file-truename repo)))
              (relative (directory-file-name
-                        (file-relative-name directory root))))
+                        (file-relative-name directory root)))
+             (status (agent-skill--git "status" "--porcelain" "--"
+                                       (concat ":/" relative))))
         (list :repo root
               :relative-path relative
               :commit (agent-skill--git-output "rev-parse" "HEAD")
-              :dirty (and (agent-skill--git-output
-                           "status" "--porcelain" "--" relative)
-                          t))))))
+              :dirty (cond
+                      ((not (eq (car status) 0)) 'unknown)
+                      ((string-empty-p (cdr status)) nil)
+                      (t t)))))))
 
 (defun agent-skill-provenance (skill)
   "Return the provenance plist for SKILL.
@@ -956,22 +1117,48 @@ none."
                      :truename truename
                      :root (plist-get skill :root)
                      :style (plist-get skill :style)
-                     :content-sha1 (agent-skill--file-sha1 path))))
+                     :content-sha1 (agent-skill--file-sha1 path)
+                     :tree-fingerprint
+                     (and truename
+                          (agent-skill--tree-fingerprint
+                           (file-name-directory truename))))))
     (if (and agent-skill-record-git-provenance
              truename
              (file-readable-p truename))
         (append base (agent-skill--git-provenance truename))
       base)))
 
+(defun agent-skill--tree-fingerprint (directory)
+  "Return a fingerprint of every file under skill DIRECTORY, or nil.
+Names, sizes, and modification times only — the point is to notice that
+something in the skill's directory changed, not to hash megabytes.  This
+is what catches an edit to a reference file in a tree that was already
+dirty, where the content hash, the commit, and the dirty flag all stay
+exactly as they were."
+  (when (file-directory-p directory)
+    (let ((entries nil))
+      (dolist (file (directory-files-recursively directory "" nil t))
+        (let ((attributes (file-attributes file)))
+          (push (format "%s %s %s"
+                        (file-relative-name file directory)
+                        (file-attribute-size attributes)
+                        (format-time-string
+                         "%s.%N" (file-attribute-modification-time
+                                  attributes)))
+                entries)))
+      (secure-hash 'sha1 (string-join (sort entries #'string<) "\n")))))
+
 (defun agent-skill-provenance-changed-p (before after)
   "Return non-nil when provenance AFTER differs materially from BEFORE.
-Only the facts that describe the instructions are compared: the content
-hash, the commit, and the dirty flag."
+The facts compared are the ones that describe the instructions: the
+content hash, the commit, the dirty flag, and the directory
+fingerprint."
   (not (and (equal (plist-get before :content-sha1)
                    (plist-get after :content-sha1))
             (equal (plist-get before :commit) (plist-get after :commit))
-            (eq (and (plist-get before :dirty) t)
-                (and (plist-get after :dirty) t)))))
+            (eq (plist-get before :dirty) (plist-get after :dirty))
+            (equal (plist-get before :tree-fingerprint)
+                   (plist-get after :tree-fingerprint)))))
 
 ;;;; Provide
 
@@ -1172,14 +1359,19 @@ reported."
                                                     :records)))))
         (setf (agent-session-id identity) "sess-42")
         (agent-skill--note-session-id session)
-        (let ((newest (car (plist-get (agent-skill-history-read) :records))))
-          (should (equal "session-id" (alist-get 'event newest)))
-          (should (equal "one" (alist-get 'id newest)))
-          (should (equal "sess-42" (alist-get 'id (alist-get 'session
-                                                             newest)))))
+        ;; The reader shows one row for the invocation, now carrying the
+        ;; id — not a bare correlation row beside an id-less invocation.
+        (let* ((read (agent-skill-history-read))
+               (rows (plist-get read :records)))
+          (should (= 1 (length rows)))
+          (should (= 1 (plist-get read :total)))
+          (should (equal "one" (alist-get 'id (car rows))))
+          (should (equal "sess-42"
+                         (alist-get 'id (alist-get 'session (car rows))))))
         ;; A second notification for the same id appends nothing.
         (agent-skill--note-session-id session)
-        (should (= 2 (plist-get (agent-skill-history-read) :total)))))))
+        (should (= 1 (length (plist-get (agent-skill-history-read)
+                                        :records))))))))
 ```
 
 - [ ] **Step 2: Run the tests and watch them fail**
@@ -1230,10 +1422,15 @@ KEYS is a list of (JSON-NAME . PLIST-KEY) conses."
           keys))
 
 (defconst agent-skill--source-json-keys
-  '((path . :path) (root . :root) (style . :style)
-    (content_sha1 . :content-sha1) (repo . :repo)
+  '((path . :path) (truename . :truename) (root . :root) (style . :style)
+    (content_sha1 . :content-sha1)
+    (tree_fingerprint . :tree-fingerprint)
+    (repo . :repo) (relative_path . :relative-path)
     (commit . :commit) (dirty . :dirty))
-  "JSON field names for a provenance plist.")
+  "JSON field names for a provenance plist.
+Every field `agent-skill-provenance' documents is serialized; a field
+that is recorded in memory but dropped on the way to disk would make
+the durable history quietly weaker than the live one.")
 
 (defun agent-skill--session-json (buffer)
   "Return the JSON session identity of session BUFFER, or `:null'."
@@ -1330,8 +1527,12 @@ Maintained by `agent-skill-mode'.  This dies with the buffer by design;
 the durable copy is `agent-skill-history-file'.")
 
 (defun agent-skill--track-in-session (record)
-  "Add RECORD to its session buffer's `agent-skill--applied' list."
+  "Add RECORD to its session buffer's `agent-skill--applied' list.
+A `skipped' step is recorded in the history but never added here: the
+list answers \"what was this session given\", and a step that was not
+run was not given to it."
   (when-let* (((eq 'session (plist-get record :mode)))
+              ((not (eq 'skipped (plist-get record :outcome))))
               (buffer (plist-get record :buffer))
               ((buffer-live-p buffer)))
     (with-current-buffer buffer
@@ -1405,15 +1606,37 @@ leaves — is skipped by `forward-line' and would silently disappear."
       (insert-file-contents file)
       (split-string (buffer-string) "\n" t "[ \t\r]+"))))
 
+(defun agent-skill--apply-correlations (records correlations)
+  "Return RECORDS with late session ids from CORRELATIONS folded in.
+CORRELATIONS maps an invocation id to the session object a later
+`session-id' event reported.  A reader should see one row per
+invocation carrying the best identity known, not an invocation row
+saying `no session id' next to a bare correlation row."
+  (mapcar (lambda (record)
+            (if-let* ((id (alist-get 'id record))
+                      (session (gethash id correlations)))
+                (cons (cons 'session session)
+                      (assq-delete-all 'session (copy-alist record)))
+              record))
+          records))
+
 (defun agent-skill-history-read (&optional limit)
   "Return recorded invocations, newest first.
-LIMIT bounds how many are returned.  Rotated history files are read
-after the current one, newest rotation first, so rotation never hides
-history.  The result is a plist with `:records' (alists as stored),
-`:total' (records returned), `:unparsable' (lines that were not valid
-JSON) and `:files' (the files actually read).  A missing history file
-yields an empty result, not an error."
+LIMIT bounds how many *invocations* are returned.  Rotated history
+files are read after the current one, newest rotation first, so
+rotation never hides history.
+
+`session-id' correlation events are not rows: they are folded into the
+invocation they name, so an entry dispatched into a brand-new session
+shows the id the backend reported afterwards.  They are also not
+counted against LIMIT, which counts what a reader sees.
+
+The result is a plist with `:records' (alists as stored, correlations
+applied), `:total', `:unparsable' (lines that were not valid JSON) and
+`:files' (the files actually read).  A missing history file yields an
+empty result, not an error."
   (let ((records nil)
+        (correlations (make-hash-table :test #'equal))
         (unparsable 0)
         (read-files nil))
     (catch 'done
@@ -1423,15 +1646,23 @@ yields an empty result, not an error."
           (push file read-files)
           (dolist (line (nreverse lines))
             (condition-case nil
-                (push (json-parse-string line
-                                         :object-type 'alist
-                                         :null-object nil
-                                         :false-object nil)
-                      records)
-              (error (setq unparsable (1+ unparsable))))
-            (when (and limit (>= (length records) limit))
-              (throw 'done nil))))))
-    (list :records (nreverse records)
+                (let ((entry (json-parse-string line
+                                                :object-type 'alist
+                                                :null-object nil
+                                                :false-object nil)))
+                  (if (equal "session-id" (alist-get 'event entry))
+                      ;; Newest wins: files are walked newest-first, so
+                      ;; only record a correlation not already seen.
+                      (let ((id (alist-get 'id entry)))
+                        (unless (gethash id correlations)
+                          (puthash id (alist-get 'session entry)
+                                   correlations)))
+                    (push entry records)
+                    (when (and limit (>= (length records) limit))
+                      (throw 'done nil))))
+              (error (setq unparsable (1+ unparsable))))))))
+    (list :records (agent-skill--apply-correlations (nreverse records)
+                                                    correlations)
           :total (length records)
           :unparsable unparsable
           :files (nreverse read-files))))
@@ -1645,6 +1876,8 @@ Every caller validates through this one function, so the resolver and
 the health check cannot disagree about what a valid bundle is.  A
 mistyped key is a `user-error' naming the key rather than a bundle that
 half works."
+  (unless (stringp name)
+    (user-error "Bundle name must be a string, not %S" name))
   (unless (and (listp bundle) (cl-evenp (length bundle)))
     (user-error "Bundle `%s' is not a plist" name))
   (let ((rest bundle))
@@ -1681,6 +1914,11 @@ half works."
           (when (and args (not (stringp args)))
             (user-error "Bundle `%s' entry `%s' option `:args' must be \
 a string"
+                        name (car parsed))))
+        (when (plist-member options :optional)
+          (unless (memq (plist-get options :optional) '(nil t))
+            (user-error "Bundle `%s' entry `%s' option `:optional' must be \
+t or nil"
                         name (car parsed)))))))
   t)
 
@@ -1919,8 +2157,14 @@ git commit -m "agent-skill: render a bundle as one deterministic message"
     busy; confirms when `unknown`.
   - `agent-read-dispatch-target (&optional PROMPT)` → a live session
     buffer or the symbol `new`.
+  - `agent-prepare-dispatch (TARGET &key backend directory)` → a plan
+    plist, `(:buffer BUFFER)` or `(:session SESSION)`.  All prompting
+    happens here.
+  - `agent-dispatch-prepared (TEXT PLAN)` → the session buffer the text
+    was submitted to.  Prompts for nothing.
   - `agent-dispatch-prompt (TEXT TARGET &key backend directory)` → the
-    session buffer the text was submitted to.
+    two above in one call, for callers with nothing to re-validate in
+    between.
 - Produces (in `agent-skill.el`):
   - `agent-skill-run-bundle (&optional NAME)` — autoloaded command.
   - `agent-skill-describe-session (&optional BUFFER)` — autoloaded
@@ -2051,20 +2295,36 @@ Add to `agent.el` at the end of the "Core send wrappers" section:
 ```elisp
 (defun agent--dispatch-readiness (buffer)
   "Return `ready', `busy', or `unknown' for session BUFFER.
-Prefer `agent-session-ready-to-submit-p' when it exists: the display
-state cannot see a session stopped at a permission dialog, which
-displays as `waiting' while a submission would be typed into the
-dialog.  Fall back to `agent-session-display-state', whose waiting
-states are the best answer available without that probe."
-  (if (fboundp 'agent-session-ready-to-submit-p)
-      (pcase (agent-session-ready-to-submit-p buffer)
-        ('ready 'ready)
-        ('unknown 'unknown)
-        (_ 'busy))
-    (pcase (agent-session-display-state buffer)
-      ('busy 'busy)
+Three sources, in decreasing order of authority, because the two other
+planned projects add them at different times:
+
+1. `agent-session-ready-to-submit-p', the public helper the queue
+   project adds.  It is the only thing that knows a session stopped at a
+   permission dialog, which displays as `waiting' while a submission
+   would be typed into the dialog.
+2. The backend `:ready-to-submit-p' slot, which the composer project
+   adds *without* the public helper.  With only the composer landed,
+   skipping this would throw away real readiness information.
+3. `agent-session-display-state', the best answer available with
+   neither."
+  (let* ((backend (agent--detect-backend buffer))
+         (struct (and backend (agent-backend backend)))
+         (slot (and struct
+                    (fboundp 'agent-backend-ready-to-submit-p)
+                    (agent-backend-ready-to-submit-p struct)))
+         (answer
+          (cond
+           ((fboundp 'agent-session-ready-to-submit-p)
+            (agent-session-ready-to-submit-p buffer))
+           (slot (funcall slot buffer))
+           (t (pcase (agent-session-display-state buffer)
+                ('busy 'busy)
+                ('unknown 'unknown)
+                (_ 'ready))))))
+    (pcase answer
+      ('ready 'ready)
       ('unknown 'unknown)
-      (_ 'ready))))
+      (_ 'busy))))
 
 (defun agent-ensure-dispatch-target (buffer)
   "Return BUFFER after checking it can accept a submitted prompt now.
@@ -2107,32 +2367,57 @@ PROMPT overrides the completion prompt."
            (cl-find choice candidates :test #'string=))
           (user-error "No session matches `%s'" choice)))))
 
-(cl-defun agent-dispatch-prompt (text target &key backend directory)
-  "Send TEXT to TARGET and return the session buffer it went to.
-TARGET is a live session buffer or the symbol `new'.  An existing
-target passes `agent-ensure-dispatch-target' first.  A new session is
-started with BACKEND (prompted for when nil) in DIRECTORY (the current
-project root or `default-directory' when nil), with TEXT as its initial
-prompt.
-
-As everywhere in this package, a successful return means the text was
-submitted at the session's prompt; terminal transports can attest
-nothing further."
+(cl-defun agent-prepare-dispatch (target &key backend directory)
+  "Do every interactive part of dispatching to TARGET and return a plan.
+TARGET is a live session buffer or the symbol `new'.  This is where all
+prompting happens — backend choice, directory choice, account
+resolution, and the `unknown'-state confirmation — so that a caller can
+finish every question the user has to answer *before* it re-checks
+whatever it is about to send.  Return either (:buffer BUFFER) or
+\(:session SESSION), ready for `agent-dispatch-prepared'."
   (if (eq target 'new)
       (let* ((backend (or backend (agent--resolve-backend)))
              (directory (or directory
                             (when-let* ((project (project-current)))
                               (project-root project))
                             default-directory)))
-        (agent-start-session
-         (agent-session-create
-          :backend backend
-          :account (agent-account-resolve backend t)
-          :directory directory)
-         :initial-prompt text))
+        (list :session (agent-session-create
+                        :backend backend
+                        :account (agent-account-resolve backend t)
+                        :directory directory)))
     (agent-ensure-dispatch-target target)
-    (agent-submit text target)
-    target))
+    (list :buffer target)))
+
+(defun agent-dispatch-prepared (text plan)
+  "Send TEXT according to PLAN and return the session buffer.
+PLAN comes from `agent-prepare-dispatch'.  This asks nothing: every
+question was settled there, so a caller may re-validate its payload
+immediately before calling this and know that nothing can intervene.  A
+live target's readiness is re-checked once more, without prompting,
+because time passed while the caller was validating.
+
+As everywhere in this package, a successful return means the text was
+submitted at the session's prompt; terminal transports can attest
+nothing further."
+  (if-let* ((session (plist-get plan :session)))
+      (agent-start-session session :initial-prompt text)
+    (let ((buffer (plist-get plan :buffer)))
+      (unless (buffer-live-p buffer)
+        (user-error "That session buffer is gone"))
+      (when (eq 'busy (agent--dispatch-readiness buffer))
+        (user-error "%s stopped being ready to take input"
+                    (agent-display-name buffer)))
+      (agent-submit text buffer)
+      buffer)))
+
+(cl-defun agent-dispatch-prompt (text target &key backend directory)
+  "Prepare and perform a dispatch of TEXT to TARGET in one step.
+The convenience form for callers with nothing to re-validate in
+between; callers that do have something use `agent-prepare-dispatch'
+and `agent-dispatch-prepared' directly."
+  (agent-dispatch-prepared
+   text (agent-prepare-dispatch target :backend backend
+                                :directory directory)))
 ```
 
 `project-current` and `project-root` are already used in this file's
@@ -2149,10 +2434,13 @@ Append to `test/agent-skill-test.el`:
 (defmacro agent-skill-test--dispatching (sent &rest body)
   "Run BODY capturing dispatches into SENT as (TEXT . TARGET) conses."
   (declare (indent 1))
-  `(cl-letf (((symbol-function 'agent-dispatch-prompt)
-              (lambda (text target &rest _)
-                (push (cons text target) ,sent)
-                (if (bufferp target) target (current-buffer)))))
+  `(cl-letf (((symbol-function 'agent-prepare-dispatch)
+              (lambda (target &rest _)
+                (if (bufferp target) (list :buffer target) (list :session t))))
+             ((symbol-function 'agent-dispatch-prepared)
+              (lambda (text plan)
+                (push (cons text (or (plist-get plan :buffer) 'new)) ,sent)
+                (or (plist-get plan :buffer) (current-buffer)))))
      ,@body))
 
 (ert-deftest agent-skill-test-run-bundle-dispatches-and-records ()
@@ -2217,7 +2505,10 @@ Append to `test/agent-skill-test.el`:
                  (lambda () 'claude-code))
                 ((symbol-function 'agent-read-dispatch-target)
                  (lambda (&rest _) 'new))
-                ((symbol-function 'agent-dispatch-prompt)
+                ((symbol-function 'agent-prepare-dispatch)
+                 (lambda (target &rest _)
+                   (if (bufferp target) (list :buffer target) (list :session t))))
+                ((symbol-function 'agent-dispatch-prepared)
                  (lambda (&rest _) (user-error "no session"))))
         (should-error (agent-skill-run-bundle "x") :type 'user-error)))
     (should-not records)))
@@ -2241,7 +2532,10 @@ for this test."
                              (lambda () 'claude-code))
                             ((symbol-function 'agent-read-dispatch-target)
                              (lambda (&rest _) session))
-                            ((symbol-function 'agent-dispatch-prompt)
+                            ((symbol-function 'agent-prepare-dispatch)
+                             (lambda (target &rest _)
+                               (if (bufferp target) (list :buffer target) (list :session t))))
+                            ((symbol-function 'agent-dispatch-prepared)
                              (lambda (_text target &rest _) target)))
                     (agent-skill-run-bundle "x"))))
             (agent-skill-mode -1))
@@ -2271,7 +2565,10 @@ must see project B's skills."
                                            :directory "/tmp/project-b/")))
                   ((symbol-function 'agent-read-dispatch-target)
                    (lambda (&rest _) session))
-                  ((symbol-function 'agent-dispatch-prompt)
+                  ((symbol-function 'agent-prepare-dispatch)
+                   (lambda (target &rest _)
+                     (if (bufferp target) (list :buffer target) (list :session t))))
+                  ((symbol-function 'agent-dispatch-prepared)
                    (lambda (_text target &rest _) target)))
           (agent-skill-run-bundle "x"))
         (should (member "/tmp/project-b/" seen))
@@ -2299,7 +2596,10 @@ must see project B's skills."
                    (with-temp-file (plist-get skill :path)
                      (insert "---\nname: demo\n---\nEdited\n"))
                    t))
-                ((symbol-function 'agent-dispatch-prompt)
+                ((symbol-function 'agent-prepare-dispatch)
+                 (lambda (target &rest _)
+                   (if (bufferp target) (list :buffer target) (list :session t))))
+                ((symbol-function 'agent-dispatch-prepared)
                  (lambda (&rest _) (setq sent t) (current-buffer))))
         (should-error (agent-skill-run-bundle "x") :type 'user-error)
         (should-not sent)))))
@@ -2321,7 +2621,10 @@ must see project B's skills."
                 ((symbol-function 'agent-skill--target-directory)
                  (lambda (&rest _) "/tmp/"))
                 ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
-                ((symbol-function 'agent-dispatch-prompt)
+                ((symbol-function 'agent-prepare-dispatch)
+                 (lambda (target &rest _)
+                   (if (bufferp target) (list :buffer target) (list :session t))))
+                ((symbol-function 'agent-dispatch-prepared)
                  (lambda (&rest _) (current-buffer))))
         (agent-skill-run-bundle "x")))
     (let ((skipped (cl-find 'skipped (nreverse records)
@@ -2503,11 +2806,15 @@ recorded unless every step resolves and the dispatch succeeds."
           (user-error "Aborted"))
       (when (buffer-live-p preview)
         (quit-windows-on preview t)))
-    (let* ((checked (let ((default-directory directory))
+    ;; Every remaining question — backend, directory, account, the
+    ;; unknown-state confirmation — is settled first.  Only then are the
+    ;; sources re-checked, and the send that follows asks nothing, so
+    ;; nothing can change the skills between the check and the message.
+    (let* ((plan (agent-prepare-dispatch target :backend backend
+                                         :directory directory))
+           (checked (let ((default-directory directory))
                       (agent-skill--revalidate steps)))
-           (buffer (agent-dispatch-prompt message-text target
-                                          :backend backend
-                                          :directory directory)))
+           (buffer (agent-dispatch-prepared message-text plan)))
       (agent-skill--note-steps name checked buffer backend directory)
       (message "Dispatched bundle %s (%d skill%s) to %s"
                name count (if (= 1 count) "" "s")
@@ -2542,10 +2849,10 @@ session that was given nothing."
                                "%F %T"
                                (seconds-to-time (plist-get record :time)))
                               (plist-get record :skill)
-                              (if-let* ((bundle (plist-get record :bundle)))
-                                  (format "  [%s %d/%d]" bundle
-                                          (plist-get record :step)
-                                          (plist-get record :steps))
+                              (if-let* ((bundle (plist-get record :bundle))
+                                        (step (plist-get record :step))
+                                        (steps (plist-get record :steps)))
+                                  (format "  [%s %d/%d]" bundle step steps)
                                 "")))
               (insert (format "    %s\n    %s\n"
                               (or (plist-get source :path) "unknown path")
@@ -3086,11 +3393,36 @@ git commit -m "agent-skill: check discovered skills and configured bundles"
     `(expand-file-name "agent/learnings/" user-emacs-directory)`.
   - `agent-learn-parse-file (FILE)` → plist `(:file :title :transcript
     :directory :captured :candidates :error)`.
-  - Candidate plist: `(:file :index :title :fields :state :review-date
-    :review-note :dispatched :text)`.
+  - Candidate plist: `(:file :index :title :heading :file-sha1 :captured
+    :fields :text :state :state-text :review-date :review-note
+    :stray-review :dispatched)`.
   - `agent-learn-candidate-field (CANDIDATE NAME)` → string or nil.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Register the new test file in the Makefile**
+
+As in Task 2, do this **before** writing the test, so the RED step
+actually runs it, and append rather than restate — the other two plans
+add their own entries to the same lists:
+
+```make
+SRC += agent-learn.el
+TEST_FILES += test/agent-learn-test.el
+```
+
+Verify nothing was lost:
+
+```bash
+git show HEAD:Makefile | sed -n 's/^SRC :=//p' | tr ' ' '\n' | sed '/^$/d' | sort -u > /tmp/agent-src-before
+sed -n 's/^SRC [:+]=//p' Makefile | tr ' ' '\n' | sed '/^$/d' | sort -u > /tmp/agent-src-after
+comm -23 /tmp/agent-src-before /tmp/agent-src-after
+git show HEAD:Makefile | sed -n 's/^TEST_FILES :=//p' | tr ' ' '\n' | sed '/^$/d' | sort -u > /tmp/agent-tests-before
+sed -n 's/^TEST_FILES [:+]=//p' Makefile | tr ' ' '\n' | sed '/^$/d' | sort -u > /tmp/agent-tests-after
+comm -23 /tmp/agent-tests-before /tmp/agent-tests-after
+```
+
+Expected: both `comm` invocations print nothing.
+
+- [ ] **Step 2: Write the failing tests**
 
 Create `test/agent-learn-test.el`:
 
@@ -3212,15 +3544,6 @@ Captured: 2026-05-11
               (plist-get (agent-learn--parse-review "maybe 2026-07-31")
                          :state))))
 
-(ert-deftest agent-learn-test-parse-file-without-candidates ()
-  "Return no candidates and no error for a file with only a header."
-  (let ((file (make-temp-file "agent-learn" nil ".md" "# Nothing here\n")))
-    (unwind-protect
-        (let ((parsed (agent-learn-parse-file file)))
-          (should-not (plist-get parsed :candidates))
-          (should-not (plist-get parsed :error)))
-      (delete-file file))))
-
 (ert-deftest agent-learn-test-parse-unreadable-file-reports-an-error ()
   "Report an unreadable file instead of signaling."
   (let ((parsed (agent-learn-parse-file "/nowhere/missing.md")))
@@ -3330,12 +3653,14 @@ inner triple backticks are ordinary characters — no escaping needed.
 (This plan wraps that block in a four-backtick fence for the same
 reason.)
 
-- [ ] **Step 2: Run the tests and watch them fail**
+- [ ] **Step 3: Run the tests and watch them fail**
 
 Run: `make test 2>&1 | tail -20`
-Expected: `Cannot open load file: agent-learn`.
+Expected: the run aborts with `Cannot open load file: agent-learn`.
+Step 1 registered the file, so this failure proves the new tests are
+wired into `make test`.
 
-- [ ] **Step 3: Create the module with the parser**
+- [ ] **Step 4: Create the module with the parser**
 
 Create `agent-learn.el`:
 
@@ -3514,26 +3839,41 @@ approved."
          (t (setq done t)))))
     (string-join (nreverse kept) "\n")))
 
-(defun agent-learn--parse-candidate (file index title heading text file-sha1)
+(defun agent-learn--stray-review-p (text managed-text)
+  "Return non-nil when candidate TEXT has a `Review' line outside MANAGED-TEXT.
+Counting occurrences rather than checking for absence is what catches a
+second review line *after* a legitimate one — the case where a model
+appends its own verdict below the human's."
+  (let ((count (lambda (string)
+                 (let ((total 0)
+                       (start 0))
+                   (while (string-match
+                           "^\\*\\*Review:\\*\\*" string start)
+                     (setq total (1+ total)
+                           start (match-end 0)))
+                   total))))
+    (> (funcall count text) (funcall count managed-text))))
+
+(defun agent-learn--parse-candidate (file index title heading text file-sha1
+                                          captured)
   "Return the candidate plist for section TEXT.
 FILE, INDEX, TITLE, and the literal HEADING line identify it.
 FILE-SHA1 is the hash of the file as parsed, which the writer compares
 before editing so a file that changed underneath is refused instead of
 half-rewritten."
   (let* ((fields (agent-learn--parse-fields text))
-         (managed (agent-learn--parse-fields
-                   (agent-learn--managed-text
-                    (substring text (min (length text)
-                                         (1+ (or (string-search "\n" text)
-                                                 0)))))))
+         (body (substring text (min (length text)
+                                    (1+ (or (string-search "\n" text) 0)))))
+         (managed-text (agent-learn--managed-text body))
+         (managed (agent-learn--parse-fields managed-text))
          (review (agent-learn--parse-review (cdr (assoc "Review" managed))))
-         (stray (and (assoc "Review" fields)
-                     (not (assoc "Review" managed)))))
+         (stray (agent-learn--stray-review-p text managed-text)))
     (list :file file
           :index index
           :title title
           :heading heading
           :file-sha1 file-sha1
+          :captured captured
           :fields fields
           :text text
           :state (if (assoc "Review" managed)
@@ -3605,6 +3945,8 @@ older free-prose captures, and they must stay visible."
         (insert-file-contents file))
       (let* ((content (buffer-string))
              (file-sha1 (agent-learn--file-sha1 file))
+             (header (agent-learn--parse-header
+                      (substring content 0 (min (length content) 2000))))
              (starts (agent-learn--candidate-starts))
              (candidates nil))
         (if (null starts)
@@ -3618,23 +3960,16 @@ older free-prose captures, and they must stay visible."
                                file (nth 1 start) (nth 2 start) (nth 3 start)
                                (buffer-substring-no-properties
                                 (car start) end)
-                               file-sha1)
+                               file-sha1
+                               (plist-get header :captured))
                               candidates)))
           (append (list :file file :candidates (nreverse candidates))
-                  (agent-learn--parse-header
-                   (substring content 0 (min (length content) 2000)))))))))
+                  header))))))
 
 ;;;; Provide
 
 (provide 'agent-learn)
 ;;; agent-learn.el ends here
-```
-
-- [ ] **Step 4: Add the module to the Makefile**
-
-```make
-SRC := agent.el agent-account.el agent-capture.el agent-slack.el agent-snippet.el agent-claude-cli.el agent-claude.el agent-codex.el agent-chief.el agent-skill.el agent-learn.el
-TEST_FILES := test/agent-test.el test/agent-account-test.el test/agent-capture-test.el test/agent-slack-test.el test/agent-snippet-test.el test/agent-claude-cli-test.el test/agent-claude-test.el test/agent-codex-test.el test/agent-chief-test.el test/agent-skill-test.el test/agent-learn-test.el
 ```
 
 - [ ] **Step 5: Run the tests**
@@ -3731,6 +4066,32 @@ pass even if the write re-encoded the file."
              (stripped (replace-regexp-in-string
                         (regexp-quote inserted) "" after nil t)))
         (should (equal before stripped))))))
+
+(ert-deftest agent-learn-test-set-review-preserves-crlf-endings ()
+  "Leave a CRLF file with CRLF endings."
+  (agent-learn-test--with-file file
+    (let ((crlf (replace-regexp-in-string "\n" "\r\n"
+                                          agent-learn-test--file t t)))
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region crlf nil file nil 'no-message)))
+    (agent-learn-set-review (agent-learn-test--candidate file 1)
+                            'approved nil)
+    (let ((after (agent-learn-test--bytes file)))
+      (should (string-match-p "\r\n" after))
+      (should-not (string-match-p "[^\r]\n" after)))))
+
+(ert-deftest agent-learn-test-set-review-preserves-mixed-endings ()
+  "Leave the stray carriage returns of a mixed-ending file in place."
+  (agent-learn-test--with-file file
+    (let ((mixed (replace-regexp-in-string
+                  "^## Candidate 1: \\(.*\\)$" "## Candidate 1: \\1\r"
+                  agent-learn-test--file)))
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region mixed nil file nil 'no-message)))
+    (let ((before-crs (cl-count ?\r (agent-learn-test--bytes file))))
+      (agent-learn-set-review (agent-learn-test--candidate file 2)
+                              'approved nil)
+      (should (= before-crs (cl-count ?\r (agent-learn-test--bytes file)))))))
 
 (ert-deftest agent-learn-test-write-detects-a-changed-file ()
   "Refuse to write when the file changed since the candidate was parsed."
@@ -3852,9 +4213,14 @@ product.  The file's hash must still match the one recorded when the
 candidate was parsed, so a file that changed underneath is refused
 rather than half-rewritten.  The new text is written to a temporary
 file in the same directory and renamed over the original, so an
-interrupted write cannot truncate it.  Reading and writing both pin
-UTF-8, so a round trip cannot re-encode bytes this package did not
-touch."
+interrupted write cannot truncate it.  And the file is written back
+with **the coding system Emacs detected when reading it**, not a fixed
+one: forcing `utf-8-unix' rewrites every line ending in a CRLF file and
+in the CRLF half of a mixed-ending file.  Capturing
+`buffer-file-coding-system' after the read and binding
+`coding-system-for-write' to it round-trips CRLF as CRLF and leaves the
+stray carriage returns of a mixed file exactly where they were (both
+verified by the tests below)."
   (let* ((file (plist-get candidate :file))
          (visiting (get-file-buffer file))
          (expected (plist-get candidate :file-sha1))
@@ -3875,20 +4241,22 @@ touch."
             (with-temp-buffer
               (let ((coding-system-for-read 'utf-8))
                 (insert-file-contents file))
-              (agent-learn--find-candidate candidate)
-              (let* ((bounds (agent-learn--managed-bounds))
-                     (existing (agent-learn--managed-values
-                                (buffer-substring-no-properties
-                                 (car bounds) (cdr bounds)))))
-                (pcase-dolist (`(,name . ,value) updates)
-                  (setf (alist-get name existing nil t #'equal) value))
-                (delete-region (car bounds) (cdr bounds))
-                (goto-char (car bounds))
-                (dolist (name agent-learn--managed-fields)
-                  (when-let* ((value (cdr (assoc name existing))))
-                    (insert (format "**%s:** %s\n\n" name value)))))
-              (let ((coding-system-for-write 'utf-8-unix))
-                (write-region (point-min) (point-max) temp nil 'no-message)))
+              (let ((detected buffer-file-coding-system))
+                (agent-learn--find-candidate candidate)
+                (let* ((bounds (agent-learn--managed-bounds))
+                       (existing (agent-learn--managed-values
+                                  (buffer-substring-no-properties
+                                   (car bounds) (cdr bounds)))))
+                  (pcase-dolist (`(,name . ,value) updates)
+                    (setf (alist-get name existing nil t #'equal) value))
+                  (delete-region (car bounds) (cdr bounds))
+                  (goto-char (car bounds))
+                  (dolist (name agent-learn--managed-fields)
+                    (when-let* ((value (cdr (assoc name existing))))
+                      (insert (format "**%s:** %s\n\n" name value)))))
+                (let ((coding-system-for-write detected))
+                  (write-region (point-min) (point-max) temp
+                                nil 'no-message))))
             (set-file-modes temp (file-modes file))
             (rename-file temp file t)
             (setq temp nil))
@@ -4252,15 +4620,18 @@ hand an approved candidate to a session."
     (message "Rejected: %s" (plist-get candidate :title))))
 
 (defun agent-learn-edit ()
-  "Open the candidate at point in its file for free editing."
+  "Open the candidate at point in its file for free editing.
+Search for the literal heading recorded at parse time; the corpus uses
+`##' and `###' headings with and without numbers, so a reconstructed
+`## Candidate N:' would miss a third of the shapes and silently leave
+point at the top of the file."
   (interactive nil agent-learn-mode)
   (let ((candidate (agent-learn--candidate-at-point)))
     (find-file (plist-get candidate :file))
     (goto-char (point-min))
-    (re-search-forward (format "^## Candidate %d: "
-                               (plist-get candidate :index))
-                       nil t)
-    (beginning-of-line)))
+    (if (search-forward (plist-get candidate :heading) nil t)
+        (beginning-of-line)
+      (message "Candidate heading not found; opened the file at the top"))))
 
 (defun agent-learn-toggle-archived ()
   "Toggle whether archived files are listed."
@@ -4360,6 +4731,22 @@ Append to `test/agent-learn-test.el`:
                   (plist-get (car (plist-get (agent-learn-parse-file target)
                                              :candidates))
                              :state))))))
+
+(ert-deftest agent-learn-test-archive-force-marks-every-unresolved ()
+  "Mark all undecided candidates, not just the first.
+Each write changes the file's hash, so a loop over one parse would fail
+on the second candidate with the file already half-modified."
+  (agent-learn-test--with-file file
+    ;; Both candidates undecided: strip the fixture's review line.
+    (let ((text (replace-regexp-in-string
+                 "\\*\\*Review:\\*\\* approved 2026-07-31 — do this one\n\n"
+                 "" agent-learn-test--file t t)))
+      (with-temp-file file (insert text)))
+    (let* ((target (agent-learn-archive-file file t))
+           (states (mapcar (lambda (c) (plist-get c :state))
+                           (plist-get (agent-learn-parse-file target)
+                                      :candidates))))
+      (should (equal '(archived-unreviewed archived-unreviewed) states)))))
 
 (ert-deftest agent-learn-test-archive-never-overwrites ()
   "Give a second file of the same name a distinct archived path."
@@ -4532,8 +4919,18 @@ follows it to the new path.  The file is renamed, never deleted."
                     (abbreviate-file-name file)
                     (length unresolved)
                     (if (= 1 (length unresolved)) "" "s")))
-      (dolist (candidate unresolved)
-        (agent-learn-set-review candidate 'archived-unreviewed nil))))
+      ;; Re-read between writes.  Each write changes the file, and the
+      ;; conflict check compares against the hash recorded when the
+      ;; candidate was parsed — so marking a second candidate from the
+      ;; original parse would fail after the first one had already been
+      ;; written, leaving the file half-decided.
+      (let ((next t))
+        (while next
+          (setq next (cl-find-if-not
+                      #'agent-learn--resolved-p
+                      (plist-get (agent-learn-parse-file file) :candidates)))
+          (when next
+            (agent-learn-set-review next 'archived-unreviewed nil))))))
   (let ((target (agent-learn--archive-target file)))
     (rename-file file target)
     (agent-learn--retarget-visitor file target)
@@ -4605,8 +5002,9 @@ git commit -m "agent-learn: archive reviewed candidate files"
 - Modify: `test/agent-learn-test.el`
 
 **Interfaces:**
-- Consumes: `agent-read-dispatch-target`, `agent-dispatch-prompt`,
-  `agent-display-name` (Task 6), `agent-learn-note-dispatch` (Task 10).
+- Consumes: `agent-read-dispatch-target`, `agent-prepare-dispatch`,
+  `agent-dispatch-prepared`, `agent-display-name` (Task 6),
+  `agent-learn-note-dispatch` (Task 10).
 - Produces:
   - `agent-learn-implementation-prompt (CANDIDATE)` → string (pure).
   - `agent-learn-implement` — command bound to `i`.
@@ -4644,7 +5042,10 @@ Append to `test/agent-learn-test.el`:
                             'approved "yes")
     (cl-letf (((symbol-function 'agent-read-dispatch-target)
                (lambda (&rest _) 'new))
-              ((symbol-function 'agent-dispatch-prompt)
+              ((symbol-function 'agent-prepare-dispatch)
+               (lambda (target &rest _)
+                 (if (bufferp target) (list :buffer target) (list :session t))))
+              ((symbol-function 'agent-dispatch-prepared)
                (lambda (&rest _) (current-buffer)))
               ((symbol-function 'agent-display-name)
                (lambda (&rest _) "Claude agent")))
@@ -4662,10 +5063,38 @@ Append to `test/agent-learn-test.el`:
                         (agent-learn-test--candidate file 1))))
       (agent-learn-set-review stale 'rejected "changed my mind")
       (let ((sent nil))
-        (cl-letf (((symbol-function 'agent-dispatch-prompt)
+        (cl-letf (((symbol-function 'agent-read-dispatch-target)
+                   (lambda (&rest _) 'new))
+                  ((symbol-function 'agent-prepare-dispatch)
+                   (lambda (&rest _) (list :buffer (current-buffer))))
+                  ((symbol-function 'agent-dispatch-prepared)
                    (lambda (&rest _) (setq sent t) (current-buffer))))
           (should-error (agent-learn--implement stale) :type 'user-error))
         (should-not sent)))))
+
+(ert-deftest agent-learn-test-implement-rechecks-after-the-prompts ()
+  "Re-read the candidate after target selection, not before it.
+Simulates another process rejecting the candidate while the target
+prompt is on screen: nothing may be sent."
+  (agent-learn-test--with-file file
+    (agent-learn-set-review (agent-learn-test--candidate file 1)
+                            'approved "yes")
+    (let ((candidate (agent-learn-test--candidate file 1))
+          (sent nil))
+      (cl-letf (((symbol-function 'agent-read-dispatch-target)
+                 (lambda (&rest _)
+                   ;; Stand in for the user taking their time while
+                   ;; another Emacs records a rejection.
+                   (agent-learn-set-review (agent-learn-test--candidate
+                                            file 1)
+                                           'rejected "no after all")
+                   'new))
+                ((symbol-function 'agent-prepare-dispatch)
+                 (lambda (&rest _) (list :buffer (current-buffer))))
+                ((symbol-function 'agent-dispatch-prepared)
+                 (lambda (&rest _) (setq sent t) (current-buffer))))
+        (should-error (agent-learn--implement candidate) :type 'user-error))
+      (should-not sent))))
 
 (ert-deftest agent-learn-test-implement-preflights-writability ()
   "Refuse before sending when the record could not be written after."
@@ -4674,7 +5103,10 @@ Append to `test/agent-learn-test.el`:
                             'approved "yes")
     (let ((sent nil))
       (cl-letf (((symbol-function 'file-writable-p) (lambda (_f) nil))
-                ((symbol-function 'agent-dispatch-prompt)
+                ((symbol-function 'agent-prepare-dispatch)
+                 (lambda (target &rest _)
+                   (if (bufferp target) (list :buffer target) (list :session t))))
+                ((symbol-function 'agent-dispatch-prepared)
                  (lambda (&rest _) (setq sent t) (current-buffer))))
         (should-error (agent-learn--implement
                        (agent-learn-test--candidate file 2))
@@ -4689,7 +5121,10 @@ Append to `test/agent-learn-test.el`:
     (let ((messages nil))
       (cl-letf (((symbol-function 'agent-read-dispatch-target)
                  (lambda (&rest _) 'new))
-                ((symbol-function 'agent-dispatch-prompt)
+                ((symbol-function 'agent-prepare-dispatch)
+                 (lambda (target &rest _)
+                   (if (bufferp target) (list :buffer target) (list :session t))))
+                ((symbol-function 'agent-dispatch-prepared)
                  (lambda (&rest _) (current-buffer)))
                 ((symbol-function 'agent-display-name)
                  (lambda (&rest _) "Claude agent"))
@@ -4711,7 +5146,10 @@ Append to `test/agent-learn-test.el`:
                             'approved "yes")
     (cl-letf (((symbol-function 'agent-read-dispatch-target)
                (lambda (&rest _) 'new))
-              ((symbol-function 'agent-dispatch-prompt)
+              ((symbol-function 'agent-prepare-dispatch)
+               (lambda (target &rest _)
+                 (if (bufferp target) (list :buffer target) (list :session t))))
+              ((symbol-function 'agent-dispatch-prepared)
                (lambda (&rest _) (user-error "no session"))))
       (should-error (agent-learn--implement
                      (agent-learn-test--candidate file 2))
@@ -4800,12 +5238,20 @@ since become unwritable."
     fresh))
 
 (defun agent-learn--implement (candidate)
-  "Dispatch CANDIDATE to a session and record the dispatch."
-  (let* ((fresh (agent-learn--preflight-dispatch candidate))
+  "Dispatch CANDIDATE to a session and record the dispatch.
+Target selection, readiness, and account resolution all happen first,
+because each of them can wait on the user for as long as it takes.  Only
+then is the candidate re-read and re-validated, and the send that
+follows asks nothing — so a rejection recorded in another Emacs while a
+prompt sat on screen cannot be overtaken by a send of the approved
+text."
+  (let* ((target (agent-read-dispatch-target
+                  (format "Implement `%s' in: "
+                          (plist-get candidate :title))))
+         (plan (agent-prepare-dispatch target))
+         (fresh (agent-learn--preflight-dispatch candidate))
          (prompt (agent-learn-implementation-prompt fresh))
-         (target (agent-read-dispatch-target
-                  (format "Implement `%s' in: " (plist-get fresh :title))))
-         (buffer (agent-dispatch-prompt prompt target))
+         (buffer (agent-dispatch-prepared prompt plan))
          (label (if (buffer-live-p buffer)
                     (agent-display-name buffer)
                   "a new session")))
@@ -4858,7 +5304,7 @@ git commit -m "agent-learn: hand an approved candidate to a session"
 
 **Interfaces:**
 - Consumes: the autoloaded commands of Tasks 6–13.
-- Produces: menu entries `b`, `u`, `k` (Tools) and `L` (Prompts &
+- Produces: menu entries `W`, `H`, `k` (Tools) and `v` (Prompts &
   learning).
 
 - [ ] **Step 1: Write the failing test**
@@ -4866,45 +5312,59 @@ git commit -m "agent-learn: hand an approved candidate to a session"
 Append to `test/agent-test.el`:
 
 ```elisp
-(defun agent-test--menu-keys (layout)
-  "Return every (KEY . COMMAND) pair found in transient LAYOUT."
+(defun agent-test--menu-keys (node)
+  "Return every (KEY . COMMAND) pair found in transient layout NODE.
+Walks vectors, lists, and the `transient-suffix' objects transient
+stores after parsing, so a suffix is found whichever shape it is in."
+  (require 'transient)
   (cond
-   ((and (listp layout) (plist-member layout :key))
-    (list (cons (plist-get layout :key) (plist-get layout :command))))
-   ((vectorp layout)
-    (mapcan #'agent-test--menu-keys (append layout nil)))
-   ((listp layout) (mapcan #'agent-test--menu-keys layout))))
+   ((and (recordp node) (object-of-class-p node 'transient-suffix))
+    (list (cons (ignore-errors (oref node key))
+                (ignore-errors (oref node command)))))
+   ((and (listp node) (plist-member node :key))
+    (list (cons (plist-get node :key) (plist-get node :command))))
+   ((vectorp node) (mapcan #'agent-test--menu-keys (append node nil)))
+   ((listp node) (mapcan #'agent-test--menu-keys node))
+   (t nil)))
 
 (defun agent-test--menu-bindings ()
-  "Return `agent-menu' key-to-command pairs, from its parsed layout."
+  "Return every key-to-command pair `agent-menu' can show.
+This includes the per-backend columns, which `agent-menu' does not
+declare: `agent-menu--backend-children' builds them at open time from
+each registered backend's `:menu-suffixes'.  A test that only walked
+the declared layout would not see that Claude already binds `b' and
+`u'."
   (require 'transient)
-  (agent-test--menu-keys (get 'agent-menu 'transient--layout)))
+  (append
+   (agent-test--menu-keys (get 'agent-menu 'transient--layout))
+   (agent-test--menu-keys (agent-menu--backend-children nil))))
 
 (ert-deftest agent-test-menu-binds-the-new-commands-to-their-keys ()
   "Assert the exact key each new command is bound to.
 Checking only that a key resolves would pass on whichever suffix
 already owned it."
   (let ((bindings (agent-test--menu-bindings)))
-    (dolist (pair '(("b" . agent-skill-run-bundle)
-                    ("u" . agent-skill-history)
+    (dolist (pair '(("W" . agent-skill-run-bundle)
+                    ("H" . agent-skill-history)
                     ("k" . agent-skill-check)
                     ("v" . agent-learn)))
       (should (equal (cdr pair) (cdr (assoc (car pair) bindings)))))))
 
 (ert-deftest agent-test-menu-keys-are-unique ()
-  "No key in `agent-menu' is bound twice.
-The queue plan claims `Q', `L', `I' and `E' and the composer claims
-`C'; this catches a collision the moment either lands."
-  (let* ((keys (mapcar #'car (agent-test--menu-bindings)))
+  "No key `agent-menu' can show is bound twice.
+Covers the generated backend columns, where `b' (batch todos) and `u'
+\(start status polling) already live, as well as the keys the queue
+plan (`Q', `L', `I', `E') and the composer (`C') will add."
+  (let* ((keys (delq nil (mapcar #'car (agent-test--menu-bindings))))
          (duplicates (cl-remove-duplicates
-                      (cl-remove-if (lambda (key) (= 1 (cl-count key keys
-                                                                 :test #'equal)))
+                      (cl-remove-if (lambda (key)
+                                      (= 1 (cl-count key keys :test #'equal)))
                                     keys)
                       :test #'equal)))
     (should (equal nil duplicates))))
 
 (ert-deftest agent-test-menu-preserves-neighbouring-entries ()
-  "Keep the prompt-capture entries this plan's column edits sit beside."
+  "Keep the entries this plan's column edits sit beside."
   (let ((bindings (agent-test--menu-bindings)))
     (should (equal 'agent-capture-prompt (cdr (assoc "p" bindings))))
     (should (equal 'agent-insert-captured-prompt
@@ -4912,17 +5372,19 @@ The queue plan claims `Q', `L', `I' and `E' and the composer claims
     (should (equal 'agent-run-skill (cdr (assoc "s" bindings))))))
 ```
 
-If `transient--layout` turns out to store suffixes in a shape these
-helpers do not walk, print it once with
-`(pp (get 'agent-menu 'transient--layout))` and adjust
-`agent-test--menu-keys` to match; do not weaken the assertions to
-`transient-get-suffix`, which succeeds on whatever suffix already owns
-the key.
+The uniqueness test only sees backends that are registered when it
+runs, so run the suite with both backend modules loaded — `make test`
+does, because `test/agent-claude-test.el` and `test/agent-codex-test.el`
+require them.  If `transient--layout` stores suffixes in a shape
+`agent-test--menu-keys` does not walk, print it once with
+`(pp (get 'agent-menu 'transient--layout))` and extend the walker; do
+not weaken the assertions to `transient-get-suffix`, which succeeds on
+whatever suffix already owns the key.
 
 - [ ] **Step 2: Run the test and watch it fail**
 
 Run: `make test 2>&1 | tail -20`
-Expected: `transient-get-suffix` signals for `b`.
+Expected: the two new tests fail — `W` and `H` are bound to nothing.
 
 - [ ] **Step 3: Add the autoloads**
 
@@ -4945,8 +5407,8 @@ deletes whichever of those landed first.  Insert three lines into the
 Tools column, directly after the existing `("s" "run skill" …)` line:
 
 ```elisp
-    ("b" "run skill bundle" agent-skill-run-bundle)
-    ("u" "skill usage history" agent-skill-history)
+    ("W" "run skill bundle" agent-skill-run-bundle)
+    ("H" "skill usage history" agent-skill-history)
     ("k" "check skills" agent-skill-check)
 ```
 
@@ -4958,12 +5420,24 @@ from `"Prompts"` to `"Prompts & learning"`:
     ("v" "review learnings" agent-learn)
 ```
 
-`v` rather than `L`: `L` belongs to `agent-queue-list` in the
-attention/queue plan.  After editing, confirm the diff touches four
-added lines and one changed header:
+The keys are what is free, not what is mnemonic.  `b` and `u` would
+read better but the Claude backend column already generates them
+(`b` batch todos, `u` start status polling), and those columns are
+built at open time so they never appear in this file.  `L` belongs to
+`agent-queue-list` in the attention/queue plan.  `W` (workflow) and `H`
+(history) are unclaimed by `agent.el`, by either backend, and by the
+other two plans.
+
+After editing, confirm the diff touches four added lines and one
+changed header:
 
 Run: `git diff --stat agent.el`
 Expected: 5 insertions, 1 deletion.
+
+Then confirm no key is shadowed, with both backends loaded:
+
+Run: `make test 2>&1 | grep -E "menu-(keys-are-unique|binds)"`
+Expected: both tests pass.
 
 - [ ] **Step 5: Run the tests**
 
@@ -5019,7 +5493,7 @@ Add after the "Shared commands" section:
 #+vindex: agent-skill-mode
 
 A /bundle/ is a named, ordered group of skills dispatched into one
-session.  ~agent-skill-run-bundle~ (=b= in the Tools column) asks which
+session.  ~agent-skill-run-bundle~ (=W= in the Tools column) asks which
 bundle to run and where, resolves every step against the target
 backend's discoverable skills, shows exactly what will be sent, and
 submits it as a single message.
@@ -5079,7 +5553,7 @@ current session.  The durable record is ~agent-skill-history-file~, an
 append-only JSON Lines file written while the global minor mode
 ~agent-skill-mode~ is enabled; with the mode off, bundles still work and
 still show provenance, but nothing is written.  ~agent-skill-history~
-(=u=) lists the records, newest first, and states how many lines it
+(=H=) lists the records, newest first, and states how many lines it
 read and how many were unparsable.  Single skills run with
 ~agent-run-skill~, the project audit, and before-exit skills are all
 recorded through the same hook, ~agent-skill-invocation-functions~.
@@ -5115,7 +5589,7 @@ path.  It is read-only.
 
 Agent sessions can write /learning candidates/ — Markdown proposals
 about how future sessions should behave — into an inbox.  ~agent-learn~
-(=L= in the Prompts & learning column) reviews them.
+(=v= in the Prompts & learning column) reviews them.
 
 *Approval records a decision; it never installs anything.*  No command
 in this module edits a skill, an instructions file, a hook, or any other
@@ -5148,7 +5622,8 @@ refused rather than saved as a side effect.
 In the list buffer: =RET= shows the full candidate, =a= approves (with
 an optional note), =r= rejects (a reason is required), =e= opens the
 file for free editing, =A= archives the candidate's file, =i= hands an
-approved candidate to a session, =t= toggles archived files, =L= changes
+approved candidate to a session, =t= toggles archived files, =L= (inside
+the list buffer, unrelated to the menu) changes
 how many files are read, and =g= refreshes.
 ~agent-learn-archive-resolved~ archives every file whose candidates all
 have a decision.
@@ -5220,12 +5695,12 @@ In `README.org`'s "Transient menu" section, replace the sentence listing
 the Tools and Prompts entries with:
 
 ```org
-The Tools column runs a single skill (=s=), a named skill bundle (=b=),
-the skill usage history (=u=) and health check (=k=), Trajectory CR task
+The Tools column runs a single skill (=s=), a named skill bundle (=W=),
+the skill usage history (=H=) and health check (=k=), Trajectory CR task
 worktree creation (=n=), post-push CI (=c=), a project audit (=a=),
 backtrace debugging (=d=), and Slack and Forge action routing (=m=, =g=).
 The Prompts & learning column captures a prompt (=p=), inserts a
-captured prompt (=i=), and opens the learning review inbox (=L=).
+captured prompt (=i=), and opens the learning review inbox (=v=).
 ```
 
 Update the "Shared commands" `#+findex:` block in the same file to
@@ -5324,11 +5799,27 @@ for the session, and:
    the record is marked dirty even though `SKILL.md` did not change.
 3. Confirm the same dirty marker appears in `agent-skill-history` and
    `agent-skill-describe-session`.
-4. Run `agent-run-skill` and `agent-audit-project` once each, and
-   confirm each produces a dispatched record followed by an outcome
-   record with the same id.
-5. Remove the scratch root (`rm -rf "$scratch"`) and the defcustom
-   entry.
+4. Run `agent-run-skill` on `scratch-demo` and confirm it produces a
+   dispatched record followed by an outcome record with the same id.
+5. Exercise the audit path **against a scratch project, never a real
+   one**: `agent-audit-project` commits to whatever directory it is
+   given, so point it at a throwaway git repository containing one
+   trivial file, with `agent-audit-skills` bound to the inert
+   `scratch-demo` skill for the run.  Confirm the two correlated
+   records, then discard that repository.  Do not run it against
+   `agent`, `dotfiles`, or any other project you care about.
+
+   ```bash
+   audit=$(mktemp -d)
+   printf 'placeholder\n' > "$audit/README.md"
+   git -C "$audit" init -q && git -C "$audit" add -A \
+     && git -C "$audit" -c user.email=t@t -c user.name=t commit -qm init
+   echo "$audit"
+   ```
+
+6. Remove the scratch skill root, the scratch audit repository, and the
+   defcustom entries: `trash "$scratch" "$audit"` (this repository's
+   convention is `trash`, not `rm -rf`, so a mistake is recoverable).
 
 Then verify the symlink case against the real tree **read-only**:
 resolve provenance for one skill under `~/.claude/skills` (via
@@ -5384,13 +5875,27 @@ Point `agent-learn-directory` at `$scratch` and, on the copies:
 6. Edit a candidate with `e`, save, and confirm the list refreshes.
 7. Archive a fully reviewed file; confirm it moved into
    `archive/YYYY-MM-DD/` and nothing was deleted.
-8. Hand one approved candidate to a session with `i`; confirm the
-   session receives the prompt with the patch marked unverified and
-   that `**Dispatched:**` appears only after the dispatch succeeded.
+8. Hand one approved candidate to a session with `i` — **to a session
+   started in a throwaway directory, not in a real project**.  The
+   prompt asks an agent to implement a change, and the candidates in
+   this inbox name real repositories; sending one into a session
+   rooted in that repository invites exactly the durable edit this
+   whole design exists to keep behind a human decision.  Create the
+   target first:
+
+   ```bash
+   sandbox=$(mktemp -d)
+   git -C "$sandbox" init -q
+   echo "$sandbox"
+   ```
+
+   Choose "New session…" and that directory.  Confirm the session
+   receives the prompt with the patch marked unverified, and that
+   `**Dispatched:**` appears only after the dispatch succeeded.  Then
+   end that session without letting it edit anything.
 9. Open a copy in a buffer, modify it without saving, and confirm both
    approving and archiving that file are refused by name.
-10. Remove the scratch directory (`rm -rf "$scratch"`) and restore
-    `agent-learn-directory`.
+10. `trash "$scratch" "$sandbox"` and restore `agent-learn-directory`.
 
 - [ ] **Step 8: Confirm the tree is clean**
 

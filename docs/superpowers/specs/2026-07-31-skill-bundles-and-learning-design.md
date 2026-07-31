@@ -1,5 +1,15 @@
 # Skill Bundles and Reviewable Learning — Design
 
+Revision 3.  Revision 2 was reviewed and found still not
+implementation-ready; this revision closes those findings without
+changing the feature — the readiness fallback chain, the pre-send
+ordering, the git pathspec and tri-state dirty flag, the directory
+fingerprint, bundle validation, the history correlation join, the
+parser's authority rules, EOL-preserving writes, atomic multi-candidate
+archiving, and a live-verification procedure that touches no durable
+project.  It also fixes the menu keys, which collided with generated
+backend suffixes, and states the landing order plainly.
+
 Revision 2.  Revision 1 was reviewed and found not implementation-ready;
 this revision tightens the contracts that review found underspecified or
 wrong — dispatch readiness, when a record may claim a dispatch,
@@ -172,24 +182,31 @@ Emacs additionally records it (§4).
    the exact outgoing message.  Confirm (`agent-skill-bundle-confirm`,
    default t; a nil value skips the buffer and confirms in the
    minibuffer).
-7. Check the target can take input.  `agent-session-ready-to-submit-p`
-   is the authority when it exists (the composer and queue projects
-   define it, and it is the only thing that knows a session stopped at a
-   permission dialog — which displays as `waiting`); otherwise
-   `agent-session-display-state` is the fallback.  Not-ready →
-   `user-error` naming the session; `unknown` → explicit confirmation;
-   ready proceeds.
-8. **Re-resolve provenance and compare with the preview.**  The preview
-   may have been on screen for minutes.  Any change to a skill's content
-   hash, commit, or dirty flag aborts with a `user-error` naming the
-   file, because the message is about to point the CLI at whatever is on
-   disk now.
+7. Check the target can take input, from the most authoritative
+   source available: the public `agent-session-ready-to-submit-p` (the
+   queue project), else the backend `:ready-to-submit-p` slot (the
+   composer project, which adds the slot without the helper), else
+   `agent-session-display-state`.  Only the first two can tell that a
+   session stopped at a permission dialog, which displays as `waiting`.
+   Not-ready → `user-error` naming the session; `unknown` → explicit
+   confirmation; ready proceeds.  This, the backend and directory
+   choices, and account resolution are the *last* interactive steps.
+8. **Re-resolve provenance and compare with the preview**, after every
+   prompt above has been answered and immediately before a send that
+   asks nothing further.  Any change to a skill's content hash, commit,
+   dirty flag, or directory fingerprint aborts with a `user-error`
+   naming the file, because the message is about to point the CLI at
+   whatever is on disk now.  Ordering matters as much as the check: a
+   revalidation that still had a prompt after it would leave a window
+   just as wide as the one it closes.
 9. Dispatch: `agent-submit` for an existing session;
    `agent-start-session` with `:initial-prompt` for a new one (backend
    and account read the same way `agent-start-new-session` does, in the
    directory from step 3).
 10. Record one invocation per step (§3), including a `skipped` record
-    for each optional step that was not run, and report `"Dispatched
+    for each optional step that was not run — recorded in the history
+    but kept out of the session's applied list, which answers "what was
+    this session given", and report `"Dispatched
     bundle NAME (N skills) to SESSION"`.  As everywhere else in this
     package, "dispatched" means the text was submitted at the session's
     prompt, which is all a terminal transport can attest — and the CLI
@@ -302,8 +319,9 @@ is a strict addition to an existing public return value.
 | `:content-sha1` | SHA-1 of the `SKILL.md` bytes |
 | `:repo` | git top level, or nil |
 | `:relative-path` | the skill directory, relative to `:repo` |
+| `:tree-fingerprint` | hash of names, sizes and mtimes under the skill directory |
 | `:commit` | `HEAD` of that repo, or nil |
-| `:dirty` | non-nil when anything in the skill directory is uncommitted |
+| `:dirty` | t, nil, or `unknown` — uncommitted changes anywhere in the skill directory |
 
 The content hash is always available and is the authoritative answer to
 "which instructions were these".  The commit locates them in history; the
@@ -315,12 +333,22 @@ than assumed:
 - **Ask git about the directory, not the file.**  A skill's reference
   files are read by the model too, so a modified `references/notes.md`
   must make the provenance dirty even though only `SKILL.md` is hashed.
-- **Address it by a repository-relative path built from the
-  truename.**  `~/.claude/skills` is a symlink into the dotfiles
-  repository, and `git status --porcelain -- /Users/…/.claude/skills/x`
-  fails with `fatal: … is outside repository`.  A caller reading that
-  empty output as "no changes" would report every skill in the user's
-  actual configuration as clean.
+- **Address it with a top-anchored pathspec (`:/PATH`) and keep git's
+  exit status.**  Two failure modes both produce empty output that
+  reads as "clean": an absolute path reaching the repository through a
+  symlink (which is how `~/.claude/skills` is set up) makes git exit
+  with `outside repository`; and a repository-root-relative path is
+  resolved from the *working* directory, so for any skill below the
+  repository root git looks in the wrong place, warns, and exits 0 with
+  nothing to say.  `:/PATH` resolves from the repository root wherever
+  git is run, and because empty output means clean while a failure
+  means "do not know", `:dirty` is tri-state: t, nil, or `unknown`.
+
+- **Fingerprint the directory too.**  Content hash, commit, and a
+  boolean dirty flag are all unchanged when a reference file is edited
+  in a tree that was already dirty.  A hash of the names, sizes, and
+  modification times under the skill directory closes that gap, and it
+  is what the pre-send recheck compares.
 
 The claim is narrower than it looks, and the manual says so: provenance
 describes the files as of the moment it was resolved, while the CLI
@@ -376,8 +404,11 @@ brand-new session is serialized before the backend has reported a native
 session id, so its record names none.  When the id arrives,
 `agent-skill-mode`'s `agent-session-id-functions` consumer appends a
 `session-id` record carrying the invocation id and the now-known
-identity.  History stays append-only; a reader joins on the invocation
-id.  Each (invocation, session id) pair is appended once.
+identity.  History stays append-only.  **The reader performs the join**:
+`agent-skill-history-read` folds each correlation into the invocation it
+names, so a reader sees one row per invocation carrying the best
+identity known, and correlation events are neither rows of their own nor
+counted against the record limit.
 
 ### Live session view
 
@@ -415,12 +446,13 @@ it never edits a skill, a bundle, or a file.
 
 `agent-skill-validate-bundle NAME BUNDLE` is the one definition of a
 valid bundle, shared by the resolver and the health check so the two
-cannot disagree.  It rejects a non-plist, an unknown top-level key, a
-`:description`/`:instruction` that is not a string, a `:backends` that
-is not a list of symbols, an empty or non-list `:skills`, an entry that
-is neither a string nor a name-and-plist, an unknown entry option, and
-an `:args` that is not a string — each with a `user-error` naming the
-offending key.  Bundles are validated even when no backend is
+cannot disagree.  It rejects a non-string bundle name, a non-plist body, an unknown
+top-level key, a `:description`/`:instruction` that is not a string, a
+`:backends` that is not a list of symbols, an empty or non-list
+`:skills`, an entry that is neither a string nor a name-and-plist, an
+unknown entry option, an `:args` that is not a string, and an
+`:optional` that is neither t nor nil — each with a `user-error` naming
+the offending key.  Bundles are validated even when no backend is
 registered, so a typo is reported rather than silently unreachable.
 
 Shadowing deserves the emphasis it gets here.  `agent-discover-skills`
@@ -468,8 +500,9 @@ happened, not a fourth state.
 **Only the contiguous managed block directly after the heading is
 authority over state.**  These files are written by a model; a
 `**Review:**` line further down the candidate must not be able to mark
-that candidate approved.  A stray one is ignored for state and flagged
-on the row.
+that candidate approved.  Detection counts occurrences rather than
+checking for absence, so a second review line *below* a legitimate one
+is caught too; any excess is ignored for state and flagged on the row.
 
 Storing state in the file keeps one artifact per capture, survives moving
 the directory, needs no database, and is legible outside Emacs — which
@@ -488,10 +521,21 @@ candidate was parsed, or the write is refused as a conflict; a buffer
 visiting the file with unsaved changes refuses the write by name rather
 than having its edits saved as a side effect; and the new text goes to a
 temporary file in the same directory and is renamed over the original,
-so an interrupted write cannot truncate it.  Reads and writes both pin
-UTF-8.  A clean visiting buffer is reverted afterwards.
+so an interrupted write cannot truncate it.  The file is written back
+with the coding system Emacs detected when reading it, not a fixed one:
+forcing `utf-8-unix` would rewrite every line ending in a CRLF file and
+in the CRLF half of a mixed-ending file, which is a byte change this
+package has no business making.  A clean visiting buffer is reverted
+afterwards.
 
 ### Parsing and scale
+
+Every consumer locates a candidate by the **literal heading line**
+recorded at parse time — the review writer, the archive path, and the
+`e` edit command alike — because reconstructing `## Candidate N:` would
+miss the other two shapes.  The parsed `Captured:` value is carried onto
+each candidate, so the list shows the capture date rather than a date
+guessed from the file name.
 
 Headings are matched as `##` or `###`, with or without a candidate
 number — measured against the corpus, 1133 of 1137 files use `##
@@ -537,7 +581,11 @@ newest first.
 
 `A` refuses a file with unresolved candidates unless confirmed, and a
 confirmed force marks those candidates `archived-unreviewed` first — a
-candidate never leaves the inbox without a recorded decision.  A file
+candidate never leaves the inbox without a recorded decision.  Those
+marks are applied one at a time, re-reading the file between each,
+because every write changes the hash the conflict check compares
+against; a loop over a single parse would fail on the second candidate
+with the file already half-decided.  A file
 that failed to parse, or that holds no candidates, is never treated as
 resolved: `cl-every` over an empty list is true, and that would archive
 without review exactly the files that most need a human look.  A file
@@ -565,21 +613,26 @@ approval as verification.
 Target selection, the readiness policy, and the meaning of "dispatched"
 are identical to §1's dispatch, and the two share one internal helper.
 
-Because a message cannot be unsent, everything checkable is checked
-first: the candidate is re-read from disk and must still be approved
+Because a message cannot be unsent, the order is: resolve the target,
+readiness, and account — every step that can wait on the user — and
+only then re-read the candidate from disk.  It must still be approved
 there (approving in one Emacs and rejecting in another must not send),
 its file must be writable, and no modified buffer may be visiting it.
-Only then is the prompt sent, and only then is `**Dispatched:**`
-written.  If that write nonetheless fails, the message says the prompt
+The send that follows asks nothing, so nothing can intervene between
+the check and the message.  Only then is `**Dispatched:**` written.  If that write nonetheless fails, the message says the prompt
 was handed over but not recorded, and names the line to add by hand —
 reporting a failed dispatch instead would invite a second send of the
 same prompt.  Nothing else in the tree is touched.
 
 ## 7. Menu and manual
 
-`agent-menu`: the Tools column gains `b` "run skill bundle", `u` "skill
+`agent-menu`: the Tools column gains `W` "run skill bundle", `H` "skill
 usage history", and `k` "check skills"; the Prompts column becomes
-"Prompts & learning" and gains `v` "review learnings".  No existing key
+"Prompts & learning" and gains `v` "review learnings".  The keys are
+the free ones, not the mnemonic ones: the per-backend columns
+`agent-menu--backend-children` builds at open time already bind `b`
+(Claude batch todos) and `u` (Claude status polling), and they never
+appear in `agent.el`, so a test must walk the generated suffixes too.  No existing key
 moves, and the edits insert single lines rather than replacing columns,
 because the queue project claims `Q`/`L`/`I`/`E` and the composer claims
 `C` in the same prefix — **`L` is `agent-queue-list`, not this
@@ -664,8 +717,9 @@ temporary directories:
   parses up to 50 files from the configured inbox when one exists.
 - Learning writer: inserting a `**Review:**` line, replacing an existing
   one, and appending `**Dispatched:**`, each compared as raw bytes with
-  every other byte unchanged; a file that changed since parsing is
-  refused; no temporary file survives a write.
+  every other byte unchanged; a CRLF file keeps CRLF and a mixed-ending
+  file keeps its stray carriage returns; a file that changed since
+  parsing is refused; no temporary file survives a write.
 - Archive: resolved-only bulk archive moves the right files and
   preflights the whole set, so one refusal moves none; a file with no
   candidates is never "resolved"; forcing an unresolved file marks its
@@ -676,14 +730,22 @@ temporary directories:
   sending; prompt contains the patch under its unverified label; writes
   `**Dispatched:**` only after a successful dispatch; a post-send write
   failure reports the prompt as sent-but-unrecorded.
-- Menu: each new key maps to its own command, and no key in the prefix
-  is bound twice.
+- Menu: each new key maps to its own command, and no key is bound twice
+  across the declared layout *and* the generated backend columns.
+- History: a late session id is joined onto its invocation row rather
+  than shown as a row of its own, and does not consume the limit.
+
+**This work lands after the attention/queue and context-composer
+projects.**  Both of those replace whole Makefile lists and whole menu
+columns; landing this one first would have its entries deleted by
+theirs.  Landing it last, and having it append rather than replace, is
+what keeps all three sets of modules and menu entries alive.
 
 `make test` and `make compile` clean, with the two new modules and their
-two test files **appended** to the Makefile lists — the other two
-planned projects append their own, so restating either list would drop
-whichever landed first, and the appended lists are diffed against the
-committed ones to prove nothing disappeared.
+two test files **appended** to the Makefile lists with `+=`, each
+addition diffed against the committed lists to prove nothing
+disappeared, and each new test file registered before the failing-test
+step that is supposed to exercise it.
 
 Live verification never mutates durable user data.  Both backends:
 dispatch a two-skill bundle into an idle session and confirm from the
@@ -695,7 +757,10 @@ project, not the caller's.
 Provenance and history are exercised against a **throwaway git-backed
 skill root** created for the check and removed afterwards: dirty an
 auxiliary file there and confirm the record says dirty, and compare a
-recorded `content_sha1` against `shasum -a 1`.  The real skill tree is
+recorded `content_sha1` against `shasum -a 1`.  The audit path, which
+commits to whatever directory it is given, runs against a throwaway
+git repository with the inert scratch skill — never against a project
+anyone cares about.  Every scratch tree is removed with `trash`.  The real skill tree is
 only read — through `agent-skill-check`, confirming it reports the
 dotfiles repository and a truthful clean/dirty state through the
 symlinked root rather than calling everything clean, and that each
@@ -707,4 +772,8 @@ problem rows for its handful of non-conforming files, and full-candidate
 rendering — then confirm with `git status` that nothing changed.  Every
 mutating step (approve, reject, edit, archive, implement, and the
 refusals for modified visiting buffers) runs against copies of a few
-candidates in a temporary directory, which is removed afterwards.
+candidates in a temporary directory, which is removed afterwards.  The
+implement check in particular sends its prompt to a session started in
+a throwaway directory: these candidates name real repositories, and
+handing one to a session rooted in the repository it names invites
+exactly the durable edit this design keeps behind a human decision.
