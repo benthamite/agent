@@ -6709,6 +6709,30 @@ stop_emacs() {
   return 1
 }
 
+# Stop every process this run launched and report whether all are gone.
+# When readiness never recorded a server pid, the server may still have
+# come up: it is discovered by asking for this run's nonce, because
+# signalling only the process this script launched would orphan the
+# Emacs behind a wrapper.  Every pid is polled to confirmed exit.
+stop_run() {
+  local id="$1" nonce="$2" server="$3" launcher="$4" target reported all_gone=0
+  if [ -z "$server" ] && [ -n "$nonce" ]; then
+    reported=$(EMACS_SOCKET_NAME="$id" emacsclient -s "$id" \
+                 --eval '(list agent-tasks-live-nonce (emacs-pid))' 2>/dev/null) \
+      || reported=
+    case "$reported" in
+      "(\"$nonce\" "*")")
+        server=$(printf '%s' "$reported" | sed -e 's/^("[^"]*" //' -e 's/)$//') ;;
+    esac
+    case "$server" in ''|*[!0-9]*) server= ;; esac
+  fi
+  for target in "$server" "$launcher"; do
+    [ -n "$target" ] || continue
+    stop_emacs "$id" "$target" || all_gone=1
+  done
+  return $all_gone
+}
+
 start() {
   mkdir -p "$state_dir"
   id="agent-tasks-live-$$-$(date +%s)"
@@ -6736,13 +6760,15 @@ start() {
     trap - EXIT INT TERM
     [ "$setup_ok" = yes ] && exit "$rc"
     echo "setup failed ($rc); cleaning up" >&2
-    if stop_emacs "$id" "${server_pid:-}"; then
-      [ -n "${launcher_pid:-}" ] && kill "$launcher_pid" 2>/dev/null
+    # Before readiness `server_pid' is empty; releasing on the strength
+    # of that would leave a started Emacs running with its state gone,
+    # so nothing could ever find it again.
+    if stop_run "$id" "${nonce:-}" "${server_pid:-}" "${launcher_pid:-}"; then
       release "$id" "$state"
     else
-      echo "FAIL: could not stop the verification Emacs (${server_pid:-unknown});" >&2
+      echo "FAIL: could not confirm every launched process stopped;" >&2
       echo "      state retained: $state" >&2
-      rc=1
+      [ "$rc" -eq 0 ] && rc=1
     fi
     exit "$rc"
   }
@@ -6766,7 +6792,11 @@ start() {
   # makes the harness correct even when this falls back.
   emacs_bin=$(emacsclient -e '(expand-file-name invocation-name invocation-directory)' \
                 2>/dev/null | tr -d '"')
-  [ -x "$emacs_bin" ] || emacs_bin=emacs
+  if [ ! -x "$emacs_bin" ]; then
+    echo "cannot resolve the real Emacs executable (got: ${emacs_bin:-none})" >&2
+    echo "a PATH wrapper that does not \`exec' would leave Emacs unmanageable" >&2
+    exit 1
+  fi
 
   # The real ledger of that profile, and the account definitions, read
   # out of the live Emacs -- never hard-coded, never written back.
@@ -6839,6 +6869,7 @@ start() {
               (when (fboundp 'agent-attention-mode) (agent-attention-mode 1))
               (server-start))" &
   launcher_pid=$!
+  printf '%s\n' "$launcher_pid" > "$state/launcher-pid"
   printf '%s\n' "$root" > "$state/root"
   printf '%s\n' "$real" > "$state/real-path"
 
@@ -6884,6 +6915,7 @@ finish() {
   state="$state_dir/$id"
   root=$(cat "$state/root" 2>/dev/null) || { echo "state is incomplete: $state" >&2; exit 1; }
   pid=$(cat "$state/pid" 2>/dev/null || true)
+  launcher=$(cat "$state/launcher-pid" 2>/dev/null || true)
   nonce=$(cat "$state/nonce" 2>/dev/null || true)
   real=$(cat "$state/real-path")
   stopped=no
@@ -6893,12 +6925,18 @@ finish() {
   #    it is signalled ONLY after the server echoes this run's nonce
   #    from that same pid -- never on the strength of the number alone.
   if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-    stopped=yes                # already gone; nothing to signal
+    # Nothing to authenticate, but the launcher may still be around.
+    if stop_run "$id" "$nonce" "" "${launcher:-}"; then
+      stopped=yes
+    else
+      echo "FAIL: a process this run launched is still alive" >&2
+      rc=1
+    fi
   else
     reported=$(EMACS_SOCKET_NAME="$id" emacsclient -s "$id" \
                  --eval '(list agent-tasks-live-nonce (emacs-pid))' 2>/dev/null) || reported=
     if [ "$reported" = "(\"$nonce\" $pid)" ]; then
-      if stop_emacs "$id" "$pid"; then
+      if stop_run "$id" "$nonce" "$pid" "${launcher:-}"; then
         stopped=yes
       else
         echo "FAIL: verification Emacs $pid did not stop" >&2
