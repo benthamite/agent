@@ -636,7 +636,7 @@ columns; it never widens them past what the frame holds.  Nil applies
 no cap beyond the frame fit.  Annotations longer than the available
 width are truncated with an ellipsis."
   :type '(choice (const :tag "Fit the frame" nil)
-                 (integer :tag "Columns"))
+                 (natnum :tag "Columns"))
   :group 'agent)
 
 ;;;; Faces
