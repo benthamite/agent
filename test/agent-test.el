@@ -2807,6 +2807,57 @@ own header is included."
             (should-not (agent--buffer-for-session-id "zzz"))))
       (kill-buffer buffer))))
 
+(ert-deftest agent-test-buffer-for-session-id-falls-back-to-backend-identity ()
+  "Find a freshly forked buffer whose struct id has not been noted yet.
+A forked session has not submitted anything, so `agent--note-session-id'
+has never run and the struct's id slot is still nil, even though the
+backend can report the real id directly."
+  (let ((agent-backends nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "fork-id"))
+          (with-current-buffer buffer
+            (setq-local agent--backend 'stub)
+            (setq-local agent--session (agent-session-create :backend 'stub)))
+          (cl-letf (((symbol-function 'agent-session-buffers)
+                     (lambda () (list buffer))))
+            (should (eq (agent--buffer-for-session-id "fork-id") buffer))
+            (should (equal (agent-session-id (agent-session buffer))
+                            "fork-id"))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-buffer-for-session-id-survives-a-broken-identity-lookup ()
+  "Keep searching past a buffer whose backend identity lookup signals.
+Claude's `session-identity' raises a `user-error' when the status file
+is missing or names no session id, deliberately, so the fallback must
+not let that abort the search for other buffers."
+  (let ((agent-backends nil)
+        (broken (generate-new-buffer " *agent-test-session-broken*"))
+        (found (generate-new-buffer " *agent-test-session-found*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity
+           (lambda (buf)
+             (if (eq buf broken)
+                 (user-error "No session id")
+               "fork-id")))
+          (dolist (buf (list broken found))
+            (with-current-buffer buf
+              (setq-local agent--backend 'stub)
+              (setq-local agent--session (agent-session-create :backend 'stub))))
+          (cl-letf (((symbol-function 'agent-session-buffers)
+                     (lambda () (list broken found))))
+            (should (eq (agent--buffer-for-session-id "fork-id") found))))
+      (kill-buffer broken)
+      (kill-buffer found))))
+
 (ert-deftest agent-test-switch-branch-refuses-a-lone-session ()
   "Say so rather than opening a one-entry picker."
   (let ((agent-backends nil)

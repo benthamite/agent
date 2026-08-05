@@ -3130,11 +3130,24 @@ BACKEND defaults to BUFFER's detected backend."
     (funcall fn buffer)))
 
 (defun agent--buffer-for-session-id (session-id)
-  "Return the live session buffer whose native id is SESSION-ID, or nil."
+  "Return the live session buffer whose native id is SESSION-ID, or nil.
+Try each buffer's cached `agent-session' id first, so the common case
+does no backend work.  A buffer whose cached id does not match falls
+back to asking its backend for the live identity via
+`agent--session-identity' \(a freshly forked session has not submitted
+anything yet, so nothing has cached its id), silently treating a
+signal from that lookup as no match rather than aborting the search.
+A live id found this way is cached with `agent--note-session-id' so
+later lookups take the fast path."
   (cl-find-if
    (lambda (buffer)
-     (when-let* ((session (agent-session buffer)))
-       (equal (agent-session-id session) session-id)))
+     (or (when-let* ((session (agent-session buffer)))
+           (equal (agent-session-id session) session-id))
+         (when-let* ((backend (agent--detect-backend buffer))
+                     (id (ignore-errors
+                           (agent--session-identity buffer backend))))
+           (agent--note-session-id buffer id)
+           (equal id session-id))))
    (agent-session-buffers)))
 
 (defun agent--branch-resume-session (backend session-id)
