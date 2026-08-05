@@ -466,9 +466,9 @@ first non-nil answer is the one shown.  Whitespace is collapsed and
 long annotations are truncated, so a function may return whatever text
 it has.
 
-Each function must be cheap and free of side effects: building the
-switcher calls it more than once per session, since aligning the
-annotations needs every label's width before any label is final.
+Each function must be cheap and free of side effects: opening the
+switcher calls it for every live session, and the menu is opened often
+enough that slow work here is felt directly.
 
 Nil, the default, shows session names alone.  Optional integrations
 add a function here; `agent' renders whatever it returns and never
@@ -1158,17 +1158,20 @@ annotation to the right."
 
 (defun agent--session-label-pad ()
   "Return the width to pad session labels to in the switcher.
-The widest label among sessions that have an annotation, so their
-annotations start at one column across every account group.  Zero when
-no session has one, which leaves every label unpadded.  Assumes every
-backend's icon occupies one column, since `string-width' counts an
-icon's image as the single character it is displayed over however wide
-the image draws; a backend whose icon renders wider than that would
-sit off the column shared by the rest."
+The widest label in the menu, counting every live session and not only
+the annotated ones, so that the annotations start clear of every name
+on screen and no name runs past the column they share.  The cost is
+that one long name without an annotation pushes every annotation to
+the right; that was chosen over a name column left ragged by the
+sessions that have nothing after them.  Zero when there are no
+sessions, which leaves every label unpadded.  Assumes every backend's
+icon occupies one column, since `string-width' counts an icon's image
+as the single character it is displayed over however wide the image
+draws; a backend whose icon renders wider than that would sit off the
+column shared by the rest."
   (let ((widths (list 0)))
     (maphash (lambda (buf _key)
-               (when (and (buffer-live-p buf)
-                          (agent--session-annotation buf))
+               (when (buffer-live-p buf)
                  (push (string-width (agent--session-label-base buf))
                        widths)))
              agent--session-keys)

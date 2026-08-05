@@ -660,65 +660,67 @@ when the columns they land on do not."
               (should (apply #'= columns)))))))))
 
 (ert-deftest agent-test-menu-mixes-annotated-and-plain-sessions ()
-  "Leave a plain label unpadded while its annotated neighbours align.
-Padding exists only to line annotations up, so a session without one
-keeps the bare label it always had.  Its name is the longest here, and
-must not widen the column the other two annotations start at."
-  (let ((agent-backends nil)
-        (agent--session-keys (make-hash-table :test 'eq))
-        (agent-session-annotation-functions
-         (list (lambda (buffer)
-                 (unless (string-match-p "plain" (buffer-name buffer))
-                   "summary")))))
-    (with-temp-buffer
-      (rename-buffer "*one:~/repo/ab/:default*" t)
-      (let ((short (current-buffer)))
-        (with-temp-buffer
-          (rename-buffer "*one:~/repo/longer/:default*" t)
-          (let ((long (current-buffer)))
-            (with-temp-buffer
-              (rename-buffer "*one:~/repo/plain-and-much-longer/:default*" t)
-              (let ((plain (current-buffer)))
-                (apply #'agent-register-backend
-                       'one
-                       (agent-test--backend
-                        :buffer-p
-                        (lambda (candidate)
-                          (memq candidate (list short long plain)))
-                        :find-all-buffers
-                        (lambda () (list short long plain))))
-                (puthash short "a" agent--session-keys)
-                (puthash long "s" agent--session-keys)
-                (puthash plain "d" agent--session-keys)
-                (let* ((groups (agent--group-sessions-by-account
-                                (agent--session-label-pad)))
-                       (labels (mapcar (lambda (spec) (nth 1 spec))
-                                       (apply #'append
-                                              (mapcar #'cdr groups))))
-                       (annotated
-                        (seq-filter (lambda (label)
-                                      (string-search "summary" label))
-                                    labels))
-                       (columns (mapcar #'agent-test--annotation-column
-                                        annotated)))
-                  (should (= (length labels) 3))
-                  (should (= (length annotated) 2))
-                  ;; Exactly the name: no padding, no separator, no
-                  ;; trailing whitespace.
-                  (should (member "plain-and-much-longer" labels))
-                  (should (apply #'= columns))
-                  (should (< (car columns)
-                             (string-width
-                              "plain-and-much-longer"))))))))))))
+  "Clear every name in the menu, including the ones with no annotation.
+The plain session's name is the longest here, so the column the other
+two annotations share has to start beyond it.  The plain label itself
+is still bare: the pad decides where annotations start, not how a
+label without one ends."
+  (let* ((agent-backends nil)
+         (agent--session-keys (make-hash-table :test 'eq))
+         (agent-session-annotation-functions
+          (list (lambda (buffer)
+                  (unless (string-match-p "plain" (buffer-name buffer))
+                    "summary"))))
+         (buffers (mapcar #'generate-new-buffer
+                          '("*one:~/repo/ab/:default*"
+                            "*one:~/repo/longer/:default*"
+                            "*one:~/repo/plain-and-much-longer/:default*"
+                            "*one:~/repo/plain-short/:default*"))))
+    (unwind-protect
+        (progn
+          (apply #'agent-register-backend
+                 'one
+                 (agent-test--backend
+                  :buffer-p (lambda (candidate) (memq candidate buffers))
+                  :find-all-buffers (lambda () buffers)))
+          (cl-loop for buf in buffers
+                   for key in '("a" "s" "d" "f")
+                   do (puthash buf key agent--session-keys))
+          (let* ((groups (agent--group-sessions-by-account
+                          (agent--session-label-pad)))
+                 (labels (mapcar (lambda (spec) (nth 1 spec))
+                                 (apply #'append (mapcar #'cdr groups))))
+                 (annotated (seq-filter (lambda (label)
+                                          (string-search "summary" label))
+                                        labels))
+                 (columns (mapcar #'agent-test--annotation-column
+                                  annotated)))
+            (should (= (length labels) 4))
+            (should (= (length annotated) 2))
+            ;; Each plain label is exactly its name: no padding, no
+            ;; separator, no trailing whitespace.  The short one is
+            ;; what makes this bite -- padding the longest name in the
+            ;; menu adds nothing, so it would pass either way.
+            (should (member "plain-and-much-longer" labels))
+            (should (member "plain-short" labels))
+            (should (apply #'= columns))
+            ;; The shared column clears every name in the menu, the
+            ;; unannotated ones included.
+            (should (> (car columns)
+                       (string-width "plain-and-much-longer")))))
+      (mapc #'kill-buffer buffers))))
 
-(ert-deftest agent-test-session-label-pad-ignores-unannotated-sessions ()
-  "Pad only for sessions that have an annotation to line up.
-A long name with nothing after it needs no padding, and letting it
-widen the column would push every annotation to the right for nothing."
+(ert-deftest agent-test-session-label-pad-counts-unannotated-sessions ()
+  "Pad for every session, annotated or not.
+The annotations share one column, and it has to clear every name in
+the menu: a name measured out of the pad would run past that column
+and leave the name list ragged.  So a session with nothing after it
+still widens the pad, even though it is not itself padded."
   (let ((agent-session-annotation-functions
          (list (lambda (_buffer) nil))))
     (agent-test--with-session-buffer "*one:~/repo/much-longer-name/:default*"
-      (should (= (agent--session-label-pad) 0)))))
+      (should (= (agent--session-label-pad)
+                 (string-width "much-longer-name"))))))
 
 ;;;; Display state
 
