@@ -877,17 +877,33 @@ the Emacs side to match Claude Code's behavior."
 These arrive as user-role messages in the transcript but are not
 anything the user typed.")
 
+(defconst agent-codex--uuid-regexp
+  "[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-\
+[0-9a-f]\\{12\\}"
+  "Regexp matching the session id ending a rollout file's base name.
+A rollout is named `rollout-TIMESTAMP-UUID.jsonl'.")
+
 (defun agent-codex--session-id-from-file (file)
   "Return the session id encoded in rollout FILE's name, or nil.
 The id is taken from the file name rather than the payload's
 `session_id' because subagent rollouts record the parent's id there."
   (let ((name (file-name-base file)))
     (when (and (> (length name) 36)
-               (string-match-p
-                "\\`[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-\
-[0-9a-f]\\{4\\}-[0-9a-f]\\{12\\}\\'"
-                (substring name -36)))
+               (string-match-p (concat "\\`" agent-codex--uuid-regexp "\\'")
+                               (substring name -36)))
       (substring name -36))))
+
+(defun agent-codex--session-start-timestamp (file)
+  "Return the start timestamp encoded in rollout FILE's name, or nil.
+Rollouts are named `rollout-2026-08-05T08-08-27-UUID.jsonl', and that
+timestamp is fixed-width, so the values sort as plain strings.  It
+records when the session started, which -- unlike the file's
+modification time -- stops changing while the session runs."
+  (let ((name (file-name-base file)))
+    (when (string-match (concat "\\`rollout-\\(.+\\)-"
+                                agent-codex--uuid-regexp "\\'")
+                        name)
+      (match-string 1 name))))
 
 (defun agent-codex--same-directory-p (a b)
   "Return non-nil when directories A and B name the same place."
@@ -931,29 +947,38 @@ decoded once, so a chunk boundary cannot split a character."
 
 (defun agent-codex--read-session-header (file dir)
   "Return a header plist for rollout FILE when its session ran in DIR.
-Return nil for files from another directory, for subagent threads,
-and for anything unparseable.  Only the first line, which holds the
-`session_meta' record, is read."
+Return nil for files from another directory, for subagent threads, and
+for files that cannot be read or parsed.  Only the first line, which
+holds the `session_meta' record, is read.  The error guard sits in
+`agent-codex--read-session-meta' and covers that read alone, so a fault
+in the extraction below signals instead of passing for a session that
+simply is not there."
+  (when-let* ((json (agent-codex--read-session-meta file))
+              (payload (plist-get json :payload))
+              (id (agent-codex--session-id-from-file file)))
+    (let ((parent (plist-get payload :forked_from_id)))
+      (when (and (not (equal (plist-get payload :thread_source) "subagent"))
+                 (agent-codex--same-directory-p (plist-get payload :cwd) dir))
+        (list :session-id id
+              :forked-from (and (stringp parent)
+                                (not (equal parent id))
+                                parent)
+              :timestamp (plist-get payload :timestamp)
+              :file-path file)))))
+
+(defun agent-codex--read-session-meta (file)
+  "Return the parsed `session_meta' record opening rollout FILE, or nil.
+FILE is skipped, rather than signalling, only when it is unreadable or
+malformed -- the two things a directory of transcripts written by
+another process can legitimately hand us."
   (condition-case nil
-      (let* ((line (agent-codex--read-first-line file))
-             (json (json-parse-string line :object-type 'plist))
-             (payload (plist-get json :payload))
-             (id (agent-codex--session-id-from-file file))
-             (parent (plist-get payload :forked_from_id)))
-        (when (and id payload
-                   (not (equal (plist-get payload :thread_source)
-                               "subagent"))
-                   (agent-codex--same-directory-p
-                    (plist-get payload :cwd) dir))
-          (list :session-id id
-                :forked-from (unless (equal parent id) parent)
-                :timestamp (plist-get payload :timestamp)
-                :file-path file)))
-    (error nil)))
+      (when-let* ((line (agent-codex--read-first-line file)))
+        (json-parse-string line :object-type 'plist))
+    ((json-error file-error end-of-file) nil)))
 
 (defun agent-codex--scan-session-headers (dir &optional since)
   "Return a hash of session id to header plist for sessions run in DIR.
-SINCE, when non-nil, is a time value; rollout files last modified
+SINCE, when non-nil, is a rollout start timestamp; rollouts that started
 before it are skipped, which is what bounds the scan when only a
 session's descendants matter."
   (let ((table (make-hash-table :test #'equal))
@@ -961,25 +986,35 @@ session's descendants matter."
     (when (file-directory-p root)
       (dolist (file (directory-files-recursively
                      root "\\`rollout-.*\\.jsonl\\'"))
-        (when (or (null since)
-                  (time-less-p since (file-attribute-modification-time
-                                      (file-attributes file))))
+        (unless (agent-codex--rollout-started-before-p file since)
           (when-let* ((header (agent-codex--read-session-header file dir)))
             (puthash (plist-get header :session-id) header table)))))
     table))
 
+(defun agent-codex--rollout-started-before-p (file since)
+  "Return non-nil when rollout FILE started before timestamp SINCE.
+SINCE is a start timestamp string, or nil to bound nothing.  A FILE
+whose name carries no start timestamp is never reported as earlier, so
+an unrecognized name widens the scan rather than dropping the file."
+  (when-let* ((since)
+              (start (agent-codex--session-start-timestamp file)))
+    (string< start since)))
+
 (defun agent-codex--session-headers (buffer &optional descendants-of)
   "Return Codex session headers for BUFFER's project directory.
-With DESCENDANTS-OF, bound the scan to files newer than that session's
-own rollout file, which is enough to find its descendants and avoids
-reading every rollout on disk."
-  (when (buffer-live-p buffer)
+BUFFER is a session buffer; a dead one yields an empty table rather than
+nil, because the backend slot promises a hash table.  DESCENDANTS-OF is
+a session id that bounds the scan to rollouts started no earlier than
+that session's own.  A fork always starts after its parent, so the bound
+still reaches the whole subtree below it, and it spares the caller a
+read of every rollout on disk.  An anchor whose rollout cannot be found
+leaves the scan unbounded, which is slow but never silently empty."
+  (if (not (buffer-live-p buffer))
+      (make-hash-table :test #'equal)
     (let ((dir (with-current-buffer buffer default-directory))
-          (since (when descendants-of
-                   (when-let* ((file (codex--find-session-transcript
-                                      descendants-of))
-                               (attrs (file-attributes file)))
-                     (file-attribute-modification-time attrs)))))
+          (since (when-let* ((id descendants-of)
+                             (file (codex--find-session-transcript id)))
+                   (agent-codex--session-start-timestamp file))))
       (agent-codex--scan-session-headers dir since))))
 
 (defun agent-codex--user-prompt-from-line (line)

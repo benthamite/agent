@@ -1104,14 +1104,21 @@ event, so the submission hook must also record it."
 
 ;;;; Session headers
 
-(defun agent-codex-test--write-rollout (dir id meta &optional lines)
+(defun agent-codex-test--write-rollout (dir id meta &optional lines timestamp)
   "Write a rollout file for session ID under DIR and return its path.
-META is an alist merged into the session_meta payload.  LINES is a list
-of extra JSON strings appended after the meta line."
+META is an alist merged into the session_meta payload; a `session_id'
+entry in META overrides the default of ID, which is how a subagent
+rollout records its parent's id.  LINES is a list of extra JSON strings
+appended after the meta line.  TIMESTAMP is the start time encoded in
+the file name, defaulting to a fixed one."
   (let* ((file (expand-file-name
-                (format "rollout-2026-08-05T08-08-27-%s.jsonl" id) dir))
-         (payload (append meta `((session_id . ,id)
-                                 (timestamp . "2026-08-05T11:08:27.217Z")))))
+                (format "rollout-%s-%s.jsonl"
+                        (or timestamp "2026-08-05T08-08-27") id)
+                dir))
+         (payload (append meta
+                          (unless (assq 'session_id meta)
+                            `((session_id . ,id)))
+                          `((timestamp . "2026-08-05T11:08:27.217Z")))))
     (make-directory dir t)
     (with-temp-file file
       (insert (json-encode `((timestamp . "2026-08-05T11:08:31.433Z")
@@ -1132,20 +1139,26 @@ the payload would collapse distinct threads onto one key."
   (should-not (agent-codex--session-id-from-file "/x/notes.jsonl")))
 
 (ert-deftest agent-codex-test-session-headers-keep-sessions-of-this-project ()
-  "Keep rollouts whose cwd is the buffer's project and drop the others."
+  "Keep rollouts whose cwd is the buffer's project and drop the others.
+The kept rollout carries a payload `session_id' that differs from the id
+in its file name, as a subagent rollout does, so a scan that trusted the
+payload would key the table on the wrong thread."
   (let* ((root (make-temp-file "codex-sessions" t))
          (codex-transcript-sessions-directory root))
     (unwind-protect
         (progn
           (agent-codex-test--write-rollout
            root "019fd19c-44b9-7042-93b6-e4f7e21036ad"
-           `((cwd . "/tmp/mine")))
+           `((cwd . "/tmp/mine")
+             (session_id . "019fd19c-44b9-7042-93b6-e4f7e2103ccc")))
           (agent-codex-test--write-rollout
            root "019fd19c-44b9-7042-93b6-e4f7e2103bbb"
            `((cwd . "/tmp/other")))
           (let ((headers (agent-codex--scan-session-headers "/tmp/mine/")))
             (should (= (hash-table-count headers) 1))
-            (should (gethash "019fd19c-44b9-7042-93b6-e4f7e21036ad" headers))))
+            (should (gethash "019fd19c-44b9-7042-93b6-e4f7e21036ad" headers))
+            (should-not (gethash "019fd19c-44b9-7042-93b6-e4f7e2103ccc"
+                                 headers))))
       (delete-directory root t))))
 
 (ert-deftest agent-codex-test-session-headers-skip-subagent-threads ()
@@ -1193,6 +1206,146 @@ line, so a reader that stops after a fixed prefix parses none of them."
            root id `((cwd . "/tmp/mine")
                      (instructions . ,(make-string 65536 ?x))))
           (should (gethash id (agent-codex--scan-session-headers "/tmp/mine/"))))
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-session-headers-bound-by-start-not-mtime ()
+  "Bound a descendant scan by rollout start time, not modification time.
+The anchor is the session being killed, so it is still being written and
+its file's mtime is newer than that of any descendant that has already
+finished.  Bounding on mtime therefore hides exactly the descendants the
+bound exists to find."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (codex--transcript-file-cache (make-hash-table :test #'equal))
+         (anchor "019fd19c-44b9-7042-93b6-e4f7e21036ad")
+         (child "019fd19c-44b9-7042-93b6-e4f7e2103bbb")
+         (buffer (generate-new-buffer " *codex-headers*")))
+    (unwind-protect
+        (let ((anchor-file (agent-codex-test--write-rollout
+                            root anchor `((cwd . ,root))
+                            nil "2026-08-05T08-08-27"))
+              (child-file (agent-codex-test--write-rollout
+                           root child `((cwd . ,root)
+                                        (forked_from_id . ,anchor))
+                           nil "2026-08-05T09-30-00")))
+          (set-file-times child-file (encode-time 0 0 12 1 1 2020))
+          (set-file-times anchor-file (encode-time 0 0 12 1 1 2030))
+          (with-current-buffer buffer
+            (setq default-directory (file-name-as-directory root)))
+          (let ((headers (agent-codex--session-headers buffer anchor)))
+            (should (gethash child headers))
+            (should (equal (plist-get (gethash child headers) :forked-from)
+                           anchor))
+            (should (gethash anchor headers))))
+      (kill-buffer buffer)
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-session-headers-drop-rollouts-started-earlier ()
+  "Skip rollouts that started before the anchor, since none can descend."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (codex--transcript-file-cache (make-hash-table :test #'equal))
+         (anchor "019fd19c-44b9-7042-93b6-e4f7e21036ad")
+         (older "019fd19c-44b9-7042-93b6-e4f7e2103bbb")
+         (buffer (generate-new-buffer " *codex-headers*")))
+    (unwind-protect
+        (progn
+          (agent-codex-test--write-rollout
+           root anchor `((cwd . ,root)) nil "2026-08-05T08-08-27")
+          (agent-codex-test--write-rollout
+           root older `((cwd . ,root)) nil "2026-08-04T23-59-59")
+          (with-current-buffer buffer
+            (setq default-directory (file-name-as-directory root)))
+          (let ((headers (agent-codex--session-headers buffer anchor)))
+            (should (gethash anchor headers))
+            (should-not (gethash older headers))))
+      (kill-buffer buffer)
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-session-headers-unbounded-without-an-anchor-file ()
+  "Scan everything when the anchor's own rollout cannot be located.
+Returning nothing would silently drop the branch warning the bound
+exists to speed up."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (codex--transcript-file-cache (make-hash-table :test #'equal))
+         (id "019fd19c-44b9-7042-93b6-e4f7e21036ad")
+         (buffer (generate-new-buffer " *codex-headers*")))
+    (unwind-protect
+        (progn
+          (agent-codex-test--write-rollout
+           root id `((cwd . ,root)) nil "2026-08-01T00-00-00")
+          (with-current-buffer buffer
+            (setq default-directory (file-name-as-directory root)))
+          (should (gethash
+                   id (agent-codex--session-headers
+                       buffer "019fd19c-44b9-7042-93b6-e4f7e2103fff"))))
+      (kill-buffer buffer)
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-session-headers-empty-for-a-dead-buffer ()
+  "Return an empty hash table, not nil, once the session buffer is gone.
+The backend slot promises a hash table, and callers count its entries."
+  (let ((buffer (generate-new-buffer " *codex-headers*")))
+    (kill-buffer buffer)
+    (let ((headers (agent-codex--session-headers buffer)))
+      (should (hash-table-p headers))
+      (should (= (hash-table-count headers) 0)))))
+
+(ert-deftest agent-codex-test-session-headers-ignore-null-fork-parents ()
+  "Treat a JSON null `forked_from_id' as no parent at all.
+`json-parse-string' reads null as `:null', which is non-nil and unequal
+to the session id, so an unguarded read makes an unforked session look
+like a fork of a parent that does not exist."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (id "019fd19c-44b9-7042-93b6-e4f7e21036ad"))
+    (unwind-protect
+        (progn
+          (agent-codex-test--write-rollout
+           root id `((cwd . "/tmp/mine") (forked_from_id . ,json-null)))
+          (let ((header (gethash id (agent-codex--scan-session-headers
+                                     "/tmp/mine/"))))
+            (should header)
+            (should-not (plist-get header :forked-from))))
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-session-header-lets-extraction-bugs-surface ()
+  "Let a fault in header extraction signal instead of skipping the file.
+A guard around the whole body turns a bug in this code into a silently
+empty scan: that is how a fixed-size-read bug once dropped 3,185 of
+3,186 real rollouts while every unit test stayed green."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (id "019fd19c-44b9-7042-93b6-e4f7e21036ad"))
+    (unwind-protect
+        (let ((file (agent-codex-test--write-rollout
+                     root id `((cwd . "/tmp/mine")))))
+          (cl-letf (((symbol-function 'agent-codex--session-id-from-file)
+                     (lambda (&rest _)
+                       (signal 'wrong-type-argument '(stringp 7)))))
+            (should-error (agent-codex--read-session-header file "/tmp/mine/")
+                          :type 'wrong-type-argument)))
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-session-headers-skip-unparseable-rollouts ()
+  "Keep scanning past a rollout whose first line is not JSON.
+Narrowing the error guard must still tolerate malformed input on disk."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (id "019fd19c-44b9-7042-93b6-e4f7e21036ad"))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name
+                           (concat "rollout-2026-08-05T08-08-27-"
+                                   "019fd19c-44b9-7042-93b6-e4f7e2103bbb"
+                                   ".jsonl")
+                           root)
+            (insert "not json at all\n"))
+          (agent-codex-test--write-rollout root id `((cwd . "/tmp/mine")))
+          (let ((headers (agent-codex--scan-session-headers "/tmp/mine/")))
+            (should (= (hash-table-count headers) 1))
+            (should (gethash id headers))))
       (delete-directory root t))))
 
 (ert-deftest agent-codex-test-first-user-prompt-skips-injected-messages ()
