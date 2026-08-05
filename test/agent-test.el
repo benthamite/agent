@@ -2182,7 +2182,10 @@ observation."
      :start-session #'ignore)
     (let ((struct (agent-backend 'stub)))
       (should-not (agent-backend-resume struct))
-      (should-not (agent-backend-session-headers struct)))))
+      (should-not (agent-backend-session-headers struct))
+      (should-not (agent-backend-session-prompt struct))
+      (should-not (agent-backend-exec-prompt struct))
+      (should-not (agent-backend-prepare-fork struct)))))
 
 (ert-deftest agent-test-start-session-dispatches-to-backend ()
   "Dispatch session starts to the backend's start-session function."
@@ -2665,6 +2668,26 @@ byte-compilation of the module that requires it."
                      "enriched"))
       (should (equal (plist-get (gethash "a" enriched) :session-id) "a")))))
 
+(ert-deftest agent-test-branch-enrich-sessions-falls-back-to-identity ()
+  "Leave headers unchanged for a backend with no session-prompt slot.
+A future backend may track lineage without supplying prompt text; the
+enriched headers must still carry `:session-id' and `:forked-from' so
+the branch tree can be built from them."
+  (let* ((agent-backends nil)
+         (headers (agent-test--branch-sessions '(("a" nil nil) ("b" "a" nil))))
+         (members (make-hash-table :test #'equal)))
+    (puthash "a" t members)
+    (puthash "b" t members)
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore)
+    (let ((enriched (agent--branch-enrich-sessions 'stub headers members)))
+      (should (= (hash-table-count enriched) 2))
+      (should (equal (gethash "a" enriched) (gethash "a" headers)))
+      (should (equal (gethash "b" enriched) (gethash "b" headers)))
+      (should (equal (plist-get (gethash "b" enriched) :session-id) "b"))
+      (should (equal (plist-get (gethash "b" enriched) :forked-from) "a")))))
+
 (ert-deftest agent-test-confirm-kill-branches-honors-the-option ()
   "Ask nothing when `agent-warn-kill-with-branches' is nil.
 The Claude-era option was defined and toggled but never read, so this
@@ -2720,6 +2743,33 @@ is the behavior the toggle always claimed to have."
            (lambda (_buf &optional _d)
              (let ((table (make-hash-table :test #'equal)))
                (puthash "a" '(:session-id "a" :forked-from nil) table)
+               (puthash "b" '(:session-id "b" :forked-from "a") table)
+               table)))
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (prompt) (setq asked prompt) nil)))
+            (should-not (agent--confirm-kill-branches buffer 'stub))
+            (should (string-match-p "1 branch" asked))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-confirm-kill-branches-counts-a-descendants-only-scan ()
+  "Count correctly when the scan omits the anchor's own header.
+A real bounded scan is free to return only the descendants of the id
+it was given; `agent--branch-tree-members' seeds itself with that id
+regardless, so the count must come out the same as when the anchor's
+own header is included."
+  (let ((agent-backends nil)
+        (agent-warn-kill-with-branches t)
+        (asked nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-headers
+           (lambda (_buf &optional _d)
+             (let ((table (make-hash-table :test #'equal)))
                (puthash "b" '(:session-id "b" :forked-from "a") table)
                table)))
           (cl-letf (((symbol-function 'yes-or-no-p)
@@ -2842,6 +2892,51 @@ is the behavior the toggle always claimed to have."
   (with-temp-buffer
     (should-error (agent-create-branch) :type 'user-error)))
 
+(defun agent-test--init-git-repo (dir)
+  "Initialize a git repository at DIR with one commit."
+  (let ((default-directory dir))
+    (call-process "git" nil nil nil "init" "-q")
+    (call-process "git" nil nil nil "config" "user.email" "test@example.com")
+    (call-process "git" nil nil nil "config" "user.name" "Test")
+    (write-region "x" nil (expand-file-name "README" dir))
+    (call-process "git" nil nil nil "add" "README")
+    (call-process "git" nil nil nil "commit" "-q" "-m" "init")))
+
+(ert-deftest agent-test-create-branch-removes-worktree-on-start-failure ()
+  "Remove the worktree and its branch when the fork fails to start.
+The worktree must not outlive a session that never started, and the
+original start-session error must still reach the caller rather than
+being masked by a cleanup error."
+  (let* ((agent-backends nil)
+         (repo (file-name-as-directory (make-temp-file "agent-branch-repo" t)))
+         (agent-branch-worktree-directory
+          (file-name-as-directory (make-temp-file "agent-branch-worktrees" t)))
+         (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-test--init-git-repo repo)
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers (lambda () (list buffer))
+           :start-session (lambda (&rest _) (error "boom"))
+           :session-identity (lambda (_buf) "abc-123"))
+          (with-current-buffer buffer
+            (setq default-directory repo)
+            (setq-local agent--backend 'stub)
+            (let ((err (should-error (agent-create-branch t) :type 'error)))
+              (should (equal (cadr err) "boom"))))
+          (should-not (directory-files agent-branch-worktree-directory nil
+                                       directory-files-no-dot-files-regexp))
+          (let ((branches
+                 (let ((default-directory repo))
+                   (with-temp-buffer
+                     (call-process "git" nil t nil "branch" "--list"
+                                   "agent-branch-*")
+                     (string-trim (buffer-string))))))
+            (should (string-empty-p branches))))
+      (kill-buffer buffer)
+      (delete-directory repo t)
+      (delete-directory agent-branch-worktree-directory t))))
+
 (ert-deftest agent-test-prepare-fork-is-skipped-without-a-slot ()
   "Do nothing when the backend registers no fork preparation."
   (let ((agent-backends nil))
@@ -2849,6 +2944,18 @@ is the behavior the toggle always claimed to have."
      'stub :buffer-p #'ignore :find-all-buffers #'ignore
      :start-session #'ignore)
     (should-not (agent--prepare-fork 'stub "abc" "/a/" "/b/"))))
+
+(ert-deftest agent-test-prepare-fork-calls-the-registered-slot ()
+  "Call a registered prepare-fork slot with id, source dir, target dir."
+  (let ((agent-backends nil)
+        (received nil))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore
+     :prepare-fork (lambda (session-id from-dir to-dir)
+                     (setq received (list session-id from-dir to-dir))))
+    (agent--prepare-fork 'stub "abc" "/a/" "/b/")
+    (should (equal received '("abc" "/a/" "/b/")))))
 
 (ert-deftest agent-test-resume-calls-the-backend-slot-with-the-prefix ()
   "Hand the raw prefix argument to the backend's resume command."

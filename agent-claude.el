@@ -1873,19 +1873,6 @@ unconditionally recenter with `(recenter -1)'."
 
 ;;;;; Branch navigation
 
-(defun agent-claude--enrich-sessions (headers member-ids)
-  "Enrich session HEADERS with full prompt text for MEMBER-IDS.
-HEADERS is a hash table of session ID to header plist.  MEMBER-IDS
-is a hash table of session IDs to include.  Return a new hash table
-with :first-prompt and :timestamp populated."
-  (let ((table (make-hash-table :test 'equal)))
-    (maphash (lambda (id header)
-               (when (gethash id member-ids)
-                 (puthash id (agent-claude-cli-read-session-prompt header)
-                          table)))
-             headers)
-    table))
-
 (defun agent-claude--session-headers (buffer &optional _descendants-of)
   "Return session headers for BUFFER's Claude project directory.
 Return nil when the status file is unavailable, since the project

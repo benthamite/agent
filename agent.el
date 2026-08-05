@@ -2966,9 +2966,10 @@ only when the context does not name one."))
 
 (cl-defmethod transient-infix-set ((obj agent--account-variable) value)
   "Persist VALUE as the account of OBJ's backend and re-render the summary."
-  (when value
-    (agent-account-set (oref obj backend) value)
-    (agent-account-sync (oref obj backend) value))
+  (when-let* ((value)
+              (backend (oref obj backend)))
+    (agent-account-set backend value)
+    (agent-account-sync backend value))
   (oset obj value (agent--account-summary)))
 
 (cl-defmethod transient-format-value ((obj agent--account-variable))
@@ -2987,7 +2988,7 @@ accounts harder to read at a glance."
 
 (defun agent--branch-root (session-id sessions)
   "Follow forkedFrom chain from SESSION-ID upward in SESSIONS hash table.
-Returns the root session ID."
+Return the root session ID."
   (let ((current session-id)
         (seen (make-hash-table :test 'equal)))
     (catch 'done
@@ -3001,12 +3002,15 @@ Returns the root session ID."
 
 (defun agent--branch-children-map (sessions)
   "Build hash table mapping parent session ID to sorted list of child IDs.
-SESSIONS is a hash table of session ID to metadata.  Children are
-sorted by timestamp."
+SESSIONS is a hash table of session ID to metadata.  A child is linked
+under its recorded parent even when that parent has no entry of its
+own in SESSIONS, since a bounded scan may return only the descendants
+of a root the caller already knows by id.  Children are sorted by
+timestamp."
   (let ((map (make-hash-table :test 'equal)))
     (maphash (lambda (_id meta)
                (let ((parent (plist-get meta :forked-from)))
-                 (when (and parent (gethash parent sessions))
+                 (when parent
                    (push (plist-get meta :session-id)
                          (gethash parent map)))))
              sessions)
@@ -3069,7 +3073,7 @@ session must never become unkillable because its transcripts moved."
 (defun agent--branch-format-tree (root-id sessions children-map current-id)
   "Format the branch tree rooted at ROOT-ID as an alist.
 SESSIONS maps IDs to metadata, CHILDREN-MAP maps parent to child
-IDs, CURRENT-ID is the active session.  Returns an alist of
+IDs, CURRENT-ID is the active session.  Return an alist of
 \(display-string . session-id)."
   (agent--branch-format-subtree
    root-id sessions children-map current-id "" ""))
@@ -3177,11 +3181,11 @@ in a new buffer when it has none."
                                      :require-match t
                                      :sort nil))
            (selected (cdr (assoc selection tree))))
-      (cond
-       ((equal selected session-id) (message "Already on this session"))
-       ((agent--buffer-for-session-id selected)
-        (switch-to-buffer (agent--buffer-for-session-id selected)))
-       (t (agent--branch-resume-session backend selected))))))
+      (let ((selected-buffer (agent--buffer-for-session-id selected)))
+        (cond
+         ((equal selected session-id) (message "Already on this session"))
+         (selected-buffer (switch-to-buffer selected-buffer))
+         (t (agent--branch-resume-session backend selected)))))))
 
 ;;;###autoload
 (defun agent-resume (arg)
@@ -3210,7 +3214,9 @@ branch under `agent-branch-worktree-directory' and run the fork
 inside it.  The worktree starts at the parent's HEAD, so uncommitted
 parent changes are NOT carried over.  Use this when concurrent
 destructive git operations across branches are a concern; otherwise
-the default is what you want."
+the default is what you want.  When the forked session fails to
+start, the worktree and its branch are removed rather than left
+behind, and the original error is re-signaled."
   (interactive "P")
   (let* ((buffer (current-buffer))
          (backend (or (agent--detect-backend buffer)
@@ -3219,20 +3225,25 @@ the default is what you want."
                          (user-error "Current session has no session id")))
          (parent-cwd default-directory)
          (branch-id (format-time-string "%H%M%S"))
+         (toplevel (and isolated
+                        (or (agent--git-toplevel)
+                            (user-error "Not in a git repo; cannot isolate"))))
          (worktree (and isolated
-                        (agent--make-branch-worktree
-                         (or (agent--git-toplevel)
-                             (user-error "Not in a git repo; cannot isolate"))
-                         branch-id))))
+                        (agent--make-branch-worktree toplevel branch-id))))
     (when worktree
       (agent--prepare-fork backend session-id parent-cwd (car worktree)))
-    (agent-start-session
-     (agent-session-create
-      :backend backend
-      :directory (or (car worktree) default-directory)
-      :instance (format "branch-%s" branch-id))
-     :resume-id session-id
-     :fork t)
+    (condition-case err
+        (agent-start-session
+         (agent-session-create
+          :backend backend
+          :directory (or (car worktree) default-directory)
+          :instance (format "branch-%s" branch-id))
+         :resume-id session-id
+         :fork t)
+      (error
+       (when worktree
+         (agent--remove-branch-worktree toplevel worktree))
+       (signal (car err) (cdr err))))
     (when worktree
       (message "Branched in worktree %s on branch %s"
                (car worktree) (cdr worktree)))))
@@ -3277,6 +3288,21 @@ Returns a cons (PATH . BRANCH-NAME).  Signals an error on failure."
         (unless (zerop exit)
           (error "Git worktree add failed: %s"
                  (string-trim (buffer-string))))))))
+
+(defun agent--remove-branch-worktree (toplevel worktree)
+  "Remove WORKTREE and its branch, created under TOPLEVEL, best-effort.
+WORKTREE is a (PATH . BRANCH-NAME) cons as returned by
+`agent--make-branch-worktree'.  Called only after the session inside
+WORKTREE failed to start, so nothing of value is expected to be in
+it; still, never signal here, since the caller re-signals the
+original start-session error and a cleanup failure must not replace
+it."
+  (let ((default-directory toplevel))
+    (ignore-errors
+      (call-process "git" nil nil nil "worktree" "remove" "--force"
+                    (directory-file-name (car worktree))))
+    (ignore-errors
+      (call-process "git" nil nil nil "branch" "-D" (cdr worktree)))))
 
 ;;;; Transient menu
 
