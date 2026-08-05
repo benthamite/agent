@@ -1457,5 +1457,22 @@ its fixed port was reported and deleted as a leaked monet server."
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest agent-claude-test-session-headers-scan-the-transcript-project ()
+  "Scan the project directory named by the buffer's status file."
+  (let ((scanned nil))
+    (cl-letf (((symbol-function 'agent-claude--parse-status-file)
+               (lambda () '(:session_id "abc"
+                            :transcript_path "/tmp/proj/abc.jsonl")))
+              ((symbol-function 'agent-claude-cli-scan-session-headers)
+               (lambda (dir) (setq scanned dir) 'headers)))
+      (should (eq (agent-claude--session-headers (current-buffer)) 'headers))
+      (should (equal scanned "/tmp/proj/")))))
+
+(ert-deftest agent-claude-test-session-headers-without-a-status-file ()
+  "Return nil rather than signalling when the status file is unavailable."
+  (cl-letf (((symbol-function 'agent-claude--parse-status-file)
+             (lambda () nil)))
+    (should-not (agent-claude--session-headers (current-buffer)))))
+
 (provide 'agent-claude-test)
 ;;; agent-claude-test.el ends here

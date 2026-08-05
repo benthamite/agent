@@ -2564,5 +2564,82 @@ byte-compilation of the module that requires it."
     (dolist (backend '(claude-code codex))
       (should (assq backend (car (read-from-string requires)))))))
 
+;;;; Branch navigation
+
+(defun agent-test--branch-sessions (specs)
+  "Return a session hash table from SPECS, a list of (ID PARENT TIMESTAMP)."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (spec specs table)
+      (puthash (nth 0 spec)
+               (list :session-id (nth 0 spec)
+                     :forked-from (nth 1 spec)
+                     :timestamp (nth 2 spec))
+               table))))
+
+(ert-deftest agent-test-branch-root-follows-the-fork-chain ()
+  "Walk up the fork chain to the session that has no recorded parent."
+  (let ((sessions (agent-test--branch-sessions
+                   '(("a" nil "2026-08-01T10:00:00Z")
+                     ("b" "a" "2026-08-01T11:00:00Z")
+                     ("c" "b" "2026-08-01T12:00:00Z")))))
+    (should (equal (agent--branch-root "c" sessions) "a"))
+    (should (equal (agent--branch-root "a" sessions) "a"))))
+
+(ert-deftest agent-test-branch-root-stops-on-an-unknown-parent ()
+  "Treat a parent outside the scanned set as the top of the chain."
+  (let ((sessions (agent-test--branch-sessions '(("b" "missing" nil)))))
+    (should (equal (agent--branch-root "b" sessions) "b"))))
+
+(ert-deftest agent-test-branch-children-are-sorted-by-timestamp ()
+  "Order each parent's children oldest first."
+  (let* ((sessions (agent-test--branch-sessions
+                    '(("a" nil "2026-08-01T10:00:00Z")
+                      ("c" "a" "2026-08-01T12:00:00Z")
+                      ("b" "a" "2026-08-01T11:00:00Z"))))
+         (map (agent--branch-children-map sessions)))
+    (should (equal (gethash "a" map) '("b" "c")))))
+
+(ert-deftest agent-test-branch-tree-members-collect-every-descendant ()
+  "Collect the root and everything reachable from it."
+  (let* ((sessions (agent-test--branch-sessions
+                    '(("a" nil nil) ("b" "a" nil) ("c" "b" nil))))
+         (members (agent--branch-tree-members
+                   "a" (agent--branch-children-map sessions))))
+    (should (= (hash-table-count members) 3))
+    (should (gethash "c" members))))
+
+(ert-deftest agent-test-branch-format-tree-marks-the-current-session ()
+  "Draw the tree with connectors and a marker on the current session."
+  (let* ((sessions (make-hash-table :test #'equal)))
+    (puthash "a" '(:session-id "a" :forked-from nil :first-prompt "root"
+                   :timestamp nil)
+             sessions)
+    (puthash "b" '(:session-id "b" :forked-from "a" :first-prompt "child"
+                   :timestamp nil)
+             sessions)
+    (let* ((tree (agent--branch-format-tree
+                  "a" sessions (agent--branch-children-map sessions) "b")))
+      (should (equal (mapcar #'cdr tree) '("a" "b")))
+      (should (string-match-p "\\`root" (car (nth 0 tree))))
+      (should (string-match-p "└─ child" (car (nth 1 tree))))
+      (should (string-suffix-p " *" (car (nth 1 tree)))))))
+
+(ert-deftest agent-test-branch-enrich-sessions-uses-the-backend-slot ()
+  "Enrich only the tree members, through the backend's session-prompt slot."
+  (let ((agent-backends nil)
+        (headers (agent-test--branch-sessions '(("a" nil nil) ("b" "a" nil))))
+        (members (make-hash-table :test #'equal)))
+    (puthash "a" t members)
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore
+     :session-prompt (lambda (header)
+                       (append (list :first-prompt "enriched") header)))
+    (let ((enriched (agent--branch-enrich-sessions 'stub headers members)))
+      (should (= (hash-table-count enriched) 1))
+      (should (equal (plist-get (gethash "a" enriched) :first-prompt)
+                     "enriched"))
+      (should (equal (plist-get (gethash "a" enriched) :session-id) "a")))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here

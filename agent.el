@@ -33,6 +33,7 @@
 
 (require 'cl-lib)
 (require 'eieio)
+(require 'iso8601)
 (require 'json)
 (require 'subr-x)
 (eval-and-compile (require 'transient))
@@ -2880,6 +2881,114 @@ selected account."
 (cl-defmethod transient-infix-read ((obj agent--boolean-variable))
   "Toggle the boolean value of OBJ."
   (not (oref obj value)))
+
+;;;; Branch navigation
+
+(defun agent--branch-root (session-id sessions)
+  "Follow forkedFrom chain from SESSION-ID upward in SESSIONS hash table.
+Returns the root session ID."
+  (let ((current session-id)
+        (seen (make-hash-table :test 'equal)))
+    (catch 'done
+      (while t
+        (puthash current t seen)
+        (let* ((meta (gethash current sessions))
+               (parent (when meta (plist-get meta :forked-from))))
+          (if (and parent (gethash parent sessions) (not (gethash parent seen)))
+              (setq current parent)
+            (throw 'done current)))))))
+
+(defun agent--branch-children-map (sessions)
+  "Build hash table mapping parent session ID to sorted list of child IDs.
+SESSIONS is a hash table of session ID to metadata.  Children are
+sorted by timestamp."
+  (let ((map (make-hash-table :test 'equal)))
+    (maphash (lambda (_id meta)
+               (let ((parent (plist-get meta :forked-from)))
+                 (when (and parent (gethash parent sessions))
+                   (push (plist-get meta :session-id)
+                         (gethash parent map)))))
+             sessions)
+    (maphash (lambda (parent children)
+               (puthash parent
+                        (sort children
+                              (lambda (a b)
+                                (string< (or (plist-get (gethash a sessions) :timestamp) "")
+                                         (or (plist-get (gethash b sessions) :timestamp) ""))))
+                        map))
+             map)
+    map))
+
+(defun agent--branch-tree-members (root-id children-map)
+  "Return hash table of all session IDs reachable from ROOT-ID via CHILDREN-MAP."
+  (let ((members (make-hash-table :test 'equal))
+        (queue (list root-id)))
+    (while queue
+      (let ((id (pop queue)))
+        (unless (gethash id members)
+          (puthash id t members)
+          (dolist (child (gethash id children-map))
+            (push child queue)))))
+    members))
+
+(defun agent--branch-format-timestamp (iso-ts)
+  "Format ISO-TS as \"Mon DD HH:MM\" for branch display."
+  (when iso-ts
+    (condition-case nil
+        (format-time-string "%b %d %H:%M"
+                            (encode-time (iso8601-parse iso-ts)))
+      (error (substring iso-ts 0 (min 16 (length iso-ts)))))))
+
+(defun agent--branch-format-tree (root-id sessions children-map current-id)
+  "Format the branch tree rooted at ROOT-ID as an alist.
+SESSIONS maps IDs to metadata, CHILDREN-MAP maps parent to child
+IDs, CURRENT-ID is the active session.  Returns an alist of
+\(display-string . session-id)."
+  (agent--branch-format-subtree
+   root-id sessions children-map current-id "" ""))
+
+(defun agent--branch-format-subtree
+    (id sessions children-map current-id prefix child-prefix)
+  "Format branch node ID and its children recursively.
+SESSIONS maps IDs to metadata, CHILDREN-MAP maps parent to child
+IDs, CURRENT-ID is the active session.  PREFIX is the tree connector
+for this node, CHILD-PREFIX is the continuation for children.
+Return a list of (display . session-id)."
+  (let* ((meta (gethash id sessions))
+         (prompt (or (plist-get meta :first-prompt) "(no prompt)"))
+         (ts (agent--branch-format-timestamp
+              (plist-get meta :timestamp)))
+         (marker (if (string= id current-id) " *" ""))
+         (display (format "%s%s  %s%s" prefix prompt (or ts "") marker))
+         (children (gethash id children-map))
+         (len (length children))
+         (result (list (cons display id))))
+    (cl-loop for child in children
+             for i from 0
+             for last-p = (= i (1- len))
+             do (setq result
+                      (nconc result
+                             (agent--branch-format-subtree
+                              child sessions children-map current-id
+                              (concat child-prefix (if last-p "└─ " "├─ "))
+                              (concat child-prefix (if last-p "   " "│  "))))))
+    result))
+
+(defun agent--branch-enrich-sessions (backend headers member-ids)
+  "Enrich BACKEND's session HEADERS with prompt text for MEMBER-IDS.
+HEADERS is a hash table of session id to header plist, MEMBER-IDS a hash
+table of the session ids to keep.  Return a new hash table of enriched
+plists, each still carrying `:session-id' and `:forked-from' so the tree
+can be rebuilt from it."
+  (let ((enrich (or (when-let* ((struct (agent-backend backend)))
+                      (agent-backend-session-prompt struct))
+                    #'identity))
+        (table (make-hash-table :test #'equal)))
+    (maphash (lambda (id header)
+               (when (gethash id member-ids)
+                 (puthash id (funcall enrich header) table)))
+             headers)
+    table))
 
 ;;;; Transient menu
 

@@ -243,7 +243,10 @@ Source: lobehub/lobe-icons (MIT).")
   :start-session #'agent-claude--start-session
   :session-identity #'agent-claude--session-identity
   :sync-theme #'agent-claude--sync-theme
-  :menu-suffixes #'agent-claude--menu-suffixes)
+  :menu-suffixes #'agent-claude--menu-suffixes
+  :session-headers #'agent-claude--session-headers
+  :session-prompt #'agent-claude--session-prompt
+  :prepare-fork #'agent-claude--prepare-fork)
 
 ;;;; Functions
 
@@ -317,8 +320,8 @@ if the status file is unavailable, or if the user confirms."
                 t
               (let* ((project-dir (file-name-directory transcript))
                      (headers (agent-claude-cli-scan-session-headers project-dir))
-                     (children-map (agent-claude--build-children-map headers))
-                     (members (agent-claude--collect-tree-members sid children-map))
+                     (children-map (agent--branch-children-map headers))
+                     (members (agent--branch-tree-members sid children-map))
                      (branch-count (1- (hash-table-count members))))
                 (if (<= branch-count 0)
                     t
@@ -2201,95 +2204,30 @@ with :first-prompt and :timestamp populated."
              headers)
     table))
 
-(defun agent-claude--find-branch-root (session-id sessions)
-  "Follow forkedFrom chain from SESSION-ID upward in SESSIONS hash table.
-Returns the root session ID."
-  (let ((current session-id)
-        (seen (make-hash-table :test 'equal)))
-    (catch 'done
-      (while t
-        (puthash current t seen)
-        (let* ((meta (gethash current sessions))
-               (parent (when meta (plist-get meta :forked-from))))
-          (if (and parent (gethash parent sessions) (not (gethash parent seen)))
-              (setq current parent)
-            (throw 'done current)))))))
+(defun agent-claude--session-headers (buffer &optional _descendants-of)
+  "Return session headers for BUFFER's Claude project directory.
+Return nil when the status file is unavailable, since the project
+directory is only known from its transcript path.  DESCENDANTS-OF is
+accepted for the `session-headers' slot contract and ignored: the scan
+is already limited to one project directory and reads only each file's
+first line."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when-let* ((status (agent-claude--parse-status-file))
+                  (transcript (plist-get status :transcript_path)))
+        (agent-claude-cli-scan-session-headers
+         (file-name-directory transcript))))))
 
-(defun agent-claude--build-children-map (sessions)
-  "Build hash table mapping parent session ID to sorted list of child IDs.
-SESSIONS is a hash table of session ID to metadata.  Children are
-sorted by timestamp."
-  (let ((map (make-hash-table :test 'equal)))
-    (maphash (lambda (_id meta)
-               (let ((parent (plist-get meta :forked-from)))
-                 (when (and parent (gethash parent sessions))
-                   (push (plist-get meta :session-id)
-                         (gethash parent map)))))
-             sessions)
-    (maphash (lambda (parent children)
-               (puthash parent
-                        (sort children
-                              (lambda (a b)
-                                (string< (or (plist-get (gethash a sessions) :timestamp) "")
-                                         (or (plist-get (gethash b sessions) :timestamp) ""))))
-                        map))
-             map)
-    map))
+(defun agent-claude--session-prompt (header)
+  "Return HEADER enriched with its first prompt and timestamp."
+  (agent-claude-cli-read-session-prompt header))
 
-(defun agent-claude--collect-tree-members (root-id children-map)
-  "Return hash table of all session IDs reachable from ROOT-ID via CHILDREN-MAP."
-  (let ((members (make-hash-table :test 'equal))
-        (queue (list root-id)))
-    (while queue
-      (let ((id (pop queue)))
-        (unless (gethash id members)
-          (puthash id t members)
-          (dolist (child (gethash id children-map))
-            (push child queue)))))
-    members))
-
-(defun agent-claude--format-branch-timestamp (iso-ts)
-  "Format ISO-TS as \"Mon DD HH:MM\" for branch display."
-  (when iso-ts
-    (condition-case nil
-        (format-time-string "%b %d %H:%M"
-                            (encode-time (iso8601-parse iso-ts)))
-      (error (substring iso-ts 0 (min 16 (length iso-ts)))))))
-
-(defun agent-claude--format-branch-tree (root-id sessions children-map current-id)
-  "Format the branch tree rooted at ROOT-ID as an alist.
-SESSIONS maps IDs to metadata, CHILDREN-MAP maps parent to child
-IDs, CURRENT-ID is the active session.  Returns an alist of
-\(display-string . session-id)."
-  (agent-claude--format-branch-subtree
-   root-id sessions children-map current-id "" ""))
-
-(defun agent-claude--format-branch-subtree
-    (id sessions children-map current-id prefix child-prefix)
-  "Format branch node ID and its children recursively.
-SESSIONS maps IDs to metadata, CHILDREN-MAP maps parent to child
-IDs, CURRENT-ID is the active session.  PREFIX is the tree connector
-for this node, CHILD-PREFIX is the continuation for children.
-Return a list of (display . session-id)."
-  (let* ((meta (gethash id sessions))
-         (prompt (or (plist-get meta :first-prompt) "(no prompt)"))
-         (ts (agent-claude--format-branch-timestamp
-              (plist-get meta :timestamp)))
-         (marker (if (string= id current-id) " *" ""))
-         (display (format "%s%s  %s%s" prefix prompt (or ts "") marker))
-         (children (gethash id children-map))
-         (len (length children))
-         (result (list (cons display id))))
-    (cl-loop for child in children
-             for i from 0
-             for last-p = (= i (1- len))
-             do (setq result
-                      (nconc result
-                             (agent-claude--format-branch-subtree
-                              child sessions children-map current-id
-                              (concat child-prefix (if last-p "└─ " "├─ "))
-                              (concat child-prefix (if last-p "   " "│  "))))))
-    result))
+(defun agent-claude--prepare-fork (session-id from-dir to-dir)
+  "Link SESSION-ID, recorded under FROM-DIR, into TO-DIR's Claude project.
+Claude Code stores transcripts per project directory, so a fork that
+runs in a different directory cannot see its parent session until the
+transcript is linked into the new project."
+  (agent-claude-cli-link-session-into-project session-id from-dir to-dir))
 
 (defun agent-claude--find-buffer-for-session (session-id)
   "Return a live Claude buffer whose session matches SESSION-ID, or nil."
@@ -2319,14 +2257,14 @@ select one to switch to or resume."
         (user-error "Status file missing session_id or transcript_path"))
       (let* ((project-dir (file-name-directory transcript))
              (headers (agent-claude-cli-scan-session-headers project-dir))
-             (children-map (agent-claude--build-children-map headers))
-             (root-id (agent-claude--find-branch-root session-id headers))
-             (members (agent-claude--collect-tree-members root-id children-map)))
+             (children-map (agent--branch-children-map headers))
+             (root-id (agent--branch-root session-id headers))
+             (members (agent--branch-tree-members root-id children-map)))
         (when (<= (hash-table-count members) 1)
           (user-error "No branches for this session"))
         (let* ((sessions (agent-claude--enrich-sessions headers members))
-               (tree-children (agent-claude--build-children-map sessions))
-               (tree (agent-claude--format-branch-tree
+               (tree-children (agent--branch-children-map sessions))
+               (tree (agent--branch-format-tree
                       root-id sessions tree-children session-id))
                (selection (consult--read
                            (mapcar #'car tree)
