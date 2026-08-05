@@ -160,6 +160,7 @@ Source: SVG Repo (CC0).")
   :busy-p #'agent-codex--busy-p
   :label "Codex"
   :run-prompt #'agent-codex-run-prompt
+  :exec-prompt #'agent-codex--run-prompt
   :notify #'agent-codex-notify
   :skill-roots #'agent-codex-skill-roots
   :skill-command-prefix "$"
@@ -167,7 +168,9 @@ Source: SVG Repo (CC0).")
   :session-identity #'agent-codex--session-identity
   :restart-options #'agent-codex--restart-options
   :sync-theme #'agent-codex--sync-theme
-  :menu-suffixes #'agent-codex--menu-suffixes)
+  :session-headers #'agent-codex--session-headers
+  :session-prompt #'agent-codex--session-prompt
+  :resume #'codex-resume)
 
 ;;;; Functions
 
@@ -257,18 +260,29 @@ this account."
 ;;;;; Parameterized session start
 
 (cl-defun agent-codex--start-session (session &key initial-prompt resume-id
-                                              terminal-backend)
+                                              fork terminal-backend)
   "Start the Codex session described by SESSION; return its buffer.
 SESSION is an `agent-session'.  INITIAL-PROMPT is submitted as the
-first user message.  RESUME-ID resumes that session id.
-TERMINAL-BACKEND overrides `codex-terminal-backend' for this session.
-The session account is bound as `agent-account--starting' by
-`agent-start-session' so environment hooks see it at spawn time."
+first user message.  RESUME-ID resumes that session id, or forks it
+into a new session when FORK is non-nil.  TERMINAL-BACKEND overrides
+`codex-terminal-backend' for this session.  The session account is
+bound as `agent-account--starting' by `agent-start-session' so
+environment hooks see it at spawn time.  Signal a `user-error' when
+asked to fork a RESUME-ID that has not produced a transcript yet,
+since Codex has nothing on disk to fork from and would otherwise fail
+silently, leaving an empty, unrelated session buffer in place of the
+requested branch."
+  (when (and fork resume-id (not (codex--find-session-transcript resume-id)))
+    (user-error
+     "Codex session %s can't be branched yet: it hasn't produced any output.
+Run at least one turn in it, then branch again"
+     resume-id))
   (let ((buffer (codex-start-session
                  :directory (agent-session-directory session)
                  :instance-name (agent-session-instance session)
                  :initial-prompt initial-prompt
                  :resume-id resume-id
+                 :fork fork
                  :terminal-backend terminal-backend)))
     (agent--set-session buffer session)
     buffer))
@@ -849,21 +863,279 @@ the Emacs side to match Claude Code's behavior."
   (when (codex--buffer-p (current-buffer))
     (agent--install-session-teardown)))
 
-;;;;; Account menu infix
+;;;;; Session headers
 
-(transient-define-infix agent-codex--infix-account ()
-  "Select the active Codex account."
-  :class 'agent-account-variable
-  :backend 'codex
-  :description "codex account")
+(defconst agent-codex--injected-prompt-prefixes
+  '("# AGENTS.md" "<environment_context>" "<user_instructions>")
+  "Prefixes of the messages Codex injects before the user's first prompt.
+These arrive as user-role messages in the transcript but are not
+anything the user typed.")
 
-;;;;; Extend unified menu
+(defconst agent-codex--uuid-regexp
+  "[0-9a-f]\\{8\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-[0-9a-f]\\{4\\}-\
+[0-9a-f]\\{12\\}"
+  "Regexp matching the session id ending a rollout file's base name.
+A rollout is named `rollout-TIMESTAMP-UUID.jsonl'.")
 
-(defun agent-codex--menu-suffixes ()
-  "Return Codex suffix specs for the unified agent menu."
-  '(("R" "codex resume" agent-codex-resume)
-    ("F" "codex fork" agent-codex-fork)
-    ("-x" agent-codex--infix-account)))
+(defun agent-codex--session-id-from-file (file)
+  "Return the session id encoded in rollout FILE's name, or nil.
+The id is taken from the file name rather than the payload's
+`session_id' because subagent rollouts record the parent's id there."
+  (let ((name (file-name-base file)))
+    (when (and (> (length name) 36)
+               (string-match-p (concat "\\`" agent-codex--uuid-regexp "\\'")
+                               (substring name -36)))
+      (substring name -36))))
+
+(defun agent-codex--session-start-timestamp (file)
+  "Return the start timestamp encoded in rollout FILE's name, or nil.
+Rollouts are named `rollout-2026-08-05T08-08-27-UUID.jsonl', and that
+timestamp is fixed-width, so the values sort as plain strings.  It
+records when the session started, which -- unlike the file's
+modification time -- stops changing while the session runs."
+  (let ((name (file-name-base file)))
+    (when (string-match (concat "\\`rollout-\\(.+\\)-"
+                                agent-codex--uuid-regexp "\\'")
+                        name)
+      (match-string 1 name))))
+
+(defun agent-codex--same-directory-p (a b)
+  "Return non-nil when directories A and B name the same place."
+  (and (stringp a) (stringp b)
+       (equal (file-truename (file-name-as-directory a))
+              (file-truename (file-name-as-directory b)))))
+
+(defconst agent-codex--first-line-chunk-size 32768
+  "Bytes read at a time when fetching a rollout's first line.
+Real `session_meta' records run to a few tens of kilobytes, so one
+read usually reaches the newline; a longer record costs another read
+rather than being truncated into unparseable JSON.")
+
+(defun agent-codex--read-first-line (file)
+  "Return the first line of FILE as a string, or nil when it is empty.
+The file is read a chunk at a time and stops at the first newline,
+because rollout transcripts run to megabytes but only their opening
+`session_meta' record matters here.  Chunks are read as bytes and
+decoded once, so a chunk boundary cannot split a character."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (let ((start 0)
+          (line nil)
+          (exhausted nil))
+      (while (and (null line) (not exhausted))
+        (goto-char (point-max))
+        (let* ((end (+ start agent-codex--first-line-chunk-size))
+               (bytes (cadr (insert-file-contents-literally
+                             file nil start end))))
+          (setq start end
+                exhausted (< bytes agent-codex--first-line-chunk-size))
+          (goto-char (point-min))
+          (cond ((search-forward "\n" nil t)
+                 (setq line (buffer-substring-no-properties
+                             (point-min) (1- (point)))))
+                (exhausted
+                 (setq line (buffer-substring-no-properties
+                             (point-min) (point-max)))))))
+      (unless (or (null line) (string-empty-p line))
+        (decode-coding-string line 'utf-8)))))
+
+(defun agent-codex--read-session-header (file dir)
+  "Return a header plist for rollout FILE when its session ran in DIR.
+Return nil for files from another directory, for subagent threads, and
+for files that cannot be read or parsed."
+  (when-let* ((header (agent-codex--rollout-header file)))
+    (when (and (not (equal (plist-get header :thread-source) "subagent"))
+               (agent-codex--same-directory-p (plist-get header :cwd) dir))
+      header)))
+
+(defconst agent-codex--rollout-header-cache-limit 4096
+  "Entries `agent-codex--rollout-header-cache' holds before it is emptied.
+A full scan of a large session store caches a few thousand small
+plists.  Emptying the table wholesale past this point bounds what a
+long-running Emacs accumulates without the bookkeeping an eviction
+order would need, and the next scan refills it.")
+
+(defvar agent-codex--rollout-header-cache (make-hash-table :test #'equal)
+  "Map from rollout file path to (MTIME . HEADER) for parsed headers.
+HEADER is what `agent-codex--parse-rollout-header' returned when the
+file was last modified at MTIME.  A rollout's opening `session_meta'
+record is written once and never rewritten, so the parse stays valid
+until the file changes -- and a session still appending to its own
+rollout is the one file whose header is read again.")
+
+(defun agent-codex--rollout-header (file)
+  "Return the header plist parsed from rollout FILE, or nil.
+The parse is memoized on FILE's modification time, so scanning the same
+store twice costs a stat per file rather than a read and a JSON parse.
+A file whose modification time cannot be read is parsed without being
+cached, since there is nothing to invalidate the entry against."
+  (let ((mtime (file-attribute-modification-time (file-attributes file))))
+    (or (agent-codex--cached-rollout-header file mtime)
+        (when-let* ((header (agent-codex--parse-rollout-header file)))
+          (agent-codex--cache-rollout-header file mtime header)
+          header))))
+
+(defun agent-codex--cached-rollout-header (file mtime)
+  "Return the header cached for FILE when it was parsed at MTIME."
+  (when-let* ((mtime)
+              (entry (gethash file agent-codex--rollout-header-cache))
+              ((time-equal-p (car entry) mtime)))
+    (cdr entry)))
+
+(defun agent-codex--cache-rollout-header (file mtime header)
+  "Cache HEADER as the header FILE had when last modified at MTIME."
+  (when mtime
+    (when (> (hash-table-count agent-codex--rollout-header-cache)
+             agent-codex--rollout-header-cache-limit)
+      (clrhash agent-codex--rollout-header-cache))
+    (puthash file (cons mtime header) agent-codex--rollout-header-cache)))
+
+(defun agent-codex--parse-rollout-header (file)
+  "Return the header plist read from rollout FILE, or nil.
+Only the first line, which holds the `session_meta' record, is read.
+The error guard sits in `agent-codex--read-session-meta' and covers that
+read alone, so a fault in the extraction below signals instead of
+passing for a session that simply is not there."
+  (when-let* ((json (agent-codex--read-session-meta file))
+              (payload (plist-get json :payload))
+              (id (agent-codex--session-id-from-file file)))
+    (let ((parent (plist-get payload :forked_from_id)))
+      (list :session-id id
+            :forked-from (and (stringp parent)
+                              (not (equal parent id))
+                              parent)
+            :thread-source (plist-get payload :thread_source)
+            :cwd (plist-get payload :cwd)
+            :timestamp (plist-get payload :timestamp)
+            :file-path file))))
+
+(defun agent-codex--read-session-meta (file)
+  "Return the parsed `session_meta' record opening rollout FILE, or nil.
+FILE is skipped, rather than signalling, only when it is unreadable or
+malformed -- the two things a directory of transcripts written by
+another process can legitimately hand us."
+  (condition-case nil
+      (when-let* ((line (agent-codex--read-first-line file)))
+        (json-parse-string line :object-type 'plist))
+    ((json-error file-error end-of-file) nil)))
+
+(defun agent-codex--scan-session-headers (dir &optional since)
+  "Return a hash of session id to header plist for sessions run in DIR.
+SINCE, when non-nil, is a rollout start timestamp; rollouts that started
+before it are skipped, which is what bounds the scan when only a
+session's descendants matter."
+  (let ((table (make-hash-table :test #'equal))
+        (root (expand-file-name codex-transcript-sessions-directory)))
+    (when (file-directory-p root)
+      (dolist (file (directory-files-recursively
+                     root "\\`rollout-.*\\.jsonl\\'"))
+        (unless (agent-codex--rollout-started-before-p file since)
+          (when-let* ((header (agent-codex--read-session-header file dir)))
+            (puthash (plist-get header :session-id) header table)))))
+    table))
+
+(defun agent-codex--rollout-started-before-p (file since)
+  "Return non-nil when rollout FILE started before timestamp SINCE.
+SINCE is a start timestamp string, or nil to bound nothing.  A FILE
+whose name carries no start timestamp is never reported as earlier, so
+an unrecognized name widens the scan rather than dropping the file."
+  (when-let* ((since)
+              (start (agent-codex--session-start-timestamp file)))
+    (string< start since)))
+
+(defun agent-codex--session-headers (buffer &optional descendants-of)
+  "Return Codex session headers for BUFFER's project directory.
+BUFFER is a session buffer; a dead one yields an empty table rather than
+nil, because the backend slot promises a hash table.  DESCENDANTS-OF is
+a session id that bounds the scan to rollouts started no earlier than
+that session's own.  A fork always starts after its parent, so the bound
+still reaches the whole subtree below it, and it spares the caller a
+read of every rollout on disk.  Without DESCENDANTS-OF the bound comes
+from the root of BUFFER's own fork family, which reaches every member of
+that family for the same reason.  An anchor whose rollout cannot be
+found, and a family whose root cannot be established, leave the scan
+unbounded: slow, but never silently partial."
+  (if (not (buffer-live-p buffer))
+      (make-hash-table :test #'equal)
+    (let* ((dir (with-current-buffer buffer default-directory))
+           (file (if descendants-of
+                     (codex--find-session-transcript descendants-of)
+                   (when-let* ((id (agent-codex--session-identity buffer)))
+                     (agent-codex--fork-family-root-file id))))
+           (since (when file (agent-codex--session-start-timestamp file))))
+      (agent-codex--scan-session-headers dir since))))
+
+(defun agent-codex--fork-family-root-file (session-id)
+  "Return the rollout file of the fork family SESSION-ID belongs to.
+Climb the `forked_from_id' chain a file at a time -- fork chains run a
+few links long, and each link costs one header read -- and return the
+rollout of the topmost ancestor.  Return nil whenever the chain cannot
+be followed all the way up: when an ancestor's rollout is missing or
+unreadable, or when a corrupt `forked_from_id' points back into its own
+ancestry.  A half-climbed chain is no answer, because the ancestor that
+stopped it can have other children older than anything the climb saw."
+  (let ((id session-id)
+        (seen (make-hash-table :test #'equal))
+        (file nil))
+    (catch 'done
+      (while id
+        (when (gethash id seen)
+          (throw 'done nil))
+        (puthash id t seen)
+        (let* ((found (or (codex--find-session-transcript id)
+                          (throw 'done nil)))
+               (header (or (agent-codex--rollout-header found)
+                           (throw 'done nil))))
+          (setq file found
+                id (plist-get header :forked-from))))
+      file)))
+
+(defun agent-codex--user-prompt-from-line (line)
+  "Return the human prompt text in rollout LINE, or nil."
+  (condition-case nil
+      (let* ((json (json-parse-string line :object-type 'plist))
+             (payload (plist-get json :payload)))
+        (when (and (equal (plist-get payload :type) "message")
+                   (equal (plist-get payload :role) "user"))
+          (let* ((content (plist-get payload :content))
+                 (text (when (and (vectorp content) (> (length content) 0))
+                         (plist-get (aref content 0) :text))))
+            (when (and (stringp text)
+                       (not (string-empty-p (string-trim text)))
+                       (not (seq-some
+                             (lambda (prefix) (string-prefix-p prefix text))
+                             agent-codex--injected-prompt-prefixes)))
+              (string-trim text)))))
+    (error nil)))
+
+(defun agent-codex--first-user-prompt (file)
+  "Return the first human prompt in rollout FILE, or nil."
+  (when (and file (file-readable-p file))
+    (with-temp-buffer
+      (let ((coding-system-for-read 'utf-8))
+        (insert-file-contents file))
+      (goto-char (point-min))
+      (catch 'found
+        (while (not (eobp))
+          (when-let* ((text (agent-codex--user-prompt-from-line
+                             (buffer-substring-no-properties
+                              (point) (line-end-position)))))
+            (throw 'found text))
+          (forward-line 1))
+        nil))))
+
+(defun agent-codex--session-prompt (header)
+  "Return HEADER enriched with the session's first prompt.
+The prompt is truncated to one short line, matching how the Claude
+backend renders branch trees."
+  (append (list :first-prompt
+                (if-let* ((text (agent-codex--first-user-prompt
+                                 (plist-get header :file-path))))
+                    (truncate-string-to-width
+                     (replace-regexp-in-string "[\n\r\t]+" " " text)
+                     60 nil nil "…")
+                  "(no prompt)"))
+          header))
 
 ;;;; Minor mode
 

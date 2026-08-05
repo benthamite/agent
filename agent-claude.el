@@ -49,31 +49,23 @@ These directories are not loaded by ordinary Claude Code sessions."
   :type '(repeat directory)
   :group 'agent-claude)
 
-(defcustom agent-claude-warn-kill-with-branches t
-  "When non-nil, warn before killing a session that has branches.
-If the session being killed is the root of a branch tree with
-more than one member, a second confirmation prompt is shown after
-the standard kill-protection prompt."
-  :type 'boolean
-  :group 'agent-claude)
+(define-obsolete-variable-alias 'agent-claude-fork-worktree-directory
+  'agent-branch-worktree-directory "0.3")
 
-(defcustom agent-claude-fork-worktree-directory
-  (expand-file-name "claude-worktrees"
-                    (or (getenv "XDG_CACHE_HOME")
-                        (expand-file-name ".cache" "~")))
-  "Base directory for git worktrees created by `agent-claude-create-branch'.
-Each forked session gets a sibling worktree under this directory,
-isolating its filesystem and git state from the parent session.
-Defaults to a cache location to avoid cloud sync
-interference with concurrent git operations."
-  :type 'directory
-  :group 'agent-claude)
+(define-obsolete-variable-alias 'agent-claude-warn-kill-with-branches
+  'agent-warn-kill-with-branches "0.3")
 
-(defcustom agent-claude-log-directory
-  (expand-file-name "agent/claude-logs/" user-emacs-directory)
-  "Directory where Claude conversation logs are saved."
-  :type 'directory
-  :group 'agent-claude)
+(define-obsolete-variable-alias 'agent-claude-log-directory
+  'agent-todo-log-directory "0.3")
+
+(define-obsolete-variable-alias 'agent-claude-org-todo-in-progress-keyword
+  'agent-todo-in-progress-keyword "0.3")
+
+(define-obsolete-function-alias 'agent-claude-batch-todos
+  #'agent-batch-todos "0.3")
+
+(define-obsolete-function-alias 'agent-claude-send-todo-at-point
+  #'agent-send-todo-at-point "0.3")
 
 (defcustom agent-claude-status-interval 5
   "Interval in seconds between status file polls."
@@ -188,19 +180,13 @@ ended in that window.")
 (defvar url-http-end-of-headers)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
 (declare-function agent-act-on-slack-message "agent-slack" ())
+(declare-function agent-batch-todos "agent-todo" ())
+(declare-function agent-send-todo-at-point "agent-todo" ())
 (declare-function claude-code--get-or-prompt-for-buffer "claude-code" ())
 (declare-function claude-code--term-send-string "claude-code" (backend string))
 (declare-function claude-code--directory "claude-code" ())
 (declare-function claude-code--prompt-for-instance-name
                   "claude-code" (dir existing-instance-names &optional force-prompt))
-(declare-function org-back-to-heading "org" (&optional invisible-ok))
-(declare-function org-map-entries "org" (func &optional match scope &rest skip))
-(declare-function org-get-todo-state "org" ())
-(declare-function org-get-heading "org" (&optional no-tags no-todo no-priority no-comment))
-(declare-function org-end-of-meta-data "org" (&optional full))
-(declare-function org-entry-is-done-p "org" ())
-(declare-function org-todo "org" (&optional arg))
-(declare-function outline-next-heading "outline" ())
 (declare-function eat-self-input "eat" (n &optional e))
 (declare-function eat-term-display-cursor "eat" (terminal))
 (declare-function eat-term-send-string "eat" (terminal string))
@@ -236,14 +222,17 @@ Source: lobehub/lobe-icons (MIT).")
   :display-name-suffix #'agent-claude--branch-suffix
   :label "Claude Code"
   :run-prompt #'agent-claude-run-prompt
+  :exec-prompt #'agent-claude--run-prompt
   :notify #'agent-claude-notify
   :skill-roots #'agent-claude-skill-roots
   :skill-command-prefix "/"
-  :before-kill-check (lambda (_buffer) (agent-claude--confirm-kill-branches))
   :start-session #'agent-claude--start-session
   :session-identity #'agent-claude--session-identity
   :sync-theme #'agent-claude--sync-theme
-  :menu-suffixes #'agent-claude--menu-suffixes)
+  :session-headers #'agent-claude--session-headers
+  :session-prompt #'agent-claude--session-prompt
+  :prepare-fork #'agent-claude--prepare-fork
+  :resume #'claude-code-resume)
 
 ;;;; Functions
 
@@ -300,33 +289,6 @@ escape sequence directly to it."
     (funcall orig-fn)))
 
 ;;;;; Buffer protection
-
-(defun agent-claude--confirm-kill-branches ()
-  "Return t unless the current session has branches and user declines.
-Reads the status file to find the session ID and project
-directory, then does a fast header-only scan to check for
-branches.  Returns t (allow kill) if the session has no branches,
-if the status file is unavailable, or if the user confirms."
-  (condition-case nil
-      (let ((status (agent-claude--parse-status-file)))
-        (if (not status)
-            t
-          (let ((sid (plist-get status :session_id))
-                (transcript (plist-get status :transcript_path)))
-            (if (not (and sid transcript))
-                t
-              (let* ((project-dir (file-name-directory transcript))
-                     (headers (agent-claude-cli-scan-session-headers project-dir))
-                     (children-map (agent-claude--build-children-map headers))
-                     (members (agent-claude--collect-tree-members sid children-map))
-                     (branch-count (1- (hash-table-count members))))
-                (if (<= branch-count 0)
-                    t
-                  (yes-or-no-p
-                   (format "Session has %d %s — kill anyway? "
-                           branch-count
-                           (if (= branch-count 1) "branch" "branches")))))))))
-    (error t)))
 
 (define-obsolete-function-alias 'agent-claude-setup-kill-on-exit
   #'agent-setup-kill-on-exit "0.2")
@@ -1360,240 +1322,7 @@ capable model.  Supports aliases like \"opus\", \"sonnet\",
                  string)
   :group 'agent-claude)
 
-(defcustom agent-claude-org-todo-in-progress-keyword nil
-  "Org TODO keyword to set when sending a heading to Claude Code.
-When non-nil, `agent-claude-send-todo-at-point' changes the
-heading's TODO state to this keyword after sending.  The keyword
-must be one of the values in `org-todo-keywords' for the current
-buffer.  When nil, the TODO state is not changed.
-
-Org's built-in keywords are just TODO and DONE, with no
-intermediate state, so this is disabled by default.  Users who
-have configured an in-progress keyword (e.g. DOING, IN-PROGRESS,
-STARTED) can set this option to that keyword."
-  :type '(choice (const :tag "Don't change TODO state" nil)
-                 (string :tag "Keyword"))
-  :group 'agent-claude)
-
-;; Batch state is passed as a plist through closures to support
-;; parallel runs.  Keys: :queue :results :log-dir :working-dir :start-time
-
-(defun agent-claude--batch-collect-todos (scope)
-  "Collect TODO entries from the current org buffer according to SCOPE.
-SCOPE is one of `buffer', `subtree', or `region'.
-Returns a list of plists with :title and :body keys."
-  (let ((entries '()))
-    (org-map-entries
-     (lambda ()
-       (when (and (org-get-todo-state)
-                  (not (org-entry-is-done-p)))
-         (let* ((title (org-get-heading t t t t))
-                (body-start (save-excursion
-                              (org-end-of-meta-data t)
-                              (point)))
-                (body-end (save-excursion
-                            (outline-next-heading)
-                            (or (point) (point-max))))
-                (body (string-trim
-                       (buffer-substring-no-properties body-start body-end))))
-           (push (list :title title :body body) entries))))
-     nil
-     (pcase scope
-       ('buffer nil)
-       ('subtree 'tree)
-       ('region 'region)))
-    (nreverse entries)))
-
-(defun agent-claude--batch-format-prompt (entry)
-  "Format ENTRY plist as a prompt string for `claude -p'.
-Combines :title and :body, using title alone when body is empty."
-  (let ((title (plist-get entry :title))
-        (body (plist-get entry :body)))
-    (if (or (null body) (string-empty-p body))
-        title
-      (concat title "\n\n" body))))
-
-(defun agent-claude-batch-todos ()
-  "Process org TODO entries sequentially via `claude -p'.
-Infers scope automatically: region if active, subtree if the
-buffer is narrowed, buffer otherwise.  Prompts for a working
-directory, then runs each TODO as a non-interactive Claude
-session.  Results are logged to timestamped files and displayed
-in a summary buffer when all entries have been processed."
-  (interactive)
-  (unless (derived-mode-p 'org-mode)
-    (user-error "Must be called from an org-mode buffer"))
-  (let* ((scope (cond
-                 ((use-region-p) 'region)
-                 ((buffer-narrowed-p) 'subtree)
-                 (t 'buffer)))
-         (entries (agent-claude--batch-collect-todos scope)))
-    (when (null entries)
-      (user-error "No TODO entries found in %s" scope))
-    (let ((dir (project-prompt-project-dir)))
-      (when (or (eq scope 'region)
-                (yes-or-no-p
-                 (format "Process %d TODO(s) in %s?" (length entries) dir)))
-        (agent-claude--batch-start entries dir)))))
-
-(defun agent-claude-send-todo-at-point ()
-  "Send the org TODO at point to a running Claude Code session.
-Extracts the heading and body of the TODO entry at point,
-formats them as a prompt, and sends it to the Claude Code
-session associated with the current file's project.  When no
-unique session can be inferred, prompts for selection.
-
-When `agent-claude-org-todo-in-progress-keyword' is
-non-nil, the heading's TODO state is changed to that keyword
-after sending."
-  (interactive)
-  (unless (derived-mode-p 'org-mode)
-    (user-error "Must be called from an org-mode buffer"))
-  (unless (org-get-todo-state)
-    (user-error "Point is not on a TODO heading"))
-  (let* ((entry (agent-claude--collect-todo-at-point))
-         (prompt (agent-claude--batch-format-prompt entry))
-         (buf (agent-claude--resolve-session-for-file)))
-    (agent-submit prompt buf)
-    (when agent-claude-org-todo-in-progress-keyword
-      (org-todo agent-claude-org-todo-in-progress-keyword))
-    (display-buffer buf)))
-
-(defun agent-claude--org-to-markdown (text)
-  "Convert org inline markup in TEXT to Markdown equivalents.
-Handles verbatim (=…=) and code (~…~) to backticks."
-  (replace-regexp-in-string "[=~]\\([^=~\n]+\\)[=~]" "`\\1`" text))
-
-(defun agent-claude--collect-todo-at-point ()
-  "Return a plist with :title and :body for the TODO at point."
-  (save-excursion
-    (org-back-to-heading t)
-    (let* ((title (agent-claude--org-to-markdown
-                   (org-get-heading t t t t)))
-           (body-start (progn (org-end-of-meta-data t) (point)))
-           (body-end (progn (outline-next-heading)
-                            (or (point) (point-max))))
-           (body (string-trim
-                  (buffer-substring-no-properties body-start body-end))))
-      (list :title title :body body))))
-
-(defun agent-claude--resolve-session-for-file ()
-  "Find the Claude Code session for the current file's project.
-Returns a buffer.  Uses the project root to find matching
-sessions.  Falls back to `claude-code--get-or-prompt-for-buffer'
-when no project is detected or no session matches."
-  (let* ((project (project-current))
-         (dir (and project (project-root project)))
-         (buffers (and dir
-                       (claude-code--find-claude-buffers-for-directory dir))))
-    (cond
-     ((= (length buffers) 1)
-      (car buffers))
-     ((> (length buffers) 1)
-      (claude-code--select-buffer-from-choices
-       (format "Multiple sessions for %s: "
-               (abbreviate-file-name dir))
-       buffers t))
-     (t
-      (or (claude-code--get-or-prompt-for-buffer)
-          (user-error "No running Claude Code session found"))))))
-
-(defun agent-claude--batch-start (entries dir &optional commit-after-each)
-  "Start batch processing of ENTRIES in working directory DIR.
-When COMMIT-AFTER-EACH is non-nil, automatically commit any uncommitted
-changes in DIR after each entry completes successfully."
-  (when commit-after-each
-    (agent-claude--ensure-clean-worktree dir))
-  (let* ((log-dir (expand-file-name
-                   (format-time-string "batch_%Y-%m-%d_%H-%M-%S")
-                   agent-claude-log-directory))
-         (state (list :queue entries
-                      :results nil
-                      :log-dir log-dir
-                      :working-dir dir
-                      :start-time (current-time)
-                      :commit-after-each commit-after-each)))
-    (make-directory log-dir t)
-    (message "Batch processing %d TODO(s)..." (length entries))
-    (agent-claude--batch-run-next state)))
-
-(defun agent-claude--ensure-clean-worktree (dir)
-  "Signal a user error unless DIR is a clean git worktree."
-  (let ((default-directory dir))
-    (with-temp-buffer
-      (let ((exit (call-process "git" nil t nil
-                                "status" "--porcelain")))
-        (cond
-         ((not (zerop exit))
-          (user-error "Cannot inspect git worktree in %s: %s"
-                      dir (string-trim (buffer-string))))
-         ((> (buffer-size) 0)
-          (user-error
-           "Refusing audit auto-commit because %s has uncommitted changes"
-           dir)))))))
-
-(defun agent-claude--batch-run-next (state)
-  "Process the next entry in the batch queue in STATE.
-STATE is a plist with keys :queue :results :log-dir :working-dir
-:start-time.  When the queue is empty, display the summary buffer."
-  (if (null (plist-get state :queue))
-      (agent-claude--batch-finish state)
-    (let* ((queue (plist-get state :queue))
-           (entry (car queue))
-           (index (1+ (length (plist-get state :results))))
-           (title (plist-get entry :title))
-           (prompt (agent-claude--batch-format-prompt entry))
-           (log-file (expand-file-name
-                      (format "%02d_%s.json"
-                              index
-                              (replace-regexp-in-string
-                               "[^a-zA-Z0-9_-]" "-"
-                               (truncate-string-to-width title 50)))
-                      (plist-get state :log-dir))))
-      (plist-put state :queue (cdr queue))
-      (message "Batch [%d/%d]: %s"
-               index
-               (+ index (length (plist-get state :queue)))
-               title)
-      (agent-claude--run-prompt
-       prompt
-       :dir (plist-get state :working-dir)
-       :callback
-       (lambda (result)
-         (when-let* ((raw (plist-get result :raw)))
-           (with-temp-file log-file
-             (insert raw)))
-         (plist-put state :results
-                    (cons (list :title title
-                                :index index
-                                :exit-code (plist-get result :exit-code)
-                                :duration (plist-get result :duration)
-                                :cost (plist-get result :cost)
-                                :result-text (or (plist-get result :text)
-                                                 "(failed to parse output)")
-                                :log-file log-file)
-                          (plist-get state :results)))
-         (when (and (zerop (plist-get result :exit-code))
-                    (plist-get state :commit-after-each))
-           (ignore-errors
-             (agent-claude--batch-commit-changes state title)))
-         (agent-claude--batch-run-next state))))))
-
-(defun agent-claude--batch-commit-changes (state title)
-  "Commit uncommitted work in the working directory of STATE.
-TITLE is the entry title, used to derive the commit message scope."
-  (let ((default-directory (plist-get state :working-dir)))
-    (with-temp-buffer
-      (call-process "git" nil t nil "status" "--porcelain")
-      (when (> (buffer-size) 0)
-        (call-process "git" nil nil nil "add" "-A")
-        (let ((scope (replace-regexp-in-string
-                      "^/" ""
-                      (car (split-string title " ")))))
-          (call-process "git" nil nil nil "commit" "-m"
-                        (format "%s: apply audit recommendations" scope)))))))
-
-(defun agent-claude--batch-parse-stream-json (raw)
+(defun agent-claude--parse-stream-json (raw)
   "Parse stream-json output RAW into a plist.
 Returns (:text ASSISTANT-TEXT :cost COST :session-id ID
          :num-turns N :subtype TYPE)."
@@ -1690,7 +1419,7 @@ Returns the process object."
                                             :model :max-turns)
                                for val = (plist-get kwargs key)
                                when val append (list key val))))
-         (env (agent-claude--batch-process-environment))
+         (env (agent-claude--exec-process-environment))
          (start-time (current-time))
          (output-buf (generate-new-buffer " *claude-run-output*")))
     (let ((process-environment env)
@@ -1709,7 +1438,7 @@ Returns the process object."
                                (buffer-string)))
                         (duration (float-time
                                    (time-subtract (current-time) start-time)))
-                        (parsed (agent-claude--batch-parse-stream-json raw)))
+                        (parsed (agent-claude--parse-stream-json raw)))
                    (setq result (list :exit-code exit-code
                                       :duration duration
                                       :cost (or (plist-get parsed :cost) 0)
@@ -1744,7 +1473,7 @@ This is the `run-prompt' backend slot implementation."
                 :error (unless (eq code 0)
                          (format "claude exited with exit code %s" code)))))))
 
-(defun agent-claude--batch-process-environment ()
+(defun agent-claude--exec-process-environment ()
   "Return the process environment for a non-interactive Claude run."
   (if-let* ((account (agent-account-resolve 'claude-code))
             (env (agent-account-env 'claude-code account)))
@@ -1780,48 +1509,6 @@ programmatic directories are pointed at by file."
 (define-obsolete-function-alias 'agent-claude-run-skill #'agent-run-skill "0.2")
 (make-obsolete-variable 'agent-claude-run-skill-model
                         'agent-claude-batch-model "0.2")
-
-;;;;; Batch TODO processing
-
-(defun agent-claude--batch-finish (state)
-  "Display the batch processing summary buffer for STATE."
-  (let* ((results (sort (plist-get state :results)
-                        (lambda (a b)
-                          (< (plist-get a :index) (plist-get b :index)))))
-         (total (length results))
-         (successes (cl-count 0 results :key (lambda (r) (plist-get r :exit-code))))
-         (failures (- total successes))
-         (total-cost (cl-reduce #'+ results :key (lambda (r) (plist-get r :cost))))
-         (start-time (plist-get state :start-time))
-         (total-time (float-time
-                      (time-subtract (current-time) start-time)))
-         (buf (get-buffer-create "*Claude Batch Results*")))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (format "#+title: Batch results — %s\n\n"
-                        (format-time-string "%Y-%m-%d %H:%M:%S" start-time)))
-        (insert (format "- Total: %d | Success: %d | Failed: %d\n" total successes failures))
-        (insert (format "- Cost: $%.4f\n" total-cost))
-        (insert (format "- Time: %.1f seconds\n" total-time))
-        (insert (format "- Logs: [[file:%s]]\n\n" (plist-get state :log-dir)))
-        (dolist (result results)
-          (let ((status (if (= 0 (plist-get result :exit-code)) "DONE" "FAIL")))
-            (insert (format "* %s %s\n" status (plist-get result :title)))
-            (insert (format ":PROPERTIES:\n:COST: $%.4f\n:DURATION: %.1fs\n:END:\n\n"
-                            (plist-get result :cost)
-                            (plist-get result :duration)))
-            (insert (format "Log: [[file:%s]]\n\n" (plist-get result :log-file)))
-            (insert "#+begin_example\n")
-            (insert (or (plist-get result :result-text) "(no output)"))
-            (unless (string-suffix-p "\n" (or (plist-get result :result-text) ""))
-              (insert "\n"))
-            (insert "#+end_example\n\n"))))
-      (org-mode)
-      (goto-char (point-min)))
-    (pop-to-buffer buf)
-    (message "Batch complete: %d/%d succeeded (%.1fs, $%.4f)"
-             successes total total-time total-cost)))
 
 ;;;;; Project audit
 
@@ -2186,244 +1873,36 @@ unconditionally recenter with `(recenter -1)'."
 
 ;;;;; Branch navigation
 
-(require 'iso8601)
+(defun agent-claude--session-headers (buffer &optional _descendants-of)
+  "Return session headers for BUFFER's Claude project directory.
+Return nil when the status file is unavailable, since the project
+directory is only known from its transcript path.  DESCENDANTS-OF is
+accepted for the `session-headers' slot contract and ignored: the scan
+is already limited to one project directory and reads only each file's
+first line."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when-let* ((status (agent-claude--parse-status-file))
+                  (transcript (plist-get status :transcript_path)))
+        (agent-claude-cli-scan-session-headers
+         (file-name-directory transcript))))))
 
-(defun agent-claude--enrich-sessions (headers member-ids)
-  "Enrich session HEADERS with full prompt text for MEMBER-IDS.
-HEADERS is a hash table of session ID to header plist.  MEMBER-IDS
-is a hash table of session IDs to include.  Return a new hash table
-with :first-prompt and :timestamp populated."
-  (let ((table (make-hash-table :test 'equal)))
-    (maphash (lambda (id header)
-               (when (gethash id member-ids)
-                 (puthash id (agent-claude-cli-read-session-prompt header)
-                          table)))
-             headers)
-    table))
+(defun agent-claude--session-prompt (header)
+  "Return HEADER enriched with its first prompt and timestamp."
+  (agent-claude-cli-read-session-prompt header))
 
-(defun agent-claude--find-branch-root (session-id sessions)
-  "Follow forkedFrom chain from SESSION-ID upward in SESSIONS hash table.
-Returns the root session ID."
-  (let ((current session-id)
-        (seen (make-hash-table :test 'equal)))
-    (catch 'done
-      (while t
-        (puthash current t seen)
-        (let* ((meta (gethash current sessions))
-               (parent (when meta (plist-get meta :forked-from))))
-          (if (and parent (gethash parent sessions) (not (gethash parent seen)))
-              (setq current parent)
-            (throw 'done current)))))))
+(defun agent-claude--prepare-fork (session-id from-dir to-dir)
+  "Link SESSION-ID, recorded under FROM-DIR, into TO-DIR's Claude project.
+Claude Code stores transcripts per project directory, so a fork that
+runs in a different directory cannot see its parent session until the
+transcript is linked into the new project."
+  (agent-claude-cli-link-session-into-project session-id from-dir to-dir))
 
-(defun agent-claude--build-children-map (sessions)
-  "Build hash table mapping parent session ID to sorted list of child IDs.
-SESSIONS is a hash table of session ID to metadata.  Children are
-sorted by timestamp."
-  (let ((map (make-hash-table :test 'equal)))
-    (maphash (lambda (_id meta)
-               (let ((parent (plist-get meta :forked-from)))
-                 (when (and parent (gethash parent sessions))
-                   (push (plist-get meta :session-id)
-                         (gethash parent map)))))
-             sessions)
-    (maphash (lambda (parent children)
-               (puthash parent
-                        (sort children
-                              (lambda (a b)
-                                (string< (or (plist-get (gethash a sessions) :timestamp) "")
-                                         (or (plist-get (gethash b sessions) :timestamp) ""))))
-                        map))
-             map)
-    map))
+(define-obsolete-function-alias 'agent-claude-switch-branch
+  #'agent-switch-branch "0.3")
 
-(defun agent-claude--collect-tree-members (root-id children-map)
-  "Return hash table of all session IDs reachable from ROOT-ID via CHILDREN-MAP."
-  (let ((members (make-hash-table :test 'equal))
-        (queue (list root-id)))
-    (while queue
-      (let ((id (pop queue)))
-        (unless (gethash id members)
-          (puthash id t members)
-          (dolist (child (gethash id children-map))
-            (push child queue)))))
-    members))
-
-(defun agent-claude--format-branch-timestamp (iso-ts)
-  "Format ISO-TS as \"Mon DD HH:MM\" for branch display."
-  (when iso-ts
-    (condition-case nil
-        (format-time-string "%b %d %H:%M"
-                            (encode-time (iso8601-parse iso-ts)))
-      (error (substring iso-ts 0 (min 16 (length iso-ts)))))))
-
-(defun agent-claude--format-branch-tree (root-id sessions children-map current-id)
-  "Format the branch tree rooted at ROOT-ID as an alist.
-SESSIONS maps IDs to metadata, CHILDREN-MAP maps parent to child
-IDs, CURRENT-ID is the active session.  Returns an alist of
-\(display-string . session-id)."
-  (agent-claude--format-branch-subtree
-   root-id sessions children-map current-id "" ""))
-
-(defun agent-claude--format-branch-subtree
-    (id sessions children-map current-id prefix child-prefix)
-  "Format branch node ID and its children recursively.
-SESSIONS maps IDs to metadata, CHILDREN-MAP maps parent to child
-IDs, CURRENT-ID is the active session.  PREFIX is the tree connector
-for this node, CHILD-PREFIX is the continuation for children.
-Return a list of (display . session-id)."
-  (let* ((meta (gethash id sessions))
-         (prompt (or (plist-get meta :first-prompt) "(no prompt)"))
-         (ts (agent-claude--format-branch-timestamp
-              (plist-get meta :timestamp)))
-         (marker (if (string= id current-id) " *" ""))
-         (display (format "%s%s  %s%s" prefix prompt (or ts "") marker))
-         (children (gethash id children-map))
-         (len (length children))
-         (result (list (cons display id))))
-    (cl-loop for child in children
-             for i from 0
-             for last-p = (= i (1- len))
-             do (setq result
-                      (nconc result
-                             (agent-claude--format-branch-subtree
-                              child sessions children-map current-id
-                              (concat child-prefix (if last-p "└─ " "├─ "))
-                              (concat child-prefix (if last-p "   " "│  "))))))
-    result))
-
-(defun agent-claude--find-buffer-for-session (session-id)
-  "Return a live Claude buffer whose session matches SESSION-ID, or nil."
-  (cl-find-if
-   (lambda (buf)
-     (when (buffer-live-p buf)
-       (with-current-buffer buf
-         (let ((status (agent-claude--parse-status-file)))
-           (and status
-                (string= (plist-get status :session_id) session-id))))))
-   (claude-code--find-all-claude-buffers)))
-
-;;;###autoload
-(defun agent-claude-switch-branch ()
-  "Navigate between branches of the current Claude session.
-Shows a tree of all sessions related by branching and lets you
-select one to switch to or resume."
-  (interactive)
-  (unless (claude-code--buffer-p (current-buffer))
-    (user-error "Not in a Claude buffer"))
-  (let ((status (agent-claude--parse-status-file)))
-    (unless status
-      (user-error "No status file; is status polling enabled?"))
-    (let ((session-id (plist-get status :session_id))
-          (transcript (plist-get status :transcript_path)))
-      (unless (and session-id transcript)
-        (user-error "Status file missing session_id or transcript_path"))
-      (let* ((project-dir (file-name-directory transcript))
-             (headers (agent-claude-cli-scan-session-headers project-dir))
-             (children-map (agent-claude--build-children-map headers))
-             (root-id (agent-claude--find-branch-root session-id headers))
-             (members (agent-claude--collect-tree-members root-id children-map)))
-        (when (<= (hash-table-count members) 1)
-          (user-error "No branches for this session"))
-        (let* ((sessions (agent-claude--enrich-sessions headers members))
-               (tree-children (agent-claude--build-children-map sessions))
-               (tree (agent-claude--format-branch-tree
-                      root-id sessions tree-children session-id))
-               (selection (consult--read
-                           (mapcar #'car tree)
-                           :prompt "Branch: "
-                           :require-match t
-                           :sort nil))
-               (selected-id (cdr (assoc selection tree))))
-          (cond
-           ((string= selected-id session-id)
-            (message "Already on this session"))
-           ((agent-claude--find-buffer-for-session selected-id)
-            (switch-to-buffer
-             (agent-claude--find-buffer-for-session selected-id)))
-           (t
-            (agent-claude--resume-session selected-id))))))))
-
-(defun agent-claude--resume-session (session-id)
-  "Resume SESSION-ID in a new Claude buffer.
-Auto-generates an instance name from the session ID to avoid the
-interactive instance-name prompt."
-  (agent-start-session
-   (agent-session-create
-    :backend 'claude-code
-    :directory default-directory
-    :instance (format "branch-%s" (substring session-id 0 8)))
-   :resume-id session-id))
-
-;;;###autoload
-(defun agent-claude-create-branch (&optional isolated)
-  "Create a branch of the current Claude session and switch to it.
-Forks the current session via `--resume --fork-session' and opens
-the new branch in a separate buffer.  By default the fork shares
-the parent's working tree, matching the behavior of launching a
-second Claude instance in the same project.
-
-With prefix arg ISOLATED, also create a git worktree on a fresh
-branch under `agent-claude-fork-worktree-directory' and run
-the fork inside it.  The worktree starts at the parent's HEAD,
-so uncommitted parent changes are NOT carried over.  Use this
-when concurrent destructive git operations across forks are a
-concern; otherwise the default is what you want."
-  (interactive "P")
-  (unless (claude-code--buffer-p (current-buffer))
-    (user-error "Not in a Claude buffer"))
-  (let* ((session-id (agent-claude--current-session-id))
-         (parent-cwd default-directory)
-         (fork-id (format-time-string "%H%M%S"))
-         (worktree (and isolated
-                        (agent-claude--make-fork-worktree
-                         (or (agent-claude--git-toplevel)
-                             (user-error "Not in a git repo; cannot isolate"))
-                         fork-id))))
-    (when worktree
-      (agent-claude-cli-link-session-into-project
-       session-id parent-cwd (car worktree)))
-    (agent-start-session
-     (agent-session-create
-      :backend 'claude-code
-      :directory (or (car worktree) default-directory)
-      :instance (format "fork-%s" fork-id))
-     :resume-id session-id
-     :fork t)
-    (when worktree
-      (message "Forked in worktree %s on branch %s"
-               (car worktree) (cdr worktree)))))
-
-(defun agent-claude--git-toplevel (&optional dir)
-  "Return git toplevel for DIR (or `default-directory'), or nil if none."
-  (let ((default-directory (or dir default-directory)))
-    (with-temp-buffer
-      (when (zerop (call-process "git" nil t nil
-                                 "rev-parse" "--show-toplevel"))
-        (file-name-as-directory (string-trim (buffer-string)))))))
-
-(defun agent-claude--make-fork-worktree (toplevel fork-id)
-  "Create a git worktree of TOPLEVEL identified by FORK-ID.
-Returns a cons (PATH . BRANCH-NAME).  Signals an error on failure."
-  (let* ((repo-name (file-name-nondirectory (directory-file-name toplevel)))
-         (branch-name (format "claude-fork-%s" fork-id))
-         (worktree-path (file-name-as-directory
-                         (expand-file-name
-                          (format "%s-fork-%s" repo-name fork-id)
-                          agent-claude-fork-worktree-directory))))
-    (make-directory agent-claude-fork-worktree-directory t)
-    (agent-claude--git-worktree-add toplevel branch-name worktree-path)
-    (cons worktree-path branch-name)))
-
-(defun agent-claude--git-worktree-add (toplevel branch-name worktree-path)
-  "Run `git worktree add' in TOPLEVEL for BRANCH-NAME at WORKTREE-PATH."
-  (let ((default-directory toplevel))
-    (with-temp-buffer
-      (let ((exit (call-process "git" nil t nil
-                                "worktree" "add" "-b" branch-name
-                                (directory-file-name worktree-path))))
-        (unless (zerop exit)
-          (error "Git worktree add failed: %s"
-                 (string-trim (buffer-string))))))))
+(define-obsolete-function-alias 'agent-claude-create-branch
+  #'agent-create-branch "0.3")
 
 (defun agent-claude--current-session-id ()
   "Return the session ID of the current Claude buffer.
@@ -2433,31 +1912,6 @@ Signals an error if the status file is missing or incomplete."
       (user-error "No status file; is status polling enabled?"))
     (or (plist-get status :session_id)
         (user-error "Status file missing session_id"))))
-
-;;;; Extend unified menu
-
-(transient-define-infix agent-claude--infix-warn-kill-with-branches ()
-  "Toggle `agent-claude-warn-kill-with-branches'."
-  :class 'agent--boolean-variable
-  :variable 'agent-claude-warn-kill-with-branches
-  :description "warn kill with branches")
-
-(transient-define-infix agent-claude--infix-account ()
-  "Select the active Claude account."
-  :class 'agent-account-variable
-  :backend 'claude-code
-  :description "claude account")
-
-(defun agent-claude--menu-suffixes ()
-  "Return Claude Code suffix specs for the unified agent menu."
-  '(("B" "switch branch" agent-claude-switch-branch)
-    ("N" "new branch" agent-claude-create-branch)
-    ("b" "batch todos" agent-claude-batch-todos)
-    ("t" "send todo at point" agent-claude-send-todo-at-point)
-    ("u" "start status polling" agent-claude-start-status-polling)
-    ("U" "stop status polling" agent-claude-stop-status-polling)
-    ("-c" agent-claude--infix-account)
-    ("-w" agent-claude--infix-warn-kill-with-branches)))
 
 ;;;; Minor mode
 

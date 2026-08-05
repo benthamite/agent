@@ -33,6 +33,7 @@
 
 (require 'cl-lib)
 (require 'eieio)
+(require 'iso8601)
 (require 'json)
 (require 'subr-x)
 (eval-and-compile (require 'transient))
@@ -126,14 +127,15 @@ such as handoff-driven autoloops.")
   "Static description of one registered AI agent backend."
   name label icon program
   buffer-p find-all-buffers find-buffers-for-dir
-  start-session session-identity restart-options
+  start-session session-identity restart-options resume
   send-string send-return submit
   waiting-p busy-p background-tasks-p duration-ms display-name-suffix
   notify
   account-env-var accounts account-file shared-config-items canonical-home
   account-init
-  run-prompt skill-roots skill-command-prefix
-  sync-theme menu-suffixes
+  run-prompt exec-prompt skill-roots skill-command-prefix
+  session-headers session-prompt prepare-fork
+  sync-theme
   before-exit-ready-to-close-p before-kill-check)
 
 (defvar agent-backends nil
@@ -165,6 +167,19 @@ key: a function called with the session buffer before
 `agent-restart' kills it, returning a plist of extra keyword
 options passed through to `agent-start-session' when the session
 is resumed.
+
+Backends that support the unified session commands provide the
+optional capability keys `:resume' (resume a past session, called
+with a prefix argument), `:session-headers' (return a hash table of
+session id to a header plist with `:session-id', `:forked-from' and
+`:timestamp', called with a session buffer and an optional session id
+whose descendants are the only ones the caller needs),
+`:session-prompt' (enrich one header with `:first-prompt'),
+`:exec-prompt' (run a prompt non-interactively, calling back with a
+plist of `:exit-code', `:duration', `:text' and `:raw'), and
+`:prepare-fork' (prepare a fork of a session recorded under one
+directory to run in another).  A backend that omits a key does not
+support the commands that dispatch on it.
 
 Multi-account backends provide the optional account keys read by
 `agent-account': `:account-env-var' (environment variable naming
@@ -322,8 +337,8 @@ user message.  RESUME-ID resumes that session id instead of starting
 fresh; a non-fork RESUME-ID also seeds the session's `id' slot, because
 that identity is already known, while a fork acquires a fresh id that
 only the backend can report.  Remaining OPTIONS are passed through to
-the backend, which may support extras such as `:fork' (Claude Code) or
-`:terminal-backend' \(Codex).  When SESSION carries an account,
+the backend, which may support extras such as `:fork' (both backends)
+or `:terminal-backend' \(Codex).  When SESSION carries an account,
 defensively sync its config home with `agent-account-sync' and bind
 `agent-account--starting' around the backend call so
 `process-environment' hooks see the account at spawn time.  Return the
@@ -632,6 +647,26 @@ so it does not inject text into a running conversation."
   :type 'number
   :group 'agent)
 
+(defcustom agent-branch-worktree-directory
+  (expand-file-name "claude-worktrees"
+                    (or (getenv "XDG_CACHE_HOME")
+                        (expand-file-name ".cache" "~")))
+  "Base directory for git worktrees created by `agent-create-branch'.
+Each isolated branch gets a sibling worktree under this directory,
+separating its filesystem and git state from the parent session.
+Defaults to a cache location to avoid cloud sync
+interference with concurrent git operations."
+  :type 'directory
+  :group 'agent)
+
+(defcustom agent-warn-kill-with-branches t
+  "When non-nil, warn before killing a session that has branches.
+If the session being killed has other sessions forked from it, a
+second confirmation prompt is shown after the standard kill-protection
+prompt."
+  :type 'boolean
+  :group 'agent)
+
 (defcustom agent-session-annotation-max-width nil
   "Maximum display width of session annotations in the session switcher.
 Annotations are always fitted to the switcher window, which is as wide
@@ -724,9 +759,13 @@ Only `agent-session-event' may set this variable.")
 (declare-function elpaca-get "elpaca")
 (declare-function elpaca-source-dir "elpaca")
 (declare-function find-library-name "find-func")
+(declare-function project-root "project" (project))
 (declare-function agent-log-menu "agent-log" ())
+(declare-function agent-batch-todos "agent-todo" ())
+(declare-function agent-send-todo-at-point "agent-todo" ())
 (declare-function agent-capture-confirm-no-pending "agent-capture"
                   (backend buffer action))
+(declare-function consult--read "consult" (table &rest options))
 
 ;;;; Theme sync
 
@@ -2185,6 +2224,28 @@ would trigger an instance-name prompt and break unattended loops."
       (_ (user-error "Multiple sessions already exist for %s"
                      (abbreviate-file-name dir))))))
 
+(defun agent--session-buffer-for-project ()
+  "Return a session buffer for the current project, prompting if needed.
+Ask every registered backend for its sessions in the project root,
+falling back to `default-directory' when there is no project.  Use the
+only match when there is one and prompt when there are several."
+  (let* ((project (project-current))
+         (dir (if project (project-root project) default-directory))
+         (buffers (delq nil
+                        (mapcan
+                         (lambda (entry)
+                           (when-let* ((fn (agent-backend-find-buffers-for-dir
+                                            (cdr entry))))
+                             (copy-sequence (funcall fn dir))))
+                         agent-backends))))
+    (pcase buffers
+      ('nil (user-error "No AI session running in %s"
+                        (abbreviate-file-name dir)))
+      (`(,buffer) buffer)
+      (_ (get-buffer
+          (completing-read "Session: " (mapcar #'buffer-name buffers)
+                           nil t))))))
+
 (defvar server-eval-args-left)
 
 ;;;###autoload
@@ -2762,12 +2823,17 @@ prompt before the buffer is killed."
          (ignore-errors (kill-buffer buffer)))))))
 
 (defun agent--before-kill-allowed-p (backend buffer)
-  "Return non-nil when killing session BUFFER is allowed by BACKEND."
+  "Return non-nil when killing session BUFFER is allowed by BACKEND.
+The shared branch warning runs first, then the backend's own
+`before-kill-check' slot, which may veto or prompt for its own
+reasons."
   (let ((check (when-let* ((struct (agent-backend backend)))
                  (agent-backend-before-kill-check struct))))
-    (or (null check)
-        (with-current-buffer buffer
-          (funcall check buffer)))))
+    (and (with-current-buffer buffer
+           (agent--confirm-kill-branches buffer backend))
+         (or (null check)
+             (with-current-buffer buffer
+               (funcall check buffer))))))
 
 (defun agent--add-process-exit-hook (buffer fn)
   "Call FN with BUFFER after the process in BUFFER exits.
@@ -2867,6 +2933,390 @@ selected account."
   "Toggle the boolean value of OBJ."
   (not (oref obj value)))
 
+;;;; Transient account infix class
+
+(defun agent--account-summary ()
+  "Return a one-line summary of every backend's current account."
+  (mapconcat (lambda (entry)
+               (format "%s: %s"
+                       (car entry)
+                       (or (agent-account-current (car entry)) "default")))
+             (sort (copy-sequence agent-backends)
+                   (lambda (a b) (string< (symbol-name (car a))
+                                          (symbol-name (car b)))))
+             "  "))
+
+(eval-and-compile
+  (defclass agent--account-variable (agent-account-variable)
+    ((backend :initarg :backend :initform nil))
+    "An infix showing every backend's account and setting one of them.
+The backend acted on is resolved when the infix is invoked, so the
+same entry works from a session buffer of either backend and prompts
+only when the context does not name one."))
+
+(cl-defmethod transient-init-value ((obj agent--account-variable))
+  "Initialize OBJ's value from the accounts of every backend."
+  (oset obj value (agent--account-summary)))
+
+(cl-defmethod transient-infix-read ((obj agent--account-variable))
+  "Resolve a backend for OBJ, then prompt for one of its accounts."
+  (let ((backend (agent--resolve-backend)))
+    (oset obj backend backend)
+    (agent-account--prompt backend)))
+
+(cl-defmethod transient-infix-set ((obj agent--account-variable) value)
+  "Persist VALUE as the account of OBJ's backend and re-render the summary."
+  (when-let* ((value)
+              (backend (oref obj backend)))
+    (agent-account-set backend value)
+    (agent-account-sync backend value))
+  (oset obj value (agent--account-summary)))
+
+(cl-defmethod transient-format-value ((obj agent--account-variable))
+  "Render OBJ's account summary as plain text.
+The inherited method prints the value with `prin1-to-string', which
+wraps this whole line in double quotes and makes the per-backend
+accounts harder to read at a glance."
+  (propertize (format "%s" (oref obj value)) 'face 'transient-value))
+
+(transient-define-infix agent--infix-account ()
+  "Select the account of the current or prompted backend."
+  :class 'agent--account-variable
+  :description "account")
+
+;;;; Branch navigation
+
+(defun agent--branch-root (session-id sessions)
+  "Follow forkedFrom chain from SESSION-ID upward in SESSIONS hash table.
+Return the root session ID."
+  (let ((current session-id)
+        (seen (make-hash-table :test 'equal)))
+    (catch 'done
+      (while t
+        (puthash current t seen)
+        (let* ((meta (gethash current sessions))
+               (parent (when meta (plist-get meta :forked-from))))
+          (if (and parent (gethash parent sessions) (not (gethash parent seen)))
+              (setq current parent)
+            (throw 'done current)))))))
+
+(defun agent--branch-children-map (sessions)
+  "Build hash table mapping parent session ID to sorted list of child IDs.
+SESSIONS is a hash table of session ID to metadata.  A child is linked
+under its recorded parent even when that parent has no entry of its
+own in SESSIONS, since a bounded scan may return only the descendants
+of a root the caller already knows by id.  Children are sorted by
+timestamp."
+  (let ((map (make-hash-table :test 'equal)))
+    (maphash (lambda (_id meta)
+               (let ((parent (plist-get meta :forked-from)))
+                 (when parent
+                   (push (plist-get meta :session-id)
+                         (gethash parent map)))))
+             sessions)
+    (maphash (lambda (parent children)
+               (puthash parent
+                        (sort children
+                              (lambda (a b)
+                                (string< (or (plist-get (gethash a sessions) :timestamp) "")
+                                         (or (plist-get (gethash b sessions) :timestamp) ""))))
+                        map))
+             map)
+    map))
+
+(defun agent--branch-tree-members (root-id children-map)
+  "Return hash table of all session IDs reachable from ROOT-ID via CHILDREN-MAP."
+  (let ((members (make-hash-table :test 'equal))
+        (queue (list root-id)))
+    (while queue
+      (let ((id (pop queue)))
+        (unless (gethash id members)
+          (puthash id t members)
+          (dolist (child (gethash id children-map))
+            (push child queue)))))
+    members))
+
+(defun agent--confirm-kill-branches (buffer backend)
+  "Return non-nil unless BUFFER's session has branches and the user declines.
+Scan only for sessions that could descend from this one, which is what
+keeps the check off the critical path when a backend stores every
+session in one directory.  Any failure to scan allows the kill: a
+session must never become unkillable because its transcripts moved."
+  (if (not agent-warn-kill-with-branches)
+      t
+    (condition-case nil
+        (let* ((struct (agent-backend backend))
+               (scan (and struct (agent-backend-session-headers struct)))
+               (session-id (and scan (agent--session-identity buffer backend))))
+          (if (not session-id)
+              t
+            (let* ((headers (funcall scan buffer session-id))
+                   (members (agent--branch-tree-members
+                             session-id
+                             (agent--branch-children-map headers)))
+                   (count (1- (hash-table-count members))))
+              (or (<= count 0)
+                  (yes-or-no-p
+                   (format "Session has %d %s — kill anyway? "
+                           count
+                           (if (= count 1) "branch" "branches")))))))
+      (error t))))
+
+(defun agent--branch-format-timestamp (iso-ts)
+  "Format ISO-TS as \"Mon DD HH:MM\" for branch display."
+  (when iso-ts
+    (condition-case nil
+        (format-time-string "%b %d %H:%M"
+                            (encode-time (iso8601-parse iso-ts)))
+      (error (substring iso-ts 0 (min 16 (length iso-ts)))))))
+
+(defun agent--branch-format-tree (root-id sessions children-map current-id)
+  "Format the branch tree rooted at ROOT-ID as an alist.
+SESSIONS maps IDs to metadata, CHILDREN-MAP maps parent to child
+IDs, CURRENT-ID is the active session.  Return an alist of
+\(display-string . session-id)."
+  (agent--branch-format-subtree
+   root-id sessions children-map current-id "" ""))
+
+(defun agent--branch-format-subtree
+    (id sessions children-map current-id prefix child-prefix)
+  "Format branch node ID and its children recursively.
+SESSIONS maps IDs to metadata, CHILDREN-MAP maps parent to child
+IDs, CURRENT-ID is the active session.  PREFIX is the tree connector
+for this node, CHILD-PREFIX is the continuation for children.
+Return a list of (display . session-id)."
+  (let* ((meta (gethash id sessions))
+         (prompt (or (plist-get meta :first-prompt) "(no prompt)"))
+         (ts (agent--branch-format-timestamp
+              (plist-get meta :timestamp)))
+         (marker (if (string= id current-id) " *" ""))
+         (display (format "%s%s  %s%s" prefix prompt (or ts "") marker))
+         (children (gethash id children-map))
+         (len (length children))
+         (result (list (cons display id))))
+    (cl-loop for child in children
+             for i from 0
+             for last-p = (= i (1- len))
+             do (setq result
+                      (nconc result
+                             (agent--branch-format-subtree
+                              child sessions children-map current-id
+                              (concat child-prefix (if last-p "└─ " "├─ "))
+                              (concat child-prefix (if last-p "   " "│  "))))))
+    result))
+
+(defun agent--branch-enrich-sessions (backend headers member-ids)
+  "Enrich BACKEND's session HEADERS with prompt text for MEMBER-IDS.
+HEADERS is a hash table of session id to header plist, MEMBER-IDS a hash
+table of the session ids to keep.  Return a new hash table of enriched
+plists, each still carrying `:session-id' and `:forked-from' so the tree
+can be rebuilt from it."
+  (let ((enrich (or (when-let* ((struct (agent-backend backend)))
+                      (agent-backend-session-prompt struct))
+                    #'identity))
+        (table (make-hash-table :test #'equal)))
+    (maphash (lambda (id header)
+               (when (gethash id member-ids)
+                 (puthash id (funcall enrich header) table)))
+             headers)
+    table))
+
+(defun agent--session-identity (buffer &optional backend)
+  "Return BUFFER's native session id, or nil when it is not known yet.
+BACKEND defaults to BUFFER's detected backend."
+  (when-let* ((backend (or backend (agent--detect-backend buffer)))
+              (struct (agent-backend backend))
+              (fn (agent-backend-session-identity struct)))
+    (funcall fn buffer)))
+
+(defun agent--buffer-for-session-id (session-id)
+  "Return the live session buffer whose native id is SESSION-ID, or nil.
+Try each buffer's cached `agent-session' id first, so the common case
+does no backend work.  A buffer whose cached id does not match falls
+back to asking its backend for the live identity via
+`agent--session-identity' \(a freshly forked session has not submitted
+anything yet, so nothing has cached its id), silently treating a
+signal from that lookup as no match rather than aborting the search.
+A live id found this way is cached with `agent--note-session-id' so
+later lookups take the fast path."
+  (cl-find-if
+   (lambda (buffer)
+     (or (when-let* ((session (agent-session buffer)))
+           (equal (agent-session-id session) session-id))
+         (when-let* ((backend (agent--detect-backend buffer))
+                     (id (ignore-errors
+                           (agent--session-identity buffer backend))))
+           (agent--note-session-id buffer id)
+           (equal id session-id))))
+   (agent-session-buffers)))
+
+(defun agent--branch-resume-session (backend session-id)
+  "Resume BACKEND's SESSION-ID in a new session buffer.
+The instance name is derived from the session id so resuming never
+stops to ask for one."
+  (agent-start-session
+   (agent-session-create
+    :backend backend
+    :directory default-directory
+    :instance (format "branch-%s" (substring session-id 0 8)))
+   :resume-id session-id))
+
+;;;###autoload
+(defun agent-switch-branch ()
+  "Navigate between branches of the current session.
+Show every session that shares a fork ancestor with this one as a
+tree, then switch to the selected session's live buffer, or resume it
+in a new buffer when it has none."
+  (interactive)
+  (let* ((buffer (current-buffer))
+         (backend (or (agent--detect-backend buffer)
+                      (user-error "Not in an AI session buffer")))
+         (scan (or (when-let* ((struct (agent-backend backend)))
+                     (agent-backend-session-headers struct))
+                   (user-error "Backend `%s' does not track branches"
+                               backend)))
+         (session-id (or (agent--session-identity buffer backend)
+                         (user-error "Current session has no session id")))
+         (headers (or (funcall scan buffer)
+                      (user-error "No sessions found for this project")))
+         (root (agent--branch-root
+                session-id headers))
+         (members (agent--branch-tree-members
+                   root (agent--branch-children-map headers))))
+    (when (<= (hash-table-count members) 1)
+      (user-error "No branches for this session"))
+    (let* ((sessions (agent--branch-enrich-sessions backend headers members))
+           (tree (agent--branch-format-tree
+                  root sessions (agent--branch-children-map sessions)
+                  session-id))
+           (selection (consult--read (mapcar #'car tree)
+                                     :prompt "Branch: "
+                                     :require-match t
+                                     :sort nil))
+           (selected (cdr (assoc selection tree))))
+      (let ((selected-buffer (agent--buffer-for-session-id selected)))
+        (cond
+         ((equal selected session-id) (message "Already on this session"))
+         (selected-buffer (switch-to-buffer selected-buffer))
+         (t (agent--branch-resume-session backend selected)))))))
+
+;;;###autoload
+(defun agent-resume (arg)
+  "Resume a past session of the current or prompted backend.
+The backend is the current session's when called from a session
+buffer, and prompted for otherwise.  ARG is passed to the backend's
+own resume command, where it means \"the most recent session\"."
+  (interactive "P")
+  (let* ((backend (agent--resolve-backend))
+         (resume (or (when-let* ((struct (agent-backend backend)))
+                       (agent-backend-resume struct))
+                     (user-error "Backend `%s' does not support resume"
+                                 backend))))
+    (funcall resume arg)))
+
+;;;###autoload
+(defun agent-create-branch (&optional isolated)
+  "Create a branch of the current session and switch to it.
+Fork the session in this buffer and open the fork in a separate
+buffer.  By default the branch shares the parent's working tree,
+matching the behavior of starting a second session in the same
+project.
+
+With prefix arg ISOLATED, also create a git worktree on a fresh
+branch under `agent-branch-worktree-directory' and run the fork
+inside it.  The worktree starts at the parent's HEAD, so uncommitted
+parent changes are NOT carried over.  Use this when concurrent
+destructive git operations across branches are a concern; otherwise
+the default is what you want.  When the forked session fails to
+start, the worktree and its branch are removed rather than left
+behind, and the original error is re-signaled."
+  (interactive "P")
+  (let* ((buffer (current-buffer))
+         (backend (or (agent--detect-backend buffer)
+                      (user-error "Not in an AI session buffer")))
+         (session-id (or (agent--session-identity buffer backend)
+                         (user-error "Current session has no session id")))
+         (parent-cwd default-directory)
+         (branch-id (format-time-string "%H%M%S"))
+         (toplevel (and isolated
+                        (or (agent--git-toplevel)
+                            (user-error "Not in a git repo; cannot isolate"))))
+         (worktree (and isolated
+                        (agent--make-branch-worktree toplevel branch-id))))
+    (when worktree
+      (agent--prepare-fork backend session-id parent-cwd (car worktree)))
+    (condition-case err
+        (agent-start-session
+         (agent-session-create
+          :backend backend
+          :directory (or (car worktree) default-directory)
+          :instance (format "branch-%s" branch-id))
+         :resume-id session-id
+         :fork t)
+      (error
+       (when worktree
+         (agent--remove-branch-worktree toplevel worktree))
+       (signal (car err) (cdr err))))
+    (when worktree
+      (message "Branched in worktree %s on branch %s"
+               (car worktree) (cdr worktree)))))
+
+(defun agent--prepare-fork (backend session-id from-dir to-dir)
+  "Prepare BACKEND to fork SESSION-ID from FROM-DIR inside TO-DIR.
+Backends that record sessions per project directory use this to make
+the parent session visible from TO-DIR; backends that record them
+globally register no `prepare-fork' slot and nothing happens."
+  (when-let* ((struct (agent-backend backend))
+              (fn (agent-backend-prepare-fork struct)))
+    (funcall fn session-id from-dir to-dir)))
+
+(defun agent--git-toplevel (&optional dir)
+  "Return git toplevel for DIR (or `default-directory'), or nil if none."
+  (let ((default-directory (or dir default-directory)))
+    (with-temp-buffer
+      (when (zerop (call-process "git" nil t nil
+                                 "rev-parse" "--show-toplevel"))
+        (file-name-as-directory (string-trim (buffer-string)))))))
+
+(defun agent--make-branch-worktree (toplevel branch-id)
+  "Create a git worktree of TOPLEVEL identified by BRANCH-ID.
+Returns a cons (PATH . BRANCH-NAME).  Signals an error on failure."
+  (let* ((repo-name (file-name-nondirectory (directory-file-name toplevel)))
+         (branch-name (format "agent-branch-%s" branch-id))
+         (worktree-path (file-name-as-directory
+                         (expand-file-name
+                          (format "%s-branch-%s" repo-name branch-id)
+                          agent-branch-worktree-directory))))
+    (make-directory agent-branch-worktree-directory t)
+    (agent--git-worktree-add toplevel branch-name worktree-path)
+    (cons worktree-path branch-name)))
+
+(defun agent--git-worktree-add (toplevel branch-name worktree-path)
+  "Run `git worktree add' in TOPLEVEL for BRANCH-NAME at WORKTREE-PATH."
+  (let ((default-directory toplevel))
+    (with-temp-buffer
+      (let ((exit (call-process "git" nil t nil
+                                "worktree" "add" "-b" branch-name
+                                (directory-file-name worktree-path))))
+        (unless (zerop exit)
+          (error "Git worktree add failed: %s"
+                 (string-trim (buffer-string))))))))
+
+(defun agent--remove-branch-worktree (toplevel worktree)
+  "Remove WORKTREE and its branch, created under TOPLEVEL, best-effort.
+WORKTREE is a (PATH . BRANCH-NAME) cons as returned by
+`agent--make-branch-worktree'.  Called only after the session inside
+WORKTREE failed to start, so nothing of value is expected to be in
+it; still, never signal here, since the caller re-signals the
+original start-session error and a cleanup failure must not replace
+it."
+  (let ((default-directory toplevel))
+    (ignore-errors
+      (call-process "git" nil nil nil "worktree" "remove" "--force"
+                    (directory-file-name (car worktree))))
+    (ignore-errors
+      (call-process "git" nil nil nil "branch" "-D" (cdr worktree)))))
+
 ;;;; Transient menu
 
 ;;;###autoload
@@ -2886,6 +3336,9 @@ when it is not installed."
   [["Sessions"
     ("e" "start or switch" agent-start-or-switch)
     ("w" "jump to waiting" agent-jump-to-waiting)
+    ("R" "resume" agent-resume)
+    ("N" "new branch" agent-create-branch)
+    ("B" "switch branch" agent-switch-branch)
     ("h" "handoff" agent-handoff)
     ("x" "exit session" agent-exit)
     ("r" "restart" agent-restart)
@@ -2908,33 +3361,15 @@ when it is not installed."
     ("T" "toggle alert" agent-toggle-alert)]
    ["Prompts"
     ("p" "capture prompt" agent-capture-prompt)
-    ("i" "insert prompt" agent-insert-captured-prompt)]
+    ("i" "insert prompt" agent-insert-captured-prompt)
+    ("b" "batch todos" agent-batch-todos)
+    ("t" "send todo at point" agent-send-todo-at-point)]
    ["Options"
     ("-A" agent--infix-alert-on-ready)
     ("-p" agent--infix-protect-buffers)
-    ("-t" agent--infix-sync-theme)]]
-  [:class transient-columns
-   :setup-children agent-menu--backend-children])
-
-(defun agent-menu--backend-children (_)
-  "Build one menu column per registered backend from its menu-suffixes slot."
-  (transient-parse-suffixes
-   'agent-menu
-   (apply #'vector
-          (delq nil (mapcar (lambda (entry)
-                              (agent-menu--backend-column (cdr entry)))
-                            (agent-menu--sorted-backends))))))
-
-(defun agent-menu--sorted-backends ()
-  "Return `agent-backends' sorted by name, independent of load order."
-  (sort (copy-sequence agent-backends)
-        (lambda (a b) (string< (car a) (car b)))))
-
-(defun agent-menu--backend-column (backend)
-  "Return a transient column vector for BACKEND, or nil when it has no suffixes."
-  (when-let* ((fn (agent-backend-menu-suffixes backend))
-              (specs (funcall fn)))
-    (apply #'vector (agent-backend-label backend) specs)))
+    ("-t" agent--infix-sync-theme)
+    ("-c" agent--infix-account)
+    ("-w" agent--infix-warn-kill-with-branches)]])
 
 (transient-define-infix agent--infix-alert-on-ready ()
   "Toggle `agent-alert-on-ready'."
@@ -2964,6 +3399,12 @@ when it is not installed."
   :class 'agent--sync-theme-variable
   :variable 'agent-sync-theme
   :description "sync theme")
+
+(transient-define-infix agent--infix-warn-kill-with-branches ()
+  "Toggle `agent-warn-kill-with-branches'."
+  :class 'agent--boolean-variable
+  :variable 'agent-warn-kill-with-branches
+  :description "warn kill with branches")
 
 (add-hook 'enable-theme-functions #'agent-sync-theme)
 (add-hook 'agent-before-exit-functions #'agent-run-skill-before-exit)

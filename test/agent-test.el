@@ -2154,6 +2154,39 @@ observation."
           :buffer-p (lambda (candidate) (eq candidate buf))))
         (should (eq (agent--detect-backend buf) 'one))))))
 
+(ert-deftest agent-test-backend-accepts-the-new-capability-slots ()
+  "Register a backend that supplies every slot the unified menu dispatches on."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'stub
+     :buffer-p #'ignore
+     :find-all-buffers #'ignore
+     :start-session #'ignore
+     :resume #'ignore
+     :session-headers #'ignore
+     :session-prompt #'ignore
+     :exec-prompt #'ignore
+     :prepare-fork #'ignore)
+    (let ((struct (agent-backend 'stub)))
+      (should (agent-backend-resume struct))
+      (should (agent-backend-session-headers struct))
+      (should (agent-backend-session-prompt struct))
+      (should (agent-backend-exec-prompt struct))
+      (should (agent-backend-prepare-fork struct)))))
+
+(ert-deftest agent-test-backend-capability-slots-are-optional ()
+  "A backend that supplies none of the new slots still registers."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore)
+    (let ((struct (agent-backend 'stub)))
+      (should-not (agent-backend-resume struct))
+      (should-not (agent-backend-session-headers struct))
+      (should-not (agent-backend-session-prompt struct))
+      (should-not (agent-backend-exec-prompt struct))
+      (should-not (agent-backend-prepare-fork struct)))))
+
 (ert-deftest agent-test-start-session-dispatches-to-backend ()
   "Dispatch session starts to the backend's start-session function."
   (let* ((agent-backends nil)
@@ -2509,13 +2542,37 @@ timestamp."
         (agent--session-teardown (current-buffer)))
       (should ran))))
 
-(ert-deftest agent-test-menu-backend-children ()
-  "Backend menu sections are built from registry slots."
-  (require 'agent-claude)
-  (require 'agent-codex)
-  (let ((children (agent-menu--backend-children nil)))
-    (should children)
-    (should (= (length children) 2))))
+(defun agent-test--menu-keys ()
+  "Return every key bound in `agent-menu', flattened.
+Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
+\(CLASS . PLIST), so a key lives in the cdr of a suffix node."
+  (let ((keys nil))
+    (letrec ((walk (lambda (node)
+                     (cond
+                      ((vectorp node) (mapc walk (append node nil)))
+                      ((consp node)
+                       (when-let* ((key (plist-get (cdr node) :key)))
+                         (push key keys))
+                       (mapc walk node))))))
+      (funcall walk (get 'agent-menu 'transient--layout)))
+    (nreverse keys)))
+
+(ert-deftest agent-test-menu-has-no-backend-column ()
+  "Build the whole menu statically, with no per-backend group."
+  (should-not (fboundp 'agent-menu--backend-children))
+  (should-not (fboundp 'agent-menu--backend-column))
+  (should-not (memq 'menu-suffixes
+                    (mapcar #'car (cdr (cl-struct-slot-info 'agent-backend))))))
+
+(ert-deftest agent-test-menu-binds-the-unified-commands ()
+  "Bind every unified session command in the static layout."
+  (let ((keys (agent-test--menu-keys)))
+    (dolist (key '("R" "N" "B" "b" "t" "-c" "-w"))
+      (should (member key keys)))
+    (should-not (member "F" keys))
+    (should-not (member "u" keys))
+    (should-not (member "U" keys))
+    (should-not (member "-x" keys))))
 
 (ert-deftest agent-test-menu-slack-command-is-autoloaded ()
   "Source-loaded core menu references an available Slack command."
@@ -2533,6 +2590,530 @@ byte-compilation of the module that requires it."
     (should requires)
     (dolist (backend '(claude-code codex))
       (should (assq backend (car (read-from-string requires)))))))
+
+;;;; Branch navigation
+
+(defun agent-test--branch-sessions (specs)
+  "Return a session hash table from SPECS, a list of (ID PARENT TIMESTAMP)."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (spec specs table)
+      (puthash (nth 0 spec)
+               (list :session-id (nth 0 spec)
+                     :forked-from (nth 1 spec)
+                     :timestamp (nth 2 spec))
+               table))))
+
+(ert-deftest agent-test-branch-root-follows-the-fork-chain ()
+  "Walk up the fork chain to the session that has no recorded parent."
+  (let ((sessions (agent-test--branch-sessions
+                   '(("a" nil "2026-08-01T10:00:00Z")
+                     ("b" "a" "2026-08-01T11:00:00Z")
+                     ("c" "b" "2026-08-01T12:00:00Z")))))
+    (should (equal (agent--branch-root "c" sessions) "a"))
+    (should (equal (agent--branch-root "a" sessions) "a"))))
+
+(ert-deftest agent-test-branch-root-stops-on-an-unknown-parent ()
+  "Treat a parent outside the scanned set as the top of the chain."
+  (let ((sessions (agent-test--branch-sessions '(("b" "missing" nil)))))
+    (should (equal (agent--branch-root "b" sessions) "b"))))
+
+(ert-deftest agent-test-branch-children-are-sorted-by-timestamp ()
+  "Order each parent's children oldest first."
+  (let* ((sessions (agent-test--branch-sessions
+                    '(("a" nil "2026-08-01T10:00:00Z")
+                      ("c" "a" "2026-08-01T12:00:00Z")
+                      ("b" "a" "2026-08-01T11:00:00Z"))))
+         (map (agent--branch-children-map sessions)))
+    (should (equal (gethash "a" map) '("b" "c")))))
+
+(ert-deftest agent-test-branch-tree-members-collect-every-descendant ()
+  "Collect the root and everything reachable from it."
+  (let* ((sessions (agent-test--branch-sessions
+                    '(("a" nil nil) ("b" "a" nil) ("c" "b" nil))))
+         (members (agent--branch-tree-members
+                   "a" (agent--branch-children-map sessions))))
+    (should (= (hash-table-count members) 3))
+    (should (gethash "c" members))))
+
+(ert-deftest agent-test-branch-format-tree-marks-the-current-session ()
+  "Draw the tree with connectors and a marker on the current session."
+  (let* ((sessions (make-hash-table :test #'equal)))
+    (puthash "a" '(:session-id "a" :forked-from nil :first-prompt "root"
+                   :timestamp nil)
+             sessions)
+    (puthash "b" '(:session-id "b" :forked-from "a" :first-prompt "child"
+                   :timestamp nil)
+             sessions)
+    (let* ((tree (agent--branch-format-tree
+                  "a" sessions (agent--branch-children-map sessions) "b")))
+      (should (equal (mapcar #'cdr tree) '("a" "b")))
+      (should (string-match-p "\\`root" (car (nth 0 tree))))
+      (should (string-match-p "└─ child" (car (nth 1 tree))))
+      (should (string-suffix-p " *" (car (nth 1 tree)))))))
+
+(ert-deftest agent-test-branch-enrich-sessions-uses-the-backend-slot ()
+  "Enrich only the tree members, through the backend's session-prompt slot."
+  (let ((agent-backends nil)
+        (headers (agent-test--branch-sessions '(("a" nil nil) ("b" "a" nil))))
+        (members (make-hash-table :test #'equal)))
+    (puthash "a" t members)
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore
+     :session-prompt (lambda (header)
+                       (append (list :first-prompt "enriched") header)))
+    (let ((enriched (agent--branch-enrich-sessions 'stub headers members)))
+      (should (= (hash-table-count enriched) 1))
+      (should (equal (plist-get (gethash "a" enriched) :first-prompt)
+                     "enriched"))
+      (should (equal (plist-get (gethash "a" enriched) :session-id) "a")))))
+
+(ert-deftest agent-test-branch-enrich-sessions-falls-back-to-identity ()
+  "Leave headers unchanged for a backend with no session-prompt slot.
+A future backend may track lineage without supplying prompt text; the
+enriched headers must still carry `:session-id' and `:forked-from' so
+the branch tree can be built from them."
+  (let* ((agent-backends nil)
+         (headers (agent-test--branch-sessions '(("a" nil nil) ("b" "a" nil))))
+         (members (make-hash-table :test #'equal)))
+    (puthash "a" t members)
+    (puthash "b" t members)
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore)
+    (let ((enriched (agent--branch-enrich-sessions 'stub headers members)))
+      (should (= (hash-table-count enriched) 2))
+      (should (equal (gethash "a" enriched) (gethash "a" headers)))
+      (should (equal (gethash "b" enriched) (gethash "b" headers)))
+      (should (equal (plist-get (gethash "b" enriched) :session-id) "b"))
+      (should (equal (plist-get (gethash "b" enriched) :forked-from) "a")))))
+
+(ert-deftest agent-test-confirm-kill-branches-honors-the-option ()
+  "Ask nothing when `agent-warn-kill-with-branches' is nil.
+The Claude-era option was defined and toggled but never read, so this
+is the behavior the toggle always claimed to have."
+  (let ((agent-backends nil)
+        (agent-warn-kill-with-branches nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-headers
+           (lambda (&rest _) (error "must not scan when the option is off")))
+          (should (agent--confirm-kill-branches buffer 'stub)))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-confirm-kill-branches-allows-a-lone-session ()
+  "Allow the kill without prompting when the session has no branches."
+  (let ((agent-backends nil)
+        (agent-warn-kill-with-branches t)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-headers
+           (lambda (_buf &optional _d)
+             (let ((table (make-hash-table :test #'equal)))
+               (puthash "a" '(:session-id "a" :forked-from nil) table)
+               table)))
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (&rest _) (error "must not prompt"))))
+            (should (agent--confirm-kill-branches buffer 'stub))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-confirm-kill-branches-prompts-with-a-count ()
+  "Prompt, naming how many branches the session has, and obey the answer."
+  (let ((agent-backends nil)
+        (agent-warn-kill-with-branches t)
+        (asked nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-headers
+           (lambda (_buf &optional _d)
+             (let ((table (make-hash-table :test #'equal)))
+               (puthash "a" '(:session-id "a" :forked-from nil) table)
+               (puthash "b" '(:session-id "b" :forked-from "a") table)
+               table)))
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (prompt) (setq asked prompt) nil)))
+            (should-not (agent--confirm-kill-branches buffer 'stub))
+            (should (string-match-p "1 branch" asked))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-confirm-kill-branches-counts-a-descendants-only-scan ()
+  "Count correctly when the scan omits the anchor's own header.
+A real bounded scan is free to return only the descendants of the id
+it was given; `agent--branch-tree-members' seeds itself with that id
+regardless, so the count must come out the same as when the anchor's
+own header is included."
+  (let ((agent-backends nil)
+        (agent-warn-kill-with-branches t)
+        (asked nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-headers
+           (lambda (_buf &optional _d)
+             (let ((table (make-hash-table :test #'equal)))
+               (puthash "b" '(:session-id "b" :forked-from "a") table)
+               table)))
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (prompt) (setq asked prompt) nil)))
+            (should-not (agent--confirm-kill-branches buffer 'stub))
+            (should (string-match-p "1 branch" asked))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-confirm-kill-branches-survives-a-broken-scan ()
+  "Allow the kill when the scan signals, rather than trapping the buffer."
+  (let ((agent-backends nil)
+        (agent-warn-kill-with-branches t)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-headers (lambda (&rest _) (error "boom")))
+          (should (agent--confirm-kill-branches buffer 'stub)))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-buffer-for-session-id-matches-the-session-struct ()
+  "Find the live buffer whose session struct carries the given id."
+  (let ((buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq-local agent--session
+                        (agent-session-create :backend 'stub :id "abc")))
+          (cl-letf (((symbol-function 'agent-session-buffers)
+                     (lambda () (list buffer))))
+            (should (eq (agent--buffer-for-session-id "abc") buffer))
+            (should-not (agent--buffer-for-session-id "zzz"))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-buffer-for-session-id-falls-back-to-backend-identity ()
+  "Find a freshly forked buffer whose struct id has not been noted yet.
+A forked session has not submitted anything, so `agent--note-session-id'
+has never run and the struct's id slot is still nil, even though the
+backend can report the real id directly."
+  (let ((agent-backends nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "fork-id"))
+          (with-current-buffer buffer
+            (setq-local agent--backend 'stub)
+            (setq-local agent--session (agent-session-create :backend 'stub)))
+          (cl-letf (((symbol-function 'agent-session-buffers)
+                     (lambda () (list buffer))))
+            (should (eq (agent--buffer-for-session-id "fork-id") buffer))
+            (should (equal (agent-session-id (agent-session buffer))
+                            "fork-id"))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-buffer-for-session-id-survives-a-broken-identity-lookup ()
+  "Keep searching past a buffer whose backend identity lookup signals.
+Claude's `session-identity' raises a `user-error' when the status file
+is missing or names no session id, deliberately, so the fallback must
+not let that abort the search for other buffers."
+  (let ((agent-backends nil)
+        (broken (generate-new-buffer " *agent-test-session-broken*"))
+        (found (generate-new-buffer " *agent-test-session-found*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity
+           (lambda (buf)
+             (if (eq buf broken)
+                 (user-error "No session id")
+               "fork-id")))
+          (dolist (buf (list broken found))
+            (with-current-buffer buf
+              (setq-local agent--backend 'stub)
+              (setq-local agent--session (agent-session-create :backend 'stub))))
+          (cl-letf (((symbol-function 'agent-session-buffers)
+                     (lambda () (list broken found))))
+            (should (eq (agent--buffer-for-session-id "fork-id") found))))
+      (kill-buffer broken)
+      (kill-buffer found))))
+
+(ert-deftest agent-test-switch-branch-refuses-a-lone-session ()
+  "Say so rather than opening a one-entry picker."
+  (let ((agent-backends nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p (lambda (buf) (eq buf buffer))
+           :find-all-buffers (lambda () (list buffer))
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "abc")
+           :session-headers
+           (lambda (_buf &optional _d)
+             (let ((table (make-hash-table :test #'equal)))
+               (puthash "abc" '(:session-id "abc" :forked-from nil) table)
+               table)))
+          (with-current-buffer buffer
+            (setq-local agent--backend 'stub)
+            (should-error (agent-switch-branch) :type 'user-error)))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-switch-branch-switches-to-a-live-branch ()
+  "Switch to the selected branch's existing buffer instead of resuming it."
+  (let ((agent-backends nil)
+        (parent (generate-new-buffer " *agent-test-parent*"))
+        (child (generate-new-buffer " *agent-test-child*"))
+        (switched nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer child
+            (setq-local agent--session
+                        (agent-session-create :backend 'stub :id "b")))
+          (agent-register-backend
+           'stub :buffer-p #'ignore
+           :find-all-buffers (lambda () (list parent child))
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-prompt (lambda (header)
+                             (append (list :first-prompt "p") header))
+           :session-headers
+           (lambda (_buf &optional _d)
+             (let ((table (make-hash-table :test #'equal)))
+               (puthash "a" '(:session-id "a" :forked-from nil) table)
+               (puthash "b" '(:session-id "b" :forked-from "a") table)
+               table)))
+          (cl-letf (((symbol-function 'consult--read)
+                     (lambda (candidates &rest _)
+                       (cl-find-if (lambda (c) (string-match-p "└─" c))
+                                   candidates)))
+                    ((symbol-function 'switch-to-buffer)
+                     (lambda (buf &rest _) (setq switched buf))))
+            (with-current-buffer parent
+              (setq-local agent--backend 'stub)
+              (agent-switch-branch))
+            (should (eq switched child))))
+      (kill-buffer parent)
+      (kill-buffer child))))
+
+(ert-deftest agent-test-create-branch-forks-the-current-session ()
+  "Fork the current session id through the backend's start-session slot."
+  (let ((agent-backends nil)
+        (buffer (generate-new-buffer " *agent-test-session*"))
+        (started nil))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers (lambda () (list buffer))
+           :start-session (lambda (session &rest options)
+                            (setq started (cons session options))
+                            buffer)
+           :session-identity (lambda (_buf) "abc-123"))
+          (with-current-buffer buffer
+            (setq-local agent--backend 'stub)
+            (agent-create-branch))
+          (should (equal (plist-get (cdr started) :resume-id) "abc-123"))
+          (should (plist-get (cdr started) :fork))
+          (should (string-prefix-p "branch-"
+                                   (agent-session-instance (car started)))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-create-branch-outside-a-session-errors ()
+  "Refuse to branch from a buffer that is not a session."
+  (with-temp-buffer
+    (should-error (agent-create-branch) :type 'user-error)))
+
+(defun agent-test--init-git-repo (dir)
+  "Initialize a git repository at DIR with one commit."
+  (let ((default-directory dir))
+    (call-process "git" nil nil nil "init" "-q")
+    (call-process "git" nil nil nil "config" "user.email" "test@example.com")
+    (call-process "git" nil nil nil "config" "user.name" "Test")
+    (write-region "x" nil (expand-file-name "README" dir))
+    (call-process "git" nil nil nil "add" "README")
+    (call-process "git" nil nil nil "commit" "-q" "-m" "init")))
+
+(ert-deftest agent-test-create-branch-removes-worktree-on-start-failure ()
+  "Remove the worktree and its branch when the fork fails to start.
+The worktree must not outlive a session that never started, and the
+original start-session error must still reach the caller rather than
+being masked by a cleanup error."
+  (let* ((agent-backends nil)
+         (repo (file-name-as-directory (make-temp-file "agent-branch-repo" t)))
+         (agent-branch-worktree-directory
+          (file-name-as-directory (make-temp-file "agent-branch-worktrees" t)))
+         (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-test--init-git-repo repo)
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers (lambda () (list buffer))
+           :start-session (lambda (&rest _) (error "boom"))
+           :session-identity (lambda (_buf) "abc-123"))
+          (with-current-buffer buffer
+            (setq default-directory repo)
+            (setq-local agent--backend 'stub)
+            (let ((err (should-error (agent-create-branch t) :type 'error)))
+              (should (equal (cadr err) "boom"))))
+          (should-not (directory-files agent-branch-worktree-directory nil
+                                       directory-files-no-dot-files-regexp))
+          (let ((branches
+                 (let ((default-directory repo))
+                   (with-temp-buffer
+                     (call-process "git" nil t nil "branch" "--list"
+                                   "agent-branch-*")
+                     (string-trim (buffer-string))))))
+            (should (string-empty-p branches))))
+      (kill-buffer buffer)
+      (delete-directory repo t)
+      (delete-directory agent-branch-worktree-directory t))))
+
+(ert-deftest agent-test-create-branch-removes-worktree-on-user-error ()
+  "Remove the worktree when the fork refuses to start with a `user-error'.
+A backend that rejects an unforkable session signals `user-error'
+rather than a plain `error' -- the cleanup and error propagation in
+`agent-create-branch' must treat it the same way, since `user-error'
+is itself a kind of `error' and nothing here should special-case it."
+  (let* ((agent-backends nil)
+         (repo (file-name-as-directory (make-temp-file "agent-branch-repo" t)))
+         (agent-branch-worktree-directory
+          (file-name-as-directory (make-temp-file "agent-branch-worktrees" t)))
+         (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-test--init-git-repo repo)
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers (lambda () (list buffer))
+           :start-session (lambda (&rest _) (user-error "not forkable yet"))
+           :session-identity (lambda (_buf) "abc-123"))
+          (with-current-buffer buffer
+            (setq default-directory repo)
+            (setq-local agent--backend 'stub)
+            (let ((err (should-error (agent-create-branch t)
+                                     :type 'user-error)))
+              (should (equal (cadr err) "not forkable yet"))))
+          (should-not (directory-files agent-branch-worktree-directory nil
+                                       directory-files-no-dot-files-regexp))
+          (let ((branches
+                 (let ((default-directory repo))
+                   (with-temp-buffer
+                     (call-process "git" nil t nil "branch" "--list"
+                                   "agent-branch-*")
+                     (string-trim (buffer-string))))))
+            (should (string-empty-p branches))))
+      (kill-buffer buffer)
+      (delete-directory repo t)
+      (delete-directory agent-branch-worktree-directory t))))
+
+(ert-deftest agent-test-prepare-fork-is-skipped-without-a-slot ()
+  "Do nothing when the backend registers no fork preparation."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore)
+    (should-not (agent--prepare-fork 'stub "abc" "/a/" "/b/"))))
+
+(ert-deftest agent-test-prepare-fork-calls-the-registered-slot ()
+  "Call a registered prepare-fork slot with id, source dir, target dir."
+  (let ((agent-backends nil)
+        (received nil))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore
+     :prepare-fork (lambda (session-id from-dir to-dir)
+                     (setq received (list session-id from-dir to-dir))))
+    (agent--prepare-fork 'stub "abc" "/a/" "/b/")
+    (should (equal received '("abc" "/a/" "/b/")))))
+
+(ert-deftest agent-test-resume-calls-the-backend-slot-with-the-prefix ()
+  "Hand the raw prefix argument to the backend's resume command."
+  (let ((agent-backends nil)
+        (received 'unset))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore
+     :resume (lambda (arg) (setq received arg)))
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'stub)))
+      (agent-resume '(4))
+      (should (equal received '(4))))))
+
+(ert-deftest agent-test-resume-without-a-slot-errors ()
+  "Say which backend cannot resume rather than failing obscurely."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore)
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'stub)))
+      (should-error (agent-resume nil) :type 'user-error))))
+
+;;;; Project session lookup
+
+(ert-deftest agent-test-session-buffer-for-project-uses-the-only-session ()
+  "Return the single session running in the project without prompting."
+  (let ((agent-backends nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers (lambda () (list buffer))
+           :start-session #'ignore
+           :find-buffers-for-dir (lambda (_dir) (list buffer)))
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+            (should (eq (agent--session-buffer-for-project) buffer))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-session-buffer-for-project-without-sessions-errors ()
+  "Say there is no session rather than returning nil into a submit call."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers (lambda () nil)
+     :start-session #'ignore
+     :find-buffers-for-dir (lambda (_dir) nil))
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+      (should-error (agent--session-buffer-for-project) :type 'user-error))))
+
+;;;; Account infix
+
+(ert-deftest agent-test-account-summary-lists-every-backend ()
+  "Show one backend per entry, sorted, with its current account."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'zeta :buffer-p #'ignore :find-all-buffers #'ignore :start-session #'ignore)
+    (agent-register-backend
+     'alpha :buffer-p #'ignore :find-all-buffers #'ignore :start-session #'ignore)
+    (cl-letf (((symbol-function 'agent-account-current)
+               (lambda (backend) (when (eq backend 'alpha) "work"))))
+      (should (equal (agent--account-summary) "alpha: work  zeta: default")))))
+
+(ert-deftest agent-test-account-infix-renders-summary-unquoted ()
+  "Render the account summary as plain text, not as a printed Lisp string."
+  (let ((obj (agent--account-variable)))
+    (oset obj value "alpha: work  zeta: default")
+    (let ((rendered (transient-format-value obj)))
+      (should (equal (substring-no-properties rendered)
+                     "alpha: work  zeta: default"))
+      (should-not (string-match-p "\"" rendered))
+      (should (eq (get-text-property 0 'face rendered) 'transient-value)))))
 
 (provide 'agent-test)
 ;;; agent-test.el ends here
