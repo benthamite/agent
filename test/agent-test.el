@@ -375,6 +375,24 @@ wider than its key and description together."
     (should (= (agent--switcher-column-width column)
                (length "A very wide heading")))))
 
+(ert-deftest agent-test-switcher-column-width-measures-childless-column ()
+  "Measure a column with no children as the width of its heading.
+The switcher's own Sessions column is childless in the static layout:
+its suffixes are added at setup time."
+  (let ((column (vector 'transient-column '(:description "Sessions") nil)))
+    (should (= (agent--switcher-column-width column) (length "Sessions")))))
+
+(ert-deftest agent-test-switcher-column-width-rejects-computed-heading ()
+  "Signal when a column heading is present but not a string.
+Transient permits a function there, whose width this arithmetic cannot
+measure; treating it as zero would understate the column."
+  (let ((column (vector 'transient-column
+                        '(:description ignore)
+                        '((transient-suffix :key "w"
+                                            :description "x"
+                                            :command ignore)))))
+    (should-error (agent--switcher-column-width column))))
+
 (ert-deftest agent-test-switcher-sessions-column-offset-clears-actions ()
   "Start the Sessions column two columns past the Actions column.
 The expected value is derived from the Actions column's own contents,
@@ -384,6 +402,19 @@ change in transient's layout representation breaks it loudly."
              (+ 2 (max (length "Actions")
                        (+ 2 1 (length "jump to waiting"))
                        (+ 2 1 (length "new session")))))))
+
+(ert-deftest agent-test-switcher-sessions-column-offset-requires-a-sessions-column ()
+  "Signal when no column of the layout is headed \"Sessions\".
+Summing every column instead would yield a plausible but wrong offset,
+and annotations narrower than the frame allows."
+  (cl-letf (((symbol-function 'agent--switcher-columns)
+             (lambda ()
+               (list (vector 'transient-column
+                             '(:description "Actions")
+                             '((transient-suffix :key "w"
+                                                 :description "jump to waiting"
+                                                 :command ignore)))))))
+    (should-error (agent--switcher-sessions-column-offset))))
 
 (ert-deftest agent-test-annotation-width-honors-max-width ()
   "Cap annotations at `agent-session-annotation-max-width' when set."
@@ -397,6 +428,15 @@ frame width minus the Sessions column offset, the three columns
 transient spends on \" k \", the padded label, and two trailing
 columns."
   (let ((agent-session-annotation-max-width nil))
+    (cl-letf (((symbol-function 'frame-width) (lambda (&optional _) 100)))
+      (should (= (agent--session-annotation-width 20)
+                 (- 100 (agent--switcher-sessions-column-offset) 3 20 2))))))
+
+(ert-deftest agent-test-annotation-width-caps-rather-than-overrides ()
+  "Never let `agent-session-annotation-max-width' widen an annotation.
+The option is a maximum, so a value larger than the frame fits yields
+the frame fit."
+  (let ((agent-session-annotation-max-width 500))
     (cl-letf (((symbol-function 'frame-width) (lambda (&optional _) 100)))
       (should (= (agent--session-annotation-width 20)
                  (- 100 (agent--switcher-sessions-column-offset) 3 20 2))))))
