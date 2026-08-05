@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Two repositories are touched. `agent`: `/Users/pablostafforini/.config/emacs-profiles/8.3.0-dev/elpaca/sources/agent`. `agent-log`: `/Users/pablostafforini/.config/emacs-profiles/8.3.0-dev/elpaca/sources/agent-log`. Every path below is relative to the repository named in the task.
-- `agent` must not require, load, or name `agent-log`. `agent-log` may name `agent`, but only inside `agent-log-agent.el`.
+- `agent` must acquire no load-time or build-time dependency on `agent-log`: nothing in `agent` may `require` it at load, and no new code may name it. The pre-existing `agent-history` command, which soft-requires `agent-log` on demand and signals a clear error when it is absent (agent.el:2867), is the established exception and is not to be "fixed" to satisfy this rule. `agent-log` may name `agent`, but only inside `agent-log-agent.el`.
 - Emacs floors: `agent` requires Emacs 30.0, `agent-log` requires Emacs 29.1.
 - No silent fallbacks. If a helper cannot compute its answer, let the error surface; do not substitute a plausible default and carry on.
 - Every new function and variable gets a docstring whose first line is a complete sentence in the imperative or declarative style used by its neighbours.
