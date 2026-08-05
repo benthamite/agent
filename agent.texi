@@ -199,6 +199,7 @@ The global minor modes @code{agent-claude-mode} and @code{agent-codex-mode} own 
 @vindex agent-prompt-capture-auto-save-delay
 @vindex agent-sync-theme
 @vindex agent-sigwinch-delay
+@vindex agent-session-annotation-max-width
 The user option @code{agent-protect-buffers} is a boolean that defaults to @code{t}. When enabled, killing a live AI session buffer prompts for confirmation through @code{agent-protect-buffer}. Buffers whose processes have already exited are allowed to die without the prompt.
 
 The user option @code{agent-alert-on-ready} is a boolean that defaults to @code{nil}. When enabled, backend notification handlers can call @code{agent-notify} to emit visual and/or audible alerts when a session is waiting for input. Codex's own terminal-bell notification path is routed through the same alert setting. @code{agent-alert-style} selects @code{visual}, @code{sound}, or @code{both}; it defaults to @code{both}. @code{agent-alert-sound} defaults to @code{nil}; set it to a sound file to enable sound alerts. @code{agent-alert-sound-player} optionally names an external sound player when Emacs sound support is unavailable.
@@ -214,6 +215,8 @@ The user option @code{agent-prompt-capture-directory} controls where @code{agent
 The user option @code{agent-sync-theme} is a boolean that defaults to @code{nil}. When enabled, theme changes in Emacs are persisted through each registered backend's theme-sync handler. This updates configuration files for new or restarted CLI sessions without sending theme commands into active terminal conversations.
 
 The user option @code{agent-sigwinch-delay} is a number of seconds and defaults to @samp{0.5}. It controls how long @code{agent-fix-rendering} waits before sending @samp{SIGWINCH} to a terminal process. Increase it if an AI CLI reads the terminal size before the @samp{eat} window has settled.
+
+The user option @code{agent-session-annotation-max-width} caps the width of session annotations in the session switcher (@ref{Shared commands}). It defaults to @code{nil}, which applies no cap beyond the fit to the frame. An integer narrows annotations to at most that many columns; it never widens them past what the frame holds, since the frame fit applies either way. Text longer than the resulting width is truncated with an ellipsis.
 
 Snippet helpers use @samp{yasnippet} and @samp{consult-yasnippet} only when those optional packages are loaded.
 
@@ -338,6 +341,16 @@ The command @code{agent-history}, bound to @samp{l} in the Sessions column, open
 In EAT-backed Claude and Codex session buffers, @code{agent-setup-scroll-keys} makes PageUp and PageDown send terminal mouse-wheel events, matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window.
 
 The command @code{agent-start-or-switch} is the main entry point. If no sessions exist, it starts a new session through the selected backend. If sessions already exist, it opens the session switcher. Sessions receive stable home-row keys where possible and display backend icons next to their labels.
+
+@vindex agent-session-annotation-function
+Sessions can also carry a one-line annotation after their name, shown dimmed in the @code{agent-session-annotation} face. The text comes from @code{agent-session-annotation-function}, which holds a single function (not a list): it is called with a session buffer and returns a string, or @code{nil} for no annotation. @samp{agent} renders whatever it returns and knows nothing about where the text comes from. Whitespace in the answer is collapsed to single spaces, so a multi-line answer cannot break the menu's layout, and an answer that is blank or not a string counts as no annotation. Sessions without an annotation — including sessions the function declines to annotate — render exactly as they did before annotations existed. The default is @code{nil}, which shows session names alone; Agent Log installs a function that supplies each session's stored one-line summary (@uref{https://github.com/benthamite/agent-log, agent-log}), and with no such integration loaded the switcher looks unchanged.
+
+Annotations line up in one column across every account group: the labels of annotated sessions are padded to the widest of those labels, measured in display columns, so a name containing double-width characters does not push its annotation to the right. Sessions without an annotation are left unpadded.
+
+@vindex agent-session-annotation-max-width
+Annotations are truncated with an ellipsis to fit the switcher window, which is as wide as the frame. The fit subtracts everything the line spends around the annotation: the columns to the left of the Sessions column, the key and the padding transient formats a suffix with, the padded label, one separator column, and a two-column right margin. A frame too narrow for that budget yields a short annotation rather than none, since the fit never drops below twenty columns. Setting @code{agent-session-annotation-max-width} to an integer caps the result (@ref{Shared session behavior}); it can only narrow an annotation, never widen it past what the frame holds.
+
+A function installed in @code{agent-session-annotation-function} must be cheap and free of side effects: building the switcher calls it more than once per session, because aligning the annotations needs every label's width before any label is final. Reading a value from memory is appropriate; reading a file or contacting a process is not.
 
 The command @code{agent-run-skill} discovers skills from every loaded backend that implements skill discovery. It disambiguates same-named skills by backend label, prompts for declared arguments when a skill frontmatter requests them, and dispatches the invocation to the selected backend. Claude and Codex backends scan global and project-local programmatic skill directories, using both @code{project-current} and nearby tool directories as project-root signals, so batch-only skills can be run from this command without being loaded into ordinary interactive agent sessions.
 
