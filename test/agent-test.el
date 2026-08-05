@@ -574,6 +574,17 @@ so a costly provider installed behind a cheap one is not paid for."
         (should (<= (string-width annotation) 10))
         (should (string-suffix-p (truncate-string-ellipsis) annotation))))))
 
+(ert-deftest agent-test-zero-width-cap-leaves-the-label-bare ()
+  "Render the bare label when the width cap leaves no room at all.
+A cap of zero is a legal `natnum', and spending padding and a
+separator on an empty annotation would render a label with trailing
+whitespace and nothing after it."
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) "A summary with nowhere to go")))
+        (agent-session-annotation-max-width 0))
+    (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+      (should (equal (agent--session-label buf 20) "project")))))
+
 (ert-deftest agent-test-session-annotations-align-across-accounts ()
   "Start every annotation at one column, across all account groups."
   (let ((agent-backends nil)

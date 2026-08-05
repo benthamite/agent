@@ -638,7 +638,9 @@ Annotations are always fitted to the switcher window, which is as wide
 as the frame.  An integer narrows them further, to at most that many
 columns; it never widens them past what the frame holds.  Nil applies
 no cap beyond the frame fit.  Annotations longer than the available
-width are truncated with an ellipsis."
+width are truncated with an ellipsis.  Zero leaves no room at all, so
+every session renders as the bare label it would have without an
+annotation."
   :type '(choice (const :tag "Fit the frame" nil)
                  (natnum :tag "Columns"))
   :group 'agent)
@@ -1134,21 +1136,24 @@ and an answer that is blank or not a string counts as no annotation."
 (defun agent--session-label (buffer pad)
   "Return BUFFER's switcher label, annotated and padded to PAD columns.
 Sessions without an annotation keep the bare label they had before
-annotations existed, with no trailing padding.  PAD counts display
-columns, as `agent--session-label-pad' measures them, so a name
-containing double-width characters lines up with the rest; padding it
-to a character count would push its annotation to the right."
-  (let ((base (agent--session-label-base buffer))
-        (annotation (agent--session-annotation buffer)))
-    (if (not annotation)
+annotations existed, with no trailing padding.  A session whose
+annotation has no room left to it renders the same way, since padding
+and a separator around nothing is not a label anyone asked for; that
+happens when `agent-session-annotation-max-width' caps the width at
+zero.  PAD counts display columns, as `agent--session-label-pad'
+measures them, so a name containing double-width characters lines up
+with the rest; padding it to a character count would push its
+annotation to the right."
+  (let* ((base (agent--session-label-base buffer))
+         (annotation (agent--session-annotation buffer))
+         (width (and annotation (agent--session-annotation-width pad))))
+    (if (or (not annotation) (<= width 0))
         base
       (concat base
               (make-string (max 0 (- pad (string-width base))) ?\s)
               " "
               (propertize (truncate-string-to-width
-                           annotation
-                           (agent--session-annotation-width pad)
-                           nil nil t)
+                           annotation width nil nil t)
                           'face 'agent-session-annotation)))))
 
 (defun agent--session-label-pad ()
