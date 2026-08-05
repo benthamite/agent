@@ -229,7 +229,6 @@ Source: lobehub/lobe-icons (MIT).")
   :start-session #'agent-claude--start-session
   :session-identity #'agent-claude--session-identity
   :sync-theme #'agent-claude--sync-theme
-  :menu-suffixes #'agent-claude--menu-suffixes
   :session-headers #'agent-claude--session-headers
   :session-prompt #'agent-claude--session-prompt
   :prepare-fork #'agent-claude--prepare-fork
@@ -1926,31 +1925,6 @@ Signals an error if the status file is missing or incomplete."
       (user-error "No status file; is status polling enabled?"))
     (or (plist-get status :session_id)
         (user-error "Status file missing session_id"))))
-
-;;;; Extend unified menu
-
-(transient-define-infix agent-claude--infix-warn-kill-with-branches ()
-  "Toggle `agent-claude-warn-kill-with-branches'."
-  :class 'agent--boolean-variable
-  :variable 'agent-claude-warn-kill-with-branches
-  :description "warn kill with branches")
-
-(transient-define-infix agent-claude--infix-account ()
-  "Select the active Claude account."
-  :class 'agent-account-variable
-  :backend 'claude-code
-  :description "claude account")
-
-(defun agent-claude--menu-suffixes ()
-  "Return Claude Code suffix specs for the unified agent menu."
-  '(("B" "switch branch" agent-claude-switch-branch)
-    ("N" "new branch" agent-claude-create-branch)
-    ("b" "batch todos" agent-claude-batch-todos)
-    ("t" "send todo at point" agent-claude-send-todo-at-point)
-    ("u" "start status polling" agent-claude-start-status-polling)
-    ("U" "stop status polling" agent-claude-stop-status-polling)
-    ("-c" agent-claude--infix-account)
-    ("-w" agent-claude--infix-warn-kill-with-branches)))
 
 ;;;; Minor mode
 

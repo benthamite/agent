@@ -2539,13 +2539,37 @@ timestamp."
         (agent--session-teardown (current-buffer)))
       (should ran))))
 
-(ert-deftest agent-test-menu-backend-children ()
-  "Backend menu sections are built from registry slots."
-  (require 'agent-claude)
-  (require 'agent-codex)
-  (let ((children (agent-menu--backend-children nil)))
-    (should children)
-    (should (= (length children) 2))))
+(defun agent-test--menu-keys ()
+  "Return every key bound in `agent-menu', flattened.
+Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
+\(CLASS . PLIST), so a key lives in the cdr of a suffix node."
+  (let ((keys nil))
+    (letrec ((walk (lambda (node)
+                     (cond
+                      ((vectorp node) (mapc walk (append node nil)))
+                      ((consp node)
+                       (when-let* ((key (plist-get (cdr node) :key)))
+                         (push key keys))
+                       (mapc walk node))))))
+      (funcall walk (get 'agent-menu 'transient--layout)))
+    (nreverse keys)))
+
+(ert-deftest agent-test-menu-has-no-backend-column ()
+  "Build the whole menu statically, with no per-backend group."
+  (should-not (fboundp 'agent-menu--backend-children))
+  (should-not (fboundp 'agent-menu--backend-column))
+  (should-not (memq 'menu-suffixes
+                    (mapcar #'car (cdr (cl-struct-slot-info 'agent-backend))))))
+
+(ert-deftest agent-test-menu-binds-the-unified-commands ()
+  "Bind every unified session command in the static layout."
+  (let ((keys (agent-test--menu-keys)))
+    (dolist (key '("R" "N" "B" "b" "t" "-c" "-w"))
+      (should (member key keys)))
+    (should-not (member "F" keys))
+    (should-not (member "u" keys))
+    (should-not (member "U" keys))
+    (should-not (member "-x" keys))))
 
 (ert-deftest agent-test-menu-slack-command-is-autoloaded ()
   "Source-loaded core menu references an available Slack command."
@@ -2885,6 +2909,16 @@ is the behavior the toggle always claimed to have."
     (cl-letf (((symbol-function 'agent-account-current)
                (lambda (backend) (when (eq backend 'alpha) "work"))))
       (should (equal (agent--account-summary) "alpha: work  zeta: default")))))
+
+(ert-deftest agent-test-account-infix-renders-summary-unquoted ()
+  "Render the account summary as plain text, not as a printed Lisp string."
+  (let ((obj (agent--account-variable)))
+    (oset obj value "alpha: work  zeta: default")
+    (let ((rendered (transient-format-value obj)))
+      (should (equal (substring-no-properties rendered)
+                     "alpha: work  zeta: default"))
+      (should-not (string-match-p "\"" rendered))
+      (should (eq (get-text-property 0 'face rendered) 'transient-value)))))
 
 (provide 'agent-test)
 ;;; agent-test.el ends here

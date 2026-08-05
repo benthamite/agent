@@ -135,7 +135,7 @@ such as handoff-driven autoloops.")
   account-init
   run-prompt exec-prompt skill-roots skill-command-prefix
   session-headers session-prompt prepare-fork
-  sync-theme menu-suffixes
+  sync-theme
   before-exit-ready-to-close-p before-kill-check)
 
 (defvar agent-backends nil
@@ -761,6 +761,8 @@ Only `agent-session-event' may set this variable.")
 (declare-function find-library-name "find-func")
 (declare-function project-root "project" (project))
 (declare-function agent-log-menu "agent-log" ())
+(declare-function agent-batch-todos "agent-todo" ())
+(declare-function agent-send-todo-at-point "agent-todo" ())
 (declare-function agent-capture-confirm-no-pending "agent-capture"
                   (backend buffer action))
 (declare-function consult--read "consult" (table &rest options))
@@ -2969,6 +2971,13 @@ only when the context does not name one."))
     (agent-account-sync (oref obj backend) value))
   (oset obj value (agent--account-summary)))
 
+(cl-defmethod transient-format-value ((obj agent--account-variable))
+  "Render OBJ's account summary as plain text.
+The inherited method prints the value with `prin1-to-string', which
+wraps this whole line in double quotes and makes the per-backend
+accounts harder to read at a glance."
+  (propertize (format "%s" (oref obj value)) 'face 'transient-value))
+
 (transient-define-infix agent--infix-account ()
   "Select the account of the current or prompted backend."
   :class 'agent--account-variable
@@ -3288,6 +3297,9 @@ when it is not installed."
   [["Sessions"
     ("e" "start or switch" agent-start-or-switch)
     ("w" "jump to waiting" agent-jump-to-waiting)
+    ("R" "resume" agent-resume)
+    ("N" "new branch" agent-create-branch)
+    ("B" "switch branch" agent-switch-branch)
     ("h" "handoff" agent-handoff)
     ("x" "exit session" agent-exit)
     ("r" "restart" agent-restart)
@@ -3310,33 +3322,15 @@ when it is not installed."
     ("T" "toggle alert" agent-toggle-alert)]
    ["Prompts"
     ("p" "capture prompt" agent-capture-prompt)
-    ("i" "insert prompt" agent-insert-captured-prompt)]
+    ("i" "insert prompt" agent-insert-captured-prompt)
+    ("b" "batch todos" agent-batch-todos)
+    ("t" "send todo at point" agent-send-todo-at-point)]
    ["Options"
     ("-A" agent--infix-alert-on-ready)
     ("-p" agent--infix-protect-buffers)
-    ("-t" agent--infix-sync-theme)]]
-  [:class transient-columns
-   :setup-children agent-menu--backend-children])
-
-(defun agent-menu--backend-children (_)
-  "Build one menu column per registered backend from its menu-suffixes slot."
-  (transient-parse-suffixes
-   'agent-menu
-   (apply #'vector
-          (delq nil (mapcar (lambda (entry)
-                              (agent-menu--backend-column (cdr entry)))
-                            (agent-menu--sorted-backends))))))
-
-(defun agent-menu--sorted-backends ()
-  "Return `agent-backends' sorted by name, independent of load order."
-  (sort (copy-sequence agent-backends)
-        (lambda (a b) (string< (car a) (car b)))))
-
-(defun agent-menu--backend-column (backend)
-  "Return a transient column vector for BACKEND, or nil when it has no suffixes."
-  (when-let* ((fn (agent-backend-menu-suffixes backend))
-              (specs (funcall fn)))
-    (apply #'vector (agent-backend-label backend) specs)))
+    ("-t" agent--infix-sync-theme)
+    ("-c" agent--infix-account)
+    ("-w" agent--infix-warn-kill-with-branches)]])
 
 (transient-define-infix agent--infix-alert-on-ready ()
   "Toggle `agent-alert-on-ready'."
@@ -3366,6 +3360,12 @@ when it is not installed."
   :class 'agent--sync-theme-variable
   :variable 'agent-sync-theme
   :description "sync theme")
+
+(transient-define-infix agent--infix-warn-kill-with-branches ()
+  "Toggle `agent-warn-kill-with-branches'."
+  :class 'agent--boolean-variable
+  :variable 'agent-warn-kill-with-branches
+  :description "warn kill with branches")
 
 (add-hook 'enable-theme-functions #'agent-sync-theme)
 (add-hook 'agent-before-exit-functions #'agent-run-skill-before-exit)

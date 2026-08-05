@@ -170,7 +170,6 @@ Source: SVG Repo (CC0).")
   :sync-theme #'agent-codex--sync-theme
   :session-headers #'agent-codex--session-headers
   :session-prompt #'agent-codex--session-prompt
-  :menu-suffixes #'agent-codex--menu-suffixes
   :resume #'codex-resume)
 
 ;;;; Functions
@@ -854,22 +853,6 @@ the Emacs side to match Claude Code's behavior."
   "Register core session teardown for a freshly started Codex session."
   (when (codex--buffer-p (current-buffer))
     (agent--install-session-teardown)))
-
-;;;;; Account menu infix
-
-(transient-define-infix agent-codex--infix-account ()
-  "Select the active Codex account."
-  :class 'agent-account-variable
-  :backend 'codex
-  :description "codex account")
-
-;;;;; Extend unified menu
-
-(defun agent-codex--menu-suffixes ()
-  "Return Codex suffix specs for the unified agent menu."
-  '(("R" "codex resume" agent-codex-resume)
-    ("F" "codex fork" agent-codex-fork)
-    ("-x" agent-codex--infix-account)))
 
 ;;;;; Session headers
 
