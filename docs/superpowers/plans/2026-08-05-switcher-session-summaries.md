@@ -146,14 +146,18 @@ than the available width are truncated with an ellipsis."
 In `agent.el`, in the "Session switcher" section, immediately before `agent--session-suffix-spec`:
 
 ```elisp
-(defconst agent--switcher-key-column-width 3
-  "Columns transient spends on a suffix key before its description.
-A suffix is formatted as \" %k %d\", and session keys are one
-character wide.")
+(defconst agent--switcher-suffix-padding 2
+  "Columns a transient suffix spends beyond its key and description.
+Transient formats a suffix as \" %k %d\": one leading space and one
+separator.")
 
 (defconst agent--switcher-column-padding 2
   "Columns transient leaves between adjacent menu columns.
 Matches the padding `transient--column-stops' adds between columns.")
+
+(defconst agent--switcher-session-key-width 1
+  "Display width of a session key in the switcher.
+Every key in `agent--session-key-pool' is one character wide.")
 
 (defun agent--switcher-columns ()
   "Return the column vectors of the session switcher's layout."
@@ -169,7 +173,7 @@ of its suffixes formatted as \" KEY DESCRIPTION\"."
     (apply #'max
            (if (stringp heading) (string-width heading) 0)
            (mapcar (lambda (suffix)
-                     (+ agent--switcher-key-column-width -1
+                     (+ agent--switcher-suffix-padding
                         (string-width (or (plist-get (cdr suffix) :key) ""))
                         (string-width (or (plist-get (cdr suffix) :description)
                                           ""))))
@@ -199,12 +203,11 @@ than none."
   (or agent-session-annotation-max-width
       (max 20 (- (frame-width)
                  (agent--switcher-sessions-column-offset)
-                 agent--switcher-key-column-width
+                 agent--switcher-suffix-padding
+                 agent--switcher-session-key-width
                  pad
                  2))))
 ```
-
-Note on `agent--switcher-column-width`: the `+ 2` of transient's `" %k %d"` format is written as `agent--switcher-key-column-width` minus one, because both constants describe the same two leading spaces plus one separator; keeping one source for them means a future change to the format is a one-line edit.
 
 - [ ] **Step 5: Run the tests and watch them pass**
 
