@@ -933,23 +933,72 @@ decoded once, so a chunk boundary cannot split a character."
 (defun agent-codex--read-session-header (file dir)
   "Return a header plist for rollout FILE when its session ran in DIR.
 Return nil for files from another directory, for subagent threads, and
-for files that cannot be read or parsed.  Only the first line, which
-holds the `session_meta' record, is read.  The error guard sits in
-`agent-codex--read-session-meta' and covers that read alone, so a fault
-in the extraction below signals instead of passing for a session that
-simply is not there."
+for files that cannot be read or parsed."
+  (when-let* ((header (agent-codex--rollout-header file)))
+    (when (and (not (equal (plist-get header :thread-source) "subagent"))
+               (agent-codex--same-directory-p (plist-get header :cwd) dir))
+      header)))
+
+(defconst agent-codex--rollout-header-cache-limit 4096
+  "Entries `agent-codex--rollout-header-cache' holds before it is emptied.
+A full scan of a large session store caches a few thousand small
+plists.  Emptying the table wholesale past this point bounds what a
+long-running Emacs accumulates without the bookkeeping an eviction
+order would need, and the next scan refills it.")
+
+(defvar agent-codex--rollout-header-cache (make-hash-table :test #'equal)
+  "Map from rollout file path to (MTIME . HEADER) for parsed headers.
+HEADER is what `agent-codex--parse-rollout-header' returned when the
+file was last modified at MTIME.  A rollout's opening `session_meta'
+record is written once and never rewritten, so the parse stays valid
+until the file changes -- and a session still appending to its own
+rollout is the one file whose header is read again.")
+
+(defun agent-codex--rollout-header (file)
+  "Return the header plist parsed from rollout FILE, or nil.
+The parse is memoized on FILE's modification time, so scanning the same
+store twice costs a stat per file rather than a read and a JSON parse.
+A file whose modification time cannot be read is parsed without being
+cached, since there is nothing to invalidate the entry against."
+  (let ((mtime (file-attribute-modification-time (file-attributes file))))
+    (or (agent-codex--cached-rollout-header file mtime)
+        (when-let* ((header (agent-codex--parse-rollout-header file)))
+          (agent-codex--cache-rollout-header file mtime header)
+          header))))
+
+(defun agent-codex--cached-rollout-header (file mtime)
+  "Return the header cached for FILE when it was parsed at MTIME."
+  (when-let* ((mtime)
+              (entry (gethash file agent-codex--rollout-header-cache))
+              ((time-equal-p (car entry) mtime)))
+    (cdr entry)))
+
+(defun agent-codex--cache-rollout-header (file mtime header)
+  "Cache HEADER as the header FILE had when last modified at MTIME."
+  (when mtime
+    (when (> (hash-table-count agent-codex--rollout-header-cache)
+             agent-codex--rollout-header-cache-limit)
+      (clrhash agent-codex--rollout-header-cache))
+    (puthash file (cons mtime header) agent-codex--rollout-header-cache)))
+
+(defun agent-codex--parse-rollout-header (file)
+  "Return the header plist read from rollout FILE, or nil.
+Only the first line, which holds the `session_meta' record, is read.
+The error guard sits in `agent-codex--read-session-meta' and covers that
+read alone, so a fault in the extraction below signals instead of
+passing for a session that simply is not there."
   (when-let* ((json (agent-codex--read-session-meta file))
               (payload (plist-get json :payload))
               (id (agent-codex--session-id-from-file file)))
     (let ((parent (plist-get payload :forked_from_id)))
-      (when (and (not (equal (plist-get payload :thread_source) "subagent"))
-                 (agent-codex--same-directory-p (plist-get payload :cwd) dir))
-        (list :session-id id
-              :forked-from (and (stringp parent)
-                                (not (equal parent id))
-                                parent)
-              :timestamp (plist-get payload :timestamp)
-              :file-path file)))))
+      (list :session-id id
+            :forked-from (and (stringp parent)
+                              (not (equal parent id))
+                              parent)
+            :thread-source (plist-get payload :thread_source)
+            :cwd (plist-get payload :cwd)
+            :timestamp (plist-get payload :timestamp)
+            :file-path file))))
 
 (defun agent-codex--read-session-meta (file)
   "Return the parsed `session_meta' record opening rollout FILE, or nil.
@@ -992,15 +1041,45 @@ nil, because the backend slot promises a hash table.  DESCENDANTS-OF is
 a session id that bounds the scan to rollouts started no earlier than
 that session's own.  A fork always starts after its parent, so the bound
 still reaches the whole subtree below it, and it spares the caller a
-read of every rollout on disk.  An anchor whose rollout cannot be found
-leaves the scan unbounded, which is slow but never silently empty."
+read of every rollout on disk.  Without DESCENDANTS-OF the bound comes
+from the root of BUFFER's own fork family, which reaches every member of
+that family for the same reason.  An anchor whose rollout cannot be
+found, and a family whose root cannot be established, leave the scan
+unbounded: slow, but never silently partial."
   (if (not (buffer-live-p buffer))
       (make-hash-table :test #'equal)
-    (let ((dir (with-current-buffer buffer default-directory))
-          (since (when-let* ((id descendants-of)
-                             (file (codex--find-session-transcript id)))
-                   (agent-codex--session-start-timestamp file))))
+    (let* ((dir (with-current-buffer buffer default-directory))
+           (file (if descendants-of
+                     (codex--find-session-transcript descendants-of)
+                   (when-let* ((id (agent-codex--session-identity buffer)))
+                     (agent-codex--fork-family-root-file id))))
+           (since (when file (agent-codex--session-start-timestamp file))))
       (agent-codex--scan-session-headers dir since))))
+
+(defun agent-codex--fork-family-root-file (session-id)
+  "Return the rollout file of the fork family SESSION-ID belongs to.
+Climb the `forked_from_id' chain a file at a time -- fork chains run a
+few links long, and each link costs one header read -- and return the
+rollout of the topmost ancestor.  Return nil whenever the chain cannot
+be followed all the way up: when an ancestor's rollout is missing or
+unreadable, or when a corrupt `forked_from_id' points back into its own
+ancestry.  A half-climbed chain is no answer, because the ancestor that
+stopped it can have other children older than anything the climb saw."
+  (let ((id session-id)
+        (seen (make-hash-table :test #'equal))
+        (file nil))
+    (catch 'done
+      (while id
+        (when (gethash id seen)
+          (throw 'done nil))
+        (puthash id t seen)
+        (let* ((found (or (codex--find-session-transcript id)
+                          (throw 'done nil)))
+               (header (or (agent-codex--rollout-header found)
+                           (throw 'done nil))))
+          (setq file found
+                id (plist-get header :forked-from))))
+      file)))
 
 (defun agent-codex--user-prompt-from-line (line)
   "Return the human prompt text in rollout LINE, or nil."

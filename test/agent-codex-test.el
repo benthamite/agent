@@ -1348,6 +1348,255 @@ Narrowing the error guard must still tolerate malformed input on disk."
             (should (gethash id headers))))
       (delete-directory root t))))
 
+;;;; Fork family bound
+
+(defun agent-codex-test--session-id (suffix)
+  "Return a UUID-shaped session id ending in SUFFIX.
+SUFFIX is three hex characters, which is enough to tell one fixture
+session from another while keeping the id shaped like the real thing."
+  (concat "019fd19c-44b9-7042-93b6-e4f7e2103" suffix))
+
+(defun agent-codex-test--write-fork-family (dir)
+  "Write a five-session fork fixture under DIR and return its session ids.
+The ids come back as (ROOT CHILD CURRENT SIBLING STRANGER).  CURRENT
+forks CHILD, CHILD and SIBLING fork ROOT, and STRANGER started before
+ROOT and belongs to no family.  Every session records DIR as its
+working directory, so a scan of DIR keeps them all."
+  (let ((root (agent-codex-test--session-id "aaa"))
+        (child (agent-codex-test--session-id "bbb"))
+        (current (agent-codex-test--session-id "ccc"))
+        (sibling (agent-codex-test--session-id "ddd"))
+        (stranger (agent-codex-test--session-id "eee")))
+    (agent-codex-test--write-rollout
+     dir root `((cwd . ,dir)) nil "2026-08-05T08-00-00")
+    (agent-codex-test--write-rollout
+     dir child `((cwd . ,dir) (forked_from_id . ,root))
+     nil "2026-08-05T09-00-00")
+    (agent-codex-test--write-rollout
+     dir current `((cwd . ,dir) (forked_from_id . ,child))
+     nil "2026-08-05T10-00-00")
+    (agent-codex-test--write-rollout
+     dir sibling `((cwd . ,dir) (forked_from_id . ,root))
+     nil "2026-08-05T08-30-00")
+    (agent-codex-test--write-rollout
+     dir stranger `((cwd . ,dir)) nil "2026-08-01T00-00-00")
+    (list root child current sibling stranger)))
+
+(defun agent-codex-test--branch-members (session-id headers)
+  "Return the sorted ids of SESSION-ID's branch family within HEADERS."
+  (sort (hash-table-keys
+         (agent--branch-tree-members
+          (agent--branch-root session-id headers)
+          (agent--branch-children-map headers)))
+        #'string<))
+
+(ert-deftest agent-codex-test-session-headers-bound-by-the-fork-family-root ()
+  "Bound an unanchored scan by the root of the buffer's own fork family.
+The current session sits two forks below that root, so the walk has to
+climb twice to find it.  Every member of a family starts at or after
+its root, so the bound keeps the whole family while dropping the rest
+of a session store that holds thousands of unrelated rollouts."
+  (let* ((dir (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory dir)
+         (codex--transcript-file-cache (make-hash-table :test #'equal))
+         (agent-codex--rollout-header-cache (make-hash-table :test #'equal))
+         (ids (agent-codex-test--write-fork-family dir))
+         (current (nth 2 ids))
+         (buffer (generate-new-buffer " *codex-headers*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq default-directory (file-name-as-directory dir)))
+          (cl-letf (((symbol-function 'codex-session-identity)
+                     (lambda (&optional _buffer) (list :session-id current))))
+            (let ((headers (agent-codex--session-headers buffer)))
+              (should (gethash (nth 0 ids) headers))
+              (should (gethash (nth 1 ids) headers))
+              (should (gethash current headers))
+              (should (gethash (nth 3 ids) headers))
+              (should-not (gethash (nth 4 ids) headers)))))
+      (kill-buffer buffer)
+      (delete-directory dir t))))
+
+(ert-deftest agent-codex-test-session-headers-family-matches-a-full-scan ()
+  "Return the family a full scan of the store would have produced.
+The bound is an optimization, so the tree the user navigates has to be
+identical to the one an unbounded scan builds."
+  (let* ((dir (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory dir)
+         (codex--transcript-file-cache (make-hash-table :test #'equal))
+         (agent-codex--rollout-header-cache (make-hash-table :test #'equal))
+         (ids (agent-codex-test--write-fork-family dir))
+         (current (nth 2 ids))
+         (buffer (generate-new-buffer " *codex-headers*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq default-directory (file-name-as-directory dir)))
+          (cl-letf (((symbol-function 'codex-session-identity)
+                     (lambda (&optional _buffer) (list :session-id current))))
+            (let ((bounded (agent-codex-test--branch-members
+                            current (agent-codex--session-headers buffer)))
+                  (full (agent-codex-test--branch-members
+                         current
+                         (agent-codex--scan-session-headers
+                          (file-name-as-directory dir)))))
+              (should (equal bounded full))
+              (should (= (length bounded) 4)))))
+      (kill-buffer buffer)
+      (delete-directory dir t))))
+
+(ert-deftest agent-codex-test-session-headers-survive-a-fork-cycle ()
+  "Scan everything when the fork chain loops back into itself.
+A corrupt `forked_from_id' can name a session further down its own
+ancestry.  The climb has to stop, and a bound taken from inside the
+loop could hide members older than the loop, so the scan widens."
+  (let* ((dir (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory dir)
+         (codex--transcript-file-cache (make-hash-table :test #'equal))
+         (agent-codex--rollout-header-cache (make-hash-table :test #'equal))
+         (current (agent-codex-test--session-id "aaa"))
+         (parent (agent-codex-test--session-id "bbb"))
+         (stranger (agent-codex-test--session-id "eee"))
+         (buffer (generate-new-buffer " *codex-headers*")))
+    (unwind-protect
+        (progn
+          (agent-codex-test--write-rollout
+           dir current `((cwd . ,dir) (forked_from_id . ,parent))
+           nil "2026-08-05T09-00-00")
+          (agent-codex-test--write-rollout
+           dir parent `((cwd . ,dir) (forked_from_id . ,current))
+           nil "2026-08-05T08-00-00")
+          (agent-codex-test--write-rollout
+           dir stranger `((cwd . ,dir)) nil "2026-08-01T00-00-00")
+          (with-current-buffer buffer
+            (setq default-directory (file-name-as-directory dir)))
+          (cl-letf (((symbol-function 'codex-session-identity)
+                     (lambda (&optional _buffer) (list :session-id current))))
+            (let ((headers (agent-codex--session-headers buffer)))
+              (should (gethash current headers))
+              (should (gethash parent headers))
+              (should (gethash stranger headers)))))
+      (kill-buffer buffer)
+      (delete-directory dir t))))
+
+(ert-deftest agent-codex-test-session-headers-unbounded-without-a-session-id ()
+  "Scan everything when the buffer's own session id is not known yet.
+A session that has not reported its id has no family to bound by, and
+an empty branch tree would be worse than a slow one."
+  (let* ((dir (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory dir)
+         (codex--transcript-file-cache (make-hash-table :test #'equal))
+         (agent-codex--rollout-header-cache (make-hash-table :test #'equal))
+         (ids (agent-codex-test--write-fork-family dir))
+         (buffer (generate-new-buffer " *codex-headers*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq default-directory (file-name-as-directory dir)))
+          (cl-letf (((symbol-function 'codex-session-identity)
+                     (lambda (&optional _buffer) nil)))
+            (let ((headers (agent-codex--session-headers buffer)))
+              (should (= (hash-table-count headers) 5))
+              (should (gethash (nth 4 ids) headers)))))
+      (kill-buffer buffer)
+      (delete-directory dir t))))
+
+(ert-deftest agent-codex-test-session-headers-unbounded-when-an-ancestor-is-gone ()
+  "Scan everything when an ancestor's rollout is missing from the store.
+The missing ancestor's other children can have started before the
+oldest session the climb could reach, so bounding there would drop real
+family members."
+  (let* ((dir (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory dir)
+         (codex--transcript-file-cache (make-hash-table :test #'equal))
+         (agent-codex--rollout-header-cache (make-hash-table :test #'equal))
+         (current (agent-codex-test--session-id "aaa"))
+         (stranger (agent-codex-test--session-id "eee"))
+         (buffer (generate-new-buffer " *codex-headers*")))
+    (unwind-protect
+        (progn
+          (agent-codex-test--write-rollout
+           dir current
+           `((cwd . ,dir)
+             (forked_from_id . ,(agent-codex-test--session-id "fff")))
+           nil "2026-08-05T09-00-00")
+          (agent-codex-test--write-rollout
+           dir stranger `((cwd . ,dir)) nil "2026-08-01T00-00-00")
+          (with-current-buffer buffer
+            (setq default-directory (file-name-as-directory dir)))
+          (cl-letf (((symbol-function 'codex-session-identity)
+                     (lambda (&optional _buffer) (list :session-id current))))
+            (let ((headers (agent-codex--session-headers buffer)))
+              (should (gethash current headers))
+              (should (gethash stranger headers)))))
+      (kill-buffer buffer)
+      (delete-directory dir t))))
+
+;;;; Header cache
+
+(ert-deftest agent-codex-test-session-header-parsed-once-per-file ()
+  "Parse a rollout's opening record once while the file stays unchanged.
+A second branch command in the same family must cost a stat per file,
+not a read and a JSON parse."
+  (let* ((dir (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory dir)
+         (agent-codex--rollout-header-cache (make-hash-table :test #'equal))
+         (id (agent-codex-test--session-id "aaa")))
+    (unwind-protect
+        (progn
+          (agent-codex-test--write-rollout dir id `((cwd . ,dir)))
+          (should (gethash id (agent-codex--scan-session-headers dir)))
+          (cl-letf (((symbol-function 'agent-codex--read-first-line)
+                     (lambda (&rest _)
+                       (error "an unchanged rollout must not be re-read"))))
+            (should (gethash id (agent-codex--scan-session-headers dir)))))
+      (delete-directory dir t))))
+
+(ert-deftest agent-codex-test-session-header-reparsed-when-the-file-changes ()
+  "Re-read a rollout whose modification time has moved on.
+A running session appends to its rollout, and a resumed one can gain a
+fork parent, so a cache that never expires would serve a stale tree."
+  (let* ((dir (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory dir)
+         (agent-codex--rollout-header-cache (make-hash-table :test #'equal))
+         (id (agent-codex-test--session-id "aaa"))
+         (parent (agent-codex-test--session-id "bbb")))
+    (unwind-protect
+        (let ((file (agent-codex-test--write-rollout dir id `((cwd . ,dir)))))
+          (should-not (plist-get (gethash id (agent-codex--scan-session-headers
+                                              dir))
+                                 :forked-from))
+          (agent-codex-test--write-rollout
+           dir id `((cwd . ,dir) (forked_from_id . ,parent)))
+          (set-file-times file (encode-time 0 0 12 1 1 2030))
+          (should (equal (plist-get (gethash id
+                                             (agent-codex--scan-session-headers
+                                              dir))
+                                    :forked-from)
+                         parent)))
+      (delete-directory dir t))))
+
+(ert-deftest agent-codex-test-session-header-cache-stays-bounded ()
+  "Drop the cached headers once the table outgrows its limit.
+A scan of a large store caches thousands of entries, and an Emacs
+session that never restarts would otherwise keep every one of them."
+  (let* ((dir (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory dir)
+         (agent-codex--rollout-header-cache (make-hash-table :test #'equal))
+         (agent-codex--rollout-header-cache-limit 1))
+    (unwind-protect
+        (progn
+          (dolist (suffix '("aaa" "bbb" "ccc"))
+            (agent-codex-test--write-rollout
+             dir (agent-codex-test--session-id suffix) `((cwd . ,dir))))
+          (should (= (hash-table-count (agent-codex--scan-session-headers dir))
+                     3))
+          (should (> (hash-table-count agent-codex--rollout-header-cache) 0))
+          (should (<= (hash-table-count agent-codex--rollout-header-cache)
+                      (1+ agent-codex--rollout-header-cache-limit))))
+      (delete-directory dir t))))
+
 (ert-deftest agent-codex-test-first-user-prompt-skips-injected-messages ()
   "Return the first human prompt, not the instructions Codex injects."
   (let* ((root (make-temp-file "codex-sessions" t))
