@@ -742,6 +742,7 @@ Only `agent-session-event' may set this variable.")
 (declare-function agent-log-menu "agent-log" ())
 (declare-function agent-capture-confirm-no-pending "agent-capture"
                   (backend buffer action))
+(declare-function consult--read "consult" (table &rest options))
 
 ;;;; Theme sync
 
@@ -2989,6 +2990,72 @@ can be rebuilt from it."
                  (puthash id (funcall enrich header) table)))
              headers)
     table))
+
+(defun agent--session-identity (buffer &optional backend)
+  "Return BUFFER's native session id, or nil when it is not known yet.
+BACKEND defaults to BUFFER's detected backend."
+  (when-let* ((backend (or backend (agent--detect-backend buffer)))
+              (struct (agent-backend backend))
+              (fn (agent-backend-session-identity struct)))
+    (funcall fn buffer)))
+
+(defun agent--buffer-for-session-id (session-id)
+  "Return the live session buffer whose native id is SESSION-ID, or nil."
+  (cl-find-if
+   (lambda (buffer)
+     (when-let* ((session (agent-session buffer)))
+       (equal (agent-session-id session) session-id)))
+   (agent-session-buffers)))
+
+(defun agent--branch-resume-session (backend session-id)
+  "Resume BACKEND's SESSION-ID in a new session buffer.
+The instance name is derived from the session id so resuming never
+stops to ask for one."
+  (agent-start-session
+   (agent-session-create
+    :backend backend
+    :directory default-directory
+    :instance (format "branch-%s" (substring session-id 0 8)))
+   :resume-id session-id))
+
+;;;###autoload
+(defun agent-switch-branch ()
+  "Navigate between branches of the current session.
+Show every session that shares a fork ancestor with this one as a
+tree, then switch to the selected session's live buffer, or resume it
+in a new buffer when it has none."
+  (interactive)
+  (let* ((buffer (current-buffer))
+         (backend (or (agent--detect-backend buffer)
+                      (user-error "Not in an AI session buffer")))
+         (scan (or (when-let* ((struct (agent-backend backend)))
+                     (agent-backend-session-headers struct))
+                   (user-error "Backend `%s' does not track branches"
+                               backend)))
+         (session-id (or (agent--session-identity buffer backend)
+                         (user-error "Current session has no session id")))
+         (headers (or (funcall scan buffer)
+                      (user-error "No sessions found for this project")))
+         (root (agent--branch-root
+                session-id headers))
+         (members (agent--branch-tree-members
+                   root (agent--branch-children-map headers))))
+    (when (<= (hash-table-count members) 1)
+      (user-error "No branches for this session"))
+    (let* ((sessions (agent--branch-enrich-sessions backend headers members))
+           (tree (agent--branch-format-tree
+                  root sessions (agent--branch-children-map sessions)
+                  session-id))
+           (selection (consult--read (mapcar #'car tree)
+                                     :prompt "Branch: "
+                                     :require-match t
+                                     :sort nil))
+           (selected (cdr (assoc selection tree))))
+      (cond
+       ((equal selected session-id) (message "Already on this session"))
+       ((agent--buffer-for-session-id selected)
+        (switch-to-buffer (agent--buffer-for-session-id selected)))
+       (t (agent--branch-resume-session backend selected))))))
 
 ;;;; Transient menu
 

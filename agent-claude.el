@@ -2189,8 +2189,6 @@ unconditionally recenter with `(recenter -1)'."
 
 ;;;;; Branch navigation
 
-(require 'iso8601)
-
 (defun agent-claude--enrich-sessions (headers member-ids)
   "Enrich session HEADERS with full prompt text for MEMBER-IDS.
 HEADERS is a hash table of session ID to header plist.  MEMBER-IDS
@@ -2229,68 +2227,8 @@ runs in a different directory cannot see its parent session until the
 transcript is linked into the new project."
   (agent-claude-cli-link-session-into-project session-id from-dir to-dir))
 
-(defun agent-claude--find-buffer-for-session (session-id)
-  "Return a live Claude buffer whose session matches SESSION-ID, or nil."
-  (cl-find-if
-   (lambda (buf)
-     (when (buffer-live-p buf)
-       (with-current-buffer buf
-         (let ((status (agent-claude--parse-status-file)))
-           (and status
-                (string= (plist-get status :session_id) session-id))))))
-   (claude-code--find-all-claude-buffers)))
-
-;;;###autoload
-(defun agent-claude-switch-branch ()
-  "Navigate between branches of the current Claude session.
-Shows a tree of all sessions related by branching and lets you
-select one to switch to or resume."
-  (interactive)
-  (unless (claude-code--buffer-p (current-buffer))
-    (user-error "Not in a Claude buffer"))
-  (let ((status (agent-claude--parse-status-file)))
-    (unless status
-      (user-error "No status file; is status polling enabled?"))
-    (let ((session-id (plist-get status :session_id))
-          (transcript (plist-get status :transcript_path)))
-      (unless (and session-id transcript)
-        (user-error "Status file missing session_id or transcript_path"))
-      (let* ((project-dir (file-name-directory transcript))
-             (headers (agent-claude-cli-scan-session-headers project-dir))
-             (children-map (agent--branch-children-map headers))
-             (root-id (agent--branch-root session-id headers))
-             (members (agent--branch-tree-members root-id children-map)))
-        (when (<= (hash-table-count members) 1)
-          (user-error "No branches for this session"))
-        (let* ((sessions (agent-claude--enrich-sessions headers members))
-               (tree-children (agent--branch-children-map sessions))
-               (tree (agent--branch-format-tree
-                      root-id sessions tree-children session-id))
-               (selection (consult--read
-                           (mapcar #'car tree)
-                           :prompt "Branch: "
-                           :require-match t
-                           :sort nil))
-               (selected-id (cdr (assoc selection tree))))
-          (cond
-           ((string= selected-id session-id)
-            (message "Already on this session"))
-           ((agent-claude--find-buffer-for-session selected-id)
-            (switch-to-buffer
-             (agent-claude--find-buffer-for-session selected-id)))
-           (t
-            (agent-claude--resume-session selected-id))))))))
-
-(defun agent-claude--resume-session (session-id)
-  "Resume SESSION-ID in a new Claude buffer.
-Auto-generates an instance name from the session ID to avoid the
-interactive instance-name prompt."
-  (agent-start-session
-   (agent-session-create
-    :backend 'claude-code
-    :directory default-directory
-    :instance (format "branch-%s" (substring session-id 0 8)))
-   :resume-id session-id))
+(define-obsolete-function-alias 'agent-claude-switch-branch
+  #'agent-switch-branch "0.3")
 
 ;;;###autoload
 (defun agent-claude-create-branch (&optional isolated)

@@ -2641,5 +2641,77 @@ byte-compilation of the module that requires it."
                      "enriched"))
       (should (equal (plist-get (gethash "a" enriched) :session-id) "a")))))
 
+(ert-deftest agent-test-buffer-for-session-id-matches-the-session-struct ()
+  "Find the live buffer whose session struct carries the given id."
+  (let ((buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (setq-local agent--session
+                        (agent-session-create :backend 'stub :id "abc")))
+          (cl-letf (((symbol-function 'agent-session-buffers)
+                     (lambda () (list buffer))))
+            (should (eq (agent--buffer-for-session-id "abc") buffer))
+            (should-not (agent--buffer-for-session-id "zzz"))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-switch-branch-refuses-a-lone-session ()
+  "Say so rather than opening a one-entry picker."
+  (let ((agent-backends nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p (lambda (buf) (eq buf buffer))
+           :find-all-buffers (lambda () (list buffer))
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "abc")
+           :session-headers
+           (lambda (_buf &optional _d)
+             (let ((table (make-hash-table :test #'equal)))
+               (puthash "abc" '(:session-id "abc" :forked-from nil) table)
+               table)))
+          (with-current-buffer buffer
+            (setq-local agent--backend 'stub)
+            (should-error (agent-switch-branch) :type 'user-error)))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-switch-branch-switches-to-a-live-branch ()
+  "Switch to the selected branch's existing buffer instead of resuming it."
+  (let ((agent-backends nil)
+        (parent (generate-new-buffer " *agent-test-parent*"))
+        (child (generate-new-buffer " *agent-test-child*"))
+        (switched nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer child
+            (setq-local agent--session
+                        (agent-session-create :backend 'stub :id "b")))
+          (agent-register-backend
+           'stub :buffer-p #'ignore
+           :find-all-buffers (lambda () (list parent child))
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-prompt (lambda (header)
+                             (append (list :first-prompt "p") header))
+           :session-headers
+           (lambda (_buf &optional _d)
+             (let ((table (make-hash-table :test #'equal)))
+               (puthash "a" '(:session-id "a" :forked-from nil) table)
+               (puthash "b" '(:session-id "b" :forked-from "a") table)
+               table)))
+          (cl-letf (((symbol-function 'consult--read)
+                     (lambda (candidates &rest _)
+                       (cl-find-if (lambda (c) (string-match-p "└─" c))
+                                   candidates)))
+                    ((symbol-function 'switch-to-buffer)
+                     (lambda (buf &rest _) (setq switched buf))))
+            (with-current-buffer parent
+              (setq-local agent--backend 'stub)
+              (agent-switch-branch))
+            (should (eq switched child))))
+      (kill-buffer parent)
+      (kill-buffer child))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here
