@@ -2931,6 +2931,49 @@ selected account."
   "Toggle the boolean value of OBJ."
   (not (oref obj value)))
 
+;;;; Transient account infix class
+
+(defun agent--account-summary ()
+  "Return a one-line summary of every backend's current account."
+  (mapconcat (lambda (entry)
+               (format "%s: %s"
+                       (car entry)
+                       (or (agent-account-current (car entry)) "default")))
+             (sort (copy-sequence agent-backends)
+                   (lambda (a b) (string< (symbol-name (car a))
+                                          (symbol-name (car b)))))
+             "  "))
+
+(eval-and-compile
+  (defclass agent--account-variable (agent-account-variable)
+    ((backend :initarg :backend :initform nil))
+    "An infix showing every backend's account and setting one of them.
+The backend acted on is resolved when the infix is invoked, so the
+same entry works from a session buffer of either backend and prompts
+only when the context does not name one."))
+
+(cl-defmethod transient-init-value ((obj agent--account-variable))
+  "Initialize OBJ's value from the accounts of every backend."
+  (oset obj value (agent--account-summary)))
+
+(cl-defmethod transient-infix-read ((obj agent--account-variable))
+  "Resolve a backend for OBJ, then prompt for one of its accounts."
+  (let ((backend (agent--resolve-backend)))
+    (oset obj backend backend)
+    (agent-account--prompt backend)))
+
+(cl-defmethod transient-infix-set ((obj agent--account-variable) value)
+  "Persist VALUE as the account of OBJ's backend and re-render the summary."
+  (when value
+    (agent-account-set (oref obj backend) value)
+    (agent-account-sync (oref obj backend) value))
+  (oset obj value (agent--account-summary)))
+
+(transient-define-infix agent--infix-account ()
+  "Select the account of the current or prompted backend."
+  :class 'agent--account-variable
+  :description "account")
+
 ;;;; Branch navigation
 
 (defun agent--branch-root (session-id sessions)

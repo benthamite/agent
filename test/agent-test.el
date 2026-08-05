@@ -2873,5 +2873,18 @@ is the behavior the toggle always claimed to have."
     (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
       (should-error (agent--session-buffer-for-project) :type 'user-error))))
 
+;;;; Account infix
+
+(ert-deftest agent-test-account-summary-lists-every-backend ()
+  "Show one backend per entry, sorted, with its current account."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'zeta :buffer-p #'ignore :find-all-buffers #'ignore :start-session #'ignore)
+    (agent-register-backend
+     'alpha :buffer-p #'ignore :find-all-buffers #'ignore :start-session #'ignore)
+    (cl-letf (((symbol-function 'agent-account-current)
+               (lambda (backend) (when (eq backend 'alpha) "work"))))
+      (should (equal (agent--account-summary) "alpha: work  zeta: default")))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here
