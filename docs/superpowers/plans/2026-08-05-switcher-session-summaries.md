@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Two repositories are touched. `agent`: `/Users/pablostafforini/.config/emacs-profiles/8.3.0-dev/elpaca/sources/agent`. `agent-log`: `/Users/pablostafforini/.config/emacs-profiles/8.3.0-dev/elpaca/sources/agent-log`. Every path below is relative to the repository named in the task.
-- `agent` must not require, load, or name `agent-log`. `agent-log` may name `agent`, but only inside `agent-log-agent.el`.
+- `agent` must acquire no load-time or build-time dependency on `agent-log`: nothing in `agent` may `require` it at load, and no new code may name it. The pre-existing `agent-history` command, which soft-requires `agent-log` on demand and signals a clear error when it is absent (agent.el:2867), is the established exception and is not to be "fixed" to satisfy this rule. `agent-log` may name `agent`, but only inside `agent-log-agent.el`.
 - Emacs floors: `agent` requires Emacs 30.0, `agent-log` requires Emacs 29.1.
 - No silent fallbacks. If a helper cannot compute its answer, let the error surface; do not substitute a plausible default and carry on.
 - Every new function and variable gets a docstring whose first line is a complete sentence in the imperative or declarative style used by its neighbours.
@@ -22,8 +22,10 @@
 
 ## Before you start
 
-- `cd` to each repository and run `git status --short`. Both trees must be clean. **`agent-log` had uncommitted work in progress when this plan was written** (a self-rescheduling summary sweep timer and browser-prioritized sweeps, touching `agent-log.el`, `agent-log-test.el`, `README.org`, `agent-log.texi`). If that work is still uncommitted, stop and ask before touching `agent-log`: committing it accidentally would bundle unrelated changes.
-- Run `make test` in both repositories and record the baselines.
+- **Both repositories work on the branch `switcher-session-summaries`, already created, with `git config branch.switcher-session-summaries.deferDocUpdates true` already set.** The commit guard `require-doc-update.sh` refuses any commit that stages a non-test `.el` file without `README.org`, and it ignores the deferral setting on `main` and `master`. The branch is what makes Task 5's single documentation commit possible. Do not switch either repository back to `main` until Task 7.
+- After each commit that changes Elisp, a post-commit hook rebuilds and reloads the package in the running Emacs, and the session's guard requires the changed code path to be exercised there before work continues. Each implementation task therefore ends with an `emacsclient -e` call that exercises what it just added; the dispatching controller names the call for its task.
+- `cd` to each repository and run `git status --short`. Both trees must be clean. The unrelated `agent-log` work in progress that existed when this plan was written was committed first, as `06acec6`.
+- Run `make test` in both repositories and record the baselines: `agent` 362 tests, `agent-log` 346 tests.
 
 ## File Structure
 
@@ -905,6 +907,40 @@ Ask the user to run `M-x agent-start-or-switch` and confirm three things: summar
 - [ ] **Step 6: Report**
 
 State plainly what was verified and what was not: which sessions showed summaries, whether any label wrapped, and whether the state faces survived. If a session showed no summary, say whether it was because the archive has none for it or because its id was unknown.
+
+---
+
+### Task 7: Land the branches
+
+**Files:** none.
+
+- [ ] **Step 1: Merge each repository's branch into `main`**
+
+In each repository, with a clean tree and the whole plan committed:
+
+```bash
+git checkout main
+git merge --no-ff switcher-session-summaries -m "agent: show session summaries in the session switcher"
+```
+
+Use `agent-log:` as the prefix in the `agent-log` repository. The merge itself is exempt from the documentation guard, and by this point Task 5 has committed the manuals on the branch anyway.
+
+- [ ] **Step 2: Remove the deferral setting**
+
+```bash
+git config --unset branch.switcher-session-summaries.deferDocUpdates
+git branch -d switcher-session-summaries
+```
+
+Run both in each repository. Leaving the setting behind would silently exempt a future branch of the same name from the documentation guard.
+
+- [ ] **Step 3: Confirm both repositories are on `main` and clean**
+
+```bash
+git branch --show-current && git status --short
+```
+
+Expected: `main`, and no output from `git status`.
 
 ---
 

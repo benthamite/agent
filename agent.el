@@ -457,6 +457,25 @@ value with (agent-session-id (agent-session BUFFER))."
   :type 'hook
   :group 'agent)
 
+(defcustom agent-session-annotation-functions nil
+  "Abnormal hook supplying a short annotation for a live session buffer.
+Each function is called with the session buffer and returns a
+single-line string to show after the session name in the session
+switcher, or nil to leave the session to the functions after it.  The
+first non-nil answer is the one shown.  Whitespace is collapsed and
+long annotations are truncated, so a function may return whatever text
+it has.
+
+Each function must be cheap and free of side effects: opening the
+switcher calls it for every live session, and the menu is opened often
+enough that slow work here is felt directly.
+
+Nil, the default, shows session names alone.  Optional integrations
+add a function here; `agent' renders whatever it returns and never
+depends on where the text comes from."
+  :type 'hook
+  :group 'agent)
+
 (defun agent--note-session-id (buffer id)
   "Record ID as the native session id of the session in BUFFER.
 Do nothing unless BUFFER is live, belongs to a session, and ID is a
@@ -613,6 +632,19 @@ so it does not inject text into a running conversation."
   :type 'number
   :group 'agent)
 
+(defcustom agent-session-annotation-max-width nil
+  "Maximum display width of session annotations in the session switcher.
+Annotations are always fitted to the switcher window, which is as wide
+as the frame.  An integer narrows them further, to at most that many
+columns; it never widens them past what the frame holds.  Nil applies
+no cap beyond the frame fit.  Annotations longer than the available
+width are truncated with an ellipsis.  Zero leaves no room at all, so
+every session renders as the bare label it would have without an
+annotation."
+  :type '(choice (const :tag "Fit the frame" nil)
+                 (natnum :tag "Columns"))
+  :group 'agent)
+
 ;;;; Faces
 
 (defface agent-waiting
@@ -633,6 +665,16 @@ these sessions from `agent-waiting' (truly idle)."
   "Face for sessions whose state has never been observed.
 Applied in the session switcher when no session event has reached a
 buffer, so that an unknown state is not presented as a known one."
+  :group 'agent)
+
+(defface agent-session-annotation
+  '((t :inherit shadow))
+  "Face for session annotations in the session switcher.
+Applied to the text `agent-session-annotation-functions' returns, so
+that a session's name stays the prominent part of its entry.
+Transient adds a suffix's own face behind the faces a string already
+carries, so annotations stay dim even next to a name colored by
+`agent-waiting'."
   :group 'agent)
 
 ;;;; State variables
@@ -938,20 +980,24 @@ If sessions exist, show a transient menu with home-row keys."
     :setup-children agent--session-switcher-children]])
 
 (defun agent--session-switcher-children (_)
-  "Build transient suffixes for the session switcher, grouped by account."
-  (let ((groups (agent--group-sessions-by-account)))
+  "Build transient suffixes for the session switcher, grouped by account.
+Labels are built in two passes, because aligning annotations needs the
+widest label, which is only known once every label exists."
+  (let* ((pad (agent--session-label-pad))
+         (groups (agent--group-sessions-by-account pad)))
     (transient-parse-suffixes
      'agent--session-switcher
      (apply #'vector (agent--interleave-group-headers groups)))))
 
-(defun agent--group-sessions-by-account ()
+(defun agent--group-sessions-by-account (&optional pad)
   "Return an alist of (ACCOUNT . SPECS) sorted by account name.
-Each SPECS is a list of suffix specs sorted by home-row key."
+Each SPECS is a list of suffix specs sorted by home-row key.  PAD is
+the width to pad session labels to; nil pads nothing."
   (let ((groups (make-hash-table :test 'equal)))
     (maphash
      (lambda (buf key)
        (when (buffer-live-p buf)
-         (push (agent--session-suffix-spec buf key)
+         (push (agent--session-suffix-spec buf key pad)
                (gethash (agent--session-group-key buf) groups))))
      agent--session-keys)
     (agent--hash-to-sorted-alist groups)))
@@ -968,13 +1014,175 @@ the backend's :label or symbol name."
         (and backend (symbol-name backend))
         "Sessions")))
 
-(defun agent--session-suffix-spec (buf key)
-  "Build a transient suffix spec for BUF bound to KEY."
-  (let* ((backend (agent--detect-backend buf))
+(defconst agent--switcher-suffix-padding 2
+  "Columns a transient suffix spends beyond its key and description.
+Transient formats a suffix as \" %k %d\": one leading space and one
+separator.")
+
+(defconst agent--switcher-column-padding 2
+  "Columns transient leaves between adjacent menu columns.
+Matches the padding `transient--column-stops' adds between columns.")
+
+(defconst agent--switcher-session-key-width 1
+  "Display width of a session key in the switcher.
+Every key in `agent--session-key-pool' is one character wide.")
+
+(defconst agent--session-annotation-separator-width 1
+  "Columns between a padded session label and its annotation.
+`agent--session-label' joins the two with a single space, which the
+width available to an annotation has to allow for.")
+
+(defconst agent--session-annotation-margin 2
+  "Columns left empty to the right of a session annotation.
+Keeps an annotation clear of the window's last column, where a
+character would wrap onto the next line.")
+
+(defconst agent--session-annotation-min-width 20
+  "Fewest columns a session annotation may occupy when fitted to the frame.
+A frame too narrow for the full fit yields a short annotation rather
+than none.")
+
+(defun agent--switcher-columns ()
+  "Return the column vectors of the session switcher's layout.
+Read the layout through `transient--get-children', which rejects a
+layout whose representation this arithmetic does not understand."
+  (aref (car (transient--get-children 'agent--session-switcher)) 2))
+
+(defun agent--switcher-column-width (column)
+  "Return the display width of COLUMN in the switcher's layout.
+A transient column is as wide as its widest cell: its heading, or one
+of its suffixes formatted as \" KEY DESCRIPTION\".  A column with no
+heading is as wide as its widest suffix.  Signal an error when a
+heading is present but is not a string, since transient computes such
+a heading only at display time and its width is not known here."
+  (let ((heading (plist-get (aref column 1) :description)))
+    (when (and heading (not (stringp heading)))
+      (error "Non-string column heading in `agent--session-switcher' layout: %S"
+             heading))
+    (apply #'max
+           (if heading (string-width heading) 0)
+           (mapcar (lambda (suffix)
+                     (+ agent--switcher-suffix-padding
+                        (string-width (or (plist-get (cdr suffix) :key) ""))
+                        (string-width (or (plist-get (cdr suffix) :description)
+                                          ""))))
+                   (aref column 2)))))
+
+(defun agent--switcher-sessions-column-offset ()
+  "Return the column at which the switcher's Sessions column starts.
+Transient places each column two columns past the widest cell of the
+one before it, so the room left for annotations depends on the columns
+to the left of Sessions.  Measuring the prefix's own layout keeps that
+number correct when an action is added or renamed.  Assumes
+`transient-align-variable-pitch' is nil, since transient measures
+columns in pixels rather than characters when it is set."
+  (let ((offset 0))
+    (cl-dolist
+        (column (agent--switcher-columns)
+                (error "No Sessions column in `agent--session-switcher' layout"))
+      (when (equal (plist-get (aref column 1) :description) "Sessions")
+        (cl-return offset))
+      (setq offset (+ offset
+                      agent--switcher-column-padding
+                      (agent--switcher-column-width column))))))
+
+(defun agent--session-annotation-width (pad)
+  "Return the display width available to a session annotation.
+PAD is the width session labels are padded to.  Fit the annotation to
+the switcher window, which spans the frame, and never return less than
+`agent--session-annotation-min-width' columns, so a narrow frame
+yields a short annotation rather than none.  The fit accounts for
+everything the line spends before and after the annotation: the
+columns left of the Sessions column, the key and the padding transient
+formats a suffix with, the padded label, the separator space
+`agent--session-label' inserts, and the trailing margin.  When
+`agent-session-annotation-max-width' is an integer it caps that fit: it
+can only narrow the annotation, never widen it past what the frame
+holds."
+  (let ((fit (max agent--session-annotation-min-width
+                  (- (frame-width)
+                     (agent--switcher-sessions-column-offset)
+                     agent--switcher-suffix-padding
+                     agent--switcher-session-key-width
+                     pad
+                     agent--session-annotation-separator-width
+                     agent--session-annotation-margin))))
+    (if agent-session-annotation-max-width
+        (min agent-session-annotation-max-width fit)
+      fit)))
+
+(defun agent--session-label-base (buffer)
+  "Return BUFFER's switcher label without any annotation."
+  (let* ((backend (agent--detect-backend buffer))
          (icon (when backend (agent-backend-icon-string backend)))
-         (name (agent-display-name buf))
-         (label (if (and icon (not (string-empty-p icon)))
-                    (format "%s %s" icon name) name))
+         (name (agent-display-name buffer)))
+    (if (and icon (not (string-empty-p icon)))
+        (format "%s %s" icon name)
+      name)))
+
+(defun agent--session-annotation (buffer)
+  "Return the annotation for session BUFFER, or nil for none.
+The text is the first non-nil answer from
+`agent-session-annotation-functions'.  Whitespace is collapsed to
+single spaces so a multi-line answer cannot break the menu's layout,
+and an answer that is blank or not a string counts as no annotation."
+  (let ((text (run-hook-with-args-until-success
+               'agent-session-annotation-functions buffer)))
+    (when (stringp text)
+      (let ((line (string-trim
+                   (replace-regexp-in-string "[ \t\n\r\f\v]+" " " text))))
+        (unless (string-empty-p line) line)))))
+
+(defun agent--session-label (buffer pad)
+  "Return BUFFER's switcher label, annotated and padded to PAD columns.
+Sessions without an annotation keep the bare label they had before
+annotations existed, with no trailing padding.  A session whose
+annotation has no room left to it renders the same way, since padding
+and a separator around nothing is not a label anyone asked for; that
+happens when `agent-session-annotation-max-width' caps the width at
+zero.  PAD counts display columns, as `agent--session-label-pad'
+measures them, so a name containing double-width characters lines up
+with the rest; padding it to a character count would push its
+annotation to the right."
+  (let* ((base (agent--session-label-base buffer))
+         (annotation (agent--session-annotation buffer))
+         (width (and annotation (agent--session-annotation-width pad))))
+    (if (or (not annotation) (<= width 0))
+        base
+      (concat base
+              (make-string (max 0 (- pad (string-width base))) ?\s)
+              " "
+              (propertize (truncate-string-to-width
+                           annotation width nil nil t)
+                          'face 'agent-session-annotation)))))
+
+(defun agent--session-label-pad ()
+  "Return the width to pad session labels to in the switcher.
+The widest label in the menu, counting every live session and not only
+the annotated ones, so that the annotations start clear of every name
+on screen and no name runs past the column they share.  The cost is
+that one long name without an annotation pushes every annotation to
+the right; that was chosen over a name column left ragged by the
+sessions that have nothing after them.  Zero when there are no
+sessions, which leaves every label unpadded.  Assumes every backend's
+icon occupies one column, since `string-width' counts an icon's image
+as the single character it is displayed over however wide the image
+draws; a backend whose icon renders wider than that would sit off the
+column shared by the rest."
+  (let ((widths (list 0)))
+    (maphash (lambda (buf _key)
+               (when (buffer-live-p buf)
+                 (push (string-width (agent--session-label-base buf))
+                       widths)))
+             agent--session-keys)
+    (apply #'max widths)))
+
+(defun agent--session-suffix-spec (buf key &optional pad)
+  "Build a transient suffix spec for BUF bound to KEY.
+PAD is the width to pad the session label to, so that annotations line
+up across the switcher; nil pads nothing."
+  (let* ((backend (agent--detect-backend buf))
+         (label (agent--session-label buf (or pad 0)))
          (state (agent-session-display-state buf backend))
          (cmd (make-symbol (format "ai-switch-%s" key)))
          (spec (list key label cmd)))
