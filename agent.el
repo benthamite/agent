@@ -1021,6 +1021,11 @@ Matches the padding `transient--column-stops' adds between columns.")
   "Display width of a session key in the switcher.
 Every key in `agent--session-key-pool' is one character wide.")
 
+(defconst agent--session-annotation-separator-width 1
+  "Columns between a padded session label and its annotation.
+`agent--session-label' joins the two with a single space, which the
+width available to an annotation has to allow for.")
+
 (defconst agent--session-annotation-margin 2
   "Columns left empty to the right of a session annotation.
 Keeps an annotation clear of the window's last column, where a
@@ -1080,7 +1085,11 @@ columns in pixels rather than characters when it is set."
 PAD is the width session labels are padded to.  Fit the annotation to
 the switcher window, which spans the frame, and never return less than
 `agent--session-annotation-min-width' columns, so a narrow frame
-yields a short annotation rather than none.  When
+yields a short annotation rather than none.  The fit accounts for
+everything the line spends before and after the annotation: the
+columns left of the Sessions column, the key and the padding transient
+formats a suffix with, the padded label, the separator space
+`agent--session-label' inserts, and the trailing margin.  When
 `agent-session-annotation-max-width' is an integer it caps that fit: it
 can only narrow the annotation, never widen it past what the frame
 holds."
@@ -1090,6 +1099,7 @@ holds."
                      agent--switcher-suffix-padding
                      agent--switcher-session-key-width
                      pad
+                     agent--session-annotation-separator-width
                      agent--session-annotation-margin))))
     (if agent-session-annotation-max-width
         (min agent-session-annotation-max-width fit)
@@ -1114,7 +1124,7 @@ no annotation."
     (let ((text (funcall agent-session-annotation-function buffer)))
       (when (stringp text)
         (let ((line (string-trim
-                     (replace-regexp-in-string "[ \t\n\r]+" " " text))))
+                     (replace-regexp-in-string "[ \t\n\r\f\v]+" " " text))))
           (unless (string-empty-p line) line))))))
 
 (defun agent--session-label (buffer pad)
@@ -1141,7 +1151,11 @@ to a character count would push its annotation to the right."
   "Return the width to pad session labels to in the switcher.
 The widest label among sessions that have an annotation, so their
 annotations start at one column across every account group.  Zero when
-no session has one, which leaves every label unpadded."
+no session has one, which leaves every label unpadded.  Assumes every
+backend's icon occupies one column, since `string-width' counts an
+icon's image as the single character it is displayed over however wide
+the image draws; a backend whose icon renders wider than that would
+sit off the column shared by the rest."
   (let ((widths (list 0)))
     (maphash (lambda (buf _key)
                (when (and (buffer-live-p buf)

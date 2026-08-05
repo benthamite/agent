@@ -425,12 +425,13 @@ and annotations narrower than the frame allows."
   "Fit annotations to the frame when no maximum width is set.
 The switcher window spans the frame, so the room left over is the
 frame width minus the Sessions column offset, the three columns
-transient spends on \" k \", the padded label, and two trailing
-columns."
+transient spends on \" k \", the padded label, the one column of the
+separator space before the annotation, and two trailing columns."
   (let ((agent-session-annotation-max-width nil))
     (cl-letf (((symbol-function 'frame-width) (lambda (&optional _) 100)))
       (should (= (agent--session-annotation-width 20)
-                 (- 100 (agent--switcher-sessions-column-offset) 3 20 2))))))
+                 (- 100 (agent--switcher-sessions-column-offset)
+                    3 20 1 2))))))
 
 (ert-deftest agent-test-annotation-width-caps-rather-than-overrides ()
   "Never let `agent-session-annotation-max-width' widen an annotation.
@@ -439,7 +440,8 @@ the frame fit."
   (let ((agent-session-annotation-max-width 500))
     (cl-letf (((symbol-function 'frame-width) (lambda (&optional _) 100)))
       (should (= (agent--session-annotation-width 20)
-                 (- 100 (agent--switcher-sessions-column-offset) 3 20 2))))))
+                 (- 100 (agent--switcher-sessions-column-offset)
+                    3 20 1 2))))))
 
 (ert-deftest agent-test-annotation-width-has-a-floor ()
   "Never return a width below 20 columns, however narrow the frame."
@@ -452,6 +454,12 @@ the frame fit."
 (defun agent-test--switcher-label (buffer)
   "Return the switcher label BUFFER would render with, unpadded."
   (nth 1 (agent--session-suffix-spec buffer "a")))
+
+(defun agent-test--annotation-column (label)
+  "Return the display column LABEL's \"summary\" annotation starts at.
+Measured in columns rather than characters, since those differ for a
+double-width name and only the column is what lines up on screen."
+  (string-width (substring label 0 (string-search "summary" label))))
 
 (defmacro agent-test--with-session-buffer (name &rest body)
   "Run BODY with a registered single-session backend buffer named NAME.
@@ -497,12 +505,30 @@ The buffer is bound to `buf' and holds session key \"a\"."
         (should-not (get-text-property 0 'face label))))))
 
 (ert-deftest agent-test-session-annotation-collapses-whitespace ()
-  "Collapse a multi-line annotation into a single line."
+  "Collapse a multi-line annotation into a single line.
+Form feed and vertical tab count as whitespace here too.  Emacs
+displays them as ^L and ^K, so letting them through would put control
+characters in the menu, which is the layout damage collapsing
+whitespace exists to prevent."
   (let ((agent-session-annotation-function
          (lambda (_buffer) "Fix the\n  parser\n")))
     (agent-test--with-session-buffer "*one:~/repo/project/:default*"
       (should (string-suffix-p "Fix the parser"
+                               (agent-test--switcher-label buf)))))
+  (let ((agent-session-annotation-function
+         (lambda (_buffer) "Fix the\f \vparser")))
+    (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+      (should (string-suffix-p "Fix the parser"
                                (agent-test--switcher-label buf))))))
+
+(ert-deftest agent-test-session-annotation-lets-errors-surface ()
+  "Let an error from the annotation function reach the caller.
+Catching it would leave the switcher quietly unannotated, hiding a
+broken integration rather than reporting it."
+  (let ((agent-session-annotation-function
+         (lambda (_buffer) (error "Annotation function failed"))))
+    (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+      (should-error (agent-test--switcher-label buf)))))
 
 (ert-deftest agent-test-blank-annotation-counts-as-none ()
   "Treat a blank annotation as no annotation, leaving the label plain."
@@ -587,15 +613,63 @@ when the columns they land on do not."
             (let* ((groups (agent--group-sessions-by-account
                             (agent--session-label-pad)))
                    (columns
-                    (mapcar
-                     (lambda (spec)
-                       (let ((label (nth 1 spec)))
-                         (string-width
-                          (substring label 0
-                                     (string-search "summary" label)))))
-                     (apply #'append (mapcar #'cdr groups)))))
+                    (mapcar (lambda (spec)
+                              (agent-test--annotation-column (nth 1 spec)))
+                            (apply #'append (mapcar #'cdr groups)))))
               (should (= (length columns) 2))
               (should (apply #'= columns)))))))))
+
+(ert-deftest agent-test-menu-mixes-annotated-and-plain-sessions ()
+  "Leave a plain label unpadded while its annotated neighbours align.
+Padding exists only to line annotations up, so a session without one
+keeps the bare label it always had.  Its name is the longest here, and
+must not widen the column the other two annotations start at."
+  (let ((agent-backends nil)
+        (agent--session-keys (make-hash-table :test 'eq))
+        (agent-session-annotation-function
+         (lambda (buffer)
+           (unless (string-match-p "plain" (buffer-name buffer))
+             "summary"))))
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/ab/:default*" t)
+      (let ((short (current-buffer)))
+        (with-temp-buffer
+          (rename-buffer "*one:~/repo/longer/:default*" t)
+          (let ((long (current-buffer)))
+            (with-temp-buffer
+              (rename-buffer "*one:~/repo/plain-and-much-longer/:default*" t)
+              (let ((plain (current-buffer)))
+                (apply #'agent-register-backend
+                       'one
+                       (agent-test--backend
+                        :buffer-p
+                        (lambda (candidate)
+                          (memq candidate (list short long plain)))
+                        :find-all-buffers
+                        (lambda () (list short long plain))))
+                (puthash short "a" agent--session-keys)
+                (puthash long "s" agent--session-keys)
+                (puthash plain "d" agent--session-keys)
+                (let* ((groups (agent--group-sessions-by-account
+                                (agent--session-label-pad)))
+                       (labels (mapcar (lambda (spec) (nth 1 spec))
+                                       (apply #'append
+                                              (mapcar #'cdr groups))))
+                       (annotated
+                        (seq-filter (lambda (label)
+                                      (string-search "summary" label))
+                                    labels))
+                       (columns (mapcar #'agent-test--annotation-column
+                                        annotated)))
+                  (should (= (length labels) 3))
+                  (should (= (length annotated) 2))
+                  ;; Exactly the name: no padding, no separator, no
+                  ;; trailing whitespace.
+                  (should (member "plain-and-much-longer" labels))
+                  (should (apply #'= columns))
+                  (should (< (car columns)
+                             (string-width
+                              "plain-and-much-longer"))))))))))))
 
 (ert-deftest agent-test-session-label-pad-ignores-unannotated-sessions ()
   "Pad only for sessions that have an annotation to line up.
