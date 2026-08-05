@@ -42,7 +42,7 @@ variable back to nil disables the feature with no other configuration.
 
 Two further additions on the `agent` side:
 
-- Face `agent-session-summary`, inheriting `shadow`.
+- Face `agent-session-annotation`, inheriting `shadow`.
 - Defcustom `agent-session-annotation-max-width`: an integer column cap, or
   nil meaning "fit the available width of the switcher window".
 
@@ -59,7 +59,7 @@ that is only known after every label exists:
 
 `agent--session-suffix-spec` gains a pad-width argument.  When a buffer has an
 annotation, its label becomes the base label padded to that width, followed by
-the annotation propertized with `agent-session-summary` and truncated with an
+the annotation propertized with `agent-session-annotation` and truncated with an
 ellipsis.  When it has none, the label is exactly what it is today.  Padding
 is computed across all account groups, so summaries start at one column for
 the whole menu, not one column per group.
@@ -115,9 +115,13 @@ written seconds ago may not appear until the next idle moment.
 
 The frame-fitting branch of `agent-session-annotation-max-width` needs the
 width available to the Sessions column, which depends on how transient lays
-the Actions column out beside it.  This will be measured in a live Emacs.  If
-it cannot be measured robustly, the frame-fitting path is dropped and the
-defcustom takes a fixed default.
+the Actions column out beside it.  This is measured from the prefix's own
+`transient--layout` property, using transient's column-stop rule (each column
+starts two columns past the widest cell of the one before it,
+transient.el:5211) and its suffix format `" %k %d"` (transient.el:1067).  Both
+are internal to transient, so a change in either breaks the measurement.  A
+unit test pins the expected offset, so such a change fails the suite rather
+than producing a wrapped menu.
 
 ## Testing
 
