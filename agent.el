@@ -126,13 +126,14 @@ such as handoff-driven autoloops.")
   "Static description of one registered AI agent backend."
   name label icon program
   buffer-p find-all-buffers find-buffers-for-dir
-  start-session session-identity restart-options
+  start-session session-identity restart-options resume
   send-string send-return submit
   waiting-p busy-p background-tasks-p duration-ms display-name-suffix
   notify
   account-env-var accounts account-file shared-config-items canonical-home
   account-init
-  run-prompt skill-roots skill-command-prefix
+  run-prompt exec-prompt skill-roots skill-command-prefix
+  session-headers session-prompt prepare-fork
   sync-theme menu-suffixes
   before-exit-ready-to-close-p before-kill-check)
 
@@ -165,6 +166,19 @@ key: a function called with the session buffer before
 `agent-restart' kills it, returning a plist of extra keyword
 options passed through to `agent-start-session' when the session
 is resumed.
+
+Backends that support the unified session commands provide the
+optional capability keys `:resume' (resume a past session, called
+with a prefix argument), `:session-headers' (return a hash table of
+session id to a header plist with `:session-id', `:forked-from' and
+`:timestamp', called with a session buffer and an optional session id
+whose descendants are the only ones the caller needs),
+`:session-prompt' (enrich one header with `:first-prompt'),
+`:exec-prompt' (run a prompt non-interactively, calling back with a
+plist of `:exit-code', `:duration', `:text' and `:raw'), and
+`:prepare-fork' (prepare a fork of a session recorded under one
+directory to run in another).  A backend that omits a key does not
+support the commands that dispatch on it.
 
 Multi-account backends provide the optional account keys read by
 `agent-account': `:account-env-var' (environment variable naming

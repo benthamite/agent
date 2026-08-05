@@ -2154,6 +2154,36 @@ observation."
           :buffer-p (lambda (candidate) (eq candidate buf))))
         (should (eq (agent--detect-backend buf) 'one))))))
 
+(ert-deftest agent-test-backend-accepts-the-new-capability-slots ()
+  "Register a backend that supplies every slot the unified menu dispatches on."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'stub
+     :buffer-p #'ignore
+     :find-all-buffers #'ignore
+     :start-session #'ignore
+     :resume #'ignore
+     :session-headers #'ignore
+     :session-prompt #'ignore
+     :exec-prompt #'ignore
+     :prepare-fork #'ignore)
+    (let ((struct (agent-backend 'stub)))
+      (should (agent-backend-resume struct))
+      (should (agent-backend-session-headers struct))
+      (should (agent-backend-session-prompt struct))
+      (should (agent-backend-exec-prompt struct))
+      (should (agent-backend-prepare-fork struct)))))
+
+(ert-deftest agent-test-backend-capability-slots-are-optional ()
+  "A backend that supplies none of the new slots still registers."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore)
+    (let ((struct (agent-backend 'stub)))
+      (should-not (agent-backend-resume struct))
+      (should-not (agent-backend-session-headers struct)))))
+
 (ert-deftest agent-test-start-session-dispatches-to-backend ()
   "Dispatch session starts to the backend's start-session function."
   (let* ((agent-backends nil)
