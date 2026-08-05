@@ -457,20 +457,24 @@ value with (agent-session-id (agent-session BUFFER))."
   :type 'hook
   :group 'agent)
 
-(defvar agent-session-annotation-function nil
-  "Function returning a short annotation for a live session buffer.
-Called with the session buffer; returns a single-line string to show
-after the session name in the session switcher, or nil for no
-annotation.  Whitespace is collapsed and long annotations are
-truncated, so the function may return whatever text it has.
+(defcustom agent-session-annotation-functions nil
+  "Abnormal hook supplying a short annotation for a live session buffer.
+Each function is called with the session buffer and returns a
+single-line string to show after the session name in the session
+switcher, or nil to leave the session to the functions after it.  The
+first non-nil answer is the one shown.  Whitespace is collapsed and
+long annotations are truncated, so a function may return whatever text
+it has.
 
-The function must be cheap and free of side effects: building the
+Each function must be cheap and free of side effects: building the
 switcher calls it more than once per session, since aligning the
 annotations needs every label's width before any label is final.
 
 Nil, the default, shows session names alone.  Optional integrations
-install a function here; `agent' renders whatever it returns and never
-depends on where the text comes from.")
+add a function here; `agent' renders whatever it returns and never
+depends on where the text comes from."
+  :type 'hook
+  :group 'agent)
 
 (defun agent--note-session-id (buffer id)
   "Record ID as the native session id of the session in BUFFER.
@@ -664,7 +668,7 @@ buffer, so that an unknown state is not presented as a known one."
 (defface agent-session-annotation
   '((t :inherit shadow))
   "Face for session annotations in the session switcher.
-Applied to the text `agent-session-annotation-function' returns, so
+Applied to the text `agent-session-annotation-functions' returns, so
 that a session's name stays the prominent part of its entry.
 Transient adds a suffix's own face behind the faces a string already
 carries, so annotations stay dim even next to a name colored by
@@ -1116,16 +1120,16 @@ holds."
 
 (defun agent--session-annotation (buffer)
   "Return the annotation for session BUFFER, or nil for none.
-The text comes from `agent-session-annotation-function'.  Whitespace
-is collapsed to single spaces so a multi-line answer cannot break the
-menu's layout, and an answer that is blank or not a string counts as
-no annotation."
-  (when agent-session-annotation-function
-    (let ((text (funcall agent-session-annotation-function buffer)))
-      (when (stringp text)
-        (let ((line (string-trim
-                     (replace-regexp-in-string "[ \t\n\r\f\v]+" " " text))))
-          (unless (string-empty-p line) line))))))
+The text is the first non-nil answer from
+`agent-session-annotation-functions'.  Whitespace is collapsed to
+single spaces so a multi-line answer cannot break the menu's layout,
+and an answer that is blank or not a string counts as no annotation."
+  (let ((text (run-hook-with-args-until-success
+               'agent-session-annotation-functions buffer)))
+    (when (stringp text)
+      (let ((line (string-trim
+                   (replace-regexp-in-string "[ \t\n\r\f\v]+" " " text))))
+        (unless (string-empty-p line) line)))))
 
 (defun agent--session-label (buffer pad)
   "Return BUFFER's switcher label, annotated and padded to PAD columns.

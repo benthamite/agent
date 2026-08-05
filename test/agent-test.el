@@ -480,14 +480,14 @@ The buffer is bound to `buf' and holds session key \"a\"."
 
 (ert-deftest agent-test-session-label-is-plain-without-annotation-function ()
   "Render session labels exactly as before when nothing annotates them."
-  (let ((agent-session-annotation-function nil))
+  (let ((agent-session-annotation-functions nil))
     (agent-test--with-session-buffer "*one:~/repo/project/:default*"
       (should (equal (agent-test--switcher-label buf) "project")))))
 
 (ert-deftest agent-test-session-label-appends-annotation ()
   "Append the annotation after the session name."
-  (let ((agent-session-annotation-function
-         (lambda (_buffer) "Fix the parser")))
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) "Fix the parser"))))
     (agent-test--with-session-buffer "*one:~/repo/project/:default*"
       (let ((label (agent-test--switcher-label buf)))
         (should (string-prefix-p "project" label))
@@ -495,8 +495,8 @@ The buffer is bound to `buf' and holds session key \"a\"."
 
 (ert-deftest agent-test-session-annotation-is-dimmed ()
   "Carry `agent-session-annotation' on the annotation, not the name."
-  (let ((agent-session-annotation-function
-         (lambda (_buffer) "Fix the parser")))
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) "Fix the parser"))))
     (agent-test--with-session-buffer "*one:~/repo/project/:default*"
       (let* ((label (agent-test--switcher-label buf))
              (start (string-search "Fix" label)))
@@ -510,13 +510,13 @@ Form feed and vertical tab count as whitespace here too.  Emacs
 displays them as ^L and ^K, so letting them through would put control
 characters in the menu, which is the layout damage collapsing
 whitespace exists to prevent."
-  (let ((agent-session-annotation-function
-         (lambda (_buffer) "Fix the\n  parser\n")))
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) "Fix the\n  parser\n"))))
     (agent-test--with-session-buffer "*one:~/repo/project/:default*"
       (should (string-suffix-p "Fix the parser"
                                (agent-test--switcher-label buf)))))
-  (let ((agent-session-annotation-function
-         (lambda (_buffer) "Fix the\f \vparser")))
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) "Fix the\f \vparser"))))
     (agent-test--with-session-buffer "*one:~/repo/project/:default*"
       (should (string-suffix-p "Fix the parser"
                                (agent-test--switcher-label buf))))))
@@ -525,21 +525,48 @@ whitespace exists to prevent."
   "Let an error from the annotation function reach the caller.
 Catching it would leave the switcher quietly unannotated, hiding a
 broken integration rather than reporting it."
-  (let ((agent-session-annotation-function
-         (lambda (_buffer) (error "Annotation function failed"))))
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) (error "Annotation function failed")))))
     (agent-test--with-session-buffer "*one:~/repo/project/:default*"
       (should-error (agent-test--switcher-label buf)))))
 
+(ert-deftest agent-test-session-annotation-takes-the-first-answer ()
+  "Take the first non-nil answer, passing over functions that decline.
+The hook exists so several sources can offer an annotation; a function
+that returns nil must leave the session to the ones after it rather
+than settling it as unannotated."
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) nil)
+               (lambda (_buffer) "second answer")
+               (lambda (_buffer) "third answer"))))
+    (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+      (should (string-suffix-p "second answer"
+                               (agent-test--switcher-label buf))))))
+
+(ert-deftest agent-test-session-annotation-stops-at-the-first-answer ()
+  "Leave later functions uncalled once one has answered.
+`run-hook-with-args-until-success' stops at the first non-nil answer,
+so a costly provider installed behind a cheap one is not paid for."
+  (let* ((called nil)
+         (agent-session-annotation-functions
+          (list (lambda (_buffer) "first answer")
+                (lambda (_buffer) (setq called t) "second answer"))))
+    (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+      (should (string-suffix-p "first answer"
+                               (agent-test--switcher-label buf)))
+      (should-not called))))
+
 (ert-deftest agent-test-blank-annotation-counts-as-none ()
   "Treat a blank annotation as no annotation, leaving the label plain."
-  (let ((agent-session-annotation-function (lambda (_buffer) "   ")))
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) "   "))))
     (agent-test--with-session-buffer "*one:~/repo/project/:default*"
       (should (equal (agent-test--switcher-label buf) "project")))))
 
 (ert-deftest agent-test-session-annotation-is-truncated ()
   "Truncate an annotation that exceeds the available width."
-  (let ((agent-session-annotation-function
-         (lambda (_buffer) "A very long annotation that will not fit"))
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) "A very long annotation that will not fit")))
         (agent-session-annotation-max-width 10))
     (agent-test--with-session-buffer "*one:~/repo/project/:default*"
       (let* ((label (agent-test--switcher-label buf))
@@ -551,7 +578,8 @@ broken integration rather than reporting it."
   "Start every annotation at one column, across all account groups."
   (let ((agent-backends nil)
         (agent--session-keys (make-hash-table :test 'eq))
-        (agent-session-annotation-function (lambda (_buffer) "summary")))
+        (agent-session-annotation-functions
+         (list (lambda (_buffer) "summary"))))
     (with-temp-buffer
       (rename-buffer "*one:~/repo/a/:default*" t)
       (let ((short (current-buffer)))
@@ -592,7 +620,8 @@ annotation: a character index would agree across these two labels even
 when the columns they land on do not."
   (let ((agent-backends nil)
         (agent--session-keys (make-hash-table :test 'eq))
-        (agent-session-annotation-function (lambda (_buffer) "summary")))
+        (agent-session-annotation-functions
+         (list (lambda (_buffer) "summary"))))
     (with-temp-buffer
       (rename-buffer "*one:~/repo/ab/:default*" t)
       (let ((narrow (current-buffer)))
@@ -626,10 +655,10 @@ keeps the bare label it always had.  Its name is the longest here, and
 must not widen the column the other two annotations start at."
   (let ((agent-backends nil)
         (agent--session-keys (make-hash-table :test 'eq))
-        (agent-session-annotation-function
-         (lambda (buffer)
-           (unless (string-match-p "plain" (buffer-name buffer))
-             "summary"))))
+        (agent-session-annotation-functions
+         (list (lambda (buffer)
+                 (unless (string-match-p "plain" (buffer-name buffer))
+                   "summary")))))
     (with-temp-buffer
       (rename-buffer "*one:~/repo/ab/:default*" t)
       (let ((short (current-buffer)))
@@ -675,7 +704,8 @@ must not widen the column the other two annotations start at."
   "Pad only for sessions that have an annotation to line up.
 A long name with nothing after it needs no padding, and letting it
 widen the column would push every annotation to the right for nothing."
-  (let ((agent-session-annotation-function (lambda (_buffer) nil)))
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) nil))))
     (agent-test--with-session-buffer "*one:~/repo/much-longer-name/:default*"
       (should (= (agent--session-label-pad) 0)))))
 
