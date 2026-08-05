@@ -1050,16 +1050,46 @@ so it must not be read as waiting."
       (kill-buffer buffer))))
 
 (ert-deftest agent-codex-test-start-session-passes-fork-through ()
-  "Pass `:fork' on to `codex-start-session'."
-  (let ((received nil))
-    (cl-letf (((symbol-function 'codex-start-session)
-               (lambda (&rest args) (setq received args) (current-buffer)))
-              ((symbol-function 'agent--set-session) #'ignore))
-      (agent-codex--start-session
-       (agent-session-create :backend 'codex :directory "/tmp/p/")
-       :resume-id "abc" :fork t)
-      (should (plist-get received :fork))
-      (should (equal (plist-get received :resume-id) "abc")))))
+  "Pass `:fork' on to `codex-start-session' for a session with a transcript.
+A rollout file on disk is what makes a session forkable, so writing one
+for the resumed id is what lets this fork reach `codex-start-session'
+at all."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (codex--transcript-file-cache (make-hash-table :test #'equal))
+         (received nil))
+    (unwind-protect
+        (progn
+          (write-region "" nil (expand-file-name "abc.jsonl" root))
+          (cl-letf (((symbol-function 'codex-start-session)
+                     (lambda (&rest args) (setq received args) (current-buffer)))
+                    ((symbol-function 'agent--set-session) #'ignore))
+            (agent-codex--start-session
+             (agent-session-create :backend 'codex :directory "/tmp/p/")
+             :resume-id "abc" :fork t)
+            (should (plist-get received :fork))
+            (should (equal (plist-get received :resume-id) "abc"))))
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-start-session-fork-without-transcript-errors ()
+  "Refuse to fork a Codex session that has produced no transcript yet.
+Codex forks by locating the parent session's rollout file on disk, and
+Codex does not write that file until the session has run a turn.  Left
+unchecked, forking such a session does not error inside Codex either:
+the app server just prints a status line into the new, empty session
+buffer, so the caller has no way to tell the fork failed.  Catching the
+missing transcript here, before any session is started, turns that
+silent failure into a `user-error' the caller can see."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (codex--transcript-file-cache (make-hash-table :test #'equal)))
+    (unwind-protect
+        (should-error
+         (agent-codex--start-session
+          (agent-session-create :backend 'codex :directory "/tmp/p/")
+          :resume-id "abc-123" :fork t)
+         :type 'user-error)
+      (delete-directory root t))))
 
 ;;;; Session id recording
 

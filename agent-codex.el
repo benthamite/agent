@@ -267,7 +267,16 @@ first user message.  RESUME-ID resumes that session id, or forks it
 into a new session when FORK is non-nil.  TERMINAL-BACKEND overrides
 `codex-terminal-backend' for this session.  The session account is
 bound as `agent-account--starting' by `agent-start-session' so
-environment hooks see it at spawn time."
+environment hooks see it at spawn time.  Signal a `user-error' when
+asked to fork a RESUME-ID that has not produced a transcript yet,
+since Codex has nothing on disk to fork from and would otherwise fail
+silently, leaving an empty, unrelated session buffer in place of the
+requested branch."
+  (when (and fork resume-id (not (codex--find-session-transcript resume-id)))
+    (user-error
+     "Codex session %s can't be branched yet: it hasn't produced any output.
+Run at least one turn in it, then branch again"
+     resume-id))
   (let ((buffer (codex-start-session
                  :directory (agent-session-directory session)
                  :instance-name (agent-session-instance session)

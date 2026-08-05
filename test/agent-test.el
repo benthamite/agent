@@ -2988,6 +2988,43 @@ being masked by a cleanup error."
       (delete-directory repo t)
       (delete-directory agent-branch-worktree-directory t))))
 
+(ert-deftest agent-test-create-branch-removes-worktree-on-user-error ()
+  "Remove the worktree when the fork refuses to start with a `user-error'.
+A backend that rejects an unforkable session signals `user-error'
+rather than a plain `error' -- the cleanup and error propagation in
+`agent-create-branch' must treat it the same way, since `user-error'
+is itself a kind of `error' and nothing here should special-case it."
+  (let* ((agent-backends nil)
+         (repo (file-name-as-directory (make-temp-file "agent-branch-repo" t)))
+         (agent-branch-worktree-directory
+          (file-name-as-directory (make-temp-file "agent-branch-worktrees" t)))
+         (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-test--init-git-repo repo)
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers (lambda () (list buffer))
+           :start-session (lambda (&rest _) (user-error "not forkable yet"))
+           :session-identity (lambda (_buf) "abc-123"))
+          (with-current-buffer buffer
+            (setq default-directory repo)
+            (setq-local agent--backend 'stub)
+            (let ((err (should-error (agent-create-branch t)
+                                     :type 'user-error)))
+              (should (equal (cadr err) "not forkable yet"))))
+          (should-not (directory-files agent-branch-worktree-directory nil
+                                       directory-files-no-dot-files-regexp))
+          (let ((branches
+                 (let ((default-directory repo))
+                   (with-temp-buffer
+                     (call-process "git" nil t nil "branch" "--list"
+                                   "agent-branch-*")
+                     (string-trim (buffer-string))))))
+            (should (string-empty-p branches))))
+      (kill-buffer buffer)
+      (delete-directory repo t)
+      (delete-directory agent-branch-worktree-directory t))))
+
 (ert-deftest agent-test-prepare-fork-is-skipped-without-a-slot ()
   "Do nothing when the backend registers no fork preparation."
   (let ((agent-backends nil))
