@@ -613,6 +613,15 @@ so it does not inject text into a running conversation."
   :type 'number
   :group 'agent)
 
+(defcustom agent-session-annotation-max-width nil
+  "Maximum display width of session annotations in the session switcher.
+An integer caps annotations at that many columns.  Nil fits them to the
+switcher window, which is as wide as the frame.  Annotations longer
+than the available width are truncated with an ellipsis."
+  :type '(choice (const :tag "Fit the frame" nil)
+                 (integer :tag "Columns"))
+  :group 'agent)
+
 ;;;; Faces
 
 (defface agent-waiting
@@ -967,6 +976,68 @@ the backend's :label or symbol name."
           (agent-backend-label struct))
         (and backend (symbol-name backend))
         "Sessions")))
+
+(defconst agent--switcher-suffix-padding 2
+  "Columns a transient suffix spends beyond its key and description.
+Transient formats a suffix as \" %k %d\": one leading space and one
+separator.")
+
+(defconst agent--switcher-column-padding 2
+  "Columns transient leaves between adjacent menu columns.
+Matches the padding `transient--column-stops' adds between columns.")
+
+(defconst agent--switcher-session-key-width 1
+  "Display width of a session key in the switcher.
+Every key in `agent--session-key-pool' is one character wide.")
+
+(defun agent--switcher-columns ()
+  "Return the column vectors of the session switcher's layout."
+  (let ((columns (car (aref (get 'agent--session-switcher 'transient--layout)
+                            2))))
+    (aref columns 2)))
+
+(defun agent--switcher-column-width (column)
+  "Return the display width of COLUMN in the switcher's layout.
+A transient column is as wide as its widest cell: its heading, or one
+of its suffixes formatted as \" KEY DESCRIPTION\"."
+  (let ((heading (plist-get (aref column 1) :description)))
+    (apply #'max
+           (if (stringp heading) (string-width heading) 0)
+           (mapcar (lambda (suffix)
+                     (+ agent--switcher-suffix-padding
+                        (string-width (or (plist-get (cdr suffix) :key) ""))
+                        (string-width (or (plist-get (cdr suffix) :description)
+                                          ""))))
+                   (aref column 2)))))
+
+(defun agent--switcher-sessions-column-offset ()
+  "Return the column at which the switcher's Sessions column starts.
+Transient places each column two columns past the widest cell of the
+one before it, so the room left for annotations depends on the columns
+to the left of Sessions.  Measuring the prefix's own layout keeps that
+number correct when an action is added or renamed."
+  (let ((offset 0))
+    (cl-dolist (column (agent--switcher-columns) offset)
+      (when (equal (plist-get (aref column 1) :description) "Sessions")
+        (cl-return offset))
+      (setq offset (+ offset
+                      agent--switcher-column-padding
+                      (agent--switcher-column-width column))))))
+
+(defun agent--session-annotation-width (pad)
+  "Return the display width available to a session annotation.
+PAD is the width session labels are padded to.  Honor
+`agent-session-annotation-max-width' when it is an integer; otherwise
+fit the switcher window, which spans the frame.  Never return less
+than 20 columns, so a narrow frame yields a short annotation rather
+than none."
+  (or agent-session-annotation-max-width
+      (max 20 (- (frame-width)
+                 (agent--switcher-sessions-column-offset)
+                 agent--switcher-suffix-padding
+                 agent--switcher-session-key-width
+                 pad
+                 2))))
 
 (defun agent--session-suffix-spec (buf key)
   "Build a transient suffix spec for BUF bound to KEY."

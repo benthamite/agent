@@ -348,6 +348,65 @@
         (should (equal (mapcar #'car (agent--group-sessions-by-account))
                        '("work")))))))
 
+;;;; Switcher annotation width
+
+(ert-deftest agent-test-switcher-column-width-counts-key-and-description ()
+  "Measure a transient column as its widest formatted cell.
+Transient formats a suffix as \" %k %d\", so a cell is two columns
+wider than its key and description together."
+  (let ((column (vector 'transient-column
+                        '(:description "Actions")
+                        '((transient-suffix :key "w"
+                                            :description "jump to waiting"
+                                            :command ignore)
+                          (transient-suffix :key "e"
+                                            :description "new session"
+                                            :command ignore)))))
+    (should (= (agent--switcher-column-width column)
+               (+ 2 1 (length "jump to waiting"))))))
+
+(ert-deftest agent-test-switcher-column-width-uses-heading-when-widest ()
+  "Fall back to the column heading when it is wider than every cell."
+  (let ((column (vector 'transient-column
+                        '(:description "A very wide heading")
+                        '((transient-suffix :key "w"
+                                            :description "x"
+                                            :command ignore)))))
+    (should (= (agent--switcher-column-width column)
+               (length "A very wide heading")))))
+
+(ert-deftest agent-test-switcher-sessions-column-offset-clears-actions ()
+  "Start the Sessions column two columns past the Actions column.
+The expected value is derived from the Actions column's own contents,
+so renaming an action updates this test's expectation with it, while a
+change in transient's layout representation breaks it loudly."
+  (should (= (agent--switcher-sessions-column-offset)
+             (+ 2 (max (length "Actions")
+                       (+ 2 1 (length "jump to waiting"))
+                       (+ 2 1 (length "new session")))))))
+
+(ert-deftest agent-test-annotation-width-honors-max-width ()
+  "Cap annotations at `agent-session-annotation-max-width' when set."
+  (let ((agent-session-annotation-max-width 12))
+    (should (= (agent--session-annotation-width 30) 12))))
+
+(ert-deftest agent-test-annotation-width-fits-the-frame ()
+  "Fit annotations to the frame when no maximum width is set.
+The switcher window spans the frame, so the room left over is the
+frame width minus the Sessions column offset, the three columns
+transient spends on \" k \", the padded label, and two trailing
+columns."
+  (let ((agent-session-annotation-max-width nil))
+    (cl-letf (((symbol-function 'frame-width) (lambda (&optional _) 100)))
+      (should (= (agent--session-annotation-width 20)
+                 (- 100 (agent--switcher-sessions-column-offset) 3 20 2))))))
+
+(ert-deftest agent-test-annotation-width-has-a-floor ()
+  "Never return a width below 20 columns, however narrow the frame."
+  (let ((agent-session-annotation-max-width nil))
+    (cl-letf (((symbol-function 'frame-width) (lambda (&optional _) 30)))
+      (should (= (agent--session-annotation-width 20) 20)))))
+
 ;;;; Display state
 
 (ert-deftest agent-test-display-state-unknown-before-any-event ()
