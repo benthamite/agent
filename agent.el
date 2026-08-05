@@ -457,6 +457,21 @@ value with (agent-session-id (agent-session BUFFER))."
   :type 'hook
   :group 'agent)
 
+(defvar agent-session-annotation-function nil
+  "Function returning a short annotation for a live session buffer.
+Called with the session buffer; returns a single-line string to show
+after the session name in the session switcher, or nil for no
+annotation.  Whitespace is collapsed and long annotations are
+truncated, so the function may return whatever text it has.
+
+The function must be cheap and free of side effects: building the
+switcher calls it more than once per session, since aligning the
+annotations needs every label's width before any label is final.
+
+Nil, the default, shows session names alone.  Optional integrations
+install a function here; `agent' renders whatever it returns and never
+depends on where the text comes from.")
+
 (defun agent--note-session-id (buffer id)
   "Record ID as the native session id of the session in BUFFER.
 Do nothing unless BUFFER is live, belongs to a session, and ID is a
@@ -644,6 +659,16 @@ these sessions from `agent-waiting' (truly idle)."
   "Face for sessions whose state has never been observed.
 Applied in the session switcher when no session event has reached a
 buffer, so that an unknown state is not presented as a known one."
+  :group 'agent)
+
+(defface agent-session-annotation
+  '((t :inherit shadow))
+  "Face for session annotations in the session switcher.
+Applied to the text `agent-session-annotation-function' returns, so
+that a session's name stays the prominent part of its entry.
+Transient adds a suffix's own face behind the faces a string already
+carries, so annotations stay dim even next to a name colored by
+`agent-waiting'."
   :group 'agent)
 
 ;;;; State variables
@@ -949,20 +974,24 @@ If sessions exist, show a transient menu with home-row keys."
     :setup-children agent--session-switcher-children]])
 
 (defun agent--session-switcher-children (_)
-  "Build transient suffixes for the session switcher, grouped by account."
-  (let ((groups (agent--group-sessions-by-account)))
+  "Build transient suffixes for the session switcher, grouped by account.
+Labels are built in two passes, because aligning annotations needs the
+widest label, which is only known once every label exists."
+  (let* ((pad (agent--session-label-pad))
+         (groups (agent--group-sessions-by-account pad)))
     (transient-parse-suffixes
      'agent--session-switcher
      (apply #'vector (agent--interleave-group-headers groups)))))
 
-(defun agent--group-sessions-by-account ()
+(defun agent--group-sessions-by-account (&optional pad)
   "Return an alist of (ACCOUNT . SPECS) sorted by account name.
-Each SPECS is a list of suffix specs sorted by home-row key."
+Each SPECS is a list of suffix specs sorted by home-row key.  PAD is
+the width to pad session labels to; nil pads nothing."
   (let ((groups (make-hash-table :test 'equal)))
     (maphash
      (lambda (buf key)
        (when (buffer-live-p buf)
-         (push (agent--session-suffix-spec buf key)
+         (push (agent--session-suffix-spec buf key pad)
                (gethash (agent--session-group-key buf) groups))))
      agent--session-keys)
     (agent--hash-to-sorted-alist groups)))
@@ -1066,13 +1095,68 @@ holds."
         (min agent-session-annotation-max-width fit)
       fit)))
 
-(defun agent--session-suffix-spec (buf key)
-  "Build a transient suffix spec for BUF bound to KEY."
-  (let* ((backend (agent--detect-backend buf))
+(defun agent--session-label-base (buffer)
+  "Return BUFFER's switcher label without any annotation."
+  (let* ((backend (agent--detect-backend buffer))
          (icon (when backend (agent-backend-icon-string backend)))
-         (name (agent-display-name buf))
-         (label (if (and icon (not (string-empty-p icon)))
-                    (format "%s %s" icon name) name))
+         (name (agent-display-name buffer)))
+    (if (and icon (not (string-empty-p icon)))
+        (format "%s %s" icon name)
+      name)))
+
+(defun agent--session-annotation (buffer)
+  "Return the annotation for session BUFFER, or nil for none.
+The text comes from `agent-session-annotation-function'.  Whitespace
+is collapsed to single spaces so a multi-line answer cannot break the
+menu's layout, and an answer that is blank or not a string counts as
+no annotation."
+  (when agent-session-annotation-function
+    (let ((text (funcall agent-session-annotation-function buffer)))
+      (when (stringp text)
+        (let ((line (string-trim
+                     (replace-regexp-in-string "[ \t\n\r]+" " " text))))
+          (unless (string-empty-p line) line))))))
+
+(defun agent--session-label (buffer pad)
+  "Return BUFFER's switcher label, annotated and padded to PAD columns.
+Sessions without an annotation keep the bare label they had before
+annotations existed, with no trailing padding.  PAD counts display
+columns, as `agent--session-label-pad' measures them, so a name
+containing double-width characters lines up with the rest; padding it
+to a character count would push its annotation to the right."
+  (let ((base (agent--session-label-base buffer))
+        (annotation (agent--session-annotation buffer)))
+    (if (not annotation)
+        base
+      (concat base
+              (make-string (max 0 (- pad (string-width base))) ?\s)
+              " "
+              (propertize (truncate-string-to-width
+                           annotation
+                           (agent--session-annotation-width pad)
+                           nil nil t)
+                          'face 'agent-session-annotation)))))
+
+(defun agent--session-label-pad ()
+  "Return the width to pad session labels to in the switcher.
+The widest label among sessions that have an annotation, so their
+annotations start at one column across every account group.  Zero when
+no session has one, which leaves every label unpadded."
+  (let ((widths (list 0)))
+    (maphash (lambda (buf _key)
+               (when (and (buffer-live-p buf)
+                          (agent--session-annotation buf))
+                 (push (string-width (agent--session-label-base buf))
+                       widths)))
+             agent--session-keys)
+    (apply #'max widths)))
+
+(defun agent--session-suffix-spec (buf key &optional pad)
+  "Build a transient suffix spec for BUF bound to KEY.
+PAD is the width to pad the session label to, so that annotations line
+up across the switcher; nil pads nothing."
+  (let* ((backend (agent--detect-backend buf))
+         (label (agent--session-label buf (or pad 0)))
          (state (agent-session-display-state buf backend))
          (cmd (make-symbol (format "ai-switch-%s" key)))
          (spec (list key label cmd)))
