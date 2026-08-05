@@ -1049,6 +1049,18 @@ so it must not be read as waiting."
             (should (eq (agent-session buffer) session))))
       (kill-buffer buffer))))
 
+(ert-deftest agent-codex-test-start-session-passes-fork-through ()
+  "Pass `:fork' on to `codex-start-session'."
+  (let ((received nil))
+    (cl-letf (((symbol-function 'codex-start-session)
+               (lambda (&rest args) (setq received args) (current-buffer)))
+              ((symbol-function 'agent--set-session) #'ignore))
+      (agent-codex--start-session
+       (agent-session-create :backend 'codex :directory "/tmp/p/")
+       :resume-id "abc" :fork t)
+      (should (plist-get received :fork))
+      (should (equal (plist-get received :resume-id) "abc")))))
+
 ;;;; Session id recording
 
 (ert-deftest agent-codex-test-handle-notification-notes-session-id ()

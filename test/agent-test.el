@@ -2713,5 +2713,40 @@ byte-compilation of the module that requires it."
       (kill-buffer parent)
       (kill-buffer child))))
 
+(ert-deftest agent-test-create-branch-forks-the-current-session ()
+  "Fork the current session id through the backend's start-session slot."
+  (let ((agent-backends nil)
+        (buffer (generate-new-buffer " *agent-test-session*"))
+        (started nil))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers (lambda () (list buffer))
+           :start-session (lambda (session &rest options)
+                            (setq started (cons session options))
+                            buffer)
+           :session-identity (lambda (_buf) "abc-123"))
+          (with-current-buffer buffer
+            (setq-local agent--backend 'stub)
+            (agent-create-branch))
+          (should (equal (plist-get (cdr started) :resume-id) "abc-123"))
+          (should (plist-get (cdr started) :fork))
+          (should (string-prefix-p "branch-"
+                                   (agent-session-instance (car started)))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-create-branch-outside-a-session-errors ()
+  "Refuse to branch from a buffer that is not a session."
+  (with-temp-buffer
+    (should-error (agent-create-branch) :type 'user-error)))
+
+(ert-deftest agent-test-prepare-fork-is-skipped-without-a-slot ()
+  "Do nothing when the backend registers no fork preparation."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore)
+    (should-not (agent--prepare-fork 'stub "abc" "/a/" "/b/"))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here

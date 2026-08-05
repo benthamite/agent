@@ -337,8 +337,8 @@ user message.  RESUME-ID resumes that session id instead of starting
 fresh; a non-fork RESUME-ID also seeds the session's `id' slot, because
 that identity is already known, while a fork acquires a fresh id that
 only the backend can report.  Remaining OPTIONS are passed through to
-the backend, which may support extras such as `:fork' (Claude Code) or
-`:terminal-backend' \(Codex).  When SESSION carries an account,
+the backend, which may support extras such as `:fork' (both backends)
+or `:terminal-backend' \(Codex).  When SESSION carries an account,
 defensively sync its config home with `agent-account-sync' and bind
 `agent-account--starting' around the backend call so
 `process-environment' hooks see the account at spawn time.  Return the
@@ -645,6 +645,18 @@ so it does not inject text into a running conversation."
 (defcustom agent-sigwinch-delay 0.5
   "Delay in seconds before sending SIGWINCH to fix terminal rendering."
   :type 'number
+  :group 'agent)
+
+(defcustom agent-branch-worktree-directory
+  (expand-file-name "claude-worktrees"
+                    (or (getenv "XDG_CACHE_HOME")
+                        (expand-file-name ".cache" "~")))
+  "Base directory for git worktrees created by `agent-create-branch'.
+Each isolated branch gets a sibling worktree under this directory,
+separating its filesystem and git state from the parent session.
+Defaults to a cache location to avoid cloud sync
+interference with concurrent git operations."
+  :type 'directory
   :group 'agent)
 
 (defcustom agent-session-annotation-max-width nil
@@ -3056,6 +3068,87 @@ in a new buffer when it has none."
        ((agent--buffer-for-session-id selected)
         (switch-to-buffer (agent--buffer-for-session-id selected)))
        (t (agent--branch-resume-session backend selected))))))
+
+;;;###autoload
+(defun agent-create-branch (&optional isolated)
+  "Create a branch of the current session and switch to it.
+Fork the session in this buffer and open the fork in a separate
+buffer.  By default the branch shares the parent's working tree,
+matching the behavior of starting a second session in the same
+project.
+
+With prefix arg ISOLATED, also create a git worktree on a fresh
+branch under `agent-branch-worktree-directory' and run the fork
+inside it.  The worktree starts at the parent's HEAD, so uncommitted
+parent changes are NOT carried over.  Use this when concurrent
+destructive git operations across branches are a concern; otherwise
+the default is what you want."
+  (interactive "P")
+  (let* ((buffer (current-buffer))
+         (backend (or (agent--detect-backend buffer)
+                      (user-error "Not in an AI session buffer")))
+         (session-id (or (agent--session-identity buffer backend)
+                         (user-error "Current session has no session id")))
+         (parent-cwd default-directory)
+         (branch-id (format-time-string "%H%M%S"))
+         (worktree (and isolated
+                        (agent--make-branch-worktree
+                         (or (agent--git-toplevel)
+                             (user-error "Not in a git repo; cannot isolate"))
+                         branch-id))))
+    (when worktree
+      (agent--prepare-fork backend session-id parent-cwd (car worktree)))
+    (agent-start-session
+     (agent-session-create
+      :backend backend
+      :directory (or (car worktree) default-directory)
+      :instance (format "branch-%s" branch-id))
+     :resume-id session-id
+     :fork t)
+    (when worktree
+      (message "Branched in worktree %s on branch %s"
+               (car worktree) (cdr worktree)))))
+
+(defun agent--prepare-fork (backend session-id from-dir to-dir)
+  "Prepare BACKEND to fork SESSION-ID from FROM-DIR inside TO-DIR.
+Backends that record sessions per project directory use this to make
+the parent session visible from TO-DIR; backends that record them
+globally register no `prepare-fork' slot and nothing happens."
+  (when-let* ((struct (agent-backend backend))
+              (fn (agent-backend-prepare-fork struct)))
+    (funcall fn session-id from-dir to-dir)))
+
+(defun agent--git-toplevel (&optional dir)
+  "Return git toplevel for DIR (or `default-directory'), or nil if none."
+  (let ((default-directory (or dir default-directory)))
+    (with-temp-buffer
+      (when (zerop (call-process "git" nil t nil
+                                 "rev-parse" "--show-toplevel"))
+        (file-name-as-directory (string-trim (buffer-string)))))))
+
+(defun agent--make-branch-worktree (toplevel branch-id)
+  "Create a git worktree of TOPLEVEL identified by BRANCH-ID.
+Returns a cons (PATH . BRANCH-NAME).  Signals an error on failure."
+  (let* ((repo-name (file-name-nondirectory (directory-file-name toplevel)))
+         (branch-name (format "agent-branch-%s" branch-id))
+         (worktree-path (file-name-as-directory
+                         (expand-file-name
+                          (format "%s-branch-%s" repo-name branch-id)
+                          agent-branch-worktree-directory))))
+    (make-directory agent-branch-worktree-directory t)
+    (agent--git-worktree-add toplevel branch-name worktree-path)
+    (cons worktree-path branch-name)))
+
+(defun agent--git-worktree-add (toplevel branch-name worktree-path)
+  "Run `git worktree add' in TOPLEVEL for BRANCH-NAME at WORKTREE-PATH."
+  (let ((default-directory toplevel))
+    (with-temp-buffer
+      (let ((exit (call-process "git" nil t nil
+                                "worktree" "add" "-b" branch-name
+                                (directory-file-name worktree-path))))
+        (unless (zerop exit)
+          (error "Git worktree add failed: %s"
+                 (string-trim (buffer-string))))))))
 
 ;;;; Transient menu
 

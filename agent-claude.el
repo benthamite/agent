@@ -57,17 +57,8 @@ the standard kill-protection prompt."
   :type 'boolean
   :group 'agent-claude)
 
-(defcustom agent-claude-fork-worktree-directory
-  (expand-file-name "claude-worktrees"
-                    (or (getenv "XDG_CACHE_HOME")
-                        (expand-file-name ".cache" "~")))
-  "Base directory for git worktrees created by `agent-claude-create-branch'.
-Each forked session gets a sibling worktree under this directory,
-isolating its filesystem and git state from the parent session.
-Defaults to a cache location to avoid cloud sync
-interference with concurrent git operations."
-  :type 'directory
-  :group 'agent-claude)
+(define-obsolete-variable-alias 'agent-claude-fork-worktree-directory
+  'agent-branch-worktree-directory "0.3")
 
 (defcustom agent-claude-log-directory
   (expand-file-name "agent/claude-logs/" user-emacs-directory)
@@ -2230,76 +2221,8 @@ transcript is linked into the new project."
 (define-obsolete-function-alias 'agent-claude-switch-branch
   #'agent-switch-branch "0.3")
 
-;;;###autoload
-(defun agent-claude-create-branch (&optional isolated)
-  "Create a branch of the current Claude session and switch to it.
-Forks the current session via `--resume --fork-session' and opens
-the new branch in a separate buffer.  By default the fork shares
-the parent's working tree, matching the behavior of launching a
-second Claude instance in the same project.
-
-With prefix arg ISOLATED, also create a git worktree on a fresh
-branch under `agent-claude-fork-worktree-directory' and run
-the fork inside it.  The worktree starts at the parent's HEAD,
-so uncommitted parent changes are NOT carried over.  Use this
-when concurrent destructive git operations across forks are a
-concern; otherwise the default is what you want."
-  (interactive "P")
-  (unless (claude-code--buffer-p (current-buffer))
-    (user-error "Not in a Claude buffer"))
-  (let* ((session-id (agent-claude--current-session-id))
-         (parent-cwd default-directory)
-         (fork-id (format-time-string "%H%M%S"))
-         (worktree (and isolated
-                        (agent-claude--make-fork-worktree
-                         (or (agent-claude--git-toplevel)
-                             (user-error "Not in a git repo; cannot isolate"))
-                         fork-id))))
-    (when worktree
-      (agent-claude-cli-link-session-into-project
-       session-id parent-cwd (car worktree)))
-    (agent-start-session
-     (agent-session-create
-      :backend 'claude-code
-      :directory (or (car worktree) default-directory)
-      :instance (format "fork-%s" fork-id))
-     :resume-id session-id
-     :fork t)
-    (when worktree
-      (message "Forked in worktree %s on branch %s"
-               (car worktree) (cdr worktree)))))
-
-(defun agent-claude--git-toplevel (&optional dir)
-  "Return git toplevel for DIR (or `default-directory'), or nil if none."
-  (let ((default-directory (or dir default-directory)))
-    (with-temp-buffer
-      (when (zerop (call-process "git" nil t nil
-                                 "rev-parse" "--show-toplevel"))
-        (file-name-as-directory (string-trim (buffer-string)))))))
-
-(defun agent-claude--make-fork-worktree (toplevel fork-id)
-  "Create a git worktree of TOPLEVEL identified by FORK-ID.
-Returns a cons (PATH . BRANCH-NAME).  Signals an error on failure."
-  (let* ((repo-name (file-name-nondirectory (directory-file-name toplevel)))
-         (branch-name (format "claude-fork-%s" fork-id))
-         (worktree-path (file-name-as-directory
-                         (expand-file-name
-                          (format "%s-fork-%s" repo-name fork-id)
-                          agent-claude-fork-worktree-directory))))
-    (make-directory agent-claude-fork-worktree-directory t)
-    (agent-claude--git-worktree-add toplevel branch-name worktree-path)
-    (cons worktree-path branch-name)))
-
-(defun agent-claude--git-worktree-add (toplevel branch-name worktree-path)
-  "Run `git worktree add' in TOPLEVEL for BRANCH-NAME at WORKTREE-PATH."
-  (let ((default-directory toplevel))
-    (with-temp-buffer
-      (let ((exit (call-process "git" nil t nil
-                                "worktree" "add" "-b" branch-name
-                                (directory-file-name worktree-path))))
-        (unless (zerop exit)
-          (error "Git worktree add failed: %s"
-                 (string-trim (buffer-string))))))))
+(define-obsolete-function-alias 'agent-claude-create-branch
+  #'agent-create-branch "0.3")
 
 (defun agent-claude--current-session-id ()
   "Return the session ID of the current Claude buffer.
