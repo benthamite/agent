@@ -1090,6 +1090,138 @@ event, so the submission hook must also record it."
                            "codex-sid-2"))))
       (kill-buffer buf))))
 
+;;;; Session headers
+
+(defun agent-codex-test--write-rollout (dir id meta &optional lines)
+  "Write a rollout file for session ID under DIR and return its path.
+META is an alist merged into the session_meta payload.  LINES is a list
+of extra JSON strings appended after the meta line."
+  (let* ((file (expand-file-name
+                (format "rollout-2026-08-05T08-08-27-%s.jsonl" id) dir))
+         (payload (append meta `((session_id . ,id)
+                                 (timestamp . "2026-08-05T11:08:27.217Z")))))
+    (make-directory dir t)
+    (with-temp-file file
+      (insert (json-encode `((timestamp . "2026-08-05T11:08:31.433Z")
+                             (type . "session_meta")
+                             (payload . ,payload)))
+              "\n")
+      (dolist (line (or lines '()))
+        (insert line "\n")))
+    file))
+
+(ert-deftest agent-codex-test-session-id-comes-from-the-file-name ()
+  "Take a thread's id from its file name, not the payload's session_id.
+Subagent rollouts record the parent's id in `session_id', so trusting
+the payload would collapse distinct threads onto one key."
+  (should (equal (agent-codex--session-id-from-file
+                  "/x/rollout-2026-08-05T08-08-27-019fd19c-44b9-7042-93b6-e4f7e21036ad.jsonl")
+                 "019fd19c-44b9-7042-93b6-e4f7e21036ad"))
+  (should-not (agent-codex--session-id-from-file "/x/notes.jsonl")))
+
+(ert-deftest agent-codex-test-session-headers-keep-sessions-of-this-project ()
+  "Keep rollouts whose cwd is the buffer's project and drop the others."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root))
+    (unwind-protect
+        (progn
+          (agent-codex-test--write-rollout
+           root "019fd19c-44b9-7042-93b6-e4f7e21036ad"
+           `((cwd . "/tmp/mine")))
+          (agent-codex-test--write-rollout
+           root "019fd19c-44b9-7042-93b6-e4f7e2103bbb"
+           `((cwd . "/tmp/other")))
+          (let ((headers (agent-codex--scan-session-headers "/tmp/mine/")))
+            (should (= (hash-table-count headers) 1))
+            (should (gethash "019fd19c-44b9-7042-93b6-e4f7e21036ad" headers))))
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-session-headers-skip-subagent-threads ()
+  "Skip subagent rollouts: they are forks, but not branches to navigate."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root))
+    (unwind-protect
+        (progn
+          (agent-codex-test--write-rollout
+           root "019fd19c-44b9-7042-93b6-e4f7e21036ad"
+           `((cwd . "/tmp/mine") (thread_source . "subagent")))
+          (should (= (hash-table-count
+                      (agent-codex--scan-session-headers "/tmp/mine/"))
+                     0)))
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-session-headers-read-fork-parents ()
+  "Read `forked_from_id' as the parent, ignoring a self-referential one."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (child "019fd19c-44b9-7042-93b6-e4f7e21036ad")
+         (self "019fd19c-44b9-7042-93b6-e4f7e2103bbb"))
+    (unwind-protect
+        (progn
+          (agent-codex-test--write-rollout
+           root child `((cwd . "/tmp/mine") (forked_from_id . "parent-id")))
+          (agent-codex-test--write-rollout
+           root self `((cwd . "/tmp/mine") (forked_from_id . ,self)))
+          (let ((headers (agent-codex--scan-session-headers "/tmp/mine/")))
+            (should (equal (plist-get (gethash child headers) :forked-from)
+                           "parent-id"))
+            (should-not (plist-get (gethash self headers) :forked-from))))
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-session-headers-read-long-meta-lines ()
+  "Read a `session_meta' record longer than one read chunk.
+Real rollouts carry tens of kilobytes of instructions on that first
+line, so a reader that stops after a fixed prefix parses none of them."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (id "019fd19c-44b9-7042-93b6-e4f7e21036ad"))
+    (unwind-protect
+        (progn
+          (agent-codex-test--write-rollout
+           root id `((cwd . "/tmp/mine")
+                     (instructions . ,(make-string 65536 ?x))))
+          (should (gethash id (agent-codex--scan-session-headers "/tmp/mine/"))))
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-first-user-prompt-skips-injected-messages ()
+  "Return the first human prompt, not the instructions Codex injects."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (file (agent-codex-test--write-rollout
+                root "019fd19c-44b9-7042-93b6-e4f7e21036ad"
+                '((cwd . "/tmp/mine"))
+                (list
+                 (json-encode
+                  '((type . "response_item")
+                    (payload . ((type . "message") (role . "user")
+                                (content . [((type . "input_text")
+                                             (text . "# AGENTS.md instructions for /x"))])))))
+                 (json-encode
+                  '((type . "response_item")
+                    (payload . ((type . "message") (role . "user")
+                                (content . [((type . "input_text")
+                                             (text . "Fix the failing test"))])))))))))
+    (unwind-protect
+        (should (equal (agent-codex--first-user-prompt file)
+                       "Fix the failing test"))
+      (delete-directory root t))))
+
+(ert-deftest agent-codex-test-session-prompt-falls-back-to-no-prompt ()
+  "Render a session with no human message as `(no prompt)'."
+  (let* ((root (make-temp-file "codex-sessions" t))
+         (codex-transcript-sessions-directory root)
+         (file (agent-codex-test--write-rollout
+                root "019fd19c-44b9-7042-93b6-e4f7e21036ad"
+                '((cwd . "/tmp/mine"))))
+         (header (list :session-id "019fd19c-44b9-7042-93b6-e4f7e21036ad"
+                       :forked-from nil :file-path file)))
+    (unwind-protect
+        (let ((enriched (agent-codex--session-prompt header)))
+          (should (equal (plist-get enriched :first-prompt) "(no prompt)"))
+          (should (equal (plist-get enriched :session-id)
+                         "019fd19c-44b9-7042-93b6-e4f7e21036ad")))
+      (delete-directory root t))))
+
 ;;;; Minor mode
 
 (ert-deftest agent-codex-test-snippet-start-hook-function-is-autoloaded ()
