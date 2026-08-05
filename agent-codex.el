@@ -169,7 +169,8 @@ Source: SVG Repo (CC0).")
   :sync-theme #'agent-codex--sync-theme
   :session-headers #'agent-codex--session-headers
   :session-prompt #'agent-codex--session-prompt
-  :menu-suffixes #'agent-codex--menu-suffixes)
+  :menu-suffixes #'agent-codex--menu-suffixes
+  :resume #'codex-resume)
 
 ;;;; Functions
 

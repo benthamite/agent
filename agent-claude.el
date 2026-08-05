@@ -231,7 +231,8 @@ Source: lobehub/lobe-icons (MIT).")
   :menu-suffixes #'agent-claude--menu-suffixes
   :session-headers #'agent-claude--session-headers
   :session-prompt #'agent-claude--session-prompt
-  :prepare-fork #'agent-claude--prepare-fork)
+  :prepare-fork #'agent-claude--prepare-fork
+  :resume #'claude-code-resume)
 
 ;;;; Functions
 

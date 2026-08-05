@@ -3109,6 +3109,20 @@ in a new buffer when it has none."
        (t (agent--branch-resume-session backend selected))))))
 
 ;;;###autoload
+(defun agent-resume (arg)
+  "Resume a past session of the current or prompted backend.
+The backend is the current session's when called from a session
+buffer, and prompted for otherwise.  ARG is passed to the backend's
+own resume command, where it means \"the most recent session\"."
+  (interactive "P")
+  (let* ((backend (agent--resolve-backend))
+         (resume (or (when-let* ((struct (agent-backend backend)))
+                       (agent-backend-resume struct))
+                     (user-error "Backend `%s' does not support resume"
+                                 backend))))
+    (funcall resume arg)))
+
+;;;###autoload
 (defun agent-create-branch (&optional isolated)
   "Create a branch of the current session and switch to it.
 Fork the session in this buffer and open the fork in a separate

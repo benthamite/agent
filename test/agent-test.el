@@ -2826,5 +2826,26 @@ is the behavior the toggle always claimed to have."
      :start-session #'ignore)
     (should-not (agent--prepare-fork 'stub "abc" "/a/" "/b/"))))
 
+(ert-deftest agent-test-resume-calls-the-backend-slot-with-the-prefix ()
+  "Hand the raw prefix argument to the backend's resume command."
+  (let ((agent-backends nil)
+        (received 'unset))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore
+     :resume (lambda (arg) (setq received arg)))
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'stub)))
+      (agent-resume '(4))
+      (should (equal received '(4))))))
+
+(ert-deftest agent-test-resume-without-a-slot-errors ()
+  "Say which backend cannot resume rather than failing obscurely."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers #'ignore
+     :start-session #'ignore)
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'stub)))
+      (should-error (agent-resume nil) :type 'user-error))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here
