@@ -160,6 +160,7 @@ Source: SVG Repo (CC0).")
   :busy-p #'agent-codex--busy-p
   :label "Codex"
   :run-prompt #'agent-codex-run-prompt
+  :exec-prompt #'agent-codex--run-prompt
   :notify #'agent-codex-notify
   :skill-roots #'agent-codex-skill-roots
   :skill-command-prefix "$"

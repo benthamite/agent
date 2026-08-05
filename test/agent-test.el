@@ -2847,5 +2847,31 @@ is the behavior the toggle always claimed to have."
     (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'stub)))
       (should-error (agent-resume nil) :type 'user-error))))
 
+;;;; Project session lookup
+
+(ert-deftest agent-test-session-buffer-for-project-uses-the-only-session ()
+  "Return the single session running in the project without prompting."
+  (let ((agent-backends nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers (lambda () (list buffer))
+           :start-session #'ignore
+           :find-buffers-for-dir (lambda (_dir) (list buffer)))
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+            (should (eq (agent--session-buffer-for-project) buffer))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-session-buffer-for-project-without-sessions-errors ()
+  "Say there is no session rather than returning nil into a submit call."
+  (let ((agent-backends nil))
+    (agent-register-backend
+     'stub :buffer-p #'ignore :find-all-buffers (lambda () nil)
+     :start-session #'ignore
+     :find-buffers-for-dir (lambda (_dir) nil))
+    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
+      (should-error (agent--session-buffer-for-project) :type 'user-error))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here

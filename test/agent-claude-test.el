@@ -394,26 +394,6 @@ notification would double-report the same interruption."
                          "{")))
       (delete-directory dir t))))
 
-;;;; Batch format prompt
-
-(ert-deftest agent-claude-test-batch-format-prompt-title-only ()
-  "Return title alone when body is empty."
-  (should (equal (agent-claude--batch-format-prompt
-                  '(:title "Fix the bug" :body ""))
-                 "Fix the bug")))
-
-(ert-deftest agent-claude-test-batch-format-prompt-title-and-body ()
-  "Return title and body separated by blank line."
-  (should (equal (agent-claude--batch-format-prompt
-                  '(:title "Fix the bug" :body "See error in log"))
-                 "Fix the bug\n\nSee error in log")))
-
-(ert-deftest agent-claude-test-batch-format-prompt-nil-body ()
-  "Return title alone when body is nil."
-  (should (equal (agent-claude--batch-format-prompt
-                  '(:title "Refactor module" :body nil))
-                 "Refactor module")))
-
 ;;;; Status accessors
 
 (ert-deftest agent-claude-test-status-model-present ()
@@ -622,7 +602,7 @@ notification would double-report the same interruption."
                                 :num_turns 1
                                 :subtype "success")))
          (raw (concat line1 "\n" line2))
-         (result (agent-claude--batch-parse-stream-json raw)))
+         (result (agent-claude--parse-stream-json raw)))
     (should (equal (plist-get result :text) "Hello world"))
     (should (= (plist-get result :cost) 0.05))
     (should (equal (plist-get result :session-id) "sess-123"))))
@@ -636,7 +616,7 @@ notification would double-report the same interruption."
          (line3 (json-encode '(:type "result" :total_cost_usd 0.1
                                 :session_id "s1" :num_turns 2 :subtype "success")))
          (raw (concat line1 "\n" line2 "\n" line3))
-         (result (agent-claude--batch-parse-stream-json raw)))
+         (result (agent-claude--parse-stream-json raw)))
     (should (equal (plist-get result :text) "Part one\n\nPart two"))))
 
 (ert-deftest agent-claude-test-batch-parse-stream-json-no-text ()
@@ -644,7 +624,7 @@ notification would double-report the same interruption."
   (let* ((line (json-encode '(:type "result" :total_cost_usd 0.0
                                :session_id "s99" :num_turns 0 :subtype "timeout")))
          (raw line)
-         (result (agent-claude--batch-parse-stream-json raw)))
+         (result (agent-claude--parse-stream-json raw)))
     (should (string-match-p "No assistant text captured" (plist-get result :text)))
     (should (string-match-p "s99" (plist-get result :text)))))
 
@@ -652,7 +632,7 @@ notification would double-report the same interruption."
   "Use cost_usd when total_cost_usd is absent."
   (let* ((line (json-encode '(:type "result" :cost_usd 0.03
                                :session_id "s1" :num_turns 1 :subtype "ok")))
-         (result (agent-claude--batch-parse-stream-json line)))
+         (result (agent-claude--parse-stream-json line)))
     (should (= (plist-get result :cost) 0.03))))
 
 (ert-deftest agent-claude-test-batch-parse-stream-json-malformed-lines ()
@@ -660,12 +640,12 @@ notification would double-report the same interruption."
   (let* ((good (json-encode '(:type "result" :total_cost_usd 0.01
                                :session_id "s1" :num_turns 1 :subtype "ok")))
          (raw (concat "not valid json\n" good))
-         (result (agent-claude--batch-parse-stream-json raw)))
+         (result (agent-claude--parse-stream-json raw)))
     (should (= (plist-get result :cost) 0.01))))
 
 (ert-deftest agent-claude-test-batch-parse-stream-json-empty-input ()
   "Empty input returns zero cost and fallback text."
-  (let ((result (agent-claude--batch-parse-stream-json "")))
+  (let ((result (agent-claude--parse-stream-json "")))
     (should (= (plist-get result :cost) 0))
     (should (string-match-p "No assistant text captured" (plist-get result :text)))))
 
@@ -750,9 +730,9 @@ notification would double-report the same interruption."
         (agent-claude-accounts nil)
         (agent-account--current (make-hash-table :test #'eq)))
     (should (member "ANTHROPIC_API_KEY=key"
-                    (agent-claude--batch-process-environment)))
+                    (agent-claude--exec-process-environment)))
     (should (member "ANTHROPIC_AUTH_TOKEN=token"
-                    (agent-claude--batch-process-environment)))))
+                    (agent-claude--exec-process-environment)))))
 
 (ert-deftest agent-claude-test-batch-env-strips-api-key-with-account ()
   "Strip conflicting auth when `CLAUDE_CONFIG_DIR' is set."
@@ -762,7 +742,7 @@ notification would double-report the same interruption."
         (agent-claude-accounts '(("work" . "/tmp/claude-work")))
         (agent-account--current (make-hash-table :test #'eq)))
     (puthash 'claude-code "work" agent-account--current)
-    (let ((env (agent-claude--batch-process-environment)))
+    (let ((env (agent-claude--exec-process-environment)))
       (should (member "CLAUDE_CONFIG_DIR=/tmp/claude-work" env))
       (should-not (member "ANTHROPIC_API_KEY=key" env))
       (should-not (member "ANTHROPIC_AUTH_TOKEN=token" env))
@@ -949,58 +929,6 @@ notification would double-report the same interruption."
             (should (gethash "Notification" hooks))))
       (delete-file settings)
       (delete-file wrapper))))
-
-;;;; Batch collect todos
-
-(ert-deftest agent-claude-test-batch-collect-todos-buffer-scope ()
-  "Collect TODO entries from the entire buffer."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* TODO First task\nSome body text\n* TODO Second task\nMore body\n* DONE Finished\nDone body\n")
-    (let ((entries (agent-claude--batch-collect-todos 'buffer)))
-      (should (= (length entries) 2))
-      (should (equal (plist-get (nth 0 entries) :title) "First task"))
-      (should (string-match-p "Some body text" (plist-get (nth 0 entries) :body)))
-      (should (equal (plist-get (nth 1 entries) :title) "Second task")))))
-
-(ert-deftest agent-claude-test-batch-collect-todos-skips-done ()
-  "DONE entries are excluded from the collected list."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* DONE Completed\nBody\n* TODO Active\nActive body\n")
-    (let ((entries (agent-claude--batch-collect-todos 'buffer)))
-      (should (= (length entries) 1))
-      (should (equal (plist-get (nth 0 entries) :title) "Active")))))
-
-(ert-deftest agent-claude-test-batch-collect-todos-empty-body ()
-  "TODO entries with no body text get an empty string body."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* TODO No body entry\n* TODO Another entry\n")
-    (let ((entries (agent-claude--batch-collect-todos 'buffer)))
-      (should (= (length entries) 2))
-      (should (equal (plist-get (nth 0 entries) :title) "No body entry"))
-      (should (string-empty-p (plist-get (nth 0 entries) :body))))))
-
-(ert-deftest agent-claude-test-batch-collect-todos-no-todos ()
-  "Return nil when buffer has no TODO entries."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Regular heading\nSome text\n* Another heading\n")
-    (let ((entries (agent-claude--batch-collect-todos 'buffer)))
-      (should (null entries)))))
-
-(ert-deftest agent-claude-test-batch-collect-todos-subtree-scope ()
-  "Collect only TODO entries within the current subtree."
-  (with-temp-buffer
-    (org-mode)
-    (insert "* Parent\n** TODO Child task\nChild body\n** DONE Done child\n* TODO Outside\nOutside body\n")
-    (goto-char (point-min))
-    (save-restriction
-      (org-narrow-to-subtree)
-      (let ((entries (agent-claude--batch-collect-todos 'subtree)))
-        (should (= (length entries) 1))
-        (should (equal (plist-get (nth 0 entries) :title) "Child task"))))))
 
 ;;;; Session capture
 

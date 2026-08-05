@@ -759,6 +759,7 @@ Only `agent-session-event' may set this variable.")
 (declare-function elpaca-get "elpaca")
 (declare-function elpaca-source-dir "elpaca")
 (declare-function find-library-name "find-func")
+(declare-function project-root "project" (project))
 (declare-function agent-log-menu "agent-log" ())
 (declare-function agent-capture-confirm-no-pending "agent-capture"
                   (backend buffer action))
@@ -2220,6 +2221,28 @@ would trigger an instance-name prompt and break unattended loops."
       (`(,buffer) buffer)
       (_ (user-error "Multiple sessions already exist for %s"
                      (abbreviate-file-name dir))))))
+
+(defun agent--session-buffer-for-project ()
+  "Return a session buffer for the current project, prompting if needed.
+Ask every registered backend for its sessions in the project root,
+falling back to `default-directory' when there is no project.  Use the
+only match when there is one and prompt when there are several."
+  (let* ((project (project-current))
+         (dir (if project (project-root project) default-directory))
+         (buffers (delq nil
+                        (mapcan
+                         (lambda (entry)
+                           (when-let* ((fn (agent-backend-find-buffers-for-dir
+                                            (cdr entry))))
+                             (copy-sequence (funcall fn dir))))
+                         agent-backends))))
+    (pcase buffers
+      ('nil (user-error "No AI session running in %s"
+                        (abbreviate-file-name dir)))
+      (`(,buffer) buffer)
+      (_ (get-buffer
+          (completing-read "Session: " (mapcar #'buffer-name buffers)
+                           nil t))))))
 
 (defvar server-eval-args-left)
 
