@@ -2641,6 +2641,84 @@ byte-compilation of the module that requires it."
                      "enriched"))
       (should (equal (plist-get (gethash "a" enriched) :session-id) "a")))))
 
+(ert-deftest agent-test-confirm-kill-branches-honors-the-option ()
+  "Ask nothing when `agent-warn-kill-with-branches' is nil.
+The Claude-era option was defined and toggled but never read, so this
+is the behavior the toggle always claimed to have."
+  (let ((agent-backends nil)
+        (agent-warn-kill-with-branches nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-headers
+           (lambda (&rest _) (error "must not scan when the option is off")))
+          (should (agent--confirm-kill-branches buffer 'stub)))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-confirm-kill-branches-allows-a-lone-session ()
+  "Allow the kill without prompting when the session has no branches."
+  (let ((agent-backends nil)
+        (agent-warn-kill-with-branches t)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-headers
+           (lambda (_buf &optional _d)
+             (let ((table (make-hash-table :test #'equal)))
+               (puthash "a" '(:session-id "a" :forked-from nil) table)
+               table)))
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (&rest _) (error "must not prompt"))))
+            (should (agent--confirm-kill-branches buffer 'stub))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-confirm-kill-branches-prompts-with-a-count ()
+  "Prompt, naming how many branches the session has, and obey the answer."
+  (let ((agent-backends nil)
+        (agent-warn-kill-with-branches t)
+        (asked nil)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-headers
+           (lambda (_buf &optional _d)
+             (let ((table (make-hash-table :test #'equal)))
+               (puthash "a" '(:session-id "a" :forked-from nil) table)
+               (puthash "b" '(:session-id "b" :forked-from "a") table)
+               table)))
+          (cl-letf (((symbol-function 'yes-or-no-p)
+                     (lambda (prompt) (setq asked prompt) nil)))
+            (should-not (agent--confirm-kill-branches buffer 'stub))
+            (should (string-match-p "1 branch" asked))))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-test-confirm-kill-branches-survives-a-broken-scan ()
+  "Allow the kill when the scan signals, rather than trapping the buffer."
+  (let ((agent-backends nil)
+        (agent-warn-kill-with-branches t)
+        (buffer (generate-new-buffer " *agent-test-session*")))
+    (unwind-protect
+        (progn
+          (agent-register-backend
+           'stub :buffer-p #'ignore :find-all-buffers #'ignore
+           :start-session #'ignore
+           :session-identity (lambda (_buf) "a")
+           :session-headers (lambda (&rest _) (error "boom")))
+          (should (agent--confirm-kill-branches buffer 'stub)))
+      (kill-buffer buffer))))
+
 (ert-deftest agent-test-buffer-for-session-id-matches-the-session-struct ()
   "Find the live buffer whose session struct carries the given id."
   (let ((buffer (generate-new-buffer " *agent-test-session*")))

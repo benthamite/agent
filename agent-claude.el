@@ -49,16 +49,11 @@ These directories are not loaded by ordinary Claude Code sessions."
   :type '(repeat directory)
   :group 'agent-claude)
 
-(defcustom agent-claude-warn-kill-with-branches t
-  "When non-nil, warn before killing a session that has branches.
-If the session being killed is the root of a branch tree with
-more than one member, a second confirmation prompt is shown after
-the standard kill-protection prompt."
-  :type 'boolean
-  :group 'agent-claude)
-
 (define-obsolete-variable-alias 'agent-claude-fork-worktree-directory
   'agent-branch-worktree-directory "0.3")
+
+(define-obsolete-variable-alias 'agent-claude-warn-kill-with-branches
+  'agent-warn-kill-with-branches "0.3")
 
 (defcustom agent-claude-log-directory
   (expand-file-name "agent/claude-logs/" user-emacs-directory)
@@ -230,7 +225,6 @@ Source: lobehub/lobe-icons (MIT).")
   :notify #'agent-claude-notify
   :skill-roots #'agent-claude-skill-roots
   :skill-command-prefix "/"
-  :before-kill-check (lambda (_buffer) (agent-claude--confirm-kill-branches))
   :start-session #'agent-claude--start-session
   :session-identity #'agent-claude--session-identity
   :sync-theme #'agent-claude--sync-theme
@@ -294,33 +288,6 @@ escape sequence directly to it."
     (funcall orig-fn)))
 
 ;;;;; Buffer protection
-
-(defun agent-claude--confirm-kill-branches ()
-  "Return t unless the current session has branches and user declines.
-Reads the status file to find the session ID and project
-directory, then does a fast header-only scan to check for
-branches.  Returns t (allow kill) if the session has no branches,
-if the status file is unavailable, or if the user confirms."
-  (condition-case nil
-      (let ((status (agent-claude--parse-status-file)))
-        (if (not status)
-            t
-          (let ((sid (plist-get status :session_id))
-                (transcript (plist-get status :transcript_path)))
-            (if (not (and sid transcript))
-                t
-              (let* ((project-dir (file-name-directory transcript))
-                     (headers (agent-claude-cli-scan-session-headers project-dir))
-                     (children-map (agent--branch-children-map headers))
-                     (members (agent--branch-tree-members sid children-map))
-                     (branch-count (1- (hash-table-count members))))
-                (if (<= branch-count 0)
-                    t
-                  (yes-or-no-p
-                   (format "Session has %d %s — kill anyway? "
-                           branch-count
-                           (if (= branch-count 1) "branch" "branches")))))))))
-    (error t)))
 
 (define-obsolete-function-alias 'agent-claude-setup-kill-on-exit
   #'agent-setup-kill-on-exit "0.2")

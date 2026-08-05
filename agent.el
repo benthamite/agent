@@ -659,6 +659,14 @@ interference with concurrent git operations."
   :type 'directory
   :group 'agent)
 
+(defcustom agent-warn-kill-with-branches t
+  "When non-nil, warn before killing a session that has branches.
+If the session being killed has other sessions forked from it, a
+second confirmation prompt is shown after the standard kill-protection
+prompt."
+  :type 'boolean
+  :group 'agent)
+
 (defcustom agent-session-annotation-max-width nil
   "Maximum display width of session annotations in the session switcher.
 Annotations are always fitted to the switcher window, which is as wide
@@ -2790,12 +2798,17 @@ prompt before the buffer is killed."
          (ignore-errors (kill-buffer buffer)))))))
 
 (defun agent--before-kill-allowed-p (backend buffer)
-  "Return non-nil when killing session BUFFER is allowed by BACKEND."
+  "Return non-nil when killing session BUFFER is allowed by BACKEND.
+The shared branch warning runs first, then the backend's own
+`before-kill-check' slot, which may veto or prompt for its own
+reasons."
   (let ((check (when-let* ((struct (agent-backend backend)))
                  (agent-backend-before-kill-check struct))))
-    (or (null check)
-        (with-current-buffer buffer
-          (funcall check buffer)))))
+    (and (with-current-buffer buffer
+           (agent--confirm-kill-branches buffer backend))
+         (or (null check)
+             (with-current-buffer buffer
+               (funcall check buffer))))))
 
 (defun agent--add-process-exit-hook (buffer fn)
   "Call FN with BUFFER after the process in BUFFER exits.
@@ -2943,6 +2956,32 @@ sorted by timestamp."
           (dolist (child (gethash id children-map))
             (push child queue)))))
     members))
+
+(defun agent--confirm-kill-branches (buffer backend)
+  "Return non-nil unless BUFFER's session has branches and the user declines.
+Scan only for sessions that could descend from this one, which is what
+keeps the check off the critical path when a backend stores every
+session in one directory.  Any failure to scan allows the kill: a
+session must never become unkillable because its transcripts moved."
+  (if (not agent-warn-kill-with-branches)
+      t
+    (condition-case nil
+        (let* ((struct (agent-backend backend))
+               (scan (and struct (agent-backend-session-headers struct)))
+               (session-id (and scan (agent--session-identity buffer backend))))
+          (if (not session-id)
+              t
+            (let* ((headers (funcall scan buffer session-id))
+                   (members (agent--branch-tree-members
+                             session-id
+                             (agent--branch-children-map headers)))
+                   (count (1- (hash-table-count members))))
+              (or (<= count 0)
+                  (yes-or-no-p
+                   (format "Session has %d %s — kill anyway? "
+                           count
+                           (if (= count 1) "branch" "branches")))))))
+      (error t))))
 
 (defun agent--branch-format-timestamp (iso-ts)
   "Format ISO-TS as \"Mon DD HH:MM\" for branch display."
