@@ -50,6 +50,9 @@
 (declare-function agent-backend-account-init "agent" (struct))
 (declare-function agent-backend-accounts "agent" (struct))
 (declare-function agent-backend-canonical-home "agent" (struct))
+(declare-function agent-backend-credential-file "agent" (struct))
+(declare-function agent-backend-login-args "agent" (struct))
+(declare-function agent-backend-program "agent" (struct))
 (declare-function agent-backend-shared-config-items "agent" (struct))
 
 ;;;; Variables
@@ -106,10 +109,72 @@ current account."
   (agent-account-sync backend account)
   (message "Initialized %s account: %s" backend account))
 
-(defun agent-account--read-backend ()
-  "Prompt for a registered backend that has accounts configured."
-  (let ((candidates (cl-remove-if-not #'agent-account-list
-                                      (mapcar #'car agent-backends))))
+;;;###autoload
+(defun agent-account-login (backend &optional account)
+  "Run BACKEND's login flow for ACCOUNT in a dedicated buffer.
+Spawns the backend's login command with ACCOUNT's environment, so the
+credentials land in the account's config home rather than the
+backend's default home.  ACCOUNT defaults to a prompted choice among
+BACKEND's configured accounts.  The account home is synced first so a
+fresh account can log in immediately.  Signal a `user-error' for
+backends without a `login-args' slot.  Return the login process."
+  (interactive (list (agent-account--read-backend #'agent-account--login-args)))
+  (unless (agent-account--login-args backend)
+    (user-error "Backend `%s' does not support login from Emacs" backend))
+  (let ((account (or account (agent-account--prompt backend))))
+    (unless account
+      (user-error "No account selected"))
+    (agent-account-sync backend account)
+    (agent-account--login-process backend account)))
+
+(defun agent-account--login-args (backend)
+  "Return BACKEND's login command arguments, or nil."
+  (agent-account--backend-value backend #'agent-backend-login-args))
+
+(defun agent-account--login-process (backend account)
+  "Start BACKEND's login command for ACCOUNT and return the process.
+The command runs with ACCOUNT's environment in a visible buffer, so
+the user can follow the authentication URL when the browser does not
+open automatically."
+  (let* ((buffer (get-buffer-create
+                  (format "*agent-login: %s/%s*" backend account)))
+         (process-environment (append (agent-account-env backend account)
+                                      process-environment))
+         (command (cons (agent-backend-program (agent-backend backend))
+                        (agent-account--login-args backend))))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)))
+    (display-buffer buffer)
+    (make-process
+     :name (format "agent-login-%s-%s" backend account)
+     :buffer buffer
+     :command command
+     :sentinel (lambda (process event)
+                 (agent-account--login-sentinel process event
+                                                backend account)))))
+
+(defun agent-account--login-sentinel (process event backend account)
+  "Report the completion of BACKEND ACCOUNT's login PROCESS.
+EVENT is the process status change description."
+  (when (memq (process-status process) '(exit signal))
+    (if (and (eq (process-status process) 'exit)
+             (zerop (process-exit-status process)))
+        (message "Logged in to %s account: %s" backend account)
+      (message "Login for %s account %s failed (%s); see buffer %s"
+               backend account (string-trim event)
+               (buffer-name (process-buffer process))))))
+
+(defun agent-account--read-backend (&optional predicate)
+  "Prompt for a registered backend that has accounts configured.
+When PREDICATE is non-nil, restrict candidates to backends for which
+it returns non-nil when called with the backend symbol."
+  (let ((candidates
+         (cl-remove-if-not (lambda (backend)
+                             (and (agent-account-list backend)
+                                  (or (null predicate)
+                                      (funcall predicate backend))))
+                           (mapcar #'car agent-backends))))
     (pcase candidates
       ('nil (user-error "No backend has accounts configured"))
       (`(,only) only)
@@ -204,6 +269,24 @@ Return nil when ACCOUNT is nil or not configured."
   (when-let* ((dir (alist-get account (agent-account-list backend)
                               nil nil #'string=)))
     (expand-file-name dir)))
+
+(defun agent-account-logged-in-p (backend account)
+  "Return non-nil unless ACCOUNT's BACKEND credentials are known missing.
+Checks that the backend's declared credential file exists inside
+ACCOUNT's config home.  Backends that declare no credential file are
+assumed logged in, since their credential storage cannot be
+inspected."
+  (let ((file (agent-account-credential-file backend account)))
+    (or (null file) (file-exists-p file))))
+
+(defun agent-account-credential-file (backend account)
+  "Return the credential file path for BACKEND's ACCOUNT, or nil.
+Nil when BACKEND declares no credential file or ACCOUNT has no
+configured home."
+  (when-let* ((name (agent-account--backend-value
+                     backend #'agent-backend-credential-file))
+              (home (agent-account-home backend account)))
+    (expand-file-name name home)))
 
 (defun agent-account-list (backend)
   "Return the accounts alist for BACKEND.

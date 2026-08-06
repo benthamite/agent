@@ -2254,6 +2254,47 @@ observation."
     (should (equal captured-starting '(one . "work")))
     (should (equal events '((one . "work"))))))
 
+(ert-deftest agent-test-start-session-blocks-logged-out-account ()
+  "Refuse to start a session for an account with missing credentials."
+  (let* ((home (make-temp-file "agent-test-account" t))
+         (agent-backends nil)
+         started)
+    (unwind-protect
+        (progn
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :accounts `(("work" . ,home))
+            :credential-file "auth.json"
+            :start-session (lambda (&rest _) (setq started t))))
+          (should-error
+           (agent-start-session
+            (agent-session-create :backend 'one :account "work"))
+           :type 'user-error)
+          (should-not started))
+      (delete-directory home t))))
+
+(ert-deftest agent-test-start-session-allows-logged-in-account ()
+  "Start a session normally when the account's credentials exist."
+  (let* ((home (make-temp-file "agent-test-account" t))
+         (agent-backends nil)
+         started)
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "auth.json" home)
+            (insert "{\"token\": \"x\"}"))
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :accounts `(("work" . ,home))
+            :credential-file "auth.json"
+            :start-session (lambda (&rest _) (setq started t))))
+          (cl-letf (((symbol-function 'agent-account-sync) #'ignore))
+            (agent-start-session
+             (agent-session-create :backend 'one :account "work")))
+          (should started))
+      (delete-directory home t))))
+
 (ert-deftest agent-test-account-sync-reads-backend-account-slots ()
   "Sync shared symlinks through the real backend registry slots."
   (let* ((root (make-temp-file "agent-account-sync" t))

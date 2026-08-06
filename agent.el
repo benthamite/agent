@@ -132,7 +132,7 @@ such as handoff-driven autoloops.")
   waiting-p busy-p background-tasks-p duration-ms display-name-suffix
   notify
   account-env-var accounts account-file shared-config-items canonical-home
-  account-init
+  account-init credential-file login-args
   run-prompt exec-prompt skill-roots skill-command-prefix
   session-headers session-prompt prepare-fork
   sync-theme
@@ -187,11 +187,16 @@ the account config home), `:accounts' (alist of (NAME . HOME)),
 `:account-file' (file persisting the current account name),
 `:shared-config-items' (items symlinked from the canonical home
 into each account home), `:canonical-home' (the backend's default
-config directory), and `:account-init' (function called with the
-account name after syncing).  The `:accounts', `:account-file',
-`:shared-config-items', and `:canonical-home' values may each be
-a literal value, a function returning one, or a symbol naming a
-variable, resolved at read time by `agent-account--backend-value'."
+config directory), `:account-init' (function called with the
+account name after syncing), `:credential-file' (account-local
+credentials file inside the account home, used to detect
+logged-out accounts), and `:login-args' (arguments appended to
+`:program' to run the backend's login flow; see
+`agent-account-login').  The `:accounts', `:account-file',
+`:shared-config-items', `:canonical-home', `:credential-file',
+and `:login-args' values may each be a literal value, a function
+returning one, or a symbol naming a variable, resolved at read
+time by `agent-account--backend-value'."
   (agent--validate-backend name slots)
   (setf (alist-get name agent-backends)
         (apply #'agent-backend--create :name name slots)))
@@ -341,8 +346,10 @@ the backend, which may support extras such as `:fork' (both backends)
 or `:terminal-backend' \(Codex).  When SESSION carries an account,
 defensively sync its config home with `agent-account-sync' and bind
 `agent-account--starting' around the backend call so
-`process-environment' hooks see the account at spawn time.  Return the
-new session buffer."
+`process-environment' hooks see the account at spawn time.  Signal a
+`user-error' before spawning anything when the account is logged out
+per `agent-account-logged-in-p', since the backend would only produce
+authentication failures.  Return the new session buffer."
   (ignore initial-prompt)
   (let* ((backend (agent-session-backend session))
          (account (or (agent-session-account session)
@@ -355,6 +362,10 @@ new session buffer."
                   backend))
     (when (and resume-id (not (plist-get options :fork)))
       (setf (agent-session-id session) resume-id))
+    (when (and account (not (agent-account-logged-in-p backend account)))
+      (user-error
+       "%s account `%s' is logged out; run `agent-account-login' to log back in"
+       (or (agent-backend-label (agent-backend backend)) backend) account))
     (when account
       (agent-account-sync backend account))
     (let ((agent-account--starting (and account (cons backend account))))
@@ -3356,6 +3367,9 @@ when it is not installed."
     ("d" "debug backtrace" agent-debug-backtrace)
     ("m" "act on Slack message" agent-act-on-slack-message)
     ("g" "act on Forge notification" agent-act-on-forge-notification)
+    ""
+    "Accounts"
+    ("L" "login" agent-account-login)
     ""
     "Alerts"
     ("T" "toggle alert" agent-toggle-alert)]

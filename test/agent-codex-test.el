@@ -143,6 +143,16 @@
                (lambda (_account) nil)))
       (should (equal (agent-codex-status-effort) "medium")))))
 
+(defun agent-codex-test--account-home (dir name)
+  "Create a logged-in Codex account home named NAME under DIR.
+Writes a placeholder auth.json so the logged-out session guard in
+`agent-start-session' does not trip.  Return the home path."
+  (let ((home (expand-file-name name dir)))
+    (make-directory home t)
+    (with-temp-file (expand-file-name "auth.json" home)
+      (insert "{\"token\": \"test\"}"))
+    home))
+
 (ert-deftest agent-codex-test-restart-preserves-buffer-account ()
   "Restart Codex with the account attached to the current session."
   (let ((dir (make-temp-file "codex-restart" t))
@@ -155,7 +165,7 @@
           (setq-local agent--session (agent-session-create :backend 'codex
                                                            :account "work"))
           (let ((agent-codex-accounts
-                 `(("work" . ,(expand-file-name "work" dir))))
+                 `(("work" . ,(agent-codex-test--account-home dir "work"))))
                 (agent-account--current (make-hash-table :test #'eq))
                 (agent-codex-account-file (expand-file-name "current" dir)))
             (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
@@ -186,8 +196,9 @@
           (setq-local agent--session (agent-session-create :backend 'codex
                                                            :account "work"))
           (let ((agent-codex-accounts
-                 `(("work" . ,(expand-file-name "work" dir))
-                   ("personal" . ,(expand-file-name "personal" dir))))
+                 `(("work" . ,(agent-codex-test--account-home dir "work"))
+                   ("personal" . ,(agent-codex-test--account-home
+                                   dir "personal"))))
                 (agent-account--current (make-hash-table :test #'eq)))
             (puthash 'codex "personal" agent-account--current)
             (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))
@@ -225,8 +236,9 @@
                                                            :account "work"))
           (let ((default-directory ambient-dir)
                 (agent-codex-accounts
-                 `(("work" . ,(expand-file-name "work" dir))
-                   ("personal" . ,(expand-file-name "personal" dir))))
+                 `(("work" . ,(agent-codex-test--account-home dir "work"))
+                   ("personal" . ,(agent-codex-test--account-home
+                                   dir "personal"))))
                 (agent-account--current (make-hash-table :test #'eq)))
             (puthash 'codex "personal" agent-account--current)
             (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_buffer) t))

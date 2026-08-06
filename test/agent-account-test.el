@@ -269,6 +269,68 @@ account cache and the starting binding."
           (should (equal init-args '("work"))))
       (delete-directory dir t))))
 
+;;;; Credentials and login
+
+(ert-deftest agent-account-test-logged-in-without-credential-file ()
+  "Assume logged in when the backend declares no credential file."
+  (agent-account-test--with-backend
+      (list :accounts '(("work" . "/tmp/w")))
+    (should (agent-account-logged-in-p 'stub "work"))))
+
+(ert-deftest agent-account-test-logged-in-detects-missing-credentials ()
+  "Report logged out when the declared credential file is missing."
+  (let* ((home (make-temp-file "agent-account" t)))
+    (unwind-protect
+        (agent-account-test--with-backend
+            (list :accounts `(("work" . ,home))
+                  :credential-file "auth.json")
+          (should-not (agent-account-logged-in-p 'stub "work")))
+      (delete-directory home t))))
+
+(ert-deftest agent-account-test-logged-in-detects-present-credentials ()
+  "Report logged in when the declared credential file exists."
+  (let* ((home (make-temp-file "agent-account" t)))
+    (unwind-protect
+        (agent-account-test--with-backend
+            (list :accounts `(("work" . ,home))
+                  :credential-file "auth.json")
+          (with-temp-file (expand-file-name "auth.json" home)
+            (insert "{\"token\": \"x\"}"))
+          (should (agent-account-logged-in-p 'stub "work")))
+      (delete-directory home t))))
+
+(ert-deftest agent-account-test-login-rejects-unsupported-backend ()
+  "Signal a user error for backends without a login command."
+  (agent-account-test--with-backend
+      (list :accounts '(("work" . "/tmp/w")))
+    (should-error (agent-account-login 'stub "work") :type 'user-error)))
+
+(ert-deftest agent-account-test-login-spawns-with-account-env ()
+  "Run the login command with the account's environment after syncing."
+  (agent-account-test--with-backend
+      (list :accounts '(("work" . "/tmp/w"))
+            :account-env-var "STUB_HOME"
+            :program "stub-cli"
+            :login-args '("login"))
+    (let (captured-command captured-env synced)
+      (cl-letf (((symbol-function 'agent-account-sync)
+                 (lambda (backend account)
+                   (setq synced (cons backend account))))
+                ((symbol-function 'display-buffer) #'ignore)
+                ((symbol-function 'make-process)
+                 (lambda (&rest args)
+                   (setq captured-command (plist-get args :command)
+                         captured-env process-environment)
+                   'stub-process)))
+        (unwind-protect
+            (progn
+              (should (eq (agent-account-login 'stub "work") 'stub-process))
+              (should (equal synced '(stub . "work")))
+              (should (equal captured-command '("stub-cli" "login")))
+              (should (member "STUB_HOME=/tmp/w" captured-env)))
+          (when-let* ((buffer (get-buffer "*agent-login: stub/work*")))
+            (kill-buffer buffer)))))))
+
 ;;;; Selection
 
 (ert-deftest agent-account-test-select-persists-and-syncs ()

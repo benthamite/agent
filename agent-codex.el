@@ -155,6 +155,8 @@ Source: SVG Repo (CC0).")
   :account-file 'agent-codex-account-file
   :shared-config-items 'agent-codex--shared-config-items
   :canonical-home "~/.codex/"
+  :credential-file "auth.json"
+  :login-args '("login")
   :waiting-p #'agent-codex--waiting-p
   :background-tasks-p #'agent-codex--has-background-tasks-p
   :busy-p #'agent-codex--busy-p
