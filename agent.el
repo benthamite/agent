@@ -354,22 +354,32 @@ authentication failures.  Return the new session buffer."
   (let* ((backend (agent-session-backend session))
          (account (or (agent-session-account session)
                       (setf (agent-session-account session)
-                            (agent-account-resolve backend))))
-         (start (when-let* ((struct (agent-backend backend)))
-                  (agent-backend-start-session struct))))
-    (unless start
-      (user-error "Backend `%s' does not support parameterized session start"
-                  backend))
+                            (agent-account-resolve backend)))))
+    (agent-check-session-start backend account)
     (when (and resume-id (not (plist-get options :fork)))
       (setf (agent-session-id session) resume-id))
-    (when (and account (not (agent-account-logged-in-p backend account)))
-      (user-error
-       "%s account `%s' is logged out; run `agent-account-login' to log back in"
-       (or (agent-backend-label (agent-backend backend)) backend) account))
     (when account
       (agent-account-sync backend account))
     (let ((agent-account--starting (and account (cons backend account))))
-      (apply start session options))))
+      (apply (agent-backend-start-session (agent-backend backend))
+             session options))))
+
+(defun agent-check-session-start (backend account)
+  "Signal a `user-error' unless a BACKEND session can start under ACCOUNT.
+Refuse backends that cannot start a parameterized session, and accounts
+that `agent-account-logged-in-p' reports as logged out, since the
+backend would only produce authentication failures.  Callers that
+destroy an existing session before starting the replacement, such as
+`agent-restart', must run this first so a refused start leaves the
+original session intact."
+  (unless (when-let* ((struct (agent-backend backend)))
+            (agent-backend-start-session struct))
+    (user-error "Backend `%s' does not support parameterized session start"
+                backend))
+  (when (and account (not (agent-account-logged-in-p backend account)))
+    (user-error
+     "%s account `%s' is logged out; run `agent-account-login' to log back in"
+     (or (agent-backend-label (agent-backend backend)) backend) account)))
 
 (defvar-local agent--session nil
   "The `agent-session' struct for this buffer, or nil.")
@@ -2900,6 +2910,7 @@ which one to use."
                 (funcall fn buffer)))
              (account (agent-restart--account
                        backend (agent-session-account session))))
+        (agent-check-session-start backend account)
         (setf (agent-session-account session) account)
         (agent--force-kill-buffer buffer)
         (apply #'agent-start-session session
@@ -2907,9 +2918,15 @@ which one to use."
 
 (defun agent-restart--account (backend session-account)
   "Return the account to restart a BACKEND session with.
-SESSION-ACCOUNT is the account recorded on the session.  Prompt
-for which account to use when it differs from the currently
-selected account."
+SESSION-ACCOUNT is the account recorded on the session.  Prompt for
+which account to use when it differs from the currently selected
+account.
+
+Return nil when neither is set, because the session ran under the
+backend's ambient default home and the restart must reuse it.
+Prompting here would instead force an account the session never had
+and persist that choice globally, which also hides the session's own
+transcript from account-scoped history browsers."
   (let ((selected (agent-account-resolve backend)))
     (agent-restart--ensure-account backend selected)
     (cond
@@ -2922,10 +2939,7 @@ selected account."
                         nil t nil nil selected)))
      (selected)
      (session-account
-      (agent-restart--ensure-account backend session-account))
-     (t
-      (agent-restart--ensure-account
-       backend (agent-account-resolve backend t))))))
+      (agent-restart--ensure-account backend session-account)))))
 
 (defun agent-restart--ensure-account (backend account)
   "Return ACCOUNT after checking it is configured for BACKEND."

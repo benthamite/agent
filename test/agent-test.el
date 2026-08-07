@@ -1281,6 +1281,58 @@ observation."
             (should-not killed)))
       (delete-directory agent-prompt-capture-directory t))))
 
+(ert-deftest agent-test-restart-logged-out-account-does-not-kill ()
+  "Restart refuses to kill the buffer when the account is logged out."
+  (let* ((home (make-temp-file "agent-test-account" t))
+         (agent-backends nil)
+         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+         (agent-account--current (make-hash-table :test #'eq))
+         killed
+         started)
+    (puthash 'one "work" agent-account--current)
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*one:~/repo/project/:default*" t)
+          (let ((buf (current-buffer)))
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))
+              :session-identity (lambda (_buffer) "sid-123")
+              :accounts `(("work" . ,home))
+              :credential-file "auth.json"
+              :start-session (lambda (&rest _) (setq started t))))
+            (cl-letf (((symbol-function 'agent--force-kill-buffer)
+                       (lambda (_buffer) (setq killed t))))
+              (should-error (agent-restart) :type 'user-error))
+            (should-not killed)
+            (should-not started)
+            (should (buffer-live-p buf))))
+      (delete-directory agent-prompt-capture-directory t)
+      (delete-directory home t))))
+
+(ert-deftest agent-test-restart-account-without-selection-does-not-prompt ()
+  "Restart a session that ran without an account without forcing one.
+Neither the session nor the persisted selection names an account, so the
+restart reuses the backend's ambient default instead of prompting for --
+and globally persisting -- an account the session never had."
+  (let* ((home (make-temp-file "agent-test-account" t))
+         (agent-backends nil)
+         (agent-account--current (make-hash-table :test #'eq))
+         prompted)
+    (unwind-protect
+        (progn
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend :accounts `(("work" . ,home))))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) (setq prompted t) "work"))
+                    ((symbol-function 'agent-account-set)
+                     (lambda (&rest _) (setq prompted t) "work")))
+            (should-not (agent-restart--account 'one nil)))
+          (should-not prompted))
+      (delete-directory home t))))
+
 (ert-deftest agent-test-restart-without-restart-options-omits-extras ()
   "Restart backends lacking restart-options with only the resume id."
   (let ((agent-backends nil)
