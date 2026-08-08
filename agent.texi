@@ -50,6 +50,7 @@ Architecture
 User options
 
 * Shared session behavior::
+* Project sources::
 * Org TODO workflows::
 * Claude Code backend::
 * Codex backend::
@@ -180,6 +181,7 @@ The global minor modes @code{agent-claude-mode} and @code{agent-codex-mode} own 
 
 @menu
 * Shared session behavior::
+* Project sources::
 * Org TODO workflows::
 * Claude Code backend::
 * Codex backend::
@@ -234,6 +236,17 @@ The user option @code{agent-sigwinch-delay} is a number of seconds and defaults 
 The user option @code{agent-session-annotation-max-width} caps the width of session annotations in the session switcher (@ref{Shared commands}). It defaults to @code{nil}, which applies no cap beyond the fit to the frame. An integer narrows annotations to at most that many columns; it never widens them past what the frame holds, since the frame fit applies either way. Text longer than the resulting width is truncated with an ellipsis. A cap of @samp{0} leaves no room at all, and every session then renders as the bare label it would have without an annotation, rather than a padded label followed by nothing.
 
 Snippet helpers use @samp{yasnippet} and @samp{consult-yasnippet} only when those optional packages are loaded.
+
+@node Project sources
+@section Project sources
+
+@vindex agent-project-sources
+@findex agent-project-candidates
+The @samp{agent-project} module enumerates the projects a session can be started in when the thing the session acts on carries no directory of its own. The user option @code{agent-project-sources} is an alist of (REGEXP . SOURCES). The regexp is matched against the account name of the backend that will run the session, and the first matching entry wins, so an empty regexp is a catch-all that also covers a backend with no account selected. It defaults to one catch-all entry listing @samp{~/repos/*}.
+
+Each source is a path pattern. A pattern containing a wildcard is expanded one level, never recursively, and keeps only git repositories and worktrees; a worktree records its git directory in a file rather than a directory, and both count. A pattern without a wildcard names exactly one directory, which is kept whether or not it is a repository, and dropped only when it does not exist.
+
+The function @code{agent-project-candidates} returns the candidates for an account as plists with @code{:label}, @code{:directory} and @code{:description}. Candidates are deduplicated by true path, so listing the same directory twice under different names yields one entry. A label shared by two candidates is replaced with the directory itself, so completion never offers the same string for two projects.
 
 @node Org TODO workflows
 @section Org TODO workflows
@@ -414,7 +427,7 @@ The commands @code{agent-handoff}, @code{agent-audit-project}, @code{agent-debug
 
 @code{agent-handoff} reads the backend's entry in @code{agent-handoff-files}, kills the current session buffer, and starts a new session with the handoff prompt. @code{agent-handoff-from-emacsclient} accepts the source buffer name from an @samp{emacsclient} argument, so agent-authored handoff commands can close the requesting session even though Emacs evaluates the form outside that buffer. If the source buffer name is unavailable, handoff closes the single existing session buffer for the handoff directory before starting the replacement session, which avoids the CLI's instance-name prompt in unattended loops.
 
-@code{agent-restart} kills the current session buffer and resumes the same session in place, preserving the session's directory, instance name, account, and any launch state the backend's @code{:restart-options} function captures. It prompts when the active account differs from the session account and refuses to restart when a named account is no longer configured or when no resumable session identity exists. @code{agent-audit-project} prompts for a project directory and runs each skill in @code{agent-audit-skills} sequentially through the backend's non-interactive prompt runner. @code{agent-debug-backtrace} saves the current Emacs backtrace, asks @samp{gptel} to identify likely packages, and starts a session in the selected package source directory with instructions to fix the bug. @code{agent-setup-kill-on-exit} arranges for a session buffer to be killed when its process exits, consulting the backend's @code{:before-kill-check} slot first. It is not a menu entry: each backend installs it, along with @code{agent-disable-scrollback-truncation} and, for Codex, @code{agent-fix-rendering}, from its session-start hook, so the menu carries no buffer-maintenance commands.
+@code{agent-restart} kills the current session buffer and resumes the same session in place, preserving the session's directory, instance name, account, and any launch state the backend's @code{:restart-options} function captures. It prompts when the active account differs from the session account, and it leaves the account unset when neither the session nor the global selection names one, so a session that ran under the backend's ambient default home is restarted there rather than pushed onto an account it never used.  Every precondition is checked before the old session is killed: restart refuses when a named account is no longer configured, when the account is logged out, or when no resumable session identity exists, and in each case the running session survives untouched. @code{agent-audit-project} prompts for a project directory and runs each skill in @code{agent-audit-skills} sequentially through the backend's non-interactive prompt runner. @code{agent-debug-backtrace} saves the current Emacs backtrace, asks @samp{gptel} to identify likely packages, and starts a session in the selected package source directory with instructions to fix the bug. @code{agent-setup-kill-on-exit} arranges for a session buffer to be killed when its process exits, consulting the backend's @code{:before-kill-check} slot first. It is not a menu entry: each backend installs it, along with @code{agent-disable-scrollback-truncation} and, for Codex, @code{agent-fix-rendering}, from its session-start hook, so the menu carries no buffer-maintenance commands.
 
 @code{agent-before-exit-functions} can delay @code{agent-exit} for cleanup work.
 Each function receives the resolved backend and session buffer; returning nil

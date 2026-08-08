@@ -159,6 +159,19 @@ The user option ~agent-session-annotation-max-width~ caps the width of session a
 
 Snippet helpers use =yasnippet= and =consult-yasnippet= only when those optional packages are loaded.
 
+** Project sources
+:PROPERTIES:
+:CUSTOM_ID: h:project-options
+:END:
+
+#+vindex: agent-project-sources
+#+findex: agent-project-candidates
+The =agent-project= module enumerates the projects a session can be started in when the thing the session acts on carries no directory of its own. The user option ~agent-project-sources~ is an alist of (REGEXP . SOURCES). The regexp is matched against the account name of the backend that will run the session, and the first matching entry wins, so an empty regexp is a catch-all that also covers a backend with no account selected. It defaults to one catch-all entry listing =~/repos/*=.
+
+Each source is a path pattern. A pattern containing a wildcard is expanded one level, never recursively, and keeps only git repositories and worktrees; a worktree records its git directory in a file rather than a directory, and both count. A pattern without a wildcard names exactly one directory, which is kept whether or not it is a repository, and dropped only when it does not exist.
+
+The function ~agent-project-candidates~ returns the candidates for an account as plists with ~:label~, ~:directory~ and ~:description~. Candidates are deduplicated by true path, so listing the same directory twice under different names yields one entry. A label shared by two candidates is replaced with the directory itself, so completion never offers the same string for two projects.
+
 ** Org TODO workflows
 :PROPERTIES:
 :CUSTOM_ID: h:todo-options
