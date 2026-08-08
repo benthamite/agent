@@ -139,7 +139,9 @@ Renamed with obsolete aliases: `agent-act-on-slack-message-model` and
 `-backend` become `agent-project-ranking-model` and `-backend`, since ranking
 is no longer Slack's.  `agent-epoch-project-registry-file` becomes obsolete —
 the registry is named by an entry in `agent-project-sources`.
-`agent-epoch-projects-root` stays; it resolves the registry's relative paths.
+`agent-epoch-projects-root` becomes `agent-project-registry-root`, keeping its
+job of resolving the registry's relative paths under a name that no longer
+claims the mechanism is Epoch's.
 
 ## Testing
 
