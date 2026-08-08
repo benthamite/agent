@@ -2851,11 +2851,14 @@ predicate answers from the buffer alone, without loading the module
 that owns its extractor.
 
 An extractor calls its continuation with a context plist: `:directory'
-when the thing carries a working directory, `:text' when it carries
-only text for a project to be chosen from, `:payload' for what to send,
-`:submit' for whether to submit it, and an optional `:after' thunk run
-once the payload is delivered.  The continuation is called rather than
-returned to because extraction can require network round-trips.")
+when the thing carries a working directory, as an absolute path,
+`:text' when it carries only text for a project to be chosen from,
+`:payload' for what to send, `:submit' for whether to submit it, and an
+optional `:after' thunk run once the payload is delivered, in the
+buffer the command was invoked from.  The continuation is called rather
+than returned to because extraction can require network round-trips,
+and it may therefore run in another buffer than the one the thing was
+read from.")
 
 (defun agent--extractor-at-point ()
   "Return the extractor for the thing at point, or nil when there is none."
@@ -2865,30 +2868,41 @@ returned to because extraction can require network round-trips.")
 (defun agent--act-on-context (extractor existing)
   "Extract a context with EXTRACTOR and deliver it to a session.
 With EXISTING non-nil the context goes to a running session chosen by
-completion; otherwise a new session is started for it."
-  (funcall extractor (lambda (context)
-                       (agent--deliver-context context existing))))
+completion; otherwise a new session is started for it.  Extraction can
+be asynchronous, so the buffer the command was invoked from and the
+backend resolved there are captured now and threaded through delivery:
+by the time the continuation runs, the user may have moved."
+  (let ((origin (current-buffer))
+        (backend (unless existing (agent--resolve-backend))))
+    (funcall extractor
+             (lambda (context)
+               (agent--deliver-context context existing origin backend)))))
 
-(defun agent--deliver-context (context existing)
-  "Deliver CONTEXT to a session, choosing a running one when EXISTING."
+(defun agent--deliver-context (context existing origin backend)
+  "Deliver CONTEXT to a session, choosing a running one when EXISTING.
+ORIGIN is the buffer the command was invoked from and BACKEND the
+backend resolved there."
   (if existing
-      (agent--deliver-to context (agent--read-session-buffer))
-    (agent--deliver-to-new-session context)))
+      (agent--deliver-to context (agent--read-session-buffer) origin)
+    (agent--deliver-to-new-session context origin backend)))
 
-(defun agent--deliver-to-new-session (context)
-  "Start a session for CONTEXT and deliver it there.
+(defun agent--deliver-to-new-session (context origin backend)
+  "Start a BACKEND session for CONTEXT and deliver it there.
 An anchored context names its own directory; an unanchored one has its
-project read from the account's sources, ranked by its text."
-  (let ((backend (agent--resolve-backend)))
-    (if-let* ((directory (plist-get context :directory)))
-        (agent--deliver-to context (agent--start-session-in backend directory))
-      (agent-project-read
-       (agent-account-current backend)
-       (plist-get context :text)
-       "Project: "
-       (lambda (directory)
-         (agent--deliver-to context
-                            (agent--start-session-in backend directory)))))))
+project read from the account's sources, ranked by its text.  ORIGIN is
+the buffer the command was invoked from."
+  (if-let* ((directory (plist-get context :directory)))
+      (agent--deliver-to context
+                         (agent--start-session-in backend directory)
+                         origin)
+    (agent-project-read
+     (agent-account-current backend)
+     (plist-get context :text)
+     "Project: "
+     (lambda (directory)
+       (agent--deliver-to context
+                          (agent--start-session-in backend directory)
+                          origin)))))
 
 (defun agent--start-session-in (backend directory)
   "Start a BACKEND session in DIRECTORY and return its buffer."
@@ -2899,13 +2913,18 @@ project read from the account's sources, ranked by its text."
     (agent-start-session
      (agent-session-create :backend backend :directory dir))))
 
-(defun agent--deliver-to (context buffer)
-  "Deliver CONTEXT's payload to session BUFFER and return the buffer."
+(defun agent--deliver-to (context buffer origin)
+  "Deliver CONTEXT's payload to session BUFFER and return the buffer.
+CONTEXT's `:after' thunk acts on the thing at point, so it runs in
+ORIGIN, the buffer the command was invoked from: starting a session
+pops to BUFFER and makes it current, and an origin that died meanwhile
+has nothing left to act on."
   (if (plist-get context :submit)
       (agent-submit (plist-get context :payload) buffer)
     (agent-send-string (plist-get context :payload) buffer))
-  (when-let* ((after (plist-get context :after)))
-    (funcall after))
+  (when-let* ((after (plist-get context :after))
+              ((buffer-live-p origin)))
+    (with-current-buffer origin (funcall after)))
   (display-buffer buffer)
   buffer)
 

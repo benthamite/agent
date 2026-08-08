@@ -2673,19 +2673,19 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
 
 (defvar slack-current-buffer)
 
-(ert-deftest agent-test-action-at-point-finds-a-backtrace ()
+(ert-deftest agent-test-extractor-at-point-finds-a-backtrace ()
   "Route a backtrace buffer to the backtrace debugger."
   (with-temp-buffer
     (rename-buffer "*Backtrace*" t)
     (should (eq (agent--extractor-at-point) 'agent--backtrace-context))))
 
-(ert-deftest agent-test-action-at-point-finds-a-slack-message ()
+(ert-deftest agent-test-extractor-at-point-finds-a-slack-message ()
   "Route a Slack room buffer to the Slack message router."
   (with-temp-buffer
     (let ((slack-current-buffer 'room))
       (should (eq (agent--extractor-at-point) 'agent-slack-context)))))
 
-(ert-deftest agent-test-action-at-point-finds-a-forge-topic ()
+(ert-deftest agent-test-extractor-at-point-finds-a-forge-topic ()
   "Route a topic in a Magit-derived buffer to the Forge router."
   (with-temp-buffer
     (setq major-mode 'magit-mode)
@@ -2693,7 +2693,7 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
               ((symbol-function 'forge-topic-at-point) (lambda (&optional _) 'topic)))
       (should (eq (agent--extractor-at-point) 'agent-forge-context)))))
 
-(ert-deftest agent-test-action-at-point-ignores-a-forge-buffer-without-a-topic ()
+(ert-deftest agent-test-extractor-at-point-ignores-a-forge-buffer-without-a-topic ()
   "Fall through when a Magit-derived buffer holds no topic at point."
   (with-temp-buffer
     (setq major-mode 'magit-mode)
@@ -2701,14 +2701,14 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
               ((symbol-function 'forge-topic-at-point) (lambda (&optional _) nil)))
       (should-not (agent--extractor-at-point)))))
 
-(ert-deftest agent-test-action-at-point-never-consults-forge-elsewhere ()
+(ert-deftest agent-test-extractor-at-point-never-consults-forge-elsewhere ()
   "Leave `forge' alone in buffers that cannot hold a topic."
   (with-temp-buffer
     (cl-letf (((symbol-function 'forge-topic-at-point)
                (lambda (&optional _) (error "Consulted forge"))))
       (should-not (agent--extractor-at-point)))))
 
-(ert-deftest agent-test-action-at-point-finds-an-org-todo ()
+(ert-deftest agent-test-extractor-at-point-finds-an-org-todo ()
   "Route an org TODO heading to the TODO sender."
   (with-temp-buffer
     (org-mode)
@@ -2716,7 +2716,7 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
     (goto-char (point-min))
     (should (eq (agent--extractor-at-point) 'agent-todo-context))))
 
-(ert-deftest agent-test-action-at-point-ignores-an-org-heading-without-a-todo ()
+(ert-deftest agent-test-extractor-at-point-ignores-an-org-heading-without-a-todo ()
   "Require a TODO state, not merely an org heading."
   (with-temp-buffer
     (org-mode)
@@ -2724,7 +2724,7 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
     (goto-char (point-min))
     (should-not (agent--extractor-at-point))))
 
-(ert-deftest agent-test-thing-at-point-takes-the-first-match ()
+(ert-deftest agent-test-extractor-at-point-takes-the-first-match ()
   "Take the earliest matching entry when two predicates match."
   (let ((agent-at-point-things '((always . first-extractor)
                                  (always . second-extractor))))
@@ -2743,6 +2743,8 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
   "Start the new session in the directory the thing carries."
   (let ((started nil))
     (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+              ((symbol-function 'agent-project-read)
+               (lambda (&rest _) (error "Consulted the project reader")))
               ((symbol-function 'agent--start-session-in)
                (lambda (_backend dir) (setq started dir) (current-buffer)))
               ((symbol-function 'agent-send-string) #'ignore)
@@ -2778,6 +2780,8 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
     (let ((sent nil)
           (target (current-buffer)))
       (cl-letf (((symbol-function 'agent--read-session-buffer) (lambda () target))
+                ((symbol-function 'agent--resolve-backend)
+                 (lambda () (error "Resolved a backend")))
                 ((symbol-function 'agent--start-session-in)
                  (lambda (&rest _) (error "Started a session")))
                 ((symbol-function 'agent-send-string)
@@ -2812,6 +2816,52 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
   "Signal a user error when no session is running."
   (cl-letf (((symbol-function 'agent--find-all-buffers) (lambda () nil)))
     (should-error (agent--read-session-buffer) :type 'user-error)))
+
+(ert-deftest agent-test-after-thunk-runs-in-the-origin-buffer ()
+  "Run the after thunk where the command was invoked, not in the session.
+Starting a session pops to its buffer and makes it current, so a thunk
+that acts on the thing at point would otherwise act on the terminal."
+  (let ((session (generate-new-buffer " *agent-test-session*"))
+        (ran nil))
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer " *agent-test-origin*" t)
+          (let ((origin (buffer-name)))
+            (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+                      ((symbol-function 'agent--start-session-in)
+                       (lambda (&rest _) (set-buffer session) session))
+                      ((symbol-function 'agent-send-string) #'ignore)
+                      ((symbol-function 'display-buffer) #'ignore))
+              (agent--act-on-context
+               (agent-test--context-extractor
+                (list :directory "/tmp/anchored/" :payload "url"
+                      :after (lambda () (setq ran (buffer-name)))))
+               nil))
+            (should (equal ran origin))))
+      (kill-buffer session))))
+
+(ert-deftest agent-test-backend-is-resolved-before-extraction ()
+  "Resolve the backend where the command was invoked.
+An asynchronous extractor calls back after the user may have moved to
+another buffer, whose backend the new session must not adopt."
+  (let ((elsewhere (generate-new-buffer " *agent-test-elsewhere*"))
+        (started nil))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((origin (current-buffer)))
+            (cl-letf (((symbol-function 'agent--resolve-backend)
+                       (lambda () (if (eq (current-buffer) origin) 'origin 'elsewhere)))
+                      ((symbol-function 'agent--start-session-in)
+                       (lambda (backend _dir) (setq started backend) (current-buffer)))
+                      ((symbol-function 'agent-send-string) #'ignore)
+                      ((symbol-function 'display-buffer) #'ignore))
+              (agent--act-on-context
+               (lambda (callback)
+                 (set-buffer elsewhere)
+                 (funcall callback '(:directory "/tmp/anchored/" :payload "url")))
+               nil))
+            (should (eq started 'origin))))
+      (kill-buffer elsewhere))))
 
 (ert-deftest agent-test-menu-slack-command-is-autoloaded ()
   "Source-loaded core menu references an available Slack command."
