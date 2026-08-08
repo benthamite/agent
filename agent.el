@@ -2954,8 +2954,13 @@ every room buffer."
 (defun agent--forge-topic-at-point-p ()
   "Return non-nil when a Forge notification or topic is at point.
 Checks the major mode first, so a buffer that cannot hold a topic never
-calls into `forge'."
+calls into `forge'.  A `magit-mode' buffer is current long before `forge'
+is loaded, though, and forge's lookups carry no autoload cookie, so
+their being defined is part of the question: a predicate answers from
+the buffer, and neither loads a module nor raises."
   (and (derived-mode-p '(forge-notifications-mode forge-topic-mode magit-mode))
+       (fboundp 'forge-notification-at-point)
+       (fboundp 'forge-topic-at-point)
        (or (forge-notification-at-point) (forge-topic-at-point))))
 
 (defun agent--mu4e-message-at-point-p ()
