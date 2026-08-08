@@ -781,6 +781,9 @@ Only `agent-session-event' may set this variable.")
 (declare-function elpaca-source-dir "elpaca")
 (declare-function find-library-name "find-func")
 (declare-function project-root "project" (project))
+(declare-function org-get-todo-state "org" ())
+(declare-function forge-notification-at-point "forge-notify" (&optional demand))
+(declare-function forge-topic-at-point "forge-topic" (&optional demand))
 (declare-function agent-log-menu "agent-log" ())
 (declare-function agent-batch-todos "agent-todo" ())
 (declare-function agent-send-todo-at-point "agent-todo" ())
@@ -2820,6 +2823,54 @@ session there with the backtrace prompt as the initial message."
      :initial-prompt prompt)))
 
 ;;;###autoload
+(defun agent-act-on-thing-at-point ()
+  "Route the thing at point to an AI session.
+Call the command in `agent-at-point-actions' whose predicate matches
+the current buffer: a Slack message, a Forge notification or topic, a
+backtrace, or an org TODO."
+  (interactive)
+  (call-interactively
+   (or (agent--action-at-point)
+       (user-error "Nothing to act on at point; expected a Slack message, a Forge notification or topic, a backtrace, or an org TODO"))))
+
+(defvar agent-at-point-actions
+  '((agent--backtrace-at-point-p . agent-debug-backtrace)
+    (agent--slack-message-at-point-p . agent-act-on-slack-message)
+    (agent--forge-topic-at-point-p . agent-act-on-forge-notification)
+    (agent--org-todo-at-point-p . agent-send-todo-at-point))
+  "Actions `agent-act-on-thing-at-point' dispatches to, in order.
+Each entry is a cons of a predicate called with no arguments in the
+current buffer and the command to call when it returns non-nil.  Every
+predicate answers from the buffer alone, without loading the module
+that owns its command.")
+
+(defun agent--action-at-point ()
+  "Return the command for the thing at point, or nil when there is none."
+  (cdr (seq-find (lambda (action) (funcall (car action)))
+                 agent-at-point-actions)))
+
+(defun agent--backtrace-at-point-p ()
+  "Return non-nil in a backtrace buffer."
+  (string-match-p "\\*Backtrace\\*" (buffer-name)))
+
+(defun agent--slack-message-at-point-p ()
+  "Return non-nil in a Slack message buffer.
+Reads the buffer-local `slack-current-buffer', which `slack' sets on
+every room buffer."
+  (bound-and-true-p slack-current-buffer))
+
+(defun agent--forge-topic-at-point-p ()
+  "Return non-nil when a Forge notification or topic is at point.
+Checks the major mode first, so a buffer that cannot hold a topic never
+calls into `forge'."
+  (and (derived-mode-p '(forge-notifications-mode forge-topic-mode magit-mode))
+       (or (forge-notification-at-point) (forge-topic-at-point))))
+
+(defun agent--org-todo-at-point-p ()
+  "Return non-nil when point is on an org TODO heading."
+  (and (derived-mode-p 'org-mode) (org-get-todo-state)))
+
+;;;###autoload
 (defun agent-setup-kill-on-exit ()
   "Arrange for the buffer to be killed when the session process exits.
 Consults the backend's `before-kill-check' slot, which may veto or
@@ -3366,14 +3417,11 @@ when it is not installed."
     ("n" "new CR task" agent-trajectory-new-task)
     ("c" "post-push CI" agent-post-push-ci)
     ("a" "audit project" agent-audit-project)
-    ("d" "debug backtrace" agent-debug-backtrace)
-    ("m" "act on Slack message" agent-act-on-slack-message)
-    ("g" "act on Forge notification" agent-act-on-forge-notification)]
+    ("." "act on thing at point" agent-act-on-thing-at-point)]
    ["Prompts"
     ("p" "capture prompt" agent-capture-prompt)
     ("i" "insert prompt" agent-insert-captured-prompt)
-    ("b" "batch todos" agent-batch-todos)
-    ("t" "send todo at point" agent-send-todo-at-point)]
+    ("b" "batch todos" agent-batch-todos)]
    ["Options"
     ("-a" agent--infix-alert-on-ready)
     ("-p" agent--infix-protect-buffers)

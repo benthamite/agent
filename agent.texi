@@ -341,6 +341,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-handoff
 @findex agent-handoff-from-emacsclient
 @findex agent-audit-project
+@findex agent-act-on-thing-at-point
 @findex agent-debug-backtrace
 @findex agent-act-on-slack-message
 @findex agent-act-on-forge-notification
@@ -350,7 +351,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-setup-kill-on-exit
 @findex agent-setup-scroll-keys
 @findex agent-snippet-tab
-The command @code{agent-menu} opens the unified transient menu. Every entry in it works with either backend: session switching, waiting-session jumps, resuming a past session, creating a branch of the current session, switching between branches, handoff, restart, exit, history browsing, skill execution, Trajectory CR task worktree creation, project audit, backtrace debugging, Slack-message action routing, Forge-notification action routing, and a separate Prompts section for prompt capture, captured prompt insertion, batch TODO processing, and sending the TODO at point.
+The command @code{agent-menu} opens the unified transient menu. Every entry in it works with either backend: session switching, waiting-session jumps, resuming a past session, creating a branch of the current session, switching between branches, handoff, restart, exit, history browsing, skill execution, Trajectory CR task worktree creation, project audit, one dispatcher that acts on the thing at point, and a separate Prompts section for prompt capture, captured prompt insertion, and batch TODO processing.
 
 @findex agent-history
 The command @code{agent-history}, bound to @samp{l} in the Sessions column, opens the Agent Log menu for browsing, opening, searching, and resuming historical sessions across backends. Agent Log is an optional package: loading @samp{agent} never requires it, @code{agent-history} loads it on demand, and invoking the command without Agent Log installed signals a clear error. Neither @code{agent-menu} nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
@@ -392,8 +393,7 @@ The command is the Emacs equivalent of the shell @samp{newtask} helper, but it d
 not depend on the local @samp{main} worktree's current branch.
 
 The command @code{agent-act-on-forge-notification} is the Forge counterpart of
-@code{agent-act-on-slack-message}, and sits next to it in @code{agent-menu} under @samp{g}.
-Called on a notification in
+@code{agent-act-on-slack-message}. Called on a notification in
 @code{forge-list-notifications}, it starts a session in the working tree of the
 repository that notification belongs to and inserts the issue or pull request
 URL into the prompt without submitting it. It also accepts the topic at point,
@@ -406,6 +406,9 @@ its working tree. The command signals an error when the repository has no local
 clone, or when the recorded path no longer exists: Forge does not update that
 path when a repository is renamed or moved, so a stale entry is an ordinary
 failure rather than an exceptional one.
+
+@findex agent-act-on-thing-at-point
+The menu binds no routing command directly. @code{agent-act-on-thing-at-point}, bound to @samp{.} in the Tools column, walks @code{agent-at-point-actions} and calls the first command whose predicate matches the current buffer: @code{agent-debug-backtrace} in a @samp{*Backtrace*} buffer, @code{agent-act-on-slack-message} in a Slack room buffer, @code{agent-act-on-forge-notification} on a Forge notification or topic, and @code{agent-send-todo-at-point} on an org TODO heading. Every predicate answers from the buffer alone — the buffer name, the buffer-local variable @samp{slack} sets on room buffers, the major mode, the org TODO state — so dispatch never loads a module to ask whether it applies, and the Forge lookup runs only in a Magit-derived buffer. When nothing matches, the command signals an error naming the four kinds it recognizes. The four commands stay interactive, so any of them can still be bound directly in the mode where it applies.
 
 The commands @code{agent-handoff}, @code{agent-audit-project}, @code{agent-debug-backtrace}, @code{agent-act-on-slack-message}, @code{agent-exit}, and @code{agent-restart} resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (@code{agent-claude-handoff}, @code{agent-codex-restart}, and so on) remain available as obsolete aliases.
 

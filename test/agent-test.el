@@ -2660,14 +2660,81 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
 (ert-deftest agent-test-menu-binds-the-unified-commands ()
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
-    (dolist (key '("R" "N" "B" "b" "t" "L" "-a" "-c" "-w"))
+    (dolist (key '("R" "N" "B" "b" "." "L" "-a" "-c" "-w"))
       (should (member key keys)))
-    (dolist (key '("F" "u" "U" "-x" "-A" "T" "K" "f" "S"))
+    (dolist (key '("F" "u" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"))
       (should-not (member key keys)))))
 
 (ert-deftest agent-test-menu-has-no-alert-toggle-command ()
   "Toggle alerts through the option infix alone, not a command."
   (should-not (fboundp 'agent-toggle-alert)))
+
+;;;; Act on thing at point
+
+(defvar slack-current-buffer)
+
+(ert-deftest agent-test-action-at-point-finds-a-backtrace ()
+  "Route a backtrace buffer to the backtrace debugger."
+  (with-temp-buffer
+    (rename-buffer "*Backtrace*" t)
+    (should (eq (agent--action-at-point) 'agent-debug-backtrace))))
+
+(ert-deftest agent-test-action-at-point-finds-a-slack-message ()
+  "Route a Slack room buffer to the Slack message router."
+  (with-temp-buffer
+    (let ((slack-current-buffer 'room))
+      (should (eq (agent--action-at-point) 'agent-act-on-slack-message)))))
+
+(ert-deftest agent-test-action-at-point-finds-a-forge-topic ()
+  "Route a topic in a Magit-derived buffer to the Forge router."
+  (with-temp-buffer
+    (setq major-mode 'magit-mode)
+    (cl-letf (((symbol-function 'forge-notification-at-point) (lambda (&optional _) nil))
+              ((symbol-function 'forge-topic-at-point) (lambda (&optional _) 'topic)))
+      (should (eq (agent--action-at-point)
+                  'agent-act-on-forge-notification)))))
+
+(ert-deftest agent-test-action-at-point-ignores-a-forge-buffer-without-a-topic ()
+  "Fall through when a Magit-derived buffer holds no topic at point."
+  (with-temp-buffer
+    (setq major-mode 'magit-mode)
+    (cl-letf (((symbol-function 'forge-notification-at-point) (lambda (&optional _) nil))
+              ((symbol-function 'forge-topic-at-point) (lambda (&optional _) nil)))
+      (should-not (agent--action-at-point)))))
+
+(ert-deftest agent-test-action-at-point-never-consults-forge-elsewhere ()
+  "Leave `forge' alone in buffers that cannot hold a topic."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'forge-topic-at-point)
+               (lambda (&optional _) (error "Consulted forge"))))
+      (should-not (agent--action-at-point)))))
+
+(ert-deftest agent-test-action-at-point-finds-an-org-todo ()
+  "Route an org TODO heading to the TODO sender."
+  (with-temp-buffer
+    (org-mode)
+    (insert "* TODO Fix the thing\n")
+    (goto-char (point-min))
+    (should (eq (agent--action-at-point) 'agent-send-todo-at-point))))
+
+(ert-deftest agent-test-action-at-point-ignores-an-org-heading-without-a-todo ()
+  "Require a TODO state, not merely an org heading."
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Just a heading\n")
+    (goto-char (point-min))
+    (should-not (agent--action-at-point))))
+
+(ert-deftest agent-test-action-at-point-takes-the-first-match ()
+  "Take the earliest matching entry when two predicates match."
+  (let ((agent-at-point-actions '((always . first-action)
+                                  (always . second-action))))
+    (should (eq (agent--action-at-point) 'first-action))))
+
+(ert-deftest agent-test-act-on-thing-at-point-errors-without-a-thing ()
+  "Signal a user error when nothing at point is actionable."
+  (with-temp-buffer
+    (should-error (agent-act-on-thing-at-point) :type 'user-error)))
 
 (ert-deftest agent-test-menu-slack-command-is-autoloaded ()
   "Source-loaded core menu references an available Slack command."
