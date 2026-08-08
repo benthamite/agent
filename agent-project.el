@@ -43,8 +43,10 @@ the session; the first matching entry wins, so \"\" is a catch-all that
 also covers a backend with no account selected.
 
 Each source in SOURCES is either a registry file, whose name ends in
-\".json\", or a path pattern.  A pattern containing a wildcard is
-expanded one level, never recursively, and keeps only git repositories
+\".json\", or a path pattern.  A wildcard is `*', `?' or a `[...]'
+character class, and a pattern containing one is expanded a single
+level per wildcard component, so \"*\" reaches the children of a
+directory and \"*/*\" its grandchildren, keeping only git repositories
 and worktrees.  A pattern without a wildcard names exactly one
 directory and is kept whether or not it is a repository."
   :type '(alist :key-type regexp :value-type (repeat string))
@@ -75,11 +77,12 @@ ACCOUNT may be nil, which matches a catch-all entry."
 
 (defun agent-project--candidates-from-pattern (pattern)
   "Return the candidates matching path PATTERN.
-A PATTERN containing a wildcard matches one level and keeps only git
-repositories and worktrees.  A PATTERN without one names a single
+A PATTERN containing a wildcard -- `*', `?' or a `[...]' character
+class -- matches a single level per wildcard component and keeps only
+git repositories and worktrees.  A PATTERN without one names a single
 directory, kept whether or not it is a repository."
   (let ((expanded (expand-file-name pattern)))
-    (if (string-match-p "[*?]" expanded)
+    (if (string-match-p "[*?[]" expanded)
         (mapcar #'agent-project--directory-candidate
                 (seq-filter #'agent-project--git-directory-p
                             (file-expand-wildcards expanded)))
