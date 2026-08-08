@@ -131,6 +131,13 @@ the two wins.")
       \"repo_paths\": []}]}"
   "Registry JSON whose only entry records no title, paths or text.")
 
+(defconst agent-project-test--blank-summary-json
+  "{\"projects\": [
+     {\"id\": \"epsilon\", \"title\": \"Epsilon\", \"summary\": \"\",
+      \"project_doc_paths\": [], \"repo_paths\": [], \"slack_channels\": [],
+      \"aliases\": []}]}"
+  "Registry JSON whose only entry records an empty summary.")
+
 (defmacro agent-project-test--with-registry (var json &rest body)
   "Run BODY with VAR bound to a temporary registry file holding JSON.
 The file is deleted when BODY finishes."
@@ -219,6 +226,120 @@ The root is normalized like every other candidate directory."
   "Signal a user error when a registry source does not exist."
   (let ((agent-project-sources '(("" . ("/nonexistent/registry.json")))))
     (should-error (agent-project-candidates nil) :type 'user-error)))
+
+(ert-deftest agent-project-test-read-skips-ranking-without-descriptions ()
+  "Complete directly when no candidate carries a description."
+  (agent-project-test--with-tree root '(("alpha" . t))
+    (let ((agent-project-sources
+           (list (cons "" (list (expand-file-name "*" root)))))
+          (ranked nil)
+          (chosen nil))
+      (cl-letf (((symbol-function 'agent-project--rank)
+                 (lambda (&rest _) (setq ranked t)))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) "alpha")))
+        (agent-project-read nil "some text" "Project: "
+                            (lambda (dir) (setq chosen dir))))
+      (should-not ranked)
+      (should (equal chosen (file-name-as-directory
+                             (expand-file-name "alpha" root)))))))
+
+(ert-deftest agent-project-test-read-skips-ranking-for-a-blank-description ()
+  "Complete directly when the only description a candidate carries is blank."
+  (agent-project-test--with-registry file agent-project-test--blank-summary-json
+    (let ((agent-project-registry-root "/tmp/projects/")
+          (agent-project-sources (list (cons "" (list file))))
+          (ranked nil))
+      (cl-letf (((symbol-function 'agent-project--rank)
+                 (lambda (&rest _) (setq ranked t)))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) "epsilon - Epsilon")))
+        (agent-project-read nil "some text" "Project: " #'ignore))
+      (should-not ranked))))
+
+(ert-deftest agent-project-test-read-ranks-when-descriptions-exist ()
+  "Rank candidates when a registry contributed them."
+  (agent-project-test--with-registry file nil
+    (let ((agent-project-registry-root "/tmp/projects/")
+          (agent-project-sources (list (cons "" (list file))))
+          (ranked nil))
+      (cl-letf (((symbol-function 'agent-project--rank)
+                 (lambda (candidates _text callback)
+                   (setq ranked t)
+                   (funcall callback candidates)))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) "alpha - Alpha")))
+        (agent-project-read nil "some text" "Project: " #'ignore))
+      (should ranked))))
+
+(ert-deftest agent-project-test-read-without-text-does-not-rank ()
+  "Skip ranking when the thing carries no text to rank on."
+  (agent-project-test--with-registry file nil
+    (let ((agent-project-registry-root "/tmp/projects/")
+          (agent-project-sources (list (cons "" (list file))))
+          (ranked nil))
+      (cl-letf (((symbol-function 'agent-project--rank)
+                 (lambda (&rest _) (setq ranked t)))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) "alpha - Alpha")))
+        (agent-project-read nil nil "Project: " #'ignore))
+      (should-not ranked))))
+
+(ert-deftest agent-project-test-read-with-blank-text-does-not-rank ()
+  "Skip ranking when the thing's text is blank."
+  (agent-project-test--with-registry file nil
+    (let ((agent-project-registry-root "/tmp/projects/")
+          (agent-project-sources (list (cons "" (list file))))
+          (ranked nil))
+      (cl-letf (((symbol-function 'agent-project--rank)
+                 (lambda (&rest _) (setq ranked t)))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) "alpha - Alpha")))
+        (agent-project-read nil "  \n" "Project: " #'ignore))
+      (should-not ranked))))
+
+(ert-deftest agent-project-test-read-without-sources-signals ()
+  "Signal a user error when the account has no configured sources."
+  (let ((agent-project-sources nil))
+    (should-error (agent-project-read nil nil "Project: " #'ignore)
+                  :type 'user-error)))
+
+(ert-deftest agent-project-test-ranking-failure-keeps-the-order ()
+  "Report a failed ranking request and answer it with the same candidates."
+  (let ((candidates (list (list :label "alpha - Alpha")
+                          (list :label "beta - Beta")))
+        (reported nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (format &rest args)
+                 (setq reported (apply #'format format args)))))
+      (should (eq (agent-project--ranked candidates nil '(:status "error"))
+                  candidates)))
+    (should (equal reported "Project ranking failed: error"))))
+
+(ert-deftest agent-project-test-ranking-response-orders-the-candidates ()
+  "Answer a ranking response with the candidates it names first."
+  (let ((candidates (list (list :label "alpha - Alpha")
+                          (list :label "beta - Beta"))))
+    (should (equal (mapcar (lambda (c) (plist-get c :label))
+                           (agent-project--ranked candidates "beta - Beta" nil))
+                   '("beta - Beta" "alpha - Alpha")))))
+
+(ert-deftest agent-project-test-ordering-follows-the-response ()
+  "Order candidates by the labels the model returned, keeping the rest."
+  (let ((candidates (list (list :label "alpha - Alpha")
+                          (list :label "beta - Beta")
+                          (list :label "gamma - Gamma"))))
+    (should (equal (mapcar (lambda (c) (plist-get c :label))
+                           (agent-project--ordered candidates "gamma, alpha"))
+                   '("gamma - Gamma" "alpha - Alpha" "beta - Beta")))))
+
+(ert-deftest agent-project-test-ordering-ignores-repeats-and-blanks ()
+  "Offer each candidate once and ignore an empty name in the response."
+  (let ((candidates (list (list :label "alpha - Alpha")
+                          (list :label "beta - Beta"))))
+    (should (equal (mapcar (lambda (c) (plist-get c :label))
+                           (agent-project--ordered candidates "beta, beta, "))
+                   '("beta - Beta" "alpha - Alpha")))))
 
 (provide 'agent-project-test)
 ;;; agent-project-test.el ends here

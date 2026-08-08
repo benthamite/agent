@@ -35,6 +35,14 @@
 (require 'seq)
 (require 'subr-x)
 
+(defvar gptel-backend)
+(defvar gptel-include-reasoning)
+(defvar gptel-model)
+(defvar gptel-use-tools)
+(defvar gptel--known-backends)
+
+(declare-function gptel-request "gptel")
+
 ;;;; Customization
 
 (defcustom agent-project-sources '(("" . ("~/repos/*")))
@@ -58,6 +66,16 @@ directory and is kept whether or not it is a repository."
 Registry entries record project paths relative to the directory holding
 the projects; set this to that directory."
   :type '(choice (const :tag "Unconfigured" nil) directory)
+  :group 'agent)
+
+(defcustom agent-project-ranking-model 'gemini-flash-lite-latest
+  "GPtel model that orders project candidates by relevance."
+  :type 'symbol
+  :group 'agent)
+
+(defcustom agent-project-ranking-backend "Gemini"
+  "GPtel backend name used to order project candidates."
+  :type 'string
   :group 'agent)
 
 ;;;; Candidates
@@ -233,6 +251,107 @@ directory."
                               (plist-get candidate :directory)))
                 candidate))
             candidates)))
+
+;;;; Reading
+
+(defun agent-project-read (account text prompt callback)
+  "Read a project directory for ACCOUNT and call CALLBACK with it.
+TEXT describes the thing being routed and orders the candidates when any
+of them carries a description; without descriptions there is nothing to
+rank on, so no request is made.  PROMPT is the completion prompt.
+CALLBACK receives the directory of the chosen project."
+  (let ((candidates (agent-project-candidates account)))
+    (unless candidates
+      (user-error "No project sources for account %s" (or account "(none)")))
+    (if (agent-project--rankable-p text candidates)
+        (agent-project--rank
+         candidates text
+         (lambda (ordered)
+           (funcall callback (agent-project--complete ordered prompt))))
+      (funcall callback (agent-project--complete candidates prompt)))))
+
+(defun agent-project--rankable-p (text candidates)
+  "Return non-nil when TEXT and CANDIDATES give a model something to rank.
+A blank string is nothing to rank on, whether it is TEXT or a
+description, so it counts as absent and no request is made."
+  (and (agent-project--text-p text)
+       (seq-some (lambda (candidate)
+                   (agent-project--text-p (plist-get candidate :description)))
+                 candidates)))
+
+(defun agent-project--text-p (value)
+  "Return non-nil when VALUE is a string holding more than whitespace."
+  (and (stringp value) (not (string-blank-p value))))
+
+(defun agent-project--complete (candidates prompt)
+  "Return the directory of the candidate chosen from CANDIDATES with PROMPT."
+  (let* ((labels (mapcar (lambda (c) (plist-get c :label)) candidates))
+         (choice (completing-read prompt labels nil t nil nil (car labels))))
+    (plist-get (seq-find (lambda (c) (equal (plist-get c :label) choice))
+                         candidates)
+               :directory)))
+
+(defun agent-project--rank (candidates text callback)
+  "Order CANDIDATES by relevance to TEXT and call CALLBACK with the list."
+  (unless (and (require 'gptel nil t) (fboundp 'gptel-request))
+    (user-error "Package `gptel' is required for project ranking"))
+  (let ((gptel-backend (alist-get agent-project-ranking-backend
+                                  gptel--known-backends nil nil #'string=))
+        (gptel-model agent-project-ranking-model)
+        (gptel-include-reasoning nil)
+        (gptel-use-tools nil))
+    (message "Ranking projects...")
+    (gptel-request
+     (agent-project--ranking-prompt candidates text)
+     :system (concat "You route work to existing projects. Return ONLY a "
+                     "comma-separated list of project labels from the "
+                     "provided list, ordered from most likely to least "
+                     "likely. Do not invent labels.")
+     :callback
+     (lambda (response info)
+       (funcall callback (agent-project--ranked candidates response info))))))
+
+(defun agent-project--ranked (candidates response info)
+  "Return CANDIDATES ordered by RESPONSE, or unchanged when it failed.
+INFO describes the request.  A response that is not text is a failure,
+reported and answered with the original order, so a ranking failure
+costs order rather than the whole action."
+  (if (stringp response)
+      (agent-project--ordered candidates response)
+    (message "Project ranking failed: %s" (plist-get info :status))
+    candidates))
+
+(defun agent-project--ranking-prompt (candidates text)
+  "Return the ranking prompt for CANDIDATES and TEXT."
+  (format "Text:\n%s\n\nProjects:\n%s"
+          text
+          (string-join (mapcar #'agent-project--ranking-line candidates) "\n")))
+
+(defun agent-project--ranking-line (candidate)
+  "Return the ranking description of CANDIDATE."
+  (format "%s: %s"
+          (plist-get candidate :label)
+          (or (plist-get candidate :description) "")))
+
+(defun agent-project--ordered (candidates response)
+  "Return CANDIDATES ordered by the labels named in RESPONSE.
+Candidates the response did not name keep their original order at the
+end, so an incomplete answer never hides a project.  A name RESPONSE
+repeats, or leaves blank, matches at most the one candidate it names, so
+that no candidate is offered twice or picked up by an empty name."
+  (let* ((names (seq-filter #'agent-project--text-p
+                            (mapcar #'string-trim (split-string response ","))))
+         (matched (delete-dups
+                   (delq nil (mapcar (lambda (name)
+                                       (agent-project--named name candidates))
+                                     names)))))
+    (append matched (seq-remove (lambda (c) (memq c matched)) candidates))))
+
+(defun agent-project--named (name candidates)
+  "Return the first candidate in CANDIDATES whose label NAME names, or nil."
+  (seq-find (lambda (candidate)
+              (string-prefix-p name (plist-get candidate :label)))
+            candidates))
 
 (provide 'agent-project)
 ;;; agent-project.el ends here
