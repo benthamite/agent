@@ -179,9 +179,11 @@ ended in that window.")
 (defvar eat-terminal)
 (defvar url-http-end-of-headers)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
-(declare-function agent-act-on-slack-message "agent-slack" ())
+(declare-function agent-act-on-slack-message "agent-slack"
+                  (&optional existing))
 (declare-function agent-batch-todos "agent-todo" ())
-(declare-function agent-send-todo-at-point "agent-todo" ())
+(declare-function agent-send-todo-at-point "agent-todo"
+                  (&optional existing))
 (declare-function claude-code--get-or-prompt-for-buffer "claude-code" ())
 (declare-function claude-code--term-send-string "claude-code" (backend string))
 (declare-function claude-code--directory "claude-code" ())

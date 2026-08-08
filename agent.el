@@ -38,6 +38,7 @@
 (require 'subr-x)
 (eval-and-compile (require 'transient))
 (require 'agent-account)
+(require 'agent-project)
 
 ;;;; Split-module autoloads
 
@@ -45,7 +46,12 @@
 (autoload 'agent-insert-captured-prompt "agent-capture" nil t)
 (autoload 'agent-act-on-slack-message "agent-slack" nil t)
 (autoload 'agent-act-on-forge-notification "agent-forge" nil t)
+(autoload 'agent-act-on-email "agent-mu4e" nil t)
 (autoload 'agent-setup-snippet-keys "agent-snippet" nil t)
+(autoload 'agent-slack-context "agent-slack")
+(autoload 'agent-forge-context "agent-forge")
+(autoload 'agent-mu4e-context "agent-mu4e")
+(autoload 'agent-todo-context "agent-todo")
 
 ;;;; Custom group
 
@@ -784,9 +790,11 @@ Only `agent-session-event' may set this variable.")
 (declare-function org-get-todo-state "org" ())
 (declare-function forge-notification-at-point "forge-notify" (&optional demand))
 (declare-function forge-topic-at-point "forge-topic" (&optional demand))
+(declare-function mu4e-message-at-point "mu4e-message" (&optional noerror))
 (declare-function agent-log-menu "agent-log" ())
 (declare-function agent-batch-todos "agent-todo" ())
-(declare-function agent-send-todo-at-point "agent-todo" ())
+(declare-function agent-send-todo-at-point "agent-todo"
+                  (&optional existing))
 (declare-function agent-capture-confirm-no-pending "agent-capture"
                   (backend buffer action))
 (declare-function consult--read "consult" (table &rest options))
@@ -1796,6 +1804,18 @@ appended to ARGS."
 
 ;;;; Orchestration
 
+(defvar agent--context-wants-directory t
+  "Whether the extractor now running should resolve a working directory.
+`agent--act-on-context' binds this to nil when the payload is bound for
+a session that is already running, since that session has a directory of
+its own and the one an extractor would resolve is discarded.  Finding
+one is not free: a backtrace pays a model request and a package prompt
+for it, and a Forge topic refuses outright when its repository was never
+cloned.  An extractor that would resolve a directory reads this and
+omits `:directory' from its context when it is nil.  It is read while
+the extractor runs, so an extractor that defers its work carries the
+answer over itself.")
+
 (defun agent--resolve-backend ()
   "Return the backend for the current context.
 If in a session buffer, use that backend.  If only one backend is
@@ -2240,28 +2260,6 @@ would trigger an instance-name prompt and break unattended loops."
       (_ (user-error "Multiple sessions already exist for %s"
                      (abbreviate-file-name dir))))))
 
-(defun agent--session-buffer-for-project ()
-  "Return a session buffer for the current project, prompting if needed.
-Ask every registered backend for its sessions in the project root,
-falling back to `default-directory' when there is no project.  Use the
-only match when there is one and prompt when there are several."
-  (let* ((project (project-current))
-         (dir (if project (project-root project) default-directory))
-         (buffers (delq nil
-                        (mapcan
-                         (lambda (entry)
-                           (when-let* ((fn (agent-backend-find-buffers-for-dir
-                                            (cdr entry))))
-                             (copy-sequence (funcall fn dir))))
-                         agent-backends))))
-    (pcase buffers
-      ('nil (user-error "No AI session running in %s"
-                        (abbreviate-file-name dir)))
-      (`(,buffer) buffer)
-      (_ (get-buffer
-          (completing-read "Session: " (mapcar #'buffer-name buffers)
-                           nil t))))))
-
 (defvar server-eval-args-left)
 
 ;;;###autoload
@@ -2688,21 +2686,48 @@ TITLE is the skill name, used to derive the commit message scope."
            dir)))))))
 
 ;;;###autoload
-(defun agent-debug-backtrace ()
-  "Save the backtrace, choose the offending package, and open a session.
-Save the current backtrace to `agent-backtrace-file', ask `gptel'
-to list implicated packages, let the user pick one, then start an
-interactive session in that package's source directory with the
-backtrace file path as the initial prompt."
-  (interactive)
-  (let ((backend (agent--resolve-backend))
-        (backtrace-file (expand-file-name agent-backtrace-file)))
-    ;; Schedule the identification work to run after the current command.
-    ;; `agent-save-backtrace' kills the *Backtrace* buffer, which exits the
-    ;; debugger's `recursive-edit' and unwinds this call frame.
-    (run-with-timer 0 nil #'agent--debug-identify-package
-                    backend backtrace-file)
+(defun agent-debug-backtrace (&optional existing)
+  "Route the backtrace in the current buffer to an AI session.
+Save it to `agent-backtrace-file', ask `gptel' which packages the
+backtrace implicates, let the user pick one, and start a session in that
+package's source directory with instructions to read the saved backtrace
+and fix the bug.  With prefix argument EXISTING send those instructions
+to a running session instead."
+  (interactive "P")
+  (agent--act-on-context #'agent--backtrace-context existing))
+
+(defun agent--backtrace-context (callback)
+  "Call CALLBACK with the context for the backtrace in this buffer.
+Saving the backtrace kills its buffer, which exits the debugger's
+`recursive-edit' and unwinds this frame, so identification is scheduled
+to run after the current command rather than called here.  The scheduled
+call runs after `agent--context-wants-directory' has been unbound again,
+so its value is read here and handed over."
+  (let ((file (expand-file-name agent-backtrace-file))
+        (wants-directory agent--context-wants-directory))
+    (run-with-timer 0 nil #'agent--backtrace-context-for-file
+                    file wants-directory callback)
     (agent-save-backtrace)))
+
+(defconst agent--backtrace-prompt
+  "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
+  "Prompt submitted for a saved backtrace, formatted with its file path.")
+
+(defun agent--backtrace-context-for-file (file wants-directory callback)
+  "Call CALLBACK with the context for backtrace FILE.
+WANTS-DIRECTORY non-nil identifies the package the backtrace implicates
+and anchors the context in its source directory, which costs a model
+request and a prompt; nil skips both and leaves the context unanchored,
+since a session that is already running is where the instructions are
+going either way."
+  (let ((context (list :payload (format agent--backtrace-prompt file)
+                       :submit t)))
+    (if wants-directory
+        (agent--debug-read-package-directory
+         file
+         (lambda (directory)
+           (funcall callback (append (list :directory directory) context))))
+      (funcall callback context))))
 
 ;;;###autoload
 (defun agent-save-backtrace ()
@@ -2745,11 +2770,11 @@ reasoning blocks before the final response."
   (when (stringp response)
     response))
 
-(defun agent--debug-identify-package (backend backtrace-file)
+(defun agent--debug-read-package-directory (backtrace-file callback)
   "Identify candidate packages from BACKTRACE-FILE and let the user choose.
 Ask a light LLM to list all packages implicated in the backtrace,
-then present the list via `completing-read' so the user can select
-the right one before starting a BACKEND session."
+then present the list via `completing-read' and call CALLBACK with the
+source directory of the package the user selects."
   (unless (file-exists-p backtrace-file)
     (user-error "Backtrace file not found: %s" backtrace-file))
   (unless (and (require 'gptel nil t) (fboundp 'gptel-request))
@@ -2776,9 +2801,12 @@ the right one before starting a BACKEND session."
                                       (split-string text ",")))
                   (selected
                    (completing-read "Package to debug: " candidates nil
-                                    nil nil nil (car candidates))))
-             (agent--debug-start-session
-              backend (intern selected) backtrace-file))))))))
+                                    nil nil nil (car candidates)))
+                  (directory (or (agent--package-source-directory
+                                  (intern selected))
+                                 (user-error "Package `%s' not found"
+                                             selected))))
+             (funcall callback directory))))))))
 
 (defconst agent--debug-backtrace-line-limit 400
   "Maximum characters kept per backtrace line sent to the model.")
@@ -2807,47 +2835,138 @@ capped at `agent--debug-backtrace-size-limit'."
               " [truncated]")
     line))
 
-(defun agent--debug-start-session (backend package backtrace-file)
-  "Start a BACKEND session for PACKAGE with BACKTRACE-FILE.
-Find the source directory for PACKAGE and start an interactive
-session there with the backtrace prompt as the initial message."
-  (let* ((dir (or (agent--package-source-directory package)
-                  (user-error "Package `%s' not found" package)))
-         (prompt (format "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
-                         backtrace-file))
-         (label (when-let* ((struct (agent-backend backend)))
-                  (agent-backend-label struct))))
-    (message "Starting %s for `%s' in %s..." label package dir)
+;;;###autoload
+(defun agent-act-on-thing-at-point (&optional existing)
+  "Route the thing at point to an AI session.
+Start a new session for it, or with prefix argument EXISTING send it to
+a running session chosen by completion.  The thing is the first entry
+in `agent-at-point-things' whose predicate matches: a backtrace, a
+Slack message, a Forge notification or topic, an email, or an org
+TODO."
+  (interactive "P")
+  (agent--act-on-context
+   (or (agent--extractor-at-point)
+       (user-error "Nothing to act on at point; expected a backtrace, a Slack message, a Forge notification or topic, an email, or an org TODO"))
+   existing))
+
+(defvar agent-at-point-things
+  '((agent--backtrace-at-point-p . agent--backtrace-context)
+    (agent--slack-message-at-point-p . agent-slack-context)
+    (agent--forge-topic-at-point-p . agent-forge-context)
+    (agent--mu4e-message-at-point-p . agent-mu4e-context)
+    (agent--org-todo-at-point-p . agent-todo-context))
+  "Things `agent-act-on-thing-at-point' recognizes, in order.
+Each entry is a cons of a predicate called with no arguments in the
+current buffer and an extractor called with one continuation.  Every
+predicate answers from the buffer alone, without loading the module
+that owns its extractor.
+
+An extractor calls its continuation with a context plist: `:directory'
+when the thing carries a working directory, as an absolute path,
+`:text' when it carries only text for a project to be chosen from,
+`:payload' for what to send, `:submit' for whether to submit it, and an
+optional `:after' thunk run once the payload is delivered, in the
+buffer the command was invoked from.  The continuation is called rather
+than returned to because extraction can require network round-trips,
+and it may therefore run in another buffer than the one the thing was
+read from.  An extractor that has to work for its directory leaves
+`:directory' out when `agent--context-wants-directory' says the
+directory would be discarded.")
+
+(defun agent--extractor-at-point ()
+  "Return the extractor for the thing at point, or nil when there is none."
+  (cdr (seq-find (lambda (thing) (funcall (car thing)))
+                 agent-at-point-things)))
+
+(defun agent--act-on-context (extractor existing)
+  "Extract a context with EXTRACTOR and deliver it to a session.
+With EXISTING non-nil the context goes to a running session chosen by
+completion; otherwise a new session is started for it.  Extraction can
+be asynchronous, so the buffer the command was invoked from and the
+backend resolved there are captured now and threaded through delivery:
+by the time the continuation runs, the user may have moved.  A running
+session brings its own directory, so extraction is told not to resolve
+one; see `agent--context-wants-directory'."
+  (let ((origin (current-buffer))
+        (backend (unless existing (agent--resolve-backend)))
+        (agent--context-wants-directory (not existing)))
+    (funcall extractor
+             (lambda (context)
+               (agent--deliver-context context existing origin backend)))))
+
+(defun agent--deliver-context (context existing origin backend)
+  "Deliver CONTEXT to a session, choosing a running one when EXISTING.
+ORIGIN is the buffer the command was invoked from and BACKEND the
+backend resolved there."
+  (if existing
+      (agent--deliver-to context (agent--read-session-buffer) origin)
+    (agent--deliver-to-new-session context origin backend)))
+
+(defun agent--deliver-to-new-session (context origin backend)
+  "Start a BACKEND session for CONTEXT and deliver it there.
+An anchored context names its own directory; an unanchored one has its
+project read from the account's sources, ranked by its text.  ORIGIN is
+the buffer the command was invoked from."
+  (if-let* ((directory (plist-get context :directory)))
+      (agent--start-and-deliver context backend directory origin)
+    (agent-project-read
+     (agent-account-current backend)
+     (plist-get context :text)
+     "Project: "
+     (lambda (directory)
+       (agent--start-and-deliver context backend directory origin)))))
+
+(defun agent--start-and-deliver (context backend directory origin)
+  "Start a BACKEND session in DIRECTORY for CONTEXT and deliver it there.
+A payload the context asks to submit is given to the new session as its
+initial prompt, which the backend hands over at launch rather than
+leaving to the terminal: on the CLI's command line where the backend can
+do that, and otherwise sent by the backend once the session is up.
+Typing it in instead would race the session's startup: nothing sequences
+terminal input against a CLI that has only just been spawned, and a
+directory the CLI has not seen before opens with a trust prompt that the
+typed text would answer.  An unsubmitted payload is typed in, since it
+is meant to sit in the prompt for the user to edit.  ORIGIN is the
+buffer the command was invoked from."
+  (let* ((payload (plist-get context :payload))
+         (submit (plist-get context :submit))
+         (buffer (agent--start-session-in backend directory
+                                          (and submit payload))))
+    (unless submit
+      (agent-send-string payload buffer))
+    (agent--finish-delivery context buffer origin)))
+
+(defun agent--start-session-in (backend directory &optional initial-prompt)
+  "Start a BACKEND session in DIRECTORY and return its buffer.
+INITIAL-PROMPT, when non-nil, is submitted as the session's first user
+message."
+  (let ((dir (file-name-as-directory (expand-file-name directory)))
+        (label (when-let* ((struct (agent-backend backend)))
+                 (agent-backend-label struct))))
+    (message "Starting %s in %s..." label (abbreviate-file-name dir))
     (agent-start-session
      (agent-session-create :backend backend :directory dir)
-     :initial-prompt prompt)))
+     :initial-prompt initial-prompt)))
 
-;;;###autoload
-(defun agent-act-on-thing-at-point ()
-  "Route the thing at point to an AI session.
-Call the command in `agent-at-point-actions' whose predicate matches
-the current buffer: a Slack message, a Forge notification or topic, a
-backtrace, or an org TODO."
-  (interactive)
-  (call-interactively
-   (or (agent--action-at-point)
-       (user-error "Nothing to act on at point; expected a Slack message, a Forge notification or topic, a backtrace, or an org TODO"))))
+(defun agent--deliver-to (context buffer origin)
+  "Deliver CONTEXT's payload to running session BUFFER and return it.
+ORIGIN is the buffer the command was invoked from."
+  (if (plist-get context :submit)
+      (agent-submit (plist-get context :payload) buffer)
+    (agent-send-string (plist-get context :payload) buffer))
+  (agent--finish-delivery context buffer origin))
 
-(defvar agent-at-point-actions
-  '((agent--backtrace-at-point-p . agent-debug-backtrace)
-    (agent--slack-message-at-point-p . agent-act-on-slack-message)
-    (agent--forge-topic-at-point-p . agent-act-on-forge-notification)
-    (agent--org-todo-at-point-p . agent-send-todo-at-point))
-  "Actions `agent-act-on-thing-at-point' dispatches to, in order.
-Each entry is a cons of a predicate called with no arguments in the
-current buffer and the command to call when it returns non-nil.  Every
-predicate answers from the buffer alone, without loading the module
-that owns its command.")
-
-(defun agent--action-at-point ()
-  "Return the command for the thing at point, or nil when there is none."
-  (cdr (seq-find (lambda (action) (funcall (car action)))
-                 agent-at-point-actions)))
+(defun agent--finish-delivery (context buffer origin)
+  "Run CONTEXT's `:after' thunk, display session BUFFER and return it.
+The thunk acts on the thing at point, so it runs in ORIGIN, the buffer
+the command was invoked from: starting a session pops to BUFFER and
+makes it current, and an origin that died meanwhile has nothing left to
+act on."
+  (when-let* ((after (plist-get context :after))
+              ((buffer-live-p origin)))
+    (with-current-buffer origin (funcall after)))
+  (display-buffer buffer)
+  buffer)
 
 (defun agent--backtrace-at-point-p ()
   "Return non-nil in a backtrace buffer."
@@ -2862,9 +2981,21 @@ every room buffer."
 (defun agent--forge-topic-at-point-p ()
   "Return non-nil when a Forge notification or topic is at point.
 Checks the major mode first, so a buffer that cannot hold a topic never
-calls into `forge'."
+calls into `forge'.  A `magit-mode' buffer is current long before `forge'
+is loaded, though, and forge's lookups carry no autoload cookie, so
+their being defined is part of the question: a predicate answers from
+the buffer, and neither loads a module nor raises."
   (and (derived-mode-p '(forge-notifications-mode forge-topic-mode magit-mode))
+       (fboundp 'forge-notification-at-point)
+       (fboundp 'forge-topic-at-point)
        (or (forge-notification-at-point) (forge-topic-at-point))))
+
+(defun agent--mu4e-message-at-point-p ()
+  "Return non-nil when a mu4e message is at point.
+Checks the major mode first, so a buffer that cannot hold a message
+never calls into `mu4e'."
+  (and (derived-mode-p '(mu4e-headers-mode mu4e-view-mode))
+       (mu4e-message-at-point t)))
 
 (defun agent--org-todo-at-point-p ()
   "Return non-nil when point is on an org TODO heading."

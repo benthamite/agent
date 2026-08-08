@@ -2673,68 +2673,329 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
 
 (defvar slack-current-buffer)
 
-(ert-deftest agent-test-action-at-point-finds-a-backtrace ()
+(ert-deftest agent-test-extractor-at-point-finds-a-backtrace ()
   "Route a backtrace buffer to the backtrace debugger."
   (with-temp-buffer
     (rename-buffer "*Backtrace*" t)
-    (should (eq (agent--action-at-point) 'agent-debug-backtrace))))
+    (should (eq (agent--extractor-at-point) 'agent--backtrace-context))))
 
-(ert-deftest agent-test-action-at-point-finds-a-slack-message ()
+(ert-deftest agent-test-extractor-at-point-finds-a-slack-message ()
   "Route a Slack room buffer to the Slack message router."
   (with-temp-buffer
     (let ((slack-current-buffer 'room))
-      (should (eq (agent--action-at-point) 'agent-act-on-slack-message)))))
+      (should (eq (agent--extractor-at-point) 'agent-slack-context)))))
 
-(ert-deftest agent-test-action-at-point-finds-a-forge-topic ()
+(ert-deftest agent-test-extractor-at-point-finds-a-forge-topic ()
   "Route a topic in a Magit-derived buffer to the Forge router."
   (with-temp-buffer
     (setq major-mode 'magit-mode)
     (cl-letf (((symbol-function 'forge-notification-at-point) (lambda (&optional _) nil))
               ((symbol-function 'forge-topic-at-point) (lambda (&optional _) 'topic)))
-      (should (eq (agent--action-at-point)
-                  'agent-act-on-forge-notification)))))
+      (should (eq (agent--extractor-at-point) 'agent-forge-context)))))
 
-(ert-deftest agent-test-action-at-point-ignores-a-forge-buffer-without-a-topic ()
+(ert-deftest agent-test-extractor-at-point-ignores-a-forge-buffer-without-a-topic ()
   "Fall through when a Magit-derived buffer holds no topic at point."
   (with-temp-buffer
     (setq major-mode 'magit-mode)
     (cl-letf (((symbol-function 'forge-notification-at-point) (lambda (&optional _) nil))
               ((symbol-function 'forge-topic-at-point) (lambda (&optional _) nil)))
-      (should-not (agent--action-at-point)))))
+      (should-not (agent--extractor-at-point)))))
 
-(ert-deftest agent-test-action-at-point-never-consults-forge-elsewhere ()
+(ert-deftest agent-test-extractor-at-point-falls-through-without-forge ()
+  "Fall through in a Magit buffer when `forge' is not loaded.
+A Magit buffer can be current with `forge' unloaded, and its lookups are
+not autoloaded, so the predicate must answer nil rather than raise."
+  (with-temp-buffer
+    (setq major-mode 'magit-mode)
+    (cl-letf (((symbol-function 'forge-notification-at-point) nil)
+              ((symbol-function 'forge-topic-at-point) nil))
+      (should-not (agent--extractor-at-point)))))
+
+(ert-deftest agent-test-extractor-at-point-never-consults-forge-elsewhere ()
   "Leave `forge' alone in buffers that cannot hold a topic."
   (with-temp-buffer
     (cl-letf (((symbol-function 'forge-topic-at-point)
                (lambda (&optional _) (error "Consulted forge"))))
-      (should-not (agent--action-at-point)))))
+      (should-not (agent--extractor-at-point)))))
 
-(ert-deftest agent-test-action-at-point-finds-an-org-todo ()
+(ert-deftest agent-test-extractor-at-point-finds-an-email ()
+  "Route a mu4e buffer holding a message to the email extractor."
+  (with-temp-buffer
+    (setq major-mode 'mu4e-view-mode)
+    (cl-letf (((symbol-function 'mu4e-message-at-point) (lambda (&optional _) 'msg)))
+      (should (eq (agent--extractor-at-point) 'agent-mu4e-context)))))
+
+(ert-deftest agent-test-extractor-at-point-ignores-a-mu4e-buffer-without-a-message ()
+  "Fall through when a mu4e buffer holds no message at point."
+  (with-temp-buffer
+    (setq major-mode 'mu4e-headers-mode)
+    (cl-letf (((symbol-function 'mu4e-message-at-point) (lambda (&optional _) nil)))
+      (should-not (agent--extractor-at-point)))))
+
+(ert-deftest agent-test-extractor-at-point-never-consults-mu4e-elsewhere ()
+  "Leave mu4e alone in buffers that cannot hold a message."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'mu4e-message-at-point)
+               (lambda (&optional _) (error "Consulted mu4e"))))
+      (should-not (agent--extractor-at-point)))))
+
+(ert-deftest agent-test-extractor-at-point-finds-an-org-todo ()
   "Route an org TODO heading to the TODO sender."
   (with-temp-buffer
     (org-mode)
     (insert "* TODO Fix the thing\n")
     (goto-char (point-min))
-    (should (eq (agent--action-at-point) 'agent-send-todo-at-point))))
+    (should (eq (agent--extractor-at-point) 'agent-todo-context))))
 
-(ert-deftest agent-test-action-at-point-ignores-an-org-heading-without-a-todo ()
+(ert-deftest agent-test-extractor-at-point-ignores-an-org-heading-without-a-todo ()
   "Require a TODO state, not merely an org heading."
   (with-temp-buffer
     (org-mode)
     (insert "* Just a heading\n")
     (goto-char (point-min))
-    (should-not (agent--action-at-point))))
+    (should-not (agent--extractor-at-point))))
 
-(ert-deftest agent-test-action-at-point-takes-the-first-match ()
+(ert-deftest agent-test-extractor-at-point-takes-the-first-match ()
   "Take the earliest matching entry when two predicates match."
-  (let ((agent-at-point-actions '((always . first-action)
-                                  (always . second-action))))
-    (should (eq (agent--action-at-point) 'first-action))))
+  (let ((agent-at-point-things '((always . first-extractor)
+                                 (always . second-extractor))))
+    (should (eq (agent--extractor-at-point) 'first-extractor))))
 
 (ert-deftest agent-test-act-on-thing-at-point-errors-without-a-thing ()
   "Signal a user error when nothing at point is actionable."
   (with-temp-buffer
     (should-error (agent-act-on-thing-at-point) :type 'user-error)))
+
+(defun agent-test--context-extractor (context)
+  "Return an extractor that yields CONTEXT immediately."
+  (lambda (callback) (funcall callback context)))
+
+(ert-deftest agent-test-anchored-context-starts-a-session-in-its-directory ()
+  "Start the new session in the directory the thing carries."
+  (let ((started nil))
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+              ((symbol-function 'agent-project-read)
+               (lambda (&rest _) (error "Consulted the project reader")))
+              ((symbol-function 'agent--start-session-in)
+               (lambda (_backend dir &optional _prompt)
+                 (setq started dir)
+                 (current-buffer)))
+              ((symbol-function 'agent-send-string) #'ignore)
+              ((symbol-function 'display-buffer) #'ignore))
+      (agent--act-on-context
+       (agent-test--context-extractor '(:directory "/tmp/anchored/" :payload "url"))
+       nil))
+    (should (equal started "/tmp/anchored/"))))
+
+(ert-deftest agent-test-unanchored-context-reads-a-project ()
+  "Choose a project from the account's sources when nothing is anchored."
+  (let ((asked nil)
+        (started nil))
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+              ((symbol-function 'agent-account-current) (lambda (_) "epoch"))
+              ((symbol-function 'agent-project-read)
+               (lambda (account text _prompt callback)
+                 (setq asked (list account text))
+                 (funcall callback "/tmp/chosen/")))
+              ((symbol-function 'agent--start-session-in)
+               (lambda (_backend dir &optional _prompt)
+                 (setq started dir)
+                 (current-buffer)))
+              ((symbol-function 'agent-send-string) #'ignore)
+              ((symbol-function 'display-buffer) #'ignore))
+      (agent--act-on-context
+       (agent-test--context-extractor '(:text "hello" :payload "url"))
+       nil))
+    (should (equal asked '("epoch" "hello")))
+    (should (equal started "/tmp/chosen/"))))
+
+(ert-deftest agent-test-prefix-argument-targets-a-running-session ()
+  "Send to a chosen running session instead of starting one."
+  (with-temp-buffer
+    (let ((sent nil)
+          (target (current-buffer)))
+      (cl-letf (((symbol-function 'agent--read-session-buffer) (lambda () target))
+                ((symbol-function 'agent--resolve-backend)
+                 (lambda () (error "Resolved a backend")))
+                ((symbol-function 'agent--start-session-in)
+                 (lambda (&rest _) (error "Started a session")))
+                ((symbol-function 'agent-send-string)
+                 (lambda (string buffer) (setq sent (cons string buffer))))
+                ((symbol-function 'display-buffer) #'ignore))
+        (agent--act-on-context
+         (agent-test--context-extractor '(:text "hello" :payload "url"))
+         t))
+      (should (equal sent (cons "url" target))))))
+
+(ert-deftest agent-test-context-submits-when-it-asks ()
+  "Submit the payload when the context says so, and run its after thunk."
+  (with-temp-buffer
+    (let ((submitted nil)
+          (after nil)
+          (target (current-buffer)))
+      (cl-letf (((symbol-function 'agent--read-session-buffer) (lambda () target))
+                ((symbol-function 'agent-submit)
+                 (lambda (string _buffer) (setq submitted string)))
+                ((symbol-function 'agent-send-string)
+                 (lambda (&rest _) (error "Sent without submitting")))
+                ((symbol-function 'display-buffer) #'ignore))
+        (agent--act-on-context
+         (agent-test--context-extractor
+          (list :text "t" :payload "do it" :submit t
+                :after (lambda () (setq after t))))
+         t))
+      (should (equal submitted "do it"))
+      (should after))))
+
+(ert-deftest agent-test-submitted-payload-starts-the-new-session ()
+  "Give a new session the submitted payload as its initial prompt.
+Nothing sequences typed input against a session whose CLI has only just
+been spawned, and the directory may be one the CLI opens with a trust
+prompt, which the typed text would answer instead of the model."
+  (let ((prompt 'unset))
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+              ((symbol-function 'agent-start-session)
+               (lambda (_session &rest options)
+                 (setq prompt (plist-get options :initial-prompt))
+                 (current-buffer)))
+              ((symbol-function 'agent-submit)
+               (lambda (&rest _) (error "Typed into a new session")))
+              ((symbol-function 'agent-send-string)
+               (lambda (&rest _) (error "Typed into a new session")))
+              ((symbol-function 'display-buffer) #'ignore))
+      (agent--act-on-context
+       (agent-test--context-extractor
+        '(:directory "/tmp/anchored/" :payload "do it" :submit t))
+       nil))
+    (should (equal prompt "do it"))))
+
+(ert-deftest agent-test-unsubmitted-payload-is-typed-in ()
+  "Type an unsubmitted payload in, leaving the new session's prompt empty.
+It is meant to sit in the prompt for the user to edit, so it must not go
+to the model as an initial prompt."
+  (let ((prompt 'unset)
+        (sent nil))
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+              ((symbol-function 'agent-start-session)
+               (lambda (_session &rest options)
+                 (setq prompt (plist-get options :initial-prompt))
+                 (current-buffer)))
+              ((symbol-function 'agent-submit)
+               (lambda (&rest _) (error "Submitted an unsubmitted payload")))
+              ((symbol-function 'agent-send-string)
+               (lambda (string _buffer) (setq sent string)))
+              ((symbol-function 'display-buffer) #'ignore))
+      (agent--act-on-context
+       (agent-test--context-extractor
+        '(:directory "/tmp/anchored/" :payload "url"))
+       nil))
+    (should-not prompt)
+    (should (equal sent "url"))))
+
+(ert-deftest agent-test-read-session-buffer-without-sessions-signals ()
+  "Signal a user error when no session is running."
+  (cl-letf (((symbol-function 'agent--find-all-buffers) (lambda () nil)))
+    (should-error (agent--read-session-buffer) :type 'user-error)))
+
+(ert-deftest agent-test-after-thunk-runs-in-the-origin-buffer ()
+  "Run the after thunk where the command was invoked, not in the session.
+Starting a session pops to its buffer and makes it current, so a thunk
+that acts on the thing at point would otherwise act on the terminal."
+  (let ((session (generate-new-buffer " *agent-test-session*"))
+        (ran nil))
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer " *agent-test-origin*" t)
+          (let ((origin (buffer-name)))
+            (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+                      ((symbol-function 'agent--start-session-in)
+                       (lambda (&rest _) (set-buffer session) session))
+                      ((symbol-function 'agent-send-string) #'ignore)
+                      ((symbol-function 'display-buffer) #'ignore))
+              (agent--act-on-context
+               (agent-test--context-extractor
+                (list :directory "/tmp/anchored/" :payload "url"
+                      :after (lambda () (setq ran (buffer-name)))))
+               nil))
+            (should (equal ran origin))))
+      (kill-buffer session))))
+
+(ert-deftest agent-test-backend-is-resolved-before-extraction ()
+  "Resolve the backend where the command was invoked.
+An asynchronous extractor calls back after the user may have moved to
+another buffer, whose backend the new session must not adopt."
+  (let ((elsewhere (generate-new-buffer " *agent-test-elsewhere*"))
+        (started nil))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((origin (current-buffer)))
+            (cl-letf (((symbol-function 'agent--resolve-backend)
+                       (lambda () (if (eq (current-buffer) origin) 'origin 'elsewhere)))
+                      ((symbol-function 'agent--start-session-in)
+                       (lambda (backend _dir &optional _prompt)
+                         (setq started backend)
+                         (current-buffer)))
+                      ((symbol-function 'agent-send-string) #'ignore)
+                      ((symbol-function 'display-buffer) #'ignore))
+              (agent--act-on-context
+               (lambda (callback)
+                 (set-buffer elsewhere)
+                 (funcall callback '(:directory "/tmp/anchored/" :payload "url")))
+               nil))
+            (should (eq started 'origin))))
+      (kill-buffer elsewhere))))
+
+(ert-deftest agent-test-backtrace-context-carries-the-file-and-submits ()
+  "Describe a backtrace as an anchored, submitted context.
+Saving the backtrace unwinds the calling frame, so the context is
+produced by a scheduled function rather than by the extractor itself."
+  (let ((agent-backtrace-file "/tmp/bt.txt")
+        (saved nil)
+        (scheduled nil)
+        (context nil))
+    (cl-letf (((symbol-function 'run-with-timer)
+               (lambda (_secs _repeat function &rest args)
+                 (setq scheduled (cons function args))))
+              ((symbol-function 'agent-save-backtrace)
+               (lambda () (setq saved t) "/tmp/ignored.txt"))
+              ((symbol-function 'agent--debug-read-package-directory)
+               (lambda (_file callback) (funcall callback "/tmp/pkg/"))))
+      (agent--backtrace-context (lambda (c) (setq context c)))
+      (should saved)
+      (should-not context)
+      (apply (car scheduled) (cdr scheduled)))
+    (should (equal (plist-get context :directory) "/tmp/pkg/"))
+    (should (plist-get context :submit))
+    (should (string-match-p "/tmp/bt.txt" (plist-get context :payload)))))
+
+(ert-deftest agent-test-backtrace-for-a-running-session-identifies-nothing ()
+  "Skip package identification when the instructions go to a running session.
+Identifying the package costs a model request and a package prompt, and
+the directory both pay for is never read: the session the instructions
+reach is already somewhere."
+  (with-temp-buffer
+    (let ((agent-backtrace-file "/tmp/bt.txt")
+          (target (current-buffer))
+          (scheduled nil)
+          (submitted nil))
+      (cl-letf (((symbol-function 'run-with-timer)
+                 (lambda (_secs _repeat function &rest args)
+                   (setq scheduled (cons function args))))
+                ((symbol-function 'agent-save-backtrace)
+                 (lambda () "/tmp/bt.txt"))
+                ((symbol-function 'agent--debug-read-package-directory)
+                 (lambda (&rest _)
+                   (error "Asked a model to identify a package")))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "Prompted for a package")))
+                ((symbol-function 'agent--read-session-buffer)
+                 (lambda () target))
+                ((symbol-function 'agent-submit)
+                 (lambda (string _buffer) (setq submitted string)))
+                ((symbol-function 'display-buffer) #'ignore))
+        (agent--act-on-context #'agent--backtrace-context t)
+        (apply (car scheduled) (cdr scheduled)))
+      (should (string-match-p "/tmp/bt.txt" submitted)))))
 
 (ert-deftest agent-test-menu-slack-command-is-autoloaded ()
   "Source-loaded core menu references an available Slack command."
@@ -3227,32 +3488,6 @@ is itself a kind of `error' and nothing here should special-case it."
      :start-session #'ignore)
     (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'stub)))
       (should-error (agent-resume nil) :type 'user-error))))
-
-;;;; Project session lookup
-
-(ert-deftest agent-test-session-buffer-for-project-uses-the-only-session ()
-  "Return the single session running in the project without prompting."
-  (let ((agent-backends nil)
-        (buffer (generate-new-buffer " *agent-test-session*")))
-    (unwind-protect
-        (progn
-          (agent-register-backend
-           'stub :buffer-p #'ignore :find-all-buffers (lambda () (list buffer))
-           :start-session #'ignore
-           :find-buffers-for-dir (lambda (_dir) (list buffer)))
-          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
-            (should (eq (agent--session-buffer-for-project) buffer))))
-      (kill-buffer buffer))))
-
-(ert-deftest agent-test-session-buffer-for-project-without-sessions-errors ()
-  "Say there is no session rather than returning nil into a submit call."
-  (let ((agent-backends nil))
-    (agent-register-backend
-     'stub :buffer-p #'ignore :find-all-buffers (lambda () nil)
-     :start-session #'ignore
-     :find-buffers-for-dir (lambda (_dir) nil))
-    (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil)))
-      (should-error (agent--session-buffer-for-project) :type 'user-error))))
 
 ;;;; Account infix
 

@@ -26,7 +26,11 @@
 
 ;; Forge-to-project routing for AI coding sessions.  Starts a session in
 ;; the working tree of the repository the notification belongs to and
-;; inserts the topic's URL into the prompt for review.
+;; inserts the topic's URL into the prompt for review, or under a prefix
+;; argument inserts it into a session already running.  The command only
+;; wraps the core's routing layer: `agent-forge-context' reads the topic
+;; and answers with a context anchored in that working tree, and the core
+;; chooses the session and delivers the URL.
 ;;
 ;; This is the Forge counterpart of `agent-act-on-slack-message'.  It
 ;; needs no language model: a Slack message must be classified to find
@@ -49,24 +53,34 @@
 ;;;; Forge notification routing
 
 ;;;###autoload
-(defun agent-act-on-forge-notification ()
-  "Route the Forge notification at point to an AI session.
-Starts a session in the working tree of the repository the notification
-belongs to and inserts the issue or pull request URL into the prompt for
-review, without submitting it.
+(defun agent-act-on-forge-notification (&optional existing)
+  "Route the Forge notification or topic at point to an AI session.
+Start a session in the working tree of the repository the topic belongs
+to and insert the issue or pull request URL into its prompt without
+submitting it.  With prefix argument EXISTING insert the URL into a
+running session instead."
+  (interactive "P")
+  (agent--act-on-context #'agent-forge-context existing))
 
-Also works on the topic at point, so it can be called from a topic
-buffer or a Magit status buffer as well as from
-`forge-list-notifications'."
-  (interactive)
-  (let* ((backend (agent--resolve-backend))
-         (topic (agent-forge--topic-at-point))
-         (repo (forge-get-repository topic))
-         (directory (agent-forge--worktree repo))
+(defun agent-forge-context (callback)
+  "Call CALLBACK with the context for the Forge topic at point.
+The context is anchored when a working tree is wanted: the repository's
+working tree is where the session belongs, so no project has to be
+chosen.  A running session is already somewhere, so the tree is looked
+up only when the core asks for it; looking it up regardless would refuse
+a topic whose repository was never cloned locally, for a directory
+nobody would read."
+  (let* ((topic (agent-forge--topic-at-point))
          (url (or (forge-get-url topic)
                   (user-error "Forge topic has no URL"))))
-    (agent-forge--start-session backend directory url
-                                (agent-forge--slug repo))))
+    (funcall callback (append (agent-forge--worktree-context topic)
+                              (list :payload url :submit nil)))))
+
+(defun agent-forge--worktree-context (topic)
+  "Return the `:directory' part of the context for TOPIC, or nil."
+  (when agent--context-wants-directory
+    (list :directory
+          (agent-forge--worktree (forge-get-repository topic)))))
 
 (defun agent-forge--topic-at-point ()
   "Return the Forge topic for the notification or topic at point."
@@ -102,19 +116,6 @@ rather than an exceptional one."
 Forge's classes are not loaded when this file is byte-compiled, so a
 literal `oref' would warn about every slot being unknown."
   (eieio-oref object slot))
-
-(defun agent-forge--start-session (backend directory url slug)
-  "Start a BACKEND session in DIRECTORY and insert URL.
-SLUG names the repository, for the startup message.  Returns the new
-session buffer with URL inserted into its prompt, unsubmitted."
-  (let ((label (when-let* ((struct (agent-backend backend)))
-                 (agent-backend-label struct))))
-    (message "Starting %s for `%s' in %s..." label slug directory)
-    (let ((buffer (agent-start-session
-                   (agent-session-create :backend backend
-                                         :directory directory))))
-      (agent-send-string url buffer)
-      buffer)))
 
 ;;;; Provide
 
