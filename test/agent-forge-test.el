@@ -56,5 +56,26 @@
           (should-error (agent-forge-context #'ignore) :type 'user-error))
       (delete-directory worktree t))))
 
+(ert-deftest agent-forge-test-a-running-session-needs-no-clone ()
+  "Route a topic to a running session whose repository was never cloned.
+The session already has a directory, so refusing the topic for a missing
+working tree would refuse it over a directory nobody reads."
+  (with-temp-buffer
+    (let ((target (current-buffer))
+          (sent nil))
+      (cl-letf (((symbol-function 'agent-forge--topic-at-point)
+                 (lambda () 'topic))
+                ((symbol-function 'forge-get-repository)
+                 (lambda (_topic &rest _) 'repo))
+                ((symbol-function 'forge-get-worktree) (lambda (_repo) nil))
+                ((symbol-function 'forge-get-url)
+                 (lambda (_topic) "https://example.com/repo/pull/1"))
+                ((symbol-function 'agent--read-session-buffer) (lambda () target))
+                ((symbol-function 'agent-send-string)
+                 (lambda (string _buffer) (setq sent string)))
+                ((symbol-function 'display-buffer) #'ignore))
+        (agent--act-on-context #'agent-forge-context t))
+      (should (equal sent "https://example.com/repo/pull/1")))))
+
 (provide 'agent-forge-test)
 ;;; agent-forge-test.el ends here

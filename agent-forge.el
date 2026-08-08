@@ -64,15 +64,23 @@ running session instead."
 
 (defun agent-forge-context (callback)
   "Call CALLBACK with the context for the Forge topic at point.
-The context is anchored: the repository's working tree is where the
-session belongs, so no project has to be chosen."
+The context is anchored when a working tree is wanted: the repository's
+working tree is where the session belongs, so no project has to be
+chosen.  A running session is already somewhere, so the tree is looked
+up only when the core asks for it; looking it up regardless would refuse
+a topic whose repository was never cloned locally, for a directory
+nobody would read."
   (let* ((topic (agent-forge--topic-at-point))
-         (repo (forge-get-repository topic))
          (url (or (forge-get-url topic)
                   (user-error "Forge topic has no URL"))))
-    (funcall callback (list :directory (agent-forge--worktree repo)
-                            :payload url
-                            :submit nil))))
+    (funcall callback (append (agent-forge--worktree-context topic)
+                              (list :payload url :submit nil)))))
+
+(defun agent-forge--worktree-context (topic)
+  "Return the `:directory' part of the context for TOPIC, or nil."
+  (when agent--context-wants-directory
+    (list :directory
+          (agent-forge--worktree (forge-get-repository topic)))))
 
 (defun agent-forge--topic-at-point ()
   "Return the Forge topic for the notification or topic at point."

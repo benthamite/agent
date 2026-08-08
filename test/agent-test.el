@@ -2968,6 +2968,33 @@ produced by a scheduled function rather than by the extractor itself."
     (should (plist-get context :submit))
     (should (string-match-p "/tmp/bt.txt" (plist-get context :payload)))))
 
+(ert-deftest agent-test-backtrace-for-a-running-session-identifies-nothing ()
+  "Skip package identification when the instructions go to a running session.
+Identifying the package costs a model request and a package prompt, and
+the directory both pay for is never read: the session the instructions
+reach is already somewhere."
+  (with-temp-buffer
+    (let ((agent-backtrace-file "/tmp/bt.txt")
+          (target (current-buffer))
+          (scheduled nil)
+          (submitted nil))
+      (cl-letf (((symbol-function 'run-with-timer)
+                 (lambda (_secs _repeat function &rest args)
+                   (setq scheduled (cons function args))))
+                ((symbol-function 'agent-save-backtrace)
+                 (lambda () "/tmp/bt.txt"))
+                ((symbol-function 'agent--debug-read-package-directory)
+                 (lambda (&rest _) (error "Asked a model to identify a package")))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "Prompted for a package")))
+                ((symbol-function 'agent--read-session-buffer) (lambda () target))
+                ((symbol-function 'agent-submit)
+                 (lambda (string _buffer) (setq submitted string)))
+                ((symbol-function 'display-buffer) #'ignore))
+        (agent--act-on-context #'agent--backtrace-context t)
+        (apply (car scheduled) (cdr scheduled)))
+      (should (string-match-p "/tmp/bt.txt" submitted)))))
+
 (ert-deftest agent-test-menu-slack-command-is-autoloaded ()
   "Source-loaded core menu references an available Slack command."
   (should (fboundp 'agent-act-on-slack-message)))

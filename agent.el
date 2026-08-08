@@ -1804,6 +1804,18 @@ appended to ARGS."
 
 ;;;; Orchestration
 
+(defvar agent--context-wants-directory t
+  "Whether the extractor now running should resolve a working directory.
+`agent--act-on-context' binds this to nil when the payload is bound for
+a session that is already running, since that session has a directory of
+its own and the one an extractor would resolve is discarded.  Finding
+one is not free: a backtrace pays a model request and a package prompt
+for it, and a Forge topic refuses outright when its repository was never
+cloned.  An extractor that would resolve a directory reads this and
+omits `:directory' from its context when it is nil.  It is read while
+the extractor runs, so an extractor that defers its work carries the
+answer over itself.")
+
 (defun agent--resolve-backend ()
   "Return the backend for the current context.
 If in a session buffer, use that backend.  If only one backend is
@@ -2688,24 +2700,34 @@ to a running session instead."
   "Call CALLBACK with the context for the backtrace in this buffer.
 Saving the backtrace kills its buffer, which exits the debugger's
 `recursive-edit' and unwinds this frame, so identification is scheduled
-to run after the current command rather than called here."
-  (let ((file (expand-file-name agent-backtrace-file)))
-    (run-with-timer 0 nil #'agent--backtrace-context-for-file file callback)
+to run after the current command rather than called here.  The scheduled
+call runs after `agent--context-wants-directory' has been unbound again,
+so its value is read here and handed over."
+  (let ((file (expand-file-name agent-backtrace-file))
+        (wants-directory agent--context-wants-directory))
+    (run-with-timer 0 nil #'agent--backtrace-context-for-file
+                    file wants-directory callback)
     (agent-save-backtrace)))
 
 (defconst agent--backtrace-prompt
   "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
   "Prompt submitted for a saved backtrace, formatted with its file path.")
 
-(defun agent--backtrace-context-for-file (file callback)
-  "Identify the package for FILE and call CALLBACK with its context."
-  (agent--debug-read-package-directory
-   file
-   (lambda (directory)
-     (funcall callback
-              (list :directory directory
-                    :payload (format agent--backtrace-prompt file)
-                    :submit t)))))
+(defun agent--backtrace-context-for-file (file wants-directory callback)
+  "Call CALLBACK with the context for backtrace FILE.
+WANTS-DIRECTORY non-nil identifies the package the backtrace implicates
+and anchors the context in its source directory, which costs a model
+request and a prompt; nil skips both and leaves the context unanchored,
+since a session that is already running is where the instructions are
+going either way."
+  (let ((context (list :payload (format agent--backtrace-prompt file)
+                       :submit t)))
+    (if wants-directory
+        (agent--debug-read-package-directory
+         file
+         (lambda (directory)
+           (funcall callback (append (list :directory directory) context))))
+      (funcall callback context))))
 
 ;;;###autoload
 (defun agent-save-backtrace ()
@@ -2847,7 +2869,9 @@ optional `:after' thunk run once the payload is delivered, in the
 buffer the command was invoked from.  The continuation is called rather
 than returned to because extraction can require network round-trips,
 and it may therefore run in another buffer than the one the thing was
-read from.")
+read from.  An extractor that has to work for its directory leaves
+`:directory' out when `agent--context-wants-directory' says the
+directory would be discarded.")
 
 (defun agent--extractor-at-point ()
   "Return the extractor for the thing at point, or nil when there is none."
@@ -2860,9 +2884,12 @@ With EXISTING non-nil the context goes to a running session chosen by
 completion; otherwise a new session is started for it.  Extraction can
 be asynchronous, so the buffer the command was invoked from and the
 backend resolved there are captured now and threaded through delivery:
-by the time the continuation runs, the user may have moved."
+by the time the continuation runs, the user may have moved.  A running
+session brings its own directory, so extraction is told not to resolve
+one; see `agent--context-wants-directory'."
   (let ((origin (current-buffer))
-        (backend (unless existing (agent--resolve-backend))))
+        (backend (unless existing (agent--resolve-backend)))
+        (agent--context-wants-directory (not existing)))
     (funcall extractor
              (lambda (context)
                (agent--deliver-context context existing origin backend)))))
