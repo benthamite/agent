@@ -2824,7 +2824,7 @@ TODO."
   (interactive "P")
   (agent--act-on-context
    (or (agent--extractor-at-point)
-       (user-error "Nothing to act on at point; expected a Slack message, an email, a Forge notification or topic, a backtrace, or an org TODO"))
+       (user-error "Nothing to act on at point; expected a backtrace, a Slack message, a Forge notification or topic, an email, or an org TODO"))
    existing))
 
 (defvar agent-at-point-things
