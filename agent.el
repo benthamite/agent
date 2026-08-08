@@ -38,6 +38,7 @@
 (require 'subr-x)
 (eval-and-compile (require 'transient))
 (require 'agent-account)
+(require 'agent-project)
 
 ;;;; Split-module autoloads
 
@@ -46,6 +47,9 @@
 (autoload 'agent-act-on-slack-message "agent-slack" nil t)
 (autoload 'agent-act-on-forge-notification "agent-forge" nil t)
 (autoload 'agent-setup-snippet-keys "agent-snippet" nil t)
+(autoload 'agent-slack-context "agent-slack")
+(autoload 'agent-forge-context "agent-forge")
+(autoload 'agent-todo-context "agent-todo")
 
 ;;;; Custom group
 
@@ -2823,31 +2827,87 @@ session there with the backtrace prompt as the initial message."
      :initial-prompt prompt)))
 
 ;;;###autoload
-(defun agent-act-on-thing-at-point ()
+(defun agent-act-on-thing-at-point (&optional existing)
   "Route the thing at point to an AI session.
-Call the command in `agent-at-point-actions' whose predicate matches
-the current buffer: a Slack message, a Forge notification or topic, a
-backtrace, or an org TODO."
-  (interactive)
-  (call-interactively
-   (or (agent--action-at-point)
-       (user-error "Nothing to act on at point; expected a Slack message, a Forge notification or topic, a backtrace, or an org TODO"))))
+Start a new session for it, or with prefix argument EXISTING send it to
+a running session chosen by completion.  The thing is the first entry
+in `agent-at-point-things' whose predicate matches: a backtrace, a
+Slack message, a Forge notification or topic, or an org TODO."
+  (interactive "P")
+  (agent--act-on-context
+   (or (agent--extractor-at-point)
+       (user-error "Nothing to act on at point; expected a Slack message, a Forge notification or topic, a backtrace, or an org TODO"))
+   existing))
 
-(defvar agent-at-point-actions
-  '((agent--backtrace-at-point-p . agent-debug-backtrace)
-    (agent--slack-message-at-point-p . agent-act-on-slack-message)
-    (agent--forge-topic-at-point-p . agent-act-on-forge-notification)
-    (agent--org-todo-at-point-p . agent-send-todo-at-point))
-  "Actions `agent-act-on-thing-at-point' dispatches to, in order.
+(defvar agent-at-point-things
+  '((agent--backtrace-at-point-p . agent--backtrace-context)
+    (agent--slack-message-at-point-p . agent-slack-context)
+    (agent--forge-topic-at-point-p . agent-forge-context)
+    (agent--org-todo-at-point-p . agent-todo-context))
+  "Things `agent-act-on-thing-at-point' recognizes, in order.
 Each entry is a cons of a predicate called with no arguments in the
-current buffer and the command to call when it returns non-nil.  Every
+current buffer and an extractor called with one continuation.  Every
 predicate answers from the buffer alone, without loading the module
-that owns its command.")
+that owns its extractor.
 
-(defun agent--action-at-point ()
-  "Return the command for the thing at point, or nil when there is none."
-  (cdr (seq-find (lambda (action) (funcall (car action)))
-                 agent-at-point-actions)))
+An extractor calls its continuation with a context plist: `:directory'
+when the thing carries a working directory, `:text' when it carries
+only text for a project to be chosen from, `:payload' for what to send,
+`:submit' for whether to submit it, and an optional `:after' thunk run
+once the payload is delivered.  The continuation is called rather than
+returned to because extraction can require network round-trips.")
+
+(defun agent--extractor-at-point ()
+  "Return the extractor for the thing at point, or nil when there is none."
+  (cdr (seq-find (lambda (thing) (funcall (car thing)))
+                 agent-at-point-things)))
+
+(defun agent--act-on-context (extractor existing)
+  "Extract a context with EXTRACTOR and deliver it to a session.
+With EXISTING non-nil the context goes to a running session chosen by
+completion; otherwise a new session is started for it."
+  (funcall extractor (lambda (context)
+                       (agent--deliver-context context existing))))
+
+(defun agent--deliver-context (context existing)
+  "Deliver CONTEXT to a session, choosing a running one when EXISTING."
+  (if existing
+      (agent--deliver-to context (agent--read-session-buffer))
+    (agent--deliver-to-new-session context)))
+
+(defun agent--deliver-to-new-session (context)
+  "Start a session for CONTEXT and deliver it there.
+An anchored context names its own directory; an unanchored one has its
+project read from the account's sources, ranked by its text."
+  (let ((backend (agent--resolve-backend)))
+    (if-let* ((directory (plist-get context :directory)))
+        (agent--deliver-to context (agent--start-session-in backend directory))
+      (agent-project-read
+       (agent-account-current backend)
+       (plist-get context :text)
+       "Project: "
+       (lambda (directory)
+         (agent--deliver-to context
+                            (agent--start-session-in backend directory)))))))
+
+(defun agent--start-session-in (backend directory)
+  "Start a BACKEND session in DIRECTORY and return its buffer."
+  (let ((dir (file-name-as-directory (expand-file-name directory)))
+        (label (when-let* ((struct (agent-backend backend)))
+                 (agent-backend-label struct))))
+    (message "Starting %s in %s..." label (abbreviate-file-name dir))
+    (agent-start-session
+     (agent-session-create :backend backend :directory dir))))
+
+(defun agent--deliver-to (context buffer)
+  "Deliver CONTEXT's payload to session BUFFER and return the buffer."
+  (if (plist-get context :submit)
+      (agent-submit (plist-get context :payload) buffer)
+    (agent-send-string (plist-get context :payload) buffer))
+  (when-let* ((after (plist-get context :after)))
+    (funcall after))
+  (display-buffer buffer)
+  buffer)
 
 (defun agent--backtrace-at-point-p ()
   "Return non-nil in a backtrace buffer."
