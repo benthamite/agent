@@ -38,37 +38,6 @@
 
 (require 'agent)
 
-;;;; Obsolete options
-
-(define-obsolete-variable-alias 'agent-claude-debug-slack-message-model
-  'agent-act-on-slack-message-model "0.2")
-(define-obsolete-variable-alias 'agent-claude-act-on-slack-message-model
-  'agent-act-on-slack-message-model "0.2")
-(make-obsolete-variable 'agent-codex-debug-slack-message-model
-                        'agent-act-on-slack-message-model "0.2")
-(make-obsolete-variable 'agent-codex-act-on-slack-message-model
-                        'agent-act-on-slack-message-model "0.2")
-(define-obsolete-variable-alias 'agent-act-on-slack-message-model
-  'agent-project-ranking-model "0.3")
-
-(define-obsolete-variable-alias 'agent-claude-debug-slack-message-backend
-  'agent-act-on-slack-message-backend "0.2")
-(define-obsolete-variable-alias 'agent-claude-act-on-slack-message-backend
-  'agent-act-on-slack-message-backend "0.2")
-(make-obsolete-variable 'agent-codex-debug-slack-message-backend
-                        'agent-act-on-slack-message-backend "0.2")
-(make-obsolete-variable 'agent-codex-act-on-slack-message-backend
-                        'agent-act-on-slack-message-backend "0.2")
-(define-obsolete-variable-alias 'agent-act-on-slack-message-backend
-  'agent-project-ranking-backend "0.3")
-
-(make-obsolete-variable 'agent-epoch-project-registry-file
-                        "name the registry file in `agent-project-sources'"
-                        "0.3")
-(define-obsolete-variable-alias 'agent-epoch-projects-root
-  'agent-project-registry-root "0.3")
-(make-obsolete 'agent-epoch-project-candidates 'agent-project-candidates "0.3")
-
 ;;;; Forward declarations
 
 (defvar slack-current-buffer)

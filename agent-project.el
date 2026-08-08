@@ -43,6 +43,45 @@
 
 (declare-function gptel-request "gptel")
 
+;;;; Obsolete names
+
+;; These renamings come before the options they rename, and live in this
+;; file rather than in `agent-slack.el', where the old names were
+;; defined, for one reason: a user sets an option before the package
+;; that owns it is loaded, and `defvaralias' hands the value over only
+;; while the new name is still unbound.  Declared after the `defcustom',
+;; or in a file that loads only when a Slack command is first called,
+;; the alias would silently drop the setting.
+
+(define-obsolete-variable-alias 'agent-claude-debug-slack-message-model
+  'agent-act-on-slack-message-model "0.2")
+(define-obsolete-variable-alias 'agent-claude-act-on-slack-message-model
+  'agent-act-on-slack-message-model "0.2")
+(make-obsolete-variable 'agent-codex-debug-slack-message-model
+                        'agent-act-on-slack-message-model "0.2")
+(make-obsolete-variable 'agent-codex-act-on-slack-message-model
+                        'agent-act-on-slack-message-model "0.2")
+(define-obsolete-variable-alias 'agent-act-on-slack-message-model
+  'agent-project-ranking-model "0.3")
+
+(define-obsolete-variable-alias 'agent-claude-debug-slack-message-backend
+  'agent-act-on-slack-message-backend "0.2")
+(define-obsolete-variable-alias 'agent-claude-act-on-slack-message-backend
+  'agent-act-on-slack-message-backend "0.2")
+(make-obsolete-variable 'agent-codex-debug-slack-message-backend
+                        'agent-act-on-slack-message-backend "0.2")
+(make-obsolete-variable 'agent-codex-act-on-slack-message-backend
+                        'agent-act-on-slack-message-backend "0.2")
+(define-obsolete-variable-alias 'agent-act-on-slack-message-backend
+  'agent-project-ranking-backend "0.3")
+
+(make-obsolete-variable 'agent-epoch-project-registry-file
+                        "name the registry file in `agent-project-sources'"
+                        "0.3")
+(define-obsolete-variable-alias 'agent-epoch-projects-root
+  'agent-project-registry-root "0.3")
+(make-obsolete 'agent-epoch-project-candidates 'agent-project-candidates "0.3")
+
 ;;;; Customization
 
 (defcustom agent-project-sources '(("" . ("~/repos/*")))

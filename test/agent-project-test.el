@@ -367,5 +367,46 @@ The root is normalized like every other candidate directory."
                            (agent-project--ordered candidates "zeta"))
                    '("alpha - Alpha" "beta - Beta")))))
 
+;;;; Obsolete names
+
+(defconst agent-project-test--source-directory
+  (file-name-directory
+   (directory-file-name
+    (file-name-directory (or load-file-name buffer-file-name))))
+  "Directory holding the sources under test.")
+
+(defconst agent-project-test--preload-form
+  '(progn
+     (setq agent-epoch-projects-root "/set/before/load/")
+     (setq agent-claude-act-on-slack-message-model 'chained)
+     (let ((custom--inhibit-theme-enable nil))
+       (deftheme use-package)
+       (enable-theme 'use-package)
+       (custom-theme-set-variables
+        'use-package
+        '(agent-act-on-slack-message-backend "Themed" nil nil "use-package")))
+     (require 'agent-project)
+     (prin1 (list agent-project-registry-root
+                  agent-project-ranking-model
+                  agent-project-ranking-backend)))
+  "Form a child Emacs evaluates to set obsolete names before loading.
+The third setting is written the way `use-package' writes a `:custom'
+entry, which is a theme setting made at startup rather than when the
+package loads.")
+
+(ert-deftest agent-project-test-obsolete-names-carry-a-value-set-before-loading ()
+  "Carry settings made on obsolete names before this file is loaded.
+A user sets an option before the package that owns it loads, so the
+renamings are declared above the options they rename; declared below
+them, `defvaralias' would find the new name bound and drop the value."
+  (with-temp-buffer
+    (should (zerop (call-process
+                    (expand-file-name invocation-name invocation-directory)
+                    nil t nil "--batch" "-Q"
+                    "-L" agent-project-test--source-directory
+                    "--eval" (format "%S" agent-project-test--preload-form))))
+    (should (equal (read (buffer-string))
+                   '("/set/before/load/" chained "Themed")))))
+
 (provide 'agent-project-test)
 ;;; agent-project-test.el ends here

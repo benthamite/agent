@@ -160,5 +160,20 @@ may have moved by the time the state change happens."
       (goto-char (point-max))
       (should (equal (org-get-todo-state) "TODO")))))
 
+(ert-deftest agent-todo-test-context-after-thunk-tolerates-a-deleted-heading ()
+  "Change nothing when the heading is gone by the time the thunk runs.
+The thunk runs after the session has started and before it is shown, so
+an error there would leave a running session unshown."
+  (with-temp-buffer
+    (insert "#+TODO: TODO DOING | DONE\n* TODO Vanishing\n")
+    (org-mode)
+    (goto-char (point-min))
+    (re-search-forward "^\\* TODO Vanishing")
+    (let ((context nil)
+          (agent-todo-in-progress-keyword "DOING"))
+      (agent-todo-context (lambda (c) (setq context c)))
+      (erase-buffer)
+      (should-not (funcall (plist-get context :after))))))
+
 (provide 'agent-todo-test)
 ;;; agent-todo-test.el ends here

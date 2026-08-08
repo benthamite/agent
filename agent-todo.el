@@ -24,9 +24,11 @@
 
 ;;; Commentary:
 
-;; Send org TODO entries to a running AI session, or process a whole
-;; list of them non-interactively through the backend's `exec-prompt'
-;; slot.  Both work with any registered backend.
+;; Route the org TODO at point to an AI session -- a new one in a
+;; project chosen from the TODO's own text, or a running one with a
+;; prefix argument -- or process a whole list of them non-interactively
+;; through the backend's `exec-prompt' slot.  Both work with any
+;; registered backend.
 
 ;;; Code:
 
@@ -332,12 +334,18 @@ request and a prompt, by which time point has moved."
                    :after (lambda () (agent-todo--mark-in-progress marker))))))
 
 (defun agent-todo--mark-in-progress (marker)
-  "Set the TODO state at MARKER to `agent-todo-in-progress-keyword'."
+  "Set the TODO state at MARKER to `agent-todo-in-progress-keyword'.
+A heading deleted while the session was starting leaves MARKER pointing
+at text that is no longer a TODO entry, and there is then nothing to
+mark: this runs after the session exists but before it is displayed, so
+signalling here would leave a running session unshown."
   (when (and agent-todo-in-progress-keyword (marker-buffer marker))
     (with-current-buffer (marker-buffer marker)
       (save-excursion
         (goto-char marker)
-        (org-todo agent-todo-in-progress-keyword)))))
+        (when (and (not (org-before-first-heading-p))
+                   (org-get-todo-state))
+          (org-todo agent-todo-in-progress-keyword))))))
 
 (provide 'agent-todo)
 ;;; agent-todo.el ends here
