@@ -57,8 +57,12 @@ all:
 ```elisp
 '(("epoch"      . ("~/My Drive/Epoch/projects/shared/project-registry.json"))
   ("trajectory" . ("~/Trajectory/reasoning-tasks/*"))
-  (""           . ("~/repos/*")))
+  (""           . ("~/repos/*" "~/My Drive/dotfiles" "~/work/side-thing")))
 ```
+
+An account's sources are a list because projects are rarely all in one place.
+Registries, globs, and plain directories mix freely in it, so a set of
+projects scattered across unrelated folders is spelled by naming each one.
 
 The account is the current account of the backend that will run the session,
 from `agent-account-current`.  A backend with no account selected matches the
