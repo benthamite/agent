@@ -2692,21 +2692,31 @@ TITLE is the skill name, used to derive the commit message scope."
            dir)))))))
 
 ;;;###autoload
-(defun agent-debug-backtrace ()
-  "Save the backtrace, choose the offending package, and open a session.
-Save the current backtrace to `agent-backtrace-file', ask `gptel'
-to list implicated packages, let the user pick one, then start an
-interactive session in that package's source directory with the
-backtrace file path as the initial prompt."
-  (interactive)
-  (let ((backend (agent--resolve-backend))
-        (backtrace-file (expand-file-name agent-backtrace-file)))
-    ;; Schedule the identification work to run after the current command.
-    ;; `agent-save-backtrace' kills the *Backtrace* buffer, which exits the
-    ;; debugger's `recursive-edit' and unwinds this call frame.
-    (run-with-timer 0 nil #'agent--debug-identify-package
-                    backend backtrace-file)
+(defun agent-debug-backtrace (&optional existing)
+  "Route the backtrace in the current buffer to an AI session.
+With prefix argument EXISTING send it to a running session."
+  (interactive "P")
+  (agent--act-on-context #'agent--backtrace-context existing))
+
+(defun agent--backtrace-context (callback)
+  "Call CALLBACK with the context for the backtrace in this buffer.
+Saving the backtrace kills its buffer, which exits the debugger's
+`recursive-edit' and unwinds this frame, so identification is scheduled
+to run after the current command rather than called here."
+  (let ((file (expand-file-name agent-backtrace-file)))
+    (run-with-timer 0 nil #'agent--backtrace-context-for-file file callback)
     (agent-save-backtrace)))
+
+(defun agent--backtrace-context-for-file (file callback)
+  "Identify the package for FILE and call CALLBACK with its context."
+  (agent--debug-read-package-directory
+   file
+   (lambda (directory)
+     (funcall callback
+              (list :directory directory
+                    :payload (format "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
+                                     file)
+                    :submit t)))))
 
 ;;;###autoload
 (defun agent-save-backtrace ()
@@ -2749,11 +2759,11 @@ reasoning blocks before the final response."
   (when (stringp response)
     response))
 
-(defun agent--debug-identify-package (backend backtrace-file)
+(defun agent--debug-read-package-directory (backtrace-file callback)
   "Identify candidate packages from BACKTRACE-FILE and let the user choose.
 Ask a light LLM to list all packages implicated in the backtrace,
-then present the list via `completing-read' so the user can select
-the right one before starting a BACKEND session."
+then present the list via `completing-read' and call CALLBACK with the
+source directory of the package the user selects."
   (unless (file-exists-p backtrace-file)
     (user-error "Backtrace file not found: %s" backtrace-file))
   (unless (and (require 'gptel nil t) (fboundp 'gptel-request))
@@ -2780,9 +2790,12 @@ the right one before starting a BACKEND session."
                                       (split-string text ",")))
                   (selected
                    (completing-read "Package to debug: " candidates nil
-                                    nil nil nil (car candidates))))
-             (agent--debug-start-session
-              backend (intern selected) backtrace-file))))))))
+                                    nil nil nil (car candidates)))
+                  (directory (or (agent--package-source-directory
+                                  (intern selected))
+                                 (user-error "Package `%s' not found"
+                                             selected))))
+             (funcall callback directory))))))))
 
 (defconst agent--debug-backtrace-line-limit 400
   "Maximum characters kept per backtrace line sent to the model.")
@@ -2810,21 +2823,6 @@ capped at `agent--debug-backtrace-size-limit'."
       (concat (substring line 0 agent--debug-backtrace-line-limit)
               " [truncated]")
     line))
-
-(defun agent--debug-start-session (backend package backtrace-file)
-  "Start a BACKEND session for PACKAGE with BACKTRACE-FILE.
-Find the source directory for PACKAGE and start an interactive
-session there with the backtrace prompt as the initial message."
-  (let* ((dir (or (agent--package-source-directory package)
-                  (user-error "Package `%s' not found" package)))
-         (prompt (format "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
-                         backtrace-file))
-         (label (when-let* ((struct (agent-backend backend)))
-                  (agent-backend-label struct))))
-    (message "Starting %s for `%s' in %s..." label package dir)
-    (agent-start-session
-     (agent-session-create :backend backend :directory dir)
-     :initial-prompt prompt)))
 
 ;;;###autoload
 (defun agent-act-on-thing-at-point (&optional existing)

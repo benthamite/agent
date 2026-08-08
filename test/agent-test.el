@@ -2863,6 +2863,29 @@ another buffer, whose backend the new session must not adopt."
             (should (eq started 'origin))))
       (kill-buffer elsewhere))))
 
+(ert-deftest agent-test-backtrace-context-carries-the-file-and-submits ()
+  "Describe a backtrace as an anchored, submitted context.
+Saving the backtrace unwinds the calling frame, so the context is
+produced by a scheduled function rather than by the extractor itself."
+  (let ((agent-backtrace-file "/tmp/bt.txt")
+        (saved nil)
+        (scheduled nil)
+        (context nil))
+    (cl-letf (((symbol-function 'run-with-timer)
+               (lambda (_secs _repeat function &rest args)
+                 (setq scheduled (cons function args))))
+              ((symbol-function 'agent-save-backtrace)
+               (lambda () (setq saved t) "/tmp/bt.txt"))
+              ((symbol-function 'agent--debug-read-package-directory)
+               (lambda (_file callback) (funcall callback "/tmp/pkg/"))))
+      (agent--backtrace-context (lambda (c) (setq context c)))
+      (should saved)
+      (should-not context)
+      (apply (car scheduled) (cdr scheduled)))
+    (should (equal (plist-get context :directory) "/tmp/pkg/"))
+    (should (plist-get context :submit))
+    (should (string-match-p "/tmp/bt.txt" (plist-get context :payload)))))
+
 (ert-deftest agent-test-menu-slack-command-is-autoloaded ()
   "Source-loaded core menu references an available Slack command."
   (should (fboundp 'agent-act-on-slack-message)))

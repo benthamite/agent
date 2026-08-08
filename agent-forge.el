@@ -49,24 +49,24 @@
 ;;;; Forge notification routing
 
 ;;;###autoload
-(defun agent-act-on-forge-notification ()
-  "Route the Forge notification at point to an AI session.
-Starts a session in the working tree of the repository the notification
-belongs to and inserts the issue or pull request URL into the prompt for
-review, without submitting it.
+(defun agent-act-on-forge-notification (&optional existing)
+  "Route the Forge notification or topic at point to an AI session.
+With prefix argument EXISTING send it to a running session instead of
+starting one in the repository's working tree."
+  (interactive "P")
+  (agent--act-on-context #'agent-forge-context existing))
 
-Also works on the topic at point, so it can be called from a topic
-buffer or a Magit status buffer as well as from
-`forge-list-notifications'."
-  (interactive)
-  (let* ((backend (agent--resolve-backend))
-         (topic (agent-forge--topic-at-point))
+(defun agent-forge-context (callback)
+  "Call CALLBACK with the context for the Forge topic at point.
+The context is anchored: the repository's working tree is where the
+session belongs, so no project has to be chosen."
+  (let* ((topic (agent-forge--topic-at-point))
          (repo (forge-get-repository topic))
-         (directory (agent-forge--worktree repo))
          (url (or (forge-get-url topic)
                   (user-error "Forge topic has no URL"))))
-    (agent-forge--start-session backend directory url
-                                (agent-forge--slug repo))))
+    (funcall callback (list :directory (agent-forge--worktree repo)
+                            :payload url
+                            :submit nil))))
 
 (defun agent-forge--topic-at-point ()
   "Return the Forge topic for the notification or topic at point."
@@ -102,19 +102,6 @@ rather than an exceptional one."
 Forge's classes are not loaded when this file is byte-compiled, so a
 literal `oref' would warn about every slot being unknown."
   (eieio-oref object slot))
-
-(defun agent-forge--start-session (backend directory url slug)
-  "Start a BACKEND session in DIRECTORY and insert URL.
-SLUG names the repository, for the startup message.  Returns the new
-session buffer with URL inserted into its prompt, unsubmitted."
-  (let ((label (when-let* ((struct (agent-backend backend)))
-                 (agent-backend-label struct))))
-    (message "Starting %s for `%s' in %s..." label slug directory)
-    (let ((buffer (agent-start-session
-                   (agent-session-create :backend backend
-                                         :directory directory))))
-      (agent-send-string url buffer)
-      buffer)))
 
 ;;;; Provide
 
