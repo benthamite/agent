@@ -457,9 +457,19 @@ sender as the text the project is ranked against (@ref{Project sources}).
 The sender comes from the message's @samp{:from} field, which @samp{mu} returns as a
 list of @samp{(:email EMAIL :name NAME)} plists — one per sender, with the name
 absent when the sender gave none — and reads as @samp{Name <address>}, or as the
-bare address when there is no name. The command signals an error when the
-message records no path. mu4e reports a missing string field as the empty
-string rather than as nil, so an empty path counts as no path.
+bare address when there is no name. Like its Slack and Forge counterparts, the
+command loads its foreign package itself and says so when it is missing, since
+the command is autoloaded and can therefore be called from a buffer that has
+never loaded mu4e.
+
+It signals an error when the message records no path — mu4e reports a missing
+string field as the empty string rather than as nil, so an empty path counts as
+no path — and when the recorded file cannot be read. A maildir file name
+encodes the message's flags, so reading a message, or another mail program
+touching it, renames the file, and mu's index can name a path that no longer
+exists until it is reindexed. As with a stale Forge clone path, that is an
+ordinary failure, and catching it here is better than handing the agent a path
+it cannot open.
 
 @findex agent-act-on-thing-at-point
 @vindex agent-at-point-things

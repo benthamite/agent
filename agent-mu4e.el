@@ -49,14 +49,33 @@ starting one in a project chosen from the message."
   "Call CALLBACK with the context for the mu4e message at point.
 The payload is the maildir path, which an agent can read directly.  The
 subject and sender are the text a project is chosen from."
-  (funcall callback (list :text (agent-mu4e--message-text)
-                          :payload (agent-mu4e--path)
-                          :submit nil)))
+  (unless (require 'mu4e nil t)
+    (user-error "Package `mu4e' is required"))
+  (let ((path (agent-mu4e--path)))
+    (funcall callback (list :text (agent-mu4e--message-text)
+                            :payload path
+                            :submit nil))))
+
+(defun agent-mu4e--path ()
+  "Return the maildir path of the message at point.
+`mu4e-message-field' sanitizes a missing string field to the empty
+string, so a message that records no path answers with \"\" rather than
+nil.  A maildir file name encodes the message's flags, so reading the
+message or another mail program touching it renames the file, and mu's
+index can name a path that no longer exists until it is reindexed: a
+path the agent could not open is an ordinary failure rather than an
+exceptional one."
+  (let ((path (mu4e-message-field-at-point :path)))
+    (unless (and (stringp path) (not (string-empty-p path)))
+      (user-error "Message at point records no file path"))
+    (unless (file-readable-p path)
+      (user-error "Message file is not readable: %s" path))
+    path))
 
 (defun agent-mu4e--message-text ()
   "Return the subject and sender of the message at point."
   (format "Subject: %s\nFrom: %s"
-          (or (mu4e-message-field-at-point :subject) "")
+          (mu4e-message-field-at-point :subject)
           (agent-mu4e--sender)))
 
 (defun agent-mu4e--sender ()
@@ -73,15 +92,6 @@ sender, and the name is absent for a sender that gave none."
     (if (and name (not (string-empty-p name)))
         (format "%s <%s>" name email)
       (or email ""))))
-
-(defun agent-mu4e--path ()
-  "Return the maildir path of the message at point.
-`mu4e-message-field' sanitizes a missing string field to the empty
-string, so a message without a path answers with \"\" rather than nil."
-  (let ((path (mu4e-message-field-at-point :path)))
-    (if (and (stringp path) (not (string-empty-p path)))
-        path
-      (user-error "No email at point"))))
 
 ;;;; Provide
 
