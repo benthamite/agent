@@ -2746,7 +2746,9 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
               ((symbol-function 'agent-project-read)
                (lambda (&rest _) (error "Consulted the project reader")))
               ((symbol-function 'agent--start-session-in)
-               (lambda (_backend dir) (setq started dir) (current-buffer)))
+               (lambda (_backend dir &optional _prompt)
+                 (setq started dir)
+                 (current-buffer)))
               ((symbol-function 'agent-send-string) #'ignore)
               ((symbol-function 'display-buffer) #'ignore))
       (agent--act-on-context
@@ -2765,7 +2767,9 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
                  (setq asked (list account text))
                  (funcall callback "/tmp/chosen/")))
               ((symbol-function 'agent--start-session-in)
-               (lambda (_backend dir) (setq started dir) (current-buffer)))
+               (lambda (_backend dir &optional _prompt)
+                 (setq started dir)
+                 (current-buffer)))
               ((symbol-function 'agent-send-string) #'ignore)
               ((symbol-function 'display-buffer) #'ignore))
       (agent--act-on-context
@@ -2812,6 +2816,51 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
       (should (equal submitted "do it"))
       (should after))))
 
+(ert-deftest agent-test-submitted-payload-starts-the-new-session ()
+  "Give a new session the submitted payload as its initial prompt.
+Nothing sequences typed input against a session whose CLI has only just
+been spawned, and the directory may be one the CLI opens with a trust
+prompt, which the typed text would answer instead of the model."
+  (let ((prompt 'unset))
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+              ((symbol-function 'agent-start-session)
+               (lambda (_session &rest options)
+                 (setq prompt (plist-get options :initial-prompt))
+                 (current-buffer)))
+              ((symbol-function 'agent-submit)
+               (lambda (&rest _) (error "Typed into a new session")))
+              ((symbol-function 'agent-send-string)
+               (lambda (&rest _) (error "Typed into a new session")))
+              ((symbol-function 'display-buffer) #'ignore))
+      (agent--act-on-context
+       (agent-test--context-extractor
+        '(:directory "/tmp/anchored/" :payload "do it" :submit t))
+       nil))
+    (should (equal prompt "do it"))))
+
+(ert-deftest agent-test-unsubmitted-payload-is-typed-in ()
+  "Type an unsubmitted payload in, leaving the new session's prompt empty.
+It is meant to sit in the prompt for the user to edit, so it must not go
+to the model as an initial prompt."
+  (let ((prompt 'unset)
+        (sent nil))
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+              ((symbol-function 'agent-start-session)
+               (lambda (_session &rest options)
+                 (setq prompt (plist-get options :initial-prompt))
+                 (current-buffer)))
+              ((symbol-function 'agent-submit)
+               (lambda (&rest _) (error "Submitted an unsubmitted payload")))
+              ((symbol-function 'agent-send-string)
+               (lambda (string _buffer) (setq sent string)))
+              ((symbol-function 'display-buffer) #'ignore))
+      (agent--act-on-context
+       (agent-test--context-extractor
+        '(:directory "/tmp/anchored/" :payload "url"))
+       nil))
+    (should-not prompt)
+    (should (equal sent "url"))))
+
 (ert-deftest agent-test-read-session-buffer-without-sessions-signals ()
   "Signal a user error when no session is running."
   (cl-letf (((symbol-function 'agent--find-all-buffers) (lambda () nil)))
@@ -2852,7 +2901,9 @@ another buffer, whose backend the new session must not adopt."
             (cl-letf (((symbol-function 'agent--resolve-backend)
                        (lambda () (if (eq (current-buffer) origin) 'origin 'elsewhere)))
                       ((symbol-function 'agent--start-session-in)
-                       (lambda (backend _dir) (setq started backend) (current-buffer)))
+                       (lambda (backend _dir &optional _prompt)
+                         (setq started backend)
+                         (current-buffer)))
                       ((symbol-function 'agent-send-string) #'ignore)
                       ((symbol-function 'display-buffer) #'ignore))
               (agent--act-on-context
@@ -2875,7 +2926,7 @@ produced by a scheduled function rather than by the extractor itself."
                (lambda (_secs _repeat function &rest args)
                  (setq scheduled (cons function args))))
               ((symbol-function 'agent-save-backtrace)
-               (lambda () (setq saved t) "/tmp/bt.txt"))
+               (lambda () (setq saved t) "/tmp/ignored.txt"))
               ((symbol-function 'agent--debug-read-package-directory)
                (lambda (_file callback) (funcall callback "/tmp/pkg/"))))
       (agent--backtrace-context (lambda (c) (setq context c)))

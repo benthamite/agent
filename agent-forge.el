@@ -26,7 +26,11 @@
 
 ;; Forge-to-project routing for AI coding sessions.  Starts a session in
 ;; the working tree of the repository the notification belongs to and
-;; inserts the topic's URL into the prompt for review.
+;; inserts the topic's URL into the prompt for review, or under a prefix
+;; argument inserts it into a session already running.  The command only
+;; wraps the core's routing layer: `agent-forge-context' reads the topic
+;; and answers with a context anchored in that working tree, and the core
+;; chooses the session and delivers the URL.
 ;;
 ;; This is the Forge counterpart of `agent-act-on-slack-message'.  It
 ;; needs no language model: a Slack message must be classified to find
@@ -51,8 +55,10 @@
 ;;;###autoload
 (defun agent-act-on-forge-notification (&optional existing)
   "Route the Forge notification or topic at point to an AI session.
-With prefix argument EXISTING send it to a running session instead of
-starting one in the repository's working tree."
+Start a session in the working tree of the repository the topic belongs
+to and insert the issue or pull request URL into its prompt without
+submitting it.  With prefix argument EXISTING insert the URL into a
+running session instead."
   (interactive "P")
   (agent--act-on-context #'agent-forge-context existing))
 

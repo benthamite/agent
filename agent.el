@@ -2694,7 +2694,11 @@ TITLE is the skill name, used to derive the commit message scope."
 ;;;###autoload
 (defun agent-debug-backtrace (&optional existing)
   "Route the backtrace in the current buffer to an AI session.
-With prefix argument EXISTING send it to a running session."
+Save it to `agent-backtrace-file', ask `gptel' which packages the
+backtrace implicates, let the user pick one, and start a session in that
+package's source directory with instructions to read the saved backtrace
+and fix the bug.  With prefix argument EXISTING send those instructions
+to a running session instead."
   (interactive "P")
   (agent--act-on-context #'agent--backtrace-context existing))
 
@@ -2707,6 +2711,10 @@ to run after the current command rather than called here."
     (run-with-timer 0 nil #'agent--backtrace-context-for-file file callback)
     (agent-save-backtrace)))
 
+(defconst agent--backtrace-prompt
+  "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
+  "Prompt submitted for a saved backtrace, formatted with its file path.")
+
 (defun agent--backtrace-context-for-file (file callback)
   "Identify the package for FILE and call CALLBACK with its context."
   (agent--debug-read-package-directory
@@ -2714,8 +2722,7 @@ to run after the current command rather than called here."
    (lambda (directory)
      (funcall callback
               (list :directory directory
-                    :payload (format "Read the backtrace at %s. Identify the bug, fix it, and commit the fix."
-                                     file)
+                    :payload (format agent--backtrace-prompt file)
                     :submit t)))))
 
 ;;;###autoload
@@ -2890,36 +2897,58 @@ An anchored context names its own directory; an unanchored one has its
 project read from the account's sources, ranked by its text.  ORIGIN is
 the buffer the command was invoked from."
   (if-let* ((directory (plist-get context :directory)))
-      (agent--deliver-to context
-                         (agent--start-session-in backend directory)
-                         origin)
+      (agent--start-and-deliver context backend directory origin)
     (agent-project-read
      (agent-account-current backend)
      (plist-get context :text)
      "Project: "
      (lambda (directory)
-       (agent--deliver-to context
-                          (agent--start-session-in backend directory)
-                          origin)))))
+       (agent--start-and-deliver context backend directory origin)))))
 
-(defun agent--start-session-in (backend directory)
-  "Start a BACKEND session in DIRECTORY and return its buffer."
+(defun agent--start-and-deliver (context backend directory origin)
+  "Start a BACKEND session in DIRECTORY for CONTEXT and deliver it there.
+A payload the context asks to submit is given to the new session as its
+initial prompt, which the backend passes to the CLI on the command line.
+Typing it in instead would race the session's startup: nothing sequences
+terminal input against a CLI that has only just been spawned, and a
+directory the CLI has not seen before opens with a trust prompt that the
+typed text would answer.  An unsubmitted payload is typed in, since it
+is meant to sit in the prompt for the user to edit.  ORIGIN is the
+buffer the command was invoked from."
+  (let* ((payload (plist-get context :payload))
+         (submit (plist-get context :submit))
+         (buffer (agent--start-session-in backend directory
+                                          (and submit payload))))
+    (unless submit
+      (agent-send-string payload buffer))
+    (agent--finish-delivery context buffer origin)))
+
+(defun agent--start-session-in (backend directory &optional initial-prompt)
+  "Start a BACKEND session in DIRECTORY and return its buffer.
+INITIAL-PROMPT, when non-nil, is submitted as the session's first user
+message."
   (let ((dir (file-name-as-directory (expand-file-name directory)))
         (label (when-let* ((struct (agent-backend backend)))
                  (agent-backend-label struct))))
     (message "Starting %s in %s..." label (abbreviate-file-name dir))
     (agent-start-session
-     (agent-session-create :backend backend :directory dir))))
+     (agent-session-create :backend backend :directory dir)
+     :initial-prompt initial-prompt)))
 
 (defun agent--deliver-to (context buffer origin)
-  "Deliver CONTEXT's payload to session BUFFER and return the buffer.
-CONTEXT's `:after' thunk acts on the thing at point, so it runs in
-ORIGIN, the buffer the command was invoked from: starting a session
-pops to BUFFER and makes it current, and an origin that died meanwhile
-has nothing left to act on."
+  "Deliver CONTEXT's payload to running session BUFFER and return it.
+ORIGIN is the buffer the command was invoked from."
   (if (plist-get context :submit)
       (agent-submit (plist-get context :payload) buffer)
     (agent-send-string (plist-get context :payload) buffer))
+  (agent--finish-delivery context buffer origin))
+
+(defun agent--finish-delivery (context buffer origin)
+  "Run CONTEXT's `:after' thunk, display session BUFFER and return it.
+The thunk acts on the thing at point, so it runs in ORIGIN, the buffer
+the command was invoked from: starting a session pops to BUFFER and
+makes it current, and an origin that died meanwhile has nothing left to
+act on."
   (when-let* ((after (plist-get context :after))
               ((buffer-live-p origin)))
     (with-current-buffer origin (funcall after)))
