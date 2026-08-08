@@ -306,27 +306,38 @@ have been processed."
         (agent-todo--batch-start backend entries dir)))))
 
 ;;;###autoload
-(defun agent-send-todo-at-point ()
-  "Send the org TODO at point to a running AI session.
-Extract the heading and body of the TODO entry at point, format them
-as a prompt, and send them to the session associated with the current
-file's project.  When no unique session can be inferred, prompt for
-one.
+(defun agent-send-todo-at-point (&optional existing)
+  "Route the org TODO at point to an AI session.
+With prefix argument EXISTING send it to a running session instead of
+starting one in a project chosen from the TODO's text."
+  (interactive "P")
+  (agent--act-on-context #'agent-todo-context existing))
 
-When `agent-todo-in-progress-keyword' is non-nil, the heading's TODO
-state is changed to that keyword after sending."
-  (interactive)
+(defun agent-todo-context (callback)
+  "Call CALLBACK with the context for the org TODO at point.
+The TODO is both the text a project is chosen from and the request
+itself, so it is submitted rather than left for review.  The heading is
+remembered as a marker because choosing that project can take a model
+request and a prompt, by which time point has moved."
   (unless (derived-mode-p 'org-mode)
     (user-error "Must be called from an org-mode buffer"))
   (unless (org-get-todo-state)
     (user-error "Point is not on a TODO heading"))
-  (let* ((entry (agent-todo--collect-at-point))
-         (prompt (agent-todo--format-prompt entry))
-         (buf (agent--session-buffer-for-project)))
-    (agent-submit prompt buf)
-    (when agent-todo-in-progress-keyword
-      (org-todo agent-todo-in-progress-keyword))
-    (display-buffer buf)))
+  (let* ((prompt (agent-todo--format-prompt (agent-todo--collect-at-point)))
+         (marker (point-marker)))
+    (funcall callback
+             (list :text prompt
+                   :payload prompt
+                   :submit t
+                   :after (lambda () (agent-todo--mark-in-progress marker))))))
+
+(defun agent-todo--mark-in-progress (marker)
+  "Set the TODO state at MARKER to `agent-todo-in-progress-keyword'."
+  (when (and agent-todo-in-progress-keyword (marker-buffer marker))
+    (with-current-buffer (marker-buffer marker)
+      (save-excursion
+        (goto-char marker)
+        (org-todo agent-todo-in-progress-keyword)))))
 
 (provide 'agent-todo)
 ;;; agent-todo.el ends here

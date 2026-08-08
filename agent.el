@@ -790,7 +790,8 @@ Only `agent-session-event' may set this variable.")
 (declare-function forge-topic-at-point "forge-topic" (&optional demand))
 (declare-function agent-log-menu "agent-log" ())
 (declare-function agent-batch-todos "agent-todo" ())
-(declare-function agent-send-todo-at-point "agent-todo" ())
+(declare-function agent-send-todo-at-point "agent-todo"
+                  (&optional existing))
 (declare-function agent-capture-confirm-no-pending "agent-capture"
                   (backend buffer action))
 (declare-function consult--read "consult" (table &rest options))

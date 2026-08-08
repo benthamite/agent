@@ -26,10 +26,10 @@ The package is split into a small backend-agnostic core and focused modules:
 | =agent.el=           | Core: backend registry, session identity and state machine, session keys and teardown, unified orchestration commands (handoff, restart, exit, resume, branch navigation, skills, audits, backtrace debugging), transient menu, alerts, theme sync |
 | =agent-account.el=   | Multi-account support shared by all backends: selection, persistence, per-account config homes, symlinked shared state                                                                                                      |
 | =agent-capture.el=   | Persisted Org prompt capture, keyed to the session it targets                                                                                                                                                               |
-| =agent-slack.el=     | Slack-message-to-project routing: classifies a Slack message with =gptel= and starts a session in the matching project                                                                                                      |
+| =agent-slack.el=     | Slack-message-to-project routing: reads the message at point as text with no directory of its own, leaving the project to the shared project reader                                                                          |
 | =agent-forge.el=     | Forge-notification-to-project routing: starts a session in the working tree of the repository the notification belongs to                                                                                                   |
 | =agent-snippet.el=   | Yasnippet TAB expansion and snippet insertion in eat-based session buffers                                                                                                                                                  |
-| =agent-todo.el=      | Org TODO workflows that work with any backend: batch processing of a list of entries and sending the entry at point to a running session                                                                                     |
+| =agent-todo.el=      | Org TODO workflows that work with any backend: batch processing of a list of entries and routing the entry at point to a session                                                                                             |
 | =agent-claude.el=    | Claude Code backend: integrates =claude-code.el= with status and usage polling, hook setup, and ~agent-claude-mode~                                                                                                          |
 | =agent-claude-cli.el= | Quarantined undocumented Claude CLI conventions: Keychain credential naming, the usage API endpoint, the =~/.claude/projects/= directory encoding, transcript JSONL parsing, and the =.claude.json= merge engine            |
 | =agent-codex.el=     | Codex backend: integrates =codex.el= with theme sync, =codex exec= execution, =config.toml= helpers, modeline helpers, and ~agent-codex-mode~                                                                               |
@@ -126,10 +126,6 @@ The global minor modes ~agent-claude-mode~ and ~agent-codex-mode~ own every hook
 #+vindex: agent-audit-project-directories
 #+vindex: agent-debug-backtrace-model
 #+vindex: agent-debug-backtrace-backend
-#+vindex: agent-act-on-slack-message-model
-#+vindex: agent-act-on-slack-message-backend
-#+vindex: agent-epoch-project-registry-file
-#+vindex: agent-epoch-projects-root
 #+vindex: agent-prompt-capture-directory
 #+vindex: agent-prompt-capture-auto-save-delay
 #+vindex: agent-sync-theme
@@ -145,9 +141,9 @@ The user option ~agent-alert-on-ready~ is a boolean that defaults to ~nil~. When
 
 The user option ~agent-backtrace-file~ controls where ~agent-save-backtrace~ and ~agent-debug-backtrace~ write Emacs backtraces. It defaults to a file in ~temporary-file-directory~.
 
-The unified orchestration commands share one set of options across backends. ~agent-handoff-files~ maps backend symbols to the handoff files read by ~agent-handoff~. ~agent-audit-skills~ lists the audit skills run by ~agent-audit-project~, and ~agent-audit-project-directories~ stores completion candidates for the audit directory prompt. ~agent-debug-backtrace-model~ and ~agent-debug-backtrace-backend~ configure the =gptel= request used by ~agent-debug-backtrace~ to identify likely culprit packages from an Emacs backtrace. ~agent-act-on-slack-message-model~ and ~agent-act-on-slack-message-backend~ configure the =gptel= request used by ~agent-act-on-slack-message~ to select an Epoch project from the Slack message at point.
+The unified orchestration commands share one set of options across backends. ~agent-handoff-files~ maps backend symbols to the handoff files read by ~agent-handoff~. ~agent-audit-skills~ lists the audit skills run by ~agent-audit-project~, and ~agent-audit-project-directories~ stores completion candidates for the audit directory prompt. ~agent-debug-backtrace-model~ and ~agent-debug-backtrace-backend~ configure the =gptel= request used by ~agent-debug-backtrace~ to identify likely culprit packages from an Emacs backtrace.
 
-The user options ~agent-epoch-project-registry-file~ and ~agent-epoch-projects-root~ configure Slack-message project routing. Both default to nil; Slack routing is unavailable until they point at a JSON project registry and the root directory containing the canonical project files.
+Slack-message routing has no options of its own any more. The model and =gptel= backend that pick a project from the message are the shared ~agent-project-ranking-model~ and ~agent-project-ranking-backend~ ([[#h:project-options][Project sources]]), and ~agent-act-on-slack-message-model~ and ~agent-act-on-slack-message-backend~ are obsolete aliases of them. The project candidates come from ~agent-project-sources~, so a registry that used to be named by ~agent-epoch-project-registry-file~ now belongs in that alist: that option is obsolete and nothing reads it, which means a configuration setting it alone routes against the default source list instead of the registry. ~agent-epoch-projects-root~ is an obsolete alias of ~agent-project-registry-root~ and still resolves the registry's relative paths.
 
 The user option ~agent-prompt-capture-directory~ controls where ~agent-capture-prompt~ stores per-session Org files. Each file is keyed by backend, account, project directory, and session instance, so prompts are linked to the session they target and remain available after Emacs restarts. ~agent-prompt-capture-auto-save-delay~ controls the idle delay before capture buffers are saved automatically.
 
@@ -176,7 +172,7 @@ Each source is either a registry file, whose name ends in =.json=, or a path pat
 
 A path pattern may contain wildcards. A wildcard is =*=, =?=, or a =[...]= character class, and a pattern containing one is expanded a single level per wildcard component: =~/repos/*= reaches the children of =~/repos/=, and =~/repos/.worktrees/*/*= its grandchildren two levels down. Wildcard expansion keeps only git repositories and worktrees; a worktree records its git directory in a file rather than a directory, and both count. A pattern without a wildcard names exactly one directory, which is kept whether or not it is a repository, and dropped when it does not exist or is not a directory. A pattern that cannot be expanded at all, such as one holding an unbalanced =[=, is reported in the echo area and skipped, so one malformed source never suppresses the candidates of the others.
 
-A registry is a JSON file holding a =projects= array, in the same format ~agent-epoch-project-registry-file~ reads ([[#h:shared-session-options][Shared session behavior]]). Every entry becomes one candidate, labelled by its =id= and =title=, or by its =id= alone when it records no title. Unlike a path pattern it carries a description: the entry's =summary=, or its =aliases= when it records no summary, followed by its Slack channels; an entry recording none of the three has no description at all rather than an empty one. An entry that records a JSON =null= where a string belongs counts as recording nothing, so a null summary falls back to the aliases just as an omitted one does. Later stages use that text to judge which project a piece of text is about. An entry's directory is its first =project_doc_paths= folder when it records one, because that folder holds the project's instruction files, its first =repo_paths= directory when it records only that, and the registry root itself when it records neither. The user option ~agent-project-registry-root~ names the directory those relative paths are expanded against; it defaults to ~nil~, and a registry recording relative paths is unusable until it is set. A source naming a registry that does not exist raises an error rather than being skipped, since it points at a file the user meant to have.
+A registry is a JSON file holding a =projects= array, in the format the obsolete ~agent-epoch-project-registry-file~ used to read ([[#h:shared-session-options][Shared session behavior]]). Every entry becomes one candidate, labelled by its =id= and =title=, or by its =id= alone when it records no title. Unlike a path pattern it carries a description: the entry's =summary=, or its =aliases= when it records no summary, followed by its Slack channels; an entry recording none of the three has no description at all rather than an empty one. An entry that records a JSON =null= where a string belongs counts as recording nothing, so a null summary falls back to the aliases just as an omitted one does. Later stages use that text to judge which project a piece of text is about. An entry's directory is its first =project_doc_paths= folder when it records one, because that folder holds the project's instruction files, its first =repo_paths= directory when it records only that, and the registry root itself when it records neither. The user option ~agent-project-registry-root~ names the directory those relative paths are expanded against; it defaults to ~nil~, and a registry recording relative paths is unusable until it is set. A source naming a registry that does not exist raises an error rather than being skipped, since it points at a file the user meant to have.
 
 The function ~agent-project-candidates~ returns the candidates for an account as plists with ~:label~, ~:directory~ and ~:description~. Candidates are deduplicated by true path, so listing the same directory twice under different names, or through a symbolic link, yields one entry. A label shared by two candidates is replaced with the abbreviated directory, which is what then appears in completion, so no two projects offer the same string.
 
@@ -344,6 +340,14 @@ instruction overlay, linking the canonical key and injecting private skills.
 The command is the Emacs equivalent of the shell =newtask= helper, but it does
 not depend on the local =main= worktree's current branch.
 
+The command ~agent-act-on-slack-message~, called on a message in a Slack room
+buffer, starts a session in the project that message is about and inserts its
+permalink into the prompt without submitting it. With a prefix argument it
+inserts the permalink into a running session instead. Its extractor,
+~agent-slack-context~, answers with the message text and no directory, since a
+message names no project of its own: the project is read from the account's
+sources and ranked by that text ([[#h:project-options][Project sources]]).
+
 The command ~agent-act-on-forge-notification~ is the Forge counterpart of
 ~agent-act-on-slack-message~. Called on a notification in
 ~forge-list-notifications~, it starts a session in the working tree of the
@@ -355,7 +359,7 @@ command is a thin wrapper over the routing layer described below: its
 extractor, ~agent-forge-context~, reads the topic and answers with a context
 anchored in the working tree, so the project reader is never consulted.
 
-Unlike Slack routing, it needs no language model and no project registry. A
+Unlike Slack routing, it needs no language model and no project sources. A
 Slack message has to be classified to find its project, whereas a Forge
 notification already records its repository and the repository already records
 its working tree. The command signals an error when the repository has no local
@@ -464,7 +468,7 @@ Codex records subagent threads with the same ~forked_from_id~ field, and those a
 #+findex: agent-send-todo-at-point
 The =agent-todo= module turns Org TODO entries into work for an AI session, and both of its commands work with either backend.
 
-~agent-send-todo-at-point~, bound to =t=, formats the heading and body of the TODO at point as a prompt and submits it to the session for the current file's project, asking which one when no single session can be inferred. When ~agent-todo-in-progress-keyword~ is set, the heading moves to that keyword once the prompt is on its way.
+~agent-send-todo-at-point~, bound to =t=, formats the heading and body of the TODO at point as a prompt and submits it to a session started for it; with a prefix argument it submits the prompt to a running session chosen by completion. Like a Slack message, a TODO names no directory, so the project is read from the account's sources and ranked by the TODO's own text ([[#h:project-options][Project sources]]). It no longer looks for the session belonging to the current file's project: an Org file of tasks rarely sits in the repository those tasks are about. When ~agent-todo-in-progress-keyword~ is set, the heading moves to that keyword once the prompt has been delivered. The heading is remembered as a marker, so the move lands on the heading the prompt came from however far point has travelled while the project was being chosen.
 
 ~agent-batch-todos~, bound to =b=, collects several TODO entries and runs them one after another without an interactive session. It infers its scope by itself — the region when one is active, the subtree when the buffer is narrowed, and the whole buffer otherwise — then asks for a working directory, and confirms the number of entries before starting unless you selected them as a region, where the selection is confirmation enough. Each entry runs through the resolved backend's ~:exec-prompt~ slot, its raw output is written to a numbered file under a timestamped directory in ~agent-todo-log-directory~, and a summary buffer collects every entry's status, duration, cost, and output when the queue is empty.
 

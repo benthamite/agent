@@ -95,13 +95,13 @@ The package is split into a small backend-agnostic core and focused modules:
 @item @samp{agent-capture.el}
 @tab Persisted Org prompt capture, keyed to the session it targets
 @item @samp{agent-slack.el}
-@tab Slack-message-to-project routing: classifies a Slack message with @samp{gptel} and starts a session in the matching project
+@tab Slack-message-to-project routing: reads the message at point as text with no directory of its own, leaving the project to the shared project reader
 @item @samp{agent-forge.el}
 @tab Forge-notification-to-project routing: starts a session in the working tree of the repository the notification belongs to
 @item @samp{agent-snippet.el}
 @tab Yasnippet TAB expansion and snippet insertion in eat-based session buffers
 @item @samp{agent-todo.el}
-@tab Org TODO workflows that work with any backend: batch processing of a list of entries and sending the entry at point to a running session
+@tab Org TODO workflows that work with any backend: batch processing of a list of entries and routing the entry at point to a session
 @item @samp{agent-claude.el}
 @tab Claude Code backend: integrates @samp{claude-code.el} with status and usage polling, hook setup, and @code{agent-claude-mode}
 @item @samp{agent-claude-cli.el}
@@ -204,10 +204,6 @@ The global minor modes @code{agent-claude-mode} and @code{agent-codex-mode} own 
 @vindex agent-audit-project-directories
 @vindex agent-debug-backtrace-model
 @vindex agent-debug-backtrace-backend
-@vindex agent-act-on-slack-message-model
-@vindex agent-act-on-slack-message-backend
-@vindex agent-epoch-project-registry-file
-@vindex agent-epoch-projects-root
 @vindex agent-prompt-capture-directory
 @vindex agent-prompt-capture-auto-save-delay
 @vindex agent-sync-theme
@@ -223,9 +219,9 @@ The user option @code{agent-alert-on-ready} is a boolean that defaults to @code{
 
 The user option @code{agent-backtrace-file} controls where @code{agent-save-backtrace} and @code{agent-debug-backtrace} write Emacs backtraces. It defaults to a file in @code{temporary-file-directory}.
 
-The unified orchestration commands share one set of options across backends. @code{agent-handoff-files} maps backend symbols to the handoff files read by @code{agent-handoff}. @code{agent-audit-skills} lists the audit skills run by @code{agent-audit-project}, and @code{agent-audit-project-directories} stores completion candidates for the audit directory prompt. @code{agent-debug-backtrace-model} and @code{agent-debug-backtrace-backend} configure the @samp{gptel} request used by @code{agent-debug-backtrace} to identify likely culprit packages from an Emacs backtrace. @code{agent-act-on-slack-message-model} and @code{agent-act-on-slack-message-backend} configure the @samp{gptel} request used by @code{agent-act-on-slack-message} to select an Epoch project from the Slack message at point.
+The unified orchestration commands share one set of options across backends. @code{agent-handoff-files} maps backend symbols to the handoff files read by @code{agent-handoff}. @code{agent-audit-skills} lists the audit skills run by @code{agent-audit-project}, and @code{agent-audit-project-directories} stores completion candidates for the audit directory prompt. @code{agent-debug-backtrace-model} and @code{agent-debug-backtrace-backend} configure the @samp{gptel} request used by @code{agent-debug-backtrace} to identify likely culprit packages from an Emacs backtrace.
 
-The user options @code{agent-epoch-project-registry-file} and @code{agent-epoch-projects-root} configure Slack-message project routing. Both default to nil; Slack routing is unavailable until they point at a JSON project registry and the root directory containing the canonical project files.
+Slack-message routing has no options of its own any more. The model and @samp{gptel} backend that pick a project from the message are the shared @code{agent-project-ranking-model} and @code{agent-project-ranking-backend} (@ref{Project sources}), and @code{agent-act-on-slack-message-model} and @code{agent-act-on-slack-message-backend} are obsolete aliases of them. The project candidates come from @code{agent-project-sources}, so a registry that used to be named by @code{agent-epoch-project-registry-file} now belongs in that alist: that option is obsolete and nothing reads it, which means a configuration setting it alone routes against the default source list instead of the registry. @code{agent-epoch-projects-root} is an obsolete alias of @code{agent-project-registry-root} and still resolves the registry's relative paths.
 
 The user option @code{agent-prompt-capture-directory} controls where @code{agent-capture-prompt} stores per-session Org files. Each file is keyed by backend, account, project directory, and session instance, so prompts are linked to the session they target and remain available after Emacs restarts. @code{agent-prompt-capture-auto-save-delay} controls the idle delay before capture buffers are saved automatically.
 
@@ -252,7 +248,7 @@ Each source is either a registry file, whose name ends in @samp{.json}, or a pat
 
 A path pattern may contain wildcards. A wildcard is @samp{*}, @samp{?}, or a @samp{[...]} character class, and a pattern containing one is expanded a single level per wildcard component: @samp{~/repos/*} reaches the children of @samp{~/repos/}, and @samp{~/repos/.worktrees/*/*} its grandchildren two levels down. Wildcard expansion keeps only git repositories and worktrees; a worktree records its git directory in a file rather than a directory, and both count. A pattern without a wildcard names exactly one directory, which is kept whether or not it is a repository, and dropped when it does not exist or is not a directory. A pattern that cannot be expanded at all, such as one holding an unbalanced @samp{[}, is reported in the echo area and skipped, so one malformed source never suppresses the candidates of the others.
 
-A registry is a JSON file holding a @samp{projects} array, in the same format @code{agent-epoch-project-registry-file} reads (@ref{Shared session behavior}). Every entry becomes one candidate, labelled by its @samp{id} and @samp{title}, or by its @samp{id} alone when it records no title. Unlike a path pattern it carries a description: the entry's @samp{summary}, or its @samp{aliases} when it records no summary, followed by its Slack channels; an entry recording none of the three has no description at all rather than an empty one. An entry that records a JSON @samp{null} where a string belongs counts as recording nothing, so a null summary falls back to the aliases just as an omitted one does. Later stages use that text to judge which project a piece of text is about. An entry's directory is its first @samp{project_doc_paths} folder when it records one, because that folder holds the project's instruction files, its first @samp{repo_paths} directory when it records only that, and the registry root itself when it records neither. The user option @code{agent-project-registry-root} names the directory those relative paths are expanded against; it defaults to @code{nil}, and a registry recording relative paths is unusable until it is set. A source naming a registry that does not exist raises an error rather than being skipped, since it points at a file the user meant to have.
+A registry is a JSON file holding a @samp{projects} array, in the format the obsolete @code{agent-epoch-project-registry-file} used to read (@ref{Shared session behavior}). Every entry becomes one candidate, labelled by its @samp{id} and @samp{title}, or by its @samp{id} alone when it records no title. Unlike a path pattern it carries a description: the entry's @samp{summary}, or its @samp{aliases} when it records no summary, followed by its Slack channels; an entry recording none of the three has no description at all rather than an empty one. An entry that records a JSON @samp{null} where a string belongs counts as recording nothing, so a null summary falls back to the aliases just as an omitted one does. Later stages use that text to judge which project a piece of text is about. An entry's directory is its first @samp{project_doc_paths} folder when it records one, because that folder holds the project's instruction files, its first @samp{repo_paths} directory when it records only that, and the registry root itself when it records neither. The user option @code{agent-project-registry-root} names the directory those relative paths are expanded against; it defaults to @code{nil}, and a registry recording relative paths is unusable until it is set. A source naming a registry that does not exist raises an error rather than being skipped, since it points at a file the user meant to have.
 
 The function @code{agent-project-candidates} returns the candidates for an account as plists with @code{:label}, @code{:directory} and @code{:description}. Candidates are deduplicated by true path, so listing the same directory twice under different names, or through a symbolic link, yields one entry. A label shared by two candidates is replaced with the abbreviated directory, which is what then appears in completion, so no two projects offer the same string.
 
@@ -417,6 +413,14 @@ instruction overlay, linking the canonical key and injecting private skills.
 The command is the Emacs equivalent of the shell @samp{newtask} helper, but it does
 not depend on the local @samp{main} worktree's current branch.
 
+The command @code{agent-act-on-slack-message}, called on a message in a Slack room
+buffer, starts a session in the project that message is about and inserts its
+permalink into the prompt without submitting it. With a prefix argument it
+inserts the permalink into a running session instead. Its extractor,
+@code{agent-slack-context}, answers with the message text and no directory, since a
+message names no project of its own: the project is read from the account's
+sources and ranked by that text (@ref{Project sources}).
+
 The command @code{agent-act-on-forge-notification} is the Forge counterpart of
 @code{agent-act-on-slack-message}. Called on a notification in
 @code{forge-list-notifications}, it starts a session in the working tree of the
@@ -428,7 +432,7 @@ command is a thin wrapper over the routing layer described below: its
 extractor, @code{agent-forge-context}, reads the topic and answers with a context
 anchored in the working tree, so the project reader is never consulted.
 
-Unlike Slack routing, it needs no language model and no project registry. A
+Unlike Slack routing, it needs no language model and no project sources. A
 Slack message has to be classified to find its project, whereas a Forge
 notification already records its repository and the repository already records
 its working tree. The command signals an error when the repository has no local
@@ -533,7 +537,7 @@ Codex records subagent threads with the same @code{forked_from_id} field, and th
 @findex agent-send-todo-at-point
 The @samp{agent-todo} module turns Org TODO entries into work for an AI session, and both of its commands work with either backend.
 
-@code{agent-send-todo-at-point}, bound to @samp{t}, formats the heading and body of the TODO at point as a prompt and submits it to the session for the current file's project, asking which one when no single session can be inferred. When @code{agent-todo-in-progress-keyword} is set, the heading moves to that keyword once the prompt is on its way.
+@code{agent-send-todo-at-point}, bound to @samp{t}, formats the heading and body of the TODO at point as a prompt and submits it to a session started for it; with a prefix argument it submits the prompt to a running session chosen by completion. Like a Slack message, a TODO names no directory, so the project is read from the account's sources and ranked by the TODO's own text (@ref{Project sources}). It no longer looks for the session belonging to the current file's project: an Org file of tasks rarely sits in the repository those tasks are about. When @code{agent-todo-in-progress-keyword} is set, the heading moves to that keyword once the prompt has been delivered. The heading is remembered as a marker, so the move lands on the heading the prompt came from however far point has travelled while the project was being chosen.
 
 @code{agent-batch-todos}, bound to @samp{b}, collects several TODO entries and runs them one after another without an interactive session. It infers its scope by itself — the region when one is active, the subtree when the buffer is narrowed, and the whole buffer otherwise — then asks for a working directory, and confirms the number of entries before starting unless you selected them as a region, where the selection is confirmation enough. Each entry runs through the resolved backend's @code{:exec-prompt} slot, its raw output is written to a numbered file under a timestamped directory in @code{agent-todo-log-directory}, and a summary buffer collects every entry's status, duration, cost, and output when the queue is empty.
 
