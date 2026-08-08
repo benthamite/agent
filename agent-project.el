@@ -256,13 +256,13 @@ directory."
 
 (defun agent-project-read (account text prompt callback)
   "Read a project directory for ACCOUNT and call CALLBACK with it.
-TEXT describes the thing being routed and orders the candidates when any
-of them carries a description; without descriptions there is nothing to
-rank on, so no request is made.  PROMPT is the completion prompt.
-CALLBACK receives the directory of the chosen project."
+TEXT describes the thing being routed and orders the candidates when TEXT
+and at least one description hold more than whitespace; a blank string is
+nothing to rank on, so no request is made.  PROMPT is the completion
+prompt.  CALLBACK receives the directory of the chosen project."
   (let ((candidates (agent-project-candidates account)))
     (unless candidates
-      (user-error "No project sources for account %s" (or account "(none)")))
+      (user-error "No project candidates for account %s" (or account "(none)")))
     (if (agent-project--rankable-p text candidates)
         (agent-project--rank
          candidates text
@@ -283,16 +283,11 @@ description, so it counts as absent and no request is made."
   "Return non-nil when VALUE is a string holding more than whitespace."
   (and (stringp value) (not (string-blank-p value))))
 
-(defun agent-project--complete (candidates prompt)
-  "Return the directory of the candidate chosen from CANDIDATES with PROMPT."
-  (let* ((labels (mapcar (lambda (c) (plist-get c :label)) candidates))
-         (choice (completing-read prompt labels nil t nil nil (car labels))))
-    (plist-get (seq-find (lambda (c) (equal (plist-get c :label) choice))
-                         candidates)
-               :directory)))
-
 (defun agent-project--rank (candidates text callback)
-  "Order CANDIDATES by relevance to TEXT and call CALLBACK with the list."
+  "Order CANDIDATES by relevance to TEXT and call CALLBACK with the list.
+A response that is neither text nor nil is an event sent before the
+answer, such as a reasoning block, and is waited out rather than taken
+for a failure, so the user is never prompted twice for one request."
   (unless (and (require 'gptel nil t) (fboundp 'gptel-request))
     (user-error "Package `gptel' is required for project ranking"))
   (let ((gptel-backend (alist-get agent-project-ranking-backend
@@ -309,17 +304,9 @@ description, so it counts as absent and no request is made."
                      "likely. Do not invent labels.")
      :callback
      (lambda (response info)
-       (funcall callback (agent-project--ranked candidates response info))))))
-
-(defun agent-project--ranked (candidates response info)
-  "Return CANDIDATES ordered by RESPONSE, or unchanged when it failed.
-INFO describes the request.  A response that is not text is a failure,
-reported and answered with the original order, so a ranking failure
-costs order rather than the whole action."
-  (if (stringp response)
-      (agent-project--ordered candidates response)
-    (message "Project ranking failed: %s" (plist-get info :status))
-    candidates))
+       (when (or (stringp response) (null response))
+         (funcall callback
+                  (agent-project--ranked candidates response info)))))))
 
 (defun agent-project--ranking-prompt (candidates text)
   "Return the ranking prompt for CANDIDATES and TEXT."
@@ -333,6 +320,16 @@ costs order rather than the whole action."
           (plist-get candidate :label)
           (or (plist-get candidate :description) "")))
 
+(defun agent-project--ranked (candidates response info)
+  "Return CANDIDATES ordered by RESPONSE, or unchanged when it failed.
+INFO describes the request.  A nil RESPONSE is a failure, reported and
+answered with the original order, so a ranking failure costs order rather
+than the whole action."
+  (if (stringp response)
+      (agent-project--ordered candidates response)
+    (message "Project ranking failed: %s" (plist-get info :status))
+    candidates))
+
 (defun agent-project--ordered (candidates response)
   "Return CANDIDATES ordered by the labels named in RESPONSE.
 Candidates the response did not name keep their original order at the
@@ -341,17 +338,38 @@ repeats, or leaves blank, matches at most the one candidate it names, so
 that no candidate is offered twice or picked up by an empty name."
   (let* ((names (seq-filter #'agent-project--text-p
                             (mapcar #'string-trim (split-string response ","))))
-         (matched (delete-dups
+         (matched (seq-uniq
                    (delq nil (mapcar (lambda (name)
                                        (agent-project--named name candidates))
-                                     names)))))
+                                     names))
+                   #'eq)))
     (append matched (seq-remove (lambda (c) (memq c matched)) candidates))))
 
 (defun agent-project--named (name candidates)
-  "Return the first candidate in CANDIDATES whose label NAME names, or nil."
-  (seq-find (lambda (candidate)
-              (string-prefix-p name (plist-get candidate :label)))
-            candidates))
+  "Return the candidate in CANDIDATES that NAME names, or nil.
+A label equal to NAME wins outright, so a label that is the start of
+another still names its own candidate.  Otherwise NAME is read as the
+start of a label, which is what lets the model answer \"gamma\" for
+\"gamma - Gamma\", and the shortest label it starts wins, resolving a
+truncated name toward the closest project."
+  (or (seq-find (lambda (candidate)
+                  (equal name (plist-get candidate :label)))
+                candidates)
+      (car (seq-sort-by (lambda (candidate)
+                          (length (plist-get candidate :label)))
+                        #'<
+                        (seq-filter
+                         (lambda (candidate)
+                           (string-prefix-p name (plist-get candidate :label)))
+                         candidates)))))
+
+(defun agent-project--complete (candidates prompt)
+  "Return the directory of the candidate chosen from CANDIDATES with PROMPT."
+  (let* ((labels (mapcar (lambda (c) (plist-get c :label)) candidates))
+         (choice (completing-read prompt labels nil t nil nil (car labels))))
+    (plist-get (seq-find (lambda (c) (equal (plist-get c :label) choice))
+                         candidates)
+               :directory)))
 
 (provide 'agent-project)
 ;;; agent-project.el ends here

@@ -4,6 +4,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'ert)
 (require 'agent-project)
 
@@ -340,6 +341,31 @@ The root is normalized like every other candidate directory."
     (should (equal (mapcar (lambda (c) (plist-get c :label))
                            (agent-project--ordered candidates "beta, beta, "))
                    '("beta - Beta" "alpha - Alpha")))))
+
+(ert-deftest agent-project-test-ordering-keeps-colliding-labels-apart ()
+  "Keep the model's order when one label is the start of another."
+  (let ((candidates (list (list :label "agent-project")
+                          (list :label "agent"))))
+    (should (equal (mapcar (lambda (c) (plist-get c :label))
+                           (agent-project--ordered candidates
+                                                   "agent, agent-project"))
+                   '("agent" "agent-project")))))
+
+(ert-deftest agent-project-test-ordering-takes-the-shortest-prefix-match ()
+  "Resolve a truncated name to the shortest label it starts."
+  (let ((candidates (list (list :label "ml-safety-review")
+                          (list :label "ml-safety"))))
+    (should (equal (mapcar (lambda (c) (plist-get c :label))
+                           (agent-project--ordered candidates "ml-saf"))
+                   '("ml-safety" "ml-safety-review")))))
+
+(ert-deftest agent-project-test-ordering-ignores-an-invented-label ()
+  "Leave the order alone when the response names no candidate at all."
+  (let ((candidates (list (list :label "alpha - Alpha")
+                          (list :label "beta - Beta"))))
+    (should (equal (mapcar (lambda (c) (plist-get c :label))
+                           (agent-project--ordered candidates "zeta"))
+                   '("alpha - Alpha" "beta - Beta")))))
 
 (provide 'agent-project-test)
 ;;; agent-project-test.el ends here
