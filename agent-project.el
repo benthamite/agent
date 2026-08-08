@@ -48,10 +48,14 @@
 ;; These renamings come before the options they rename, and live in this
 ;; file rather than in `agent-slack.el', where the old names were
 ;; defined, for one reason: a user sets an option before the package
-;; that owns it is loaded, and `defvaralias' hands the value over only
-;; while the new name is still unbound.  Declared after the `defcustom',
-;; or in a file that loads only when a Slack command is first called,
-;; the alias would silently drop the setting.
+;; that owns it is loaded, and the value reaches the new name only while
+;; that name is still unbound.  A value already set on the old symbol is
+;; propagated by `defvaralias'; a value merely recorded for Customize,
+;; which is what `use-package' does with `:custom', is carried by
+;; `define-obsolete-variable-alias' copying the `saved-value' property
+;; over for the `defcustom' below to pick up.  Declared after the
+;; `defcustom', or in a file that loads only when a Slack command is
+;; first called, the alias would silently drop the setting.
 
 (define-obsolete-variable-alias 'agent-claude-debug-slack-message-model
   'agent-act-on-slack-message-model "0.2")

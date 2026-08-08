@@ -2892,7 +2892,9 @@ the buffer the command was invoked from."
 (defun agent--start-and-deliver (context backend directory origin)
   "Start a BACKEND session in DIRECTORY for CONTEXT and deliver it there.
 A payload the context asks to submit is given to the new session as its
-initial prompt, which the backend passes to the CLI on the command line.
+initial prompt, which the backend hands over at launch rather than
+leaving to the terminal: on the CLI's command line where the backend can
+do that, and otherwise sent by the backend once the session is up.
 Typing it in instead would race the session's startup: nothing sequences
 terminal input against a CLI that has only just been spawned, and a
 directory the CLI has not seen before opens with a trust prompt that the
