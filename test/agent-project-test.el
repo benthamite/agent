@@ -58,6 +58,24 @@ whether that directory is a git repository."
   "Contribute nothing for a path that does not exist."
   (should-not (agent-project--candidates-from-pattern "/nonexistent/xyzzy")))
 
+(ert-deftest agent-project-test-character-class-counts-as-a-wildcard ()
+  "Expand a `[...]' class rather than reading it as a literal name."
+  (agent-project-test--with-tree root '(("alpha" . t) ("beta" . t))
+    (let ((labels (mapcar (lambda (c) (plist-get c :label))
+                          (agent-project--candidates-from-pattern
+                           (expand-file-name "[ab]lpha" root)))))
+      (should (equal labels '("alpha"))))))
+
+(ert-deftest agent-project-test-malformed-pattern-spares-the-others ()
+  "Drop a pattern that will not compile, keeping the other sources."
+  (agent-project-test--with-tree root '(("alpha" . t))
+    (let ((agent-project-sources
+           (list (cons "" (list (expand-file-name "[unbalanced" root)
+                                (expand-file-name "*" root))))))
+      (should (equal (mapcar (lambda (c) (plist-get c :label))
+                             (agent-project-candidates nil))
+                     '("alpha"))))))
+
 (ert-deftest agent-project-test-account-lookup-takes-the-first-match ()
   "Return the sources of the first regexp that matches the account."
   (let ((agent-project-sources '(("epoch" . ("/a")) ("" . ("/b")))))

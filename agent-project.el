@@ -57,8 +57,9 @@ directory and is kept whether or not it is a repository."
 (defun agent-project-candidates (&optional account)
   "Return candidate projects for ACCOUNT, deduplicated by true path.
 Each candidate is a plist with `:label', `:directory' and
-`:description'.  Labels shared by two candidates are replaced with
-their directories, so completion never offers the same string twice."
+`:description'.  A label shared by two candidates is replaced with the
+abbreviated directory, so completion never offers the same string
+twice."
   (agent-project--disambiguate
    (agent-project--dedupe
     (mapcan #'agent-project--candidates-from-source
@@ -85,9 +86,21 @@ directory, kept whether or not it is a repository."
     (if (string-match-p "[*?[]" expanded)
         (mapcar #'agent-project--directory-candidate
                 (seq-filter #'agent-project--git-directory-p
-                            (file-expand-wildcards expanded)))
+                            (agent-project--expand-wildcards expanded)))
       (when (file-directory-p expanded)
         (list (agent-project--directory-candidate expanded))))))
+
+(defun agent-project--expand-wildcards (pattern)
+  "Return the files matching PATTERN, or nil when PATTERN cannot compile.
+An unbalanced `[' makes PATTERN an invalid regexp once translated, and
+the resulting error is reported rather than raised so that one bad
+source does not take every other source's candidates down with it."
+  (condition-case error
+      (file-expand-wildcards pattern)
+    (invalid-regexp
+     (message "Ignoring malformed project source %s: %s"
+              pattern (error-message-string error))
+     nil)))
 
 (defun agent-project--directory-candidate (directory)
   "Return a candidate plist for DIRECTORY."
