@@ -108,12 +108,15 @@ whether that directory is a git repository."
 (defconst agent-project-test--registry-json
   "{\"projects\": [
      {\"id\": \"alpha\", \"title\": \"Alpha\", \"summary\": \"First project\",
-      \"project_doc_paths\": [\"alpha/alpha.org\"], \"repo_paths\": [],
+      \"project_doc_paths\": [\"alpha/alpha.org\"],
+      \"repo_paths\": [\"~/repos/epoch/alpha\"],
       \"slack_channels\": [\"#alpha\"], \"aliases\": []},
      {\"id\": \"beta\", \"title\": \"Beta\", \"project_doc_paths\": [],
       \"repo_paths\": [\"~/repos/epoch/beta\"], \"slack_channels\": [],
       \"aliases\": [\"b\"]}]}"
-  "Registry JSON exercising both directory sources and both summaries.")
+  "Registry JSON exercising both directory sources and both summaries.
+Alpha records a doc path and a repository, so it also exercises which of
+the two wins.")
 
 (defconst agent-project-test--null-summary-json
   "{\"projects\": [
@@ -121,6 +124,21 @@ whether that directory is a git repository."
       \"project_doc_paths\": [\"gamma/gamma.org\"], \"repo_paths\": null,
       \"slack_channels\": null, \"aliases\": [\"g\"]}]}"
   "Registry JSON whose only entry records an explicit null summary.")
+
+(defconst agent-project-test--bare-entry-json
+  "{\"projects\": [
+     {\"id\": \"delta\", \"title\": null, \"project_doc_paths\": [],
+      \"repo_paths\": []}]}"
+  "Registry JSON whose only entry records no title, paths or text.")
+
+(defmacro agent-project-test--with-registry (var json &rest body)
+  "Run BODY with VAR bound to a temporary registry file holding JSON.
+The file is deleted when BODY finishes."
+  (declare (indent 2))
+  `(let ((,var (agent-project-test--registry-file ,json)))
+     (unwind-protect
+         (progn ,@body)
+       (delete-file ,var))))
 
 (defun agent-project-test--registry-file (&optional json)
   "Return a temporary registry file holding JSON.
@@ -131,50 +149,71 @@ JSON defaults to `agent-project-test--registry-json'."
     file))
 
 (ert-deftest agent-project-test-registry-prefers-the-doc-directory ()
-  "Resolve a project to its doc folder when it records one."
-  (let* ((agent-project-registry-root "/tmp/projects/")
-         (candidates (agent-project--candidates-from-registry
-                      (agent-project-test--registry-file)))
-         (alpha (car candidates)))
-    (should (equal (plist-get alpha :directory) "/tmp/projects/alpha/"))))
+  "Resolve a project to its doc folder even when it records a repository."
+  (agent-project-test--with-registry file nil
+    (let* ((agent-project-registry-root "/tmp/projects/")
+           (alpha (car (agent-project--candidates-from-registry file))))
+      (should (equal (plist-get alpha :directory) "/tmp/projects/alpha/")))))
 
 (ert-deftest agent-project-test-registry-falls-back-to-the-repository ()
   "Resolve a project to its repository when it records no doc path."
-  (let* ((agent-project-registry-root "/tmp/projects/")
-         (beta (nth 1 (agent-project--candidates-from-registry
-                       (agent-project-test--registry-file)))))
-    (should (equal (plist-get beta :directory)
-                   (file-name-as-directory
-                    (expand-file-name "~/repos/epoch/beta"))))))
+  (agent-project-test--with-registry file nil
+    (let* ((agent-project-registry-root "/tmp/projects/")
+           (beta (nth 1 (agent-project--candidates-from-registry file))))
+      (should (equal (plist-get beta :directory)
+                     (file-name-as-directory
+                      (expand-file-name "~/repos/epoch/beta")))))))
 
 (ert-deftest agent-project-test-registry-labels-and-descriptions ()
   "Label a registry project by id and title, and describe it for ranking."
-  (let* ((agent-project-registry-root "/tmp/projects/")
-         (candidates (agent-project--candidates-from-registry
-                      (agent-project-test--registry-file))))
-    (should (equal (plist-get (car candidates) :label) "alpha - Alpha"))
-    (should (string-match-p "First project"
-                            (plist-get (car candidates) :description)))
-    (should (string-match-p "#alpha"
-                            (plist-get (car candidates) :description)))
-    (should (string-match-p "b" (plist-get (nth 1 candidates) :description)))))
+  (agent-project-test--with-registry file nil
+    (let* ((agent-project-registry-root "/tmp/projects/")
+           (candidates (agent-project--candidates-from-registry file)))
+      (should (equal (plist-get (car candidates) :label) "alpha - Alpha"))
+      (should (equal (plist-get (car candidates) :description)
+                     "First project; channels: #alpha"))
+      (should (equal (plist-get (nth 1 candidates) :description)
+                     "aliases: b")))))
 
 (ert-deftest agent-project-test-registry-tolerates-a-null-summary ()
   "Fall back to the aliases when an entry records an explicit null summary."
-  (let* ((agent-project-registry-root "/tmp/projects/")
-         (gamma (car (agent-project--candidates-from-registry
-                      (agent-project-test--registry-file
-                       agent-project-test--null-summary-json)))))
-    (should (equal (plist-get gamma :description) "aliases: g"))))
+  (agent-project-test--with-registry file agent-project-test--null-summary-json
+    (let* ((agent-project-registry-root "/tmp/projects/")
+           (gamma (car (agent-project--candidates-from-registry file))))
+      (should (equal (plist-get gamma :description) "aliases: g")))))
+
+(ert-deftest agent-project-test-registry-entry-without-paths-uses-the-root ()
+  "Resolve an entry recording no paths to the registry root itself.
+The root is normalized like every other candidate directory."
+  (agent-project-test--with-registry file agent-project-test--bare-entry-json
+    (let* ((agent-project-registry-root "~/projects")
+           (delta (car (agent-project--candidates-from-registry file))))
+      (should (equal (plist-get delta :directory)
+                     (file-name-as-directory (expand-file-name "~/projects")))))))
+
+(ert-deftest agent-project-test-registry-entry-without-a-title-drops-it ()
+  "Label an entry by its id alone when it records no title."
+  (agent-project-test--with-registry file agent-project-test--bare-entry-json
+    (let* ((agent-project-registry-root "~/projects")
+           (delta (car (agent-project--candidates-from-registry file))))
+      (should (equal (plist-get delta :label) "delta")))))
+
+(ert-deftest agent-project-test-registry-entry-without-text-has-no-description ()
+  "Describe an entry with nil, not an empty string, when it records no text."
+  (agent-project-test--with-registry file agent-project-test--bare-entry-json
+    (let* ((agent-project-registry-root "~/projects")
+           (delta (car (agent-project--candidates-from-registry file))))
+      (should-not (plist-get delta :description)))))
 
 (ert-deftest agent-project-test-json-source-is-read-as-a-registry ()
   "Route a source ending in .json through the registry reader."
-  (let* ((agent-project-registry-root "/tmp/projects/")
-         (agent-project-sources
-          (list (cons "" (list (agent-project-test--registry-file)))))
-         (candidates (agent-project-candidates nil)))
-    (should (= (length candidates) 2))
-    (should (plist-get (car candidates) :description))))
+  (agent-project-test--with-registry file nil
+    (let* ((agent-project-registry-root "/tmp/projects/")
+           (agent-project-sources (list (cons "" (list file))))
+           (candidates (agent-project-candidates nil)))
+      (should (= (length candidates) 2))
+      (should (equal (plist-get (car candidates) :description)
+                     "First project; channels: #alpha")))))
 
 (ert-deftest agent-project-test-missing-registry-signals ()
   "Signal a user error when a registry source does not exist."

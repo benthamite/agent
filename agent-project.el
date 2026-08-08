@@ -108,45 +108,63 @@ belongs falls back the same way an entry omitting the key does."
                    (alist-get 'project_doc_paths entry))))
         (repo (car (agent-project--string-list
                     (alist-get 'repo_paths entry)))))
-    (list :label (format "%s - %s"
-                         (alist-get 'id entry) (alist-get 'title entry))
+    (list :label (agent-project--registry-label entry)
           :directory (agent-project--registry-directory doc repo)
           :description (agent-project--registry-description entry))))
 
+(defun agent-project--registry-label (entry)
+  "Return the completion label for registry ENTRY.
+The title is dropped when ENTRY records none, so that a missing one
+never reaches completion as the string \"nil\"."
+  (if-let* ((title (alist-get 'title entry)))
+      (format "%s - %s" (alist-get 'id entry) title)
+    (format "%s" (alist-get 'id entry))))
+
 (defun agent-project--registry-directory (doc repo)
-  "Return the working directory for relative DOC and REPO paths.
+  "Return the working directory for DOC and REPO paths.
 The doc folder wins when an entry records both, because it holds the
-project's instruction files."
+project's instruction files.  An entry recording neither resolves to the
+registry root."
   (cond
    (doc (file-name-directory (agent-project--registry-path doc)))
-   (repo (file-name-as-directory
-          (directory-file-name (agent-project--registry-path repo))))
-   (t (or agent-project-registry-root
-          (user-error
-           "Set `agent-project-registry-root' to your projects directory")))))
+   (repo (file-name-as-directory (agent-project--registry-path repo)))
+   (t (file-name-as-directory
+       (expand-file-name (agent-project--registry-root))))))
 
 (defun agent-project--registry-path (path)
   "Return PATH expanded against `agent-project-registry-root'."
   (when path
-    (when (and (not (file-name-absolute-p path))
-               (null agent-project-registry-root))
+    (expand-file-name path (unless (file-name-absolute-p path)
+                             (agent-project--registry-root)))))
+
+(defun agent-project--registry-root ()
+  "Return `agent-project-registry-root', or signal when it is unset."
+  (or agent-project-registry-root
       (user-error
-       "Set `agent-project-registry-root' to your projects directory"))
-    (expand-file-name path agent-project-registry-root)))
+       "Set `agent-project-registry-root' to your projects directory")))
 
 (defun agent-project--registry-description (entry)
-  "Return the text ranking uses to judge registry ENTRY.
-Falls back to the entry's aliases when it records no summary."
-  (string-join
-   (delq nil
-         (list (or (alist-get 'summary entry)
-                   (when-let* ((aliases (agent-project--string-list
-                                         (alist-get 'aliases entry))))
-                     (concat "aliases: " (string-join aliases ", "))))
-               (when-let* ((channels (agent-project--string-list
-                                      (alist-get 'slack_channels entry))))
-                 (concat "channels: " (string-join channels ", ")))))
-   "; "))
+  "Return the text that ranking judges registry ENTRY by, or nil.
+Falls back to the entry's aliases when it records no summary, and to nil
+when it records nothing at all, so that an uninformative candidate is
+never offered for ranking."
+  (when-let* ((parts (delq nil
+                           (list (or (alist-get 'summary entry)
+                                     (agent-project--registry-aliases entry))
+                                 (agent-project--registry-channels entry)))))
+    (string-join parts "; ")))
+
+(defun agent-project--registry-aliases (entry)
+  "Return the aliases registry ENTRY records, as one string, or nil."
+  (when-let* ((aliases (agent-project--string-list
+                        (alist-get 'aliases entry))))
+    (concat "aliases: " (string-join aliases ", "))))
+
+(defun agent-project--registry-channels (entry)
+  "Return the Slack channels registry ENTRY records, as one string, or nil."
+  (when-let* ((channels (agent-project--string-list
+                         (alist-get 'slack_channels entry))))
+    (concat "channels: " (string-join channels ", "))))
 
 (defun agent-project--string-list (value)
   "Return VALUE as a list of strings, tolerating JSON nulls."
