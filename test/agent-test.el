@@ -2660,12 +2660,14 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
 (ert-deftest agent-test-menu-binds-the-unified-commands ()
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
-    (dolist (key '("R" "N" "B" "b" "t" "-c" "-w"))
+    (dolist (key '("R" "N" "B" "b" "t" "L" "-a" "-c" "-w"))
       (should (member key keys)))
-    (should-not (member "F" keys))
-    (should-not (member "u" keys))
-    (should-not (member "U" keys))
-    (should-not (member "-x" keys))))
+    (dolist (key '("F" "u" "U" "-x" "-A" "T" "K" "f" "S"))
+      (should-not (member key keys)))))
+
+(ert-deftest agent-test-menu-has-no-alert-toggle-command ()
+  "Toggle alerts through the option infix alone, not a command."
+  (should-not (fboundp 'agent-toggle-alert)))
 
 (ert-deftest agent-test-menu-slack-command-is-autoloaded ()
   "Source-loaded core menu references an available Slack command."

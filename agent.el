@@ -1510,14 +1510,6 @@ registered, falling back to `agent-notify'."
         (switch-to-buffer best-buf)
       (message "No sessions waiting for input"))))
 
-;;;###autoload
-(defun agent-toggle-alert ()
-  "Toggle OS notifications for AI sessions."
-  (interactive)
-  (setq agent-alert-on-ready (not agent-alert-on-ready))
-  (message "AI alert notifications %s"
-           (if agent-alert-on-ready "enabled" "disabled")))
-
 (defun agent-alert-indicator ()
   "Return a bell icon reflecting the current alert state."
   (if agent-alert-on-ready "🔔" "🔕"))
@@ -3368,11 +3360,7 @@ when it is not installed."
     ("x" "exit session" agent-exit)
     ("r" "restart" agent-restart)
     ("l" "history" agent-history)
-    ""
-    "Buffer"
-    ("K" "setup kill on exit" agent-setup-kill-on-exit)
-    ("f" "fix rendering" agent-fix-rendering)
-    ("S" "disable scrollback" agent-disable-scrollback-truncation)]
+    ("L" "login" agent-account-login)]
    ["Tools"
     ("s" "run skill" agent-run-skill)
     ("n" "new CR task" agent-trajectory-new-task)
@@ -3380,20 +3368,14 @@ when it is not installed."
     ("a" "audit project" agent-audit-project)
     ("d" "debug backtrace" agent-debug-backtrace)
     ("m" "act on Slack message" agent-act-on-slack-message)
-    ("g" "act on Forge notification" agent-act-on-forge-notification)
-    ""
-    "Accounts"
-    ("L" "login" agent-account-login)
-    ""
-    "Alerts"
-    ("T" "toggle alert" agent-toggle-alert)]
+    ("g" "act on Forge notification" agent-act-on-forge-notification)]
    ["Prompts"
     ("p" "capture prompt" agent-capture-prompt)
     ("i" "insert prompt" agent-insert-captured-prompt)
     ("b" "batch todos" agent-batch-todos)
     ("t" "send todo at point" agent-send-todo-at-point)]
    ["Options"
-    ("-A" agent--infix-alert-on-ready)
+    ("-a" agent--infix-alert-on-ready)
     ("-p" agent--infix-protect-buffers)
     ("-t" agent--infix-sync-theme)
     ("-c" agent--infix-account)
