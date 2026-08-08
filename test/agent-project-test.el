@@ -105,5 +105,65 @@ whether that directory is a git repository."
         (should-not (member "notes" labels))
         (should (= (length labels) 2))))))
 
+(defconst agent-project-test--registry-json
+  "{\"projects\": [
+     {\"id\": \"alpha\", \"title\": \"Alpha\", \"summary\": \"First project\",
+      \"project_doc_paths\": [\"alpha/alpha.org\"], \"repo_paths\": [],
+      \"slack_channels\": [\"#alpha\"], \"aliases\": []},
+     {\"id\": \"beta\", \"title\": \"Beta\", \"project_doc_paths\": [],
+      \"repo_paths\": [\"~/repos/epoch/beta\"], \"slack_channels\": [],
+      \"aliases\": [\"b\"]}]}"
+  "Registry JSON exercising both directory sources and both summaries.")
+
+(defun agent-project-test--registry-file ()
+  "Return a temporary registry file holding the test JSON."
+  (let ((file (make-temp-file "agent-project-registry" nil ".json")))
+    (with-temp-file file
+      (insert agent-project-test--registry-json))
+    file))
+
+(ert-deftest agent-project-test-registry-prefers-the-doc-directory ()
+  "Resolve a project to its doc folder when it records one."
+  (let* ((agent-project-registry-root "/tmp/projects/")
+         (candidates (agent-project--candidates-from-registry
+                      (agent-project-test--registry-file)))
+         (alpha (car candidates)))
+    (should (equal (plist-get alpha :directory) "/tmp/projects/alpha/"))))
+
+(ert-deftest agent-project-test-registry-falls-back-to-the-repository ()
+  "Resolve a project to its repository when it records no doc path."
+  (let* ((agent-project-registry-root "/tmp/projects/")
+         (beta (nth 1 (agent-project--candidates-from-registry
+                       (agent-project-test--registry-file)))))
+    (should (equal (plist-get beta :directory)
+                   (file-name-as-directory
+                    (expand-file-name "~/repos/epoch/beta"))))))
+
+(ert-deftest agent-project-test-registry-labels-and-descriptions ()
+  "Label a registry project by id and title, and describe it for ranking."
+  (let* ((agent-project-registry-root "/tmp/projects/")
+         (candidates (agent-project--candidates-from-registry
+                      (agent-project-test--registry-file))))
+    (should (equal (plist-get (car candidates) :label) "alpha - Alpha"))
+    (should (string-match-p "First project"
+                            (plist-get (car candidates) :description)))
+    (should (string-match-p "#alpha"
+                            (plist-get (car candidates) :description)))
+    (should (string-match-p "b" (plist-get (nth 1 candidates) :description)))))
+
+(ert-deftest agent-project-test-json-source-is-read-as-a-registry ()
+  "Route a source ending in .json through the registry reader."
+  (let* ((agent-project-registry-root "/tmp/projects/")
+         (agent-project-sources
+          (list (cons "" (list (agent-project-test--registry-file)))))
+         (candidates (agent-project-candidates nil)))
+    (should (= (length candidates) 2))
+    (should (plist-get (car candidates) :description))))
+
+(ert-deftest agent-project-test-missing-registry-signals ()
+  "Signal a user error when a registry source does not exist."
+  (let ((agent-project-sources '(("" . ("/nonexistent/registry.json")))))
+    (should-error (agent-project-candidates nil) :type 'user-error)))
+
 (provide 'agent-project-test)
 ;;; agent-project-test.el ends here

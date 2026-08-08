@@ -31,6 +31,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'json)
 (require 'seq)
 (require 'subr-x)
 
@@ -50,6 +51,13 @@ directory and \"*/*\" its grandchildren, keeping only git repositories
 and worktrees.  A pattern without a wildcard names exactly one
 directory and is kept whether or not it is a repository."
   :type '(alist :key-type regexp :value-type (repeat string))
+  :group 'agent)
+
+(defcustom agent-project-registry-root nil
+  "Directory that relative registry paths are expanded against.
+Registry entries record project paths relative to the directory holding
+the projects; set this to that directory."
+  :type '(choice (const :tag "Unconfigured" nil) directory)
   :group 'agent)
 
 ;;;; Candidates
@@ -73,8 +81,73 @@ ACCOUNT may be nil, which matches a catch-all entry."
                  agent-project-sources)))
 
 (defun agent-project--candidates-from-source (source)
-  "Return the candidates contributed by SOURCE."
-  (agent-project--candidates-from-pattern source))
+  "Return the candidates contributed by SOURCE.
+A SOURCE naming a JSON file is a registry; anything else is a path
+pattern."
+  (if (string-suffix-p ".json" source)
+      (agent-project--candidates-from-registry (expand-file-name source))
+    (agent-project--candidates-from-pattern source)))
+
+(defun agent-project--candidates-from-registry (file)
+  "Return the candidates recorded in registry FILE."
+  (unless (file-exists-p file)
+    (user-error "Project registry not found: %s" file))
+  (with-temp-buffer
+    (insert-file-contents file)
+    (mapcar #'agent-project--candidate-from-registry-entry
+            (alist-get 'projects (json-parse-string (buffer-string)
+                                                    :object-type 'alist
+                                                    :array-type 'list)))))
+
+(defun agent-project--candidate-from-registry-entry (entry)
+  "Return a candidate plist for registry ENTRY."
+  (let ((doc (car (agent-project--string-list
+                   (alist-get 'project_doc_paths entry))))
+        (repo (car (agent-project--string-list
+                    (alist-get 'repo_paths entry)))))
+    (list :label (format "%s - %s"
+                         (alist-get 'id entry) (alist-get 'title entry))
+          :directory (agent-project--registry-directory doc repo)
+          :description (agent-project--registry-description entry))))
+
+(defun agent-project--registry-directory (doc repo)
+  "Return the working directory for relative DOC and REPO paths.
+The doc folder wins when an entry records both, because it holds the
+project's instruction files."
+  (cond
+   (doc (file-name-directory (agent-project--registry-path doc)))
+   (repo (file-name-as-directory
+          (directory-file-name (agent-project--registry-path repo))))
+   (t (or agent-project-registry-root
+          (user-error
+           "Set `agent-project-registry-root' to your projects directory")))))
+
+(defun agent-project--registry-path (path)
+  "Return PATH expanded against `agent-project-registry-root'."
+  (when path
+    (when (and (not (file-name-absolute-p path))
+               (null agent-project-registry-root))
+      (user-error
+       "Set `agent-project-registry-root' to your projects directory"))
+    (expand-file-name path agent-project-registry-root)))
+
+(defun agent-project--registry-description (entry)
+  "Return the text ranking uses to judge registry ENTRY.
+Falls back to the entry's aliases when it records no summary."
+  (string-join
+   (delq nil
+         (list (or (alist-get 'summary entry)
+                   (when-let* ((aliases (agent-project--string-list
+                                         (alist-get 'aliases entry))))
+                     (concat "aliases: " (string-join aliases ", "))))
+               (when-let* ((channels (agent-project--string-list
+                                      (alist-get 'slack_channels entry))))
+                 (concat "channels: " (string-join channels ", ")))))
+   "; "))
+
+(defun agent-project--string-list (value)
+  "Return VALUE as a list of strings, tolerating JSON nulls."
+  (seq-filter #'stringp (if (listp value) value (list value))))
 
 (defun agent-project--candidates-from-pattern (pattern)
   "Return the candidates matching path PATTERN.
