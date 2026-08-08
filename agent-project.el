@@ -104,6 +104,20 @@ directory and is kept whether or not it is a repository."
   :type '(alist :key-type regexp :value-type (repeat string))
   :group 'agent)
 
+(defun agent-project--warn-retired-registry-file ()
+  "Warn when `agent-epoch-project-registry-file' holds a value.
+Nothing reads that option any more, and marking it obsolete warns only
+code that mentions the symbol, which a configuration merely setting it
+never does.  Without this warning such a configuration would lose its
+registry from routing with no message anywhere."
+  (when (bound-and-true-p agent-epoch-project-registry-file)
+    (display-warning
+     'agent
+     (concat "`agent-epoch-project-registry-file' is obsolete and ignored; "
+             "name the registry file in `agent-project-sources' instead"))))
+
+(agent-project--warn-retired-registry-file)
+
 (defcustom agent-project-registry-root nil
   "Directory that relative registry paths are expanded against.
 Registry entries record project paths relative to the directory holding

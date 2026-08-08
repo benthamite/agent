@@ -408,5 +408,40 @@ them, `defvaralias' would find the new name bound and drop the value."
     (should (equal (read (buffer-string))
                    '("/set/before/load/" chained "Themed")))))
 
+(defun agent-project-test--load-warnings (form)
+  "Return what a child Emacs warns about while evaluating FORM.
+The child loads the sources under test with nothing else in its
+configuration, so the only warnings it can report are this package's."
+  (let ((stderr (make-temp-file "agent-project-test-warnings")))
+    (unwind-protect
+        (progn
+          (should (zerop (call-process
+                          (expand-file-name invocation-name invocation-directory)
+                          nil (list nil stderr) nil "--batch" "-Q"
+                          "-L" agent-project-test--source-directory
+                          "--eval" (format "%S" form))))
+          (with-temp-buffer
+            (insert-file-contents stderr)
+            (buffer-string)))
+      (delete-file stderr))))
+
+(ert-deftest agent-project-test-a-set-registry-file-warns-when-loading ()
+  "Warn on load when the retired registry option still holds a value.
+Nothing reads the option, and its obsolescence marker warns only code
+that mentions it, so a configuration merely setting it would otherwise
+lose its registry from routing without a message."
+  (should (string-match-p
+           "is obsolete and ignored"
+           (agent-project-test--load-warnings
+            '(progn
+               (setq agent-epoch-project-registry-file "/registry.json")
+               (require 'agent-project))))))
+
+(ert-deftest agent-project-test-an-unset-registry-file-warns-about-nothing ()
+  "Say nothing on load when the retired registry option is unset."
+  (should-not (string-match-p
+               "is obsolete and ignored"
+               (agent-project-test--load-warnings '(require 'agent-project)))))
+
 (provide 'agent-project-test)
 ;;; agent-project-test.el ends here
