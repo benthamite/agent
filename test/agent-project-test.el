@@ -111,13 +111,15 @@ whether that directory is a git repository."
      {\"id\": \"alpha\", \"title\": \"Alpha\", \"summary\": \"First project\",
       \"project_doc_paths\": [\"alpha/alpha.org\"],
       \"repo_paths\": [\"~/repos/epoch/alpha\"],
+      \"browser_keywords\": [\"alpha.example\"],
       \"slack_channels\": [\"#alpha\"], \"aliases\": []},
      {\"id\": \"beta\", \"title\": \"Beta\", \"project_doc_paths\": [],
       \"repo_paths\": [\"~/repos/epoch/beta\"], \"slack_channels\": [],
-      \"aliases\": [\"b\"]}]}"
+      \"browser_keywords\": [\"epoch-research/beta\"], \"aliases\": [\"b\"]}]}"
   "Registry JSON exercising both directory sources and both summaries.
 Alpha records a doc path and a repository, so it also exercises which of
-the two wins.")
+the two wins.  Beta records keywords and no summary, which is the shape
+the live registry takes.")
 
 (defconst agent-project-test--null-summary-json
   "{\"projects\": [
@@ -173,15 +175,18 @@ JSON defaults to `agent-project-test--registry-json'."
                       (expand-file-name "~/repos/epoch/beta")))))))
 
 (ert-deftest agent-project-test-registry-labels-and-descriptions ()
-  "Label a registry project by id and title, and describe it for ranking."
+  "Label a registry project by id and title, and describe it for ranking.
+The description carries the entry's keywords as well as its summary or
+aliases, since the keywords are where a registry records the repository
+slugs and domain names a routed message tends to name."
   (agent-project-test--with-registry file nil
     (let* ((agent-project-registry-root "/tmp/projects/")
            (candidates (agent-project--candidates-from-registry file)))
       (should (equal (plist-get (car candidates) :label) "alpha - Alpha"))
       (should (equal (plist-get (car candidates) :description)
-                     "First project; channels: #alpha"))
+                     "First project; keywords: alpha.example; channels: #alpha"))
       (should (equal (plist-get (nth 1 candidates) :description)
-                     "aliases: b")))))
+                     "aliases: b; keywords: epoch-research/beta")))))
 
 (ert-deftest agent-project-test-registry-tolerates-a-null-summary ()
   "Fall back to the aliases when an entry records an explicit null summary."
@@ -221,7 +226,7 @@ The root is normalized like every other candidate directory."
            (candidates (agent-project-candidates nil)))
       (should (= (length candidates) 2))
       (should (equal (plist-get (car candidates) :description)
-                     "First project; channels: #alpha")))))
+                     "First project; keywords: alpha.example; channels: #alpha")))))
 
 (ert-deftest agent-project-test-missing-registry-signals ()
   "Signal a user error when a registry source does not exist."

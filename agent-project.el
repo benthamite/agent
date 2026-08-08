@@ -226,6 +226,7 @@ never offered for ranking."
   (when-let* ((parts (delq nil
                            (list (or (alist-get 'summary entry)
                                      (agent-project--registry-aliases entry))
+                                 (agent-project--registry-keywords entry)
                                  (agent-project--registry-channels entry)))))
     (string-join parts "; ")))
 
@@ -234,6 +235,15 @@ never offered for ranking."
   (when-let* ((aliases (agent-project--string-list
                         (alist-get 'aliases entry))))
     (concat "aliases: " (string-join aliases ", "))))
+
+(defun agent-project--registry-keywords (entry)
+  "Return the keywords registry ENTRY records, as one string, or nil.
+These are the terms the project is recognized by elsewhere, repository
+slugs and domain names among them, which is the kind of token the text
+being routed is likely to carry."
+  (when-let* ((keywords (agent-project--string-list
+                         (alist-get 'browser_keywords entry))))
+    (concat "keywords: " (string-join keywords ", "))))
 
 (defun agent-project--registry-channels (entry)
   "Return the Slack channels registry ENTRY records, as one string, or nil."
