@@ -115,11 +115,19 @@ whether that directory is a git repository."
       \"aliases\": [\"b\"]}]}"
   "Registry JSON exercising both directory sources and both summaries.")
 
-(defun agent-project-test--registry-file ()
-  "Return a temporary registry file holding the test JSON."
+(defconst agent-project-test--null-summary-json
+  "{\"projects\": [
+     {\"id\": \"gamma\", \"title\": \"Gamma\", \"summary\": null,
+      \"project_doc_paths\": [\"gamma/gamma.org\"], \"repo_paths\": null,
+      \"slack_channels\": null, \"aliases\": [\"g\"]}]}"
+  "Registry JSON whose only entry records an explicit null summary.")
+
+(defun agent-project-test--registry-file (&optional json)
+  "Return a temporary registry file holding JSON.
+JSON defaults to `agent-project-test--registry-json'."
   (let ((file (make-temp-file "agent-project-registry" nil ".json")))
     (with-temp-file file
-      (insert agent-project-test--registry-json))
+      (insert (or json agent-project-test--registry-json)))
     file))
 
 (ert-deftest agent-project-test-registry-prefers-the-doc-directory ()
@@ -150,6 +158,14 @@ whether that directory is a git repository."
     (should (string-match-p "#alpha"
                             (plist-get (car candidates) :description)))
     (should (string-match-p "b" (plist-get (nth 1 candidates) :description)))))
+
+(ert-deftest agent-project-test-registry-tolerates-a-null-summary ()
+  "Fall back to the aliases when an entry records an explicit null summary."
+  (let* ((agent-project-registry-root "/tmp/projects/")
+         (gamma (car (agent-project--candidates-from-registry
+                      (agent-project-test--registry-file
+                       agent-project-test--null-summary-json)))))
+    (should (equal (plist-get gamma :description) "aliases: g"))))
 
 (ert-deftest agent-project-test-json-source-is-read-as-a-registry ()
   "Route a source ending in .json through the registry reader."

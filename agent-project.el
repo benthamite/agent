@@ -89,7 +89,9 @@ pattern."
     (agent-project--candidates-from-pattern source)))
 
 (defun agent-project--candidates-from-registry (file)
-  "Return the candidates recorded in registry FILE."
+  "Return the candidates recorded in registry FILE.
+A JSON null is read as nil, so an entry that records one where a string
+belongs falls back the same way an entry omitting the key does."
   (unless (file-exists-p file)
     (user-error "Project registry not found: %s" file))
   (with-temp-buffer
@@ -97,7 +99,8 @@ pattern."
     (mapcar #'agent-project--candidate-from-registry-entry
             (alist-get 'projects (json-parse-string (buffer-string)
                                                     :object-type 'alist
-                                                    :array-type 'list)))))
+                                                    :array-type 'list
+                                                    :null-object nil)))))
 
 (defun agent-project--candidate-from-registry-entry (entry)
   "Return a candidate plist for registry ENTRY."
@@ -199,7 +202,9 @@ directory, so both are accepted."
           (push candidate result))))))
 
 (defun agent-project--disambiguate (candidates)
-  "Return CANDIDATES with repeated labels replaced by directories."
+  "Return CANDIDATES with repeated labels disambiguated.
+A label shared by two candidates is replaced with the abbreviated
+directory."
   (let ((counts (make-hash-table :test #'equal)))
     (dolist (candidate candidates)
       (cl-incf (gethash (plist-get candidate :label) counts 0)))
