@@ -890,7 +890,7 @@ project read from the account's sources, ranked by its text."
 - [ ] **Step 5: Run the test to verify it passes**
 
 Run: `~/My\ Drive/dotfiles/claude/bin/elisp-ert agent test/agent-test.el`
-Expected: FAIL for the four extractors, which do not exist yet — the tests added in this task pass, and `agent-test-menu-binds-the-unified-commands` still passes. Confirm the only failures name `agent-slack-context`, `agent-forge-context`, `agent-todo-context`, or `agent--backtrace-context`.
+Expected: PASS. The extractors do not exist yet, but nothing calls them: the predicate tests compare symbols and the delivery tests supply their own extractor, so the suite is green at the end of this task.
 
 - [ ] **Step 6: Commit**
 
@@ -1011,8 +1011,8 @@ session belongs, so no project has to be chosen."
 
 - [ ] **Step 5: Run the tests**
 
-Run: `~/My\ Drive/dotfiles/claude/bin/elisp-ert agent test/agent-test.el`
-Expected: the backtrace test passes; remaining failures name only `agent-slack-context` or `agent-todo-context`.
+Run: `make compile && make test`
+Expected: PASS, including the new backtrace-context test.
 
 - [ ] **Step 6: Commit**
 
