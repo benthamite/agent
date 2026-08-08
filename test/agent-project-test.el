@@ -181,10 +181,10 @@ aliases, since the keywords are where a registry records the repository
 slugs and domain names a routed message tends to name."
   (agent-project-test--with-registry file nil
     (let* ((agent-project-registry-root "/tmp/projects/")
+           (alpha "First project; keywords: alpha.example; channels: #alpha")
            (candidates (agent-project--candidates-from-registry file)))
       (should (equal (plist-get (car candidates) :label) "alpha - Alpha"))
-      (should (equal (plist-get (car candidates) :description)
-                     "First project; keywords: alpha.example; channels: #alpha"))
+      (should (equal (plist-get (car candidates) :description) alpha))
       (should (equal (plist-get (nth 1 candidates) :description)
                      "aliases: b; keywords: epoch-research/beta")))))
 
@@ -223,10 +223,10 @@ The root is normalized like every other candidate directory."
   (agent-project-test--with-registry file nil
     (let* ((agent-project-registry-root "/tmp/projects/")
            (agent-project-sources (list (cons "" (list file))))
+           (alpha "First project; keywords: alpha.example; channels: #alpha")
            (candidates (agent-project-candidates nil)))
       (should (= (length candidates) 2))
-      (should (equal (plist-get (car candidates) :description)
-                     "First project; keywords: alpha.example; channels: #alpha")))))
+      (should (equal (plist-get (car candidates) :description) alpha)))))
 
 (ert-deftest agent-project-test-missing-registry-signals ()
   "Signal a user error when a registry source does not exist."
@@ -417,14 +417,14 @@ them, `defvaralias' would find the new name bound and drop the value."
   "Return what a child Emacs warns about while evaluating FORM.
 The child loads the sources under test with nothing else in its
 configuration, so the only warnings it can report are this package's."
-  (let ((stderr (make-temp-file "agent-project-test-warnings")))
+  (let ((stderr (make-temp-file "agent-project-test-warnings"))
+        (emacs (expand-file-name invocation-name invocation-directory))
+        (source agent-project-test--source-directory))
     (unwind-protect
         (progn
-          (should (zerop (call-process
-                          (expand-file-name invocation-name invocation-directory)
-                          nil (list nil stderr) nil "--batch" "-Q"
-                          "-L" agent-project-test--source-directory
-                          "--eval" (format "%S" form))))
+          (should (zerop (call-process emacs nil (list nil stderr) nil
+                                       "--batch" "-Q" "-L" source
+                                       "--eval" (format "%S" form))))
           (with-temp-buffer
             (insert-file-contents stderr)
             (buffer-string)))
