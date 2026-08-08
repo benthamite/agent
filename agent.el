@@ -46,9 +46,11 @@
 (autoload 'agent-insert-captured-prompt "agent-capture" nil t)
 (autoload 'agent-act-on-slack-message "agent-slack" nil t)
 (autoload 'agent-act-on-forge-notification "agent-forge" nil t)
+(autoload 'agent-act-on-email "agent-mu4e" nil t)
 (autoload 'agent-setup-snippet-keys "agent-snippet" nil t)
 (autoload 'agent-slack-context "agent-slack")
 (autoload 'agent-forge-context "agent-forge")
+(autoload 'agent-mu4e-context "agent-mu4e")
 (autoload 'agent-todo-context "agent-todo")
 
 ;;;; Custom group
@@ -788,6 +790,7 @@ Only `agent-session-event' may set this variable.")
 (declare-function org-get-todo-state "org" ())
 (declare-function forge-notification-at-point "forge-notify" (&optional demand))
 (declare-function forge-topic-at-point "forge-topic" (&optional demand))
+(declare-function mu4e-message-at-point "mu4e-message" (&optional noerror))
 (declare-function agent-log-menu "agent-log" ())
 (declare-function agent-batch-todos "agent-todo" ())
 (declare-function agent-send-todo-at-point "agent-todo"
@@ -2816,17 +2819,19 @@ capped at `agent--debug-backtrace-size-limit'."
 Start a new session for it, or with prefix argument EXISTING send it to
 a running session chosen by completion.  The thing is the first entry
 in `agent-at-point-things' whose predicate matches: a backtrace, a
-Slack message, a Forge notification or topic, or an org TODO."
+Slack message, a Forge notification or topic, an email, or an org
+TODO."
   (interactive "P")
   (agent--act-on-context
    (or (agent--extractor-at-point)
-       (user-error "Nothing to act on at point; expected a Slack message, a Forge notification or topic, a backtrace, or an org TODO"))
+       (user-error "Nothing to act on at point; expected a Slack message, an email, a Forge notification or topic, a backtrace, or an org TODO"))
    existing))
 
 (defvar agent-at-point-things
   '((agent--backtrace-at-point-p . agent--backtrace-context)
     (agent--slack-message-at-point-p . agent-slack-context)
     (agent--forge-topic-at-point-p . agent-forge-context)
+    (agent--mu4e-message-at-point-p . agent-mu4e-context)
     (agent--org-todo-at-point-p . agent-todo-context))
   "Things `agent-act-on-thing-at-point' recognizes, in order.
 Each entry is a cons of a predicate called with no arguments in the
@@ -2950,6 +2955,13 @@ Checks the major mode first, so a buffer that cannot hold a topic never
 calls into `forge'."
   (and (derived-mode-p '(forge-notifications-mode forge-topic-mode magit-mode))
        (or (forge-notification-at-point) (forge-topic-at-point))))
+
+(defun agent--mu4e-message-at-point-p ()
+  "Return non-nil when a mu4e message is at point.
+Checks the major mode first, so a buffer that cannot hold a message
+never calls into `mu4e'."
+  (and (derived-mode-p '(mu4e-headers-mode mu4e-view-mode))
+       (mu4e-message-at-point t)))
 
 (defun agent--org-todo-at-point-p ()
   "Return non-nil when point is on an org TODO heading."

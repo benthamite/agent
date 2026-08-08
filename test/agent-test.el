@@ -2708,6 +2708,27 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
                (lambda (&optional _) (error "Consulted forge"))))
       (should-not (agent--extractor-at-point)))))
 
+(ert-deftest agent-test-extractor-at-point-finds-an-email ()
+  "Route a mu4e buffer holding a message to the email extractor."
+  (with-temp-buffer
+    (setq major-mode 'mu4e-view-mode)
+    (cl-letf (((symbol-function 'mu4e-message-at-point) (lambda (&optional _) 'msg)))
+      (should (eq (agent--extractor-at-point) 'agent-mu4e-context)))))
+
+(ert-deftest agent-test-extractor-at-point-ignores-a-mu4e-buffer-without-a-message ()
+  "Fall through when a mu4e buffer holds no message at point."
+  (with-temp-buffer
+    (setq major-mode 'mu4e-headers-mode)
+    (cl-letf (((symbol-function 'mu4e-message-at-point) (lambda (&optional _) nil)))
+      (should-not (agent--extractor-at-point)))))
+
+(ert-deftest agent-test-extractor-at-point-never-consults-mu4e-elsewhere ()
+  "Leave mu4e alone in buffers that cannot hold a message."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'mu4e-message-at-point)
+               (lambda (&optional _) (error "Consulted mu4e"))))
+      (should-not (agent--extractor-at-point)))))
+
 (ert-deftest agent-test-extractor-at-point-finds-an-org-todo ()
   "Route an org TODO heading to the TODO sender."
   (with-temp-buffer

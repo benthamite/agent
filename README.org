@@ -28,6 +28,7 @@ The package is split into a small backend-agnostic core and focused modules:
 | =agent-capture.el=   | Persisted Org prompt capture, keyed to the session it targets                                                                                                                                                               |
 | =agent-slack.el=     | Slack-message-to-project routing: reads the message at point as text with no directory of its own, leaving the project to the shared project reader                                                                          |
 | =agent-forge.el=     | Forge-notification-to-project routing: starts a session in the working tree of the repository the notification belongs to                                                                                                   |
+| =agent-mu4e.el=      | Email-to-project routing: reads the mu4e message at point as a maildir path, leaving the project to the shared project reader                                                                                                |
 | =agent-snippet.el=   | Yasnippet TAB expansion and snippet insertion in eat-based session buffers                                                                                                                                                  |
 | =agent-todo.el=      | Org TODO workflows that work with any backend: batch processing of a list of entries and routing the entry at point to a session                                                                                             |
 | =agent-claude.el=    | Claude Code backend: integrates =claude-code.el= with status and usage polling, hook setup, and ~agent-claude-mode~                                                                                                          |
@@ -293,6 +294,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 #+findex: agent-debug-backtrace
 #+findex: agent-act-on-slack-message
 #+findex: agent-act-on-forge-notification
+#+findex: agent-act-on-email
 #+findex: agent-exit
 #+findex: agent-restart
 #+findex: agent-history
@@ -367,9 +369,27 @@ clone, or when the recorded path no longer exists: Forge does not update that
 path when a repository is renamed or moved, so a stale entry is an ordinary
 failure rather than an exceptional one.
 
+The command ~agent-act-on-email~, called on a message in a mu4e headers or
+view buffer, starts a session in the project that message is about and inserts
+the message's maildir path into the prompt without submitting it. With a
+prefix argument it sends the path to a running session instead. The payload is
+the path rather than the text of the mail because an agent can open that file
+itself and read the headers, the body and any attachments from it, which no
+excerpt pasted into a prompt would carry. Like Slack routing and unlike Forge
+routing, the context names no directory: a message belongs to no project of its
+own, so its extractor, ~agent-mu4e-context~, answers with the subject and the
+sender as the text the project is ranked against ([[#h:project-options][Project sources]]).
+
+The sender comes from the message's =:from= field, which =mu= returns as a
+list of =(:email EMAIL :name NAME)= plists — one per sender, with the name
+absent when the sender gave none — and reads as =Name <address>=, or as the
+bare address when there is no name. The command signals an error when the
+message records no path. mu4e reports a missing string field as the empty
+string rather than as nil, so an empty path counts as no path.
+
 #+findex: agent-act-on-thing-at-point
 #+vindex: agent-at-point-things
-The menu binds no routing command directly. ~agent-act-on-thing-at-point~, bound to =.= in the Tools column, walks ~agent-at-point-things~ and runs the extractor of the first entry whose predicate matches the current buffer: a backtrace in a =*Backtrace*= buffer, a Slack message in a Slack room buffer, a Forge notification or topic, or an org TODO heading. Every predicate answers from the buffer alone — the buffer name, the buffer-local variable =slack= sets on room buffers, the major mode, the org TODO state — so dispatch never loads a module to ask whether it applies, and the Forge lookup runs only in a Magit-derived buffer. When nothing matches, the command signals an error naming the four kinds it recognizes.
+The menu binds no routing command directly. ~agent-act-on-thing-at-point~, bound to =.= in the Tools column, walks ~agent-at-point-things~ and runs the extractor of the first entry whose predicate matches the current buffer: a backtrace in a =*Backtrace*= buffer, a Slack message in a Slack room buffer, a Forge notification or topic, an email in a mu4e headers or view buffer, or an org TODO heading. Every predicate answers from the buffer alone — the buffer name, the buffer-local variable =slack= sets on room buffers, the major mode, the org TODO state — so dispatch never loads a module to ask whether it applies, and the Forge and mu4e lookups run only in a buffer whose major mode can hold what they look for. When nothing matches, the command signals an error naming the five kinds it recognizes.
 
 Recognizing the thing, choosing the session, and delivering the payload are three separate layers. An extractor takes a continuation rather than returning a value, because extraction can require a network round-trip, and calls it with a context plist: =:directory= when the thing carries a working directory, as an absolute path, =:text= when it carries only text to choose a project from, =:payload= for what to send, =:submit= for whether to submit it, and an optional =:after= thunk run once the payload is delivered. A context that names a directory starts its session there; one that does not has its project read from the account's sources with ~agent-project-read~, ranked by its text. With a prefix argument the payload goes to a running session chosen by completion instead of a new one, so the same key routes a thing either way.
 
