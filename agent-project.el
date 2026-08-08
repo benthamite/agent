@@ -84,6 +84,10 @@
                         "0.3")
 (define-obsolete-variable-alias 'agent-epoch-projects-root
   'agent-project-registry-root "0.3")
+;; The function this last marker names no longer exists, so it redirects
+;; nothing: a caller still using the old name gets `void-function'.  It
+;; is kept because it is what tells that caller, at byte-compile time,
+;; which name replaced it.
 (make-obsolete 'agent-epoch-project-candidates 'agent-project-candidates "0.3")
 
 ;;;; Customization
