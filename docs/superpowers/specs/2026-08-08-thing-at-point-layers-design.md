@@ -126,8 +126,10 @@ immediately.
 - `agent.el`: `agent-act-on-thing-at-point` gains the prefix argument and
   layers 2 and 3.  New `agent-project-sources`, candidate enumeration, and
   ranking.  The table maps predicates to extractors instead of commands.
-- `agent-slack.el`: keeps the permalink fetch and the registry parser, loses
-  session starting and project selection to the core.
+- `agent-slack.el`: keeps the permalink fetch, loses session starting and
+  project selection.  The registry parser goes with them: a registry is now
+  one kind of project source, and core enumeration cannot reach into a
+  module it is forbidden to require.
 - `agent-forge.el`, `agent-todo.el`: shrink to extractors.
 - `agent-mu4e.el`: new, small — a predicate and an extractor.
 - The four commands remain interactive wrappers that call the dispatcher with
