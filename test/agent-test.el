@@ -2809,6 +2809,22 @@ not autoloaded, so the predicate must answer nil rather than raise."
     (should (equal asked '("epoch" "hello")))
     (should (equal started "/tmp/chosen/"))))
 
+(ert-deftest agent-test-unanchored-context-keeps-the-resolved-account ()
+  "Keep the backend account resolved before asynchronous extraction."
+  (let ((account "epoch")
+        asked)
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+              ((symbol-function 'agent-account-current) (lambda (_) account))
+              ((symbol-function 'agent-project-read)
+               (lambda (selected _text _prompt _callback)
+                 (setq asked selected))))
+      (agent--act-on-context
+       (lambda (callback)
+         (setq account "personal")
+         (funcall callback '(:text "hello" :payload "url")))
+       nil))
+    (should (equal asked "epoch"))))
+
 (ert-deftest agent-test-prefix-argument-targets-a-running-session ()
   "Send to a chosen running session instead of starting one."
   (with-temp-buffer
@@ -3511,6 +3527,24 @@ is itself a kind of `error' and nothing here should special-case it."
                      "alpha: work  zeta: default"))
       (should-not (string-match-p "\"" rendered))
       (should (eq (get-text-property 0 'face rendered) 'transient-value)))))
+
+(ert-deftest agent-test-account-infix-reads-the-backend-explicitly ()
+  "Prompt for the backend instead of inferring it from the current buffer."
+  (let ((obj (agent--account-variable))
+        selected)
+    (cl-letf (((symbol-function 'agent--resolve-backend)
+               (lambda () (error "Inferred a backend from the buffer")))
+              ((symbol-function 'agent-account--read-backend)
+               (lambda (&optional _) 'claude-code))
+              ((symbol-function 'agent-account--prompt) (lambda (_) "epoch"))
+              ((symbol-function 'agent-account-set)
+               (lambda (backend account)
+                 (setq selected (cons backend account))))
+              ((symbol-function 'agent-account-sync) #'ignore)
+              ((symbol-function 'agent--account-summary) (lambda () "summary"))
+              ((symbol-function 'transient--show) #'ignore))
+      (transient-infix-set obj (transient-infix-read obj)))
+    (should (equal selected '(claude-code . "epoch")))))
 
 (provide 'agent-test)
 ;;; agent-test.el ends here

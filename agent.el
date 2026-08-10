@@ -2883,38 +2883,47 @@ directory would be discarded.")
 With EXISTING non-nil the context goes to a running session chosen by
 completion; otherwise a new session is started for it.  Extraction can
 be asynchronous, so the buffer the command was invoked from and the
-backend resolved there are captured now and threaded through delivery:
-by the time the continuation runs, the user may have moved.  A running
-session brings its own directory, so extraction is told not to resolve
-one; see `agent--context-wants-directory'."
+backend and account resolved there are captured now and threaded through
+delivery: by the time the continuation runs, the user may have moved or
+selected another account.  A running session brings its own directory, so
+extraction is told not to resolve one; see
+`agent--context-wants-directory'."
   (let ((origin (current-buffer))
-        (backend (unless existing (agent--resolve-backend)))
+        (target (unless existing (agent--resolve-backend-account)))
         (agent--context-wants-directory (not existing)))
     (funcall extractor
              (lambda (context)
-               (agent--deliver-context context existing origin backend)))))
+               (agent--deliver-context context existing origin target)))))
 
-(defun agent--deliver-context (context existing origin backend)
+(defun agent--resolve-backend-account ()
+  "Return the current context's backend and its selected account."
+  (let ((backend (agent--resolve-backend)))
+    (cons backend (agent-account-current backend))))
+
+(defun agent--deliver-context (context existing origin target)
   "Deliver CONTEXT to a session, choosing a running one when EXISTING.
-ORIGIN is the buffer the command was invoked from and BACKEND the
-backend resolved there."
+ORIGIN is the buffer the command was invoked from.  TARGET is the cons
+of backend and account resolved there."
   (if existing
       (agent--deliver-to context (agent--read-session-buffer) origin)
-    (agent--deliver-to-new-session context origin backend)))
+    (agent--deliver-to-new-session context origin target)))
 
-(defun agent--deliver-to-new-session (context origin backend)
-  "Start a BACKEND session for CONTEXT and deliver it there.
+(defun agent--deliver-to-new-session (context origin target)
+  "Start a session for CONTEXT using TARGET and deliver it there.
 An anchored context names its own directory; an unanchored one has its
-project read from the account's sources, ranked by its text.  ORIGIN is
-the buffer the command was invoked from."
-  (if-let* ((directory (plist-get context :directory)))
-      (agent--start-and-deliver context backend directory origin)
-    (agent-project-read
-     (agent-account-current backend)
-     (plist-get context :text)
-     "Project: "
-     (lambda (directory)
-       (agent--start-and-deliver context backend directory origin)))))
+project read from the captured account's sources, ranked by its text.
+ORIGIN is the buffer the command was invoked from.  TARGET is a cons of
+backend and account."
+  (let ((backend (car target))
+        (account (cdr target)))
+    (if-let* ((directory (plist-get context :directory)))
+        (agent--start-and-deliver context backend directory origin)
+      (agent-project-read
+       account
+       (plist-get context :text)
+       "Project: "
+       (lambda (directory)
+         (agent--start-and-deliver context backend directory origin))))))
 
 (defun agent--start-and-deliver (context backend directory origin)
   "Start a BACKEND session in DIRECTORY for CONTEXT and deliver it there.
@@ -3158,8 +3167,8 @@ only when the context does not name one."))
   (oset obj value (agent--account-summary)))
 
 (cl-defmethod transient-infix-read ((obj agent--account-variable))
-  "Resolve a backend for OBJ, then prompt for one of its accounts."
-  (let ((backend (agent--resolve-backend)))
+  "Prompt for OBJ's backend, then for one of its accounts."
+  (let ((backend (agent-account--read-backend)))
     (oset obj backend backend)
     (agent-account--prompt backend)))
 
