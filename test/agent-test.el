@@ -2701,6 +2701,18 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
               ((symbol-function 'forge-topic-at-point) (lambda (&optional _) nil)))
       (should-not (agent--extractor-at-point)))))
 
+(ert-deftest agent-test-extractor-at-point-finds-a-notification ()
+  "Route the notification at point to the Forge router.
+A notification about no topic goes there too: Github notifies about
+check suites, commits and releases as well, and those name a repository
+and a URL, which is what routing needs."
+  (with-temp-buffer
+    (setq major-mode 'forge-notifications-mode)
+    (cl-letf (((symbol-function 'forge-notification-at-point)
+               (lambda (&optional _) 'notification))
+              ((symbol-function 'forge-topic-at-point) (lambda (&optional _) nil)))
+      (should (eq (agent--extractor-at-point) 'agent-forge-context)))))
+
 (ert-deftest agent-test-extractor-at-point-falls-through-without-forge ()
   "Fall through in a Magit buffer when `forge' is not loaded.
 A Magit buffer can be current with `forge' unloaded, and its lookups are

@@ -2999,6 +2999,13 @@ the buffer, and neither loads a module nor raises."
        (fboundp 'forge-topic-at-point)
        (or (forge-notification-at-point) (forge-topic-at-point))))
 
+(defun agent--slot-value (object slot)
+  "Return OBJECT's dynamic EIEIO SLOT value.
+The classes another package defines are not loaded when this file is
+byte-compiled, so a literal `oref' would warn about every slot of theirs
+being unknown."
+  (eieio-oref object slot))
+
 (defun agent--mu4e-message-at-point-p ()
   "Return non-nil when a mu4e message is at point.
 Checks the major mode first, so a buffer that cannot hold a message

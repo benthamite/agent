@@ -92,7 +92,7 @@ picks the project."
      (lambda (url)
        (funcall callback
                 (list :text text :url url :ts ts
-                      :room-id (agent-slack--slot-value room 'id)))))))
+                      :room-id (agent--slot-value room 'id)))))))
 
 (defun agent-slack--message-ts-at-point ()
   "Return the Slack message timestamp at point."
@@ -132,18 +132,14 @@ picks the project."
 (defun agent-slack--message-url-fallback (team room ts)
   "Return a best-effort Slack permalink for TS in ROOM on TEAM."
   (let ((domain (or (and (slot-boundp team 'domain)
-                         (agent-slack--slot-value team 'domain))
+                         (agent--slot-value team 'domain))
                     (and (slot-boundp team 'name)
-                         (agent-slack--slot-value team 'name)))))
+                         (agent--slot-value team 'name)))))
     (unless domain
       (user-error "Slack team has no domain"))
     (format "https://%s.slack.com/archives/%s/p%s"
-            domain (agent-slack--slot-value room 'id)
+            domain (agent--slot-value room 'id)
             (replace-regexp-in-string "\\." "" ts))))
-
-(defun agent-slack--slot-value (object slot)
-  "Return OBJECT's dynamic EIEIO SLOT value."
-  (eieio-oref object slot))
 
 ;;;; Provide
 
