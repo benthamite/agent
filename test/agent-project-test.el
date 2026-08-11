@@ -77,6 +77,22 @@ whether that directory is a git repository."
                              (agent-project-candidates nil))
                      '("alpha"))))))
 
+(ert-deftest agent-project-test-repository-directory-finds-the-clone ()
+  "Answer with the clone of the repository the account's sources name."
+  (agent-project-test--with-tree root '(("alpha" . t) ("beta" . t))
+    (let ((agent-project-sources
+           (list (cons "epoch" (list (expand-file-name "*" root))))))
+      (should (equal (agent-project-repository-directory "beta" "epoch")
+                     (file-name-as-directory (expand-file-name "beta" root))))
+      (should-not (agent-project-repository-directory "gamma" "epoch")))))
+
+(ert-deftest agent-project-test-repository-directory-skips-a-non-repository ()
+  "Pass over a project directory that holds no clone of its own."
+  (agent-project-test--with-tree root '(("notes" . nil))
+    (let ((agent-project-sources
+           (list (cons "" (list (expand-file-name "notes" root))))))
+      (should-not (agent-project-repository-directory "notes" nil)))))
+
 (ert-deftest agent-project-test-account-lookup-takes-the-first-match ()
   "Return the sources of the first regexp that matches the account."
   (let ((agent-project-sources '(("epoch" . ("/a")) ("" . ("/b")))))

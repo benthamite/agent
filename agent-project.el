@@ -152,6 +152,25 @@ twice."
     (mapcan #'agent-project--candidates-from-source
             (agent-project--sources-for-account account)))))
 
+(defun agent-project-repository-directory (name &optional account)
+  "Return the local clone of the repository NAME for ACCOUNT, or nil.
+The project sources are where clones live, so they answer for a
+repository whose clone nobody else knows about: the candidate whose
+repository path is named NAME is that repository.  A path that no longer
+exists names no clone and is passed over, which is what happens to a
+recorded path after the repository moves."
+  (seq-some (lambda (candidate)
+              (when-let* ((repository (plist-get candidate :repository))
+                          ((equal name (agent-project--directory-name
+                                        repository)))
+                          ((file-directory-p repository)))
+                repository))
+            (agent-project-candidates account)))
+
+(defun agent-project--directory-name (directory)
+  "Return the last component of DIRECTORY."
+  (file-name-nondirectory (directory-file-name directory)))
+
 (defun agent-project--sources-for-account (account)
   "Return the sources of the first entry matching ACCOUNT, or nil.
 ACCOUNT may be nil, which matches a catch-all entry."
@@ -189,6 +208,9 @@ belongs falls back the same way an entry omitting the key does."
                     (alist-get 'repo_paths entry)))))
     (list :label (agent-project--registry-label entry)
           :directory (agent-project--registry-directory doc repo)
+          :repository (and repo
+                           (file-name-as-directory
+                            (agent-project--registry-path repo)))
           :description (agent-project--registry-description entry))))
 
 (defun agent-project--registry-label (entry)
@@ -290,6 +312,7 @@ source does not take every other source's candidates down with it."
   (let ((dir (file-name-as-directory (expand-file-name directory))))
     (list :label (file-name-nondirectory (directory-file-name dir))
           :directory dir
+          :repository (and (agent-project--git-directory-p dir) dir)
           :description nil)))
 
 (defun agent-project--git-directory-p (directory)

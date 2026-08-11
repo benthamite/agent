@@ -76,10 +76,12 @@ nobody would read."
   (unless (require 'forge nil t)
     (user-error "Package `forge' is required"))
   (let* ((notification (forge-notification-at-point))
-         (subject (agent-forge--subject-at-point notification)))
+         (subject (agent-forge--subject-at-point notification))
+         (payload (agent-forge--payload subject notification)))
     (funcall callback
              (append (agent-forge--worktree-context subject)
-                     (list :payload (agent-forge--payload subject notification)
+                     (list :text (agent-forge--text subject payload)
+                           :payload payload
                            :submit nil)))))
 
 (defun agent-forge--subject-at-point (notification)
@@ -103,10 +105,13 @@ about no topic by comparing its missing number with zero, which raises."
     (forge-get-topic notification)))
 
 (defun agent-forge--worktree-context (subject)
-  "Return the `:directory' part of the context for SUBJECT, or nil."
-  (when agent--context-wants-directory
-    (list :directory
-          (agent-forge--worktree (forge-get-repository subject)))))
+  "Return the `:directory' part of the context for SUBJECT, or nil.
+Nothing is returned when no clone can be found, and the context then
+carries text alone: the core reads a project for it, which is a
+completion prompt rather than a refusal."
+  (when-let* ((agent--context-wants-directory)
+              (worktree (agent-forge--worktree (forge-get-repository subject))))
+    (list :directory worktree)))
 
 (defun agent-forge--payload (subject notification)
   "Return the prompt payload for SUBJECT, the thing at point.
@@ -121,23 +126,31 @@ URL: the title is what says which of them this is."
               (agent-forge--url notification "notification"))
     (agent-forge--url subject "topic")))
 
+(defun agent-forge--text (subject payload)
+  "Return the text describing SUBJECT, which carries PAYLOAD.
+The text is what the core ranks projects by when no clone was found, so
+it leads with the repository's slug: that is the name the project it
+belongs to is likeliest to be known by."
+  (format "%s\n%s" (agent-forge--slug (forge-get-repository subject)) payload))
+
 (defun agent-forge--url (object kind)
   "Return OBJECT's URL, or refuse the KIND at point for having none."
   (or (forge-get-url object)
       (user-error "Forge %s at point has no URL" kind)))
 
 (defun agent-forge--worktree (repo)
-  "Return the working tree directory for REPO.
-Signals an error when REPO has no local clone, or when the recorded
-path no longer exists.  Forge does not update the recorded path when a
-repository is renamed or moved, so a stale entry is a normal failure
-rather than an exceptional one."
-  (let ((directory (forge-get-worktree repo)))
-    (unless directory
-      (user-error "No local clone recorded for %s" (agent-forge--slug repo)))
-    (unless (file-directory-p directory)
-      (user-error "Recorded clone for %s is missing: %s"
-                  (agent-forge--slug repo) directory))
+  "Return the working tree directory for REPO, or nil when none is known.
+Forge records a worktree only for a repository it has seen from a local
+clone, and forgets one whose recorded path stopped being a worktree,
+which is what a move does to every repository at once.  The account's
+project sources are asked next, because they are where the clones are:
+they answer for a repository Forge never saw, and answer with the
+current path for one that moved."
+  (when-let* ((directory
+               (or (forge-get-worktree repo)
+                   (agent-project-repository-directory
+                    (agent--slot-value repo 'name) agent--context-account)))
+              ((file-directory-p directory)))
     (file-name-as-directory (expand-file-name directory))))
 
 (defun agent-forge--slug (repo)

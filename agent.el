@@ -1810,11 +1810,20 @@ appended to ARGS."
 a session that is already running, since that session has a directory of
 its own and the one an extractor would resolve is discarded.  Finding
 one is not free: a backtrace pays a model request and a package prompt
-for it, and a Forge topic refuses outright when its repository was never
-cloned.  An extractor that would resolve a directory reads this and
-omits `:directory' from its context when it is nil.  It is read while
-the extractor runs, so an extractor that defers its work carries the
-answer over itself.")
+for it, and a Forge topic reads the account's project sources for it.
+An extractor that would resolve a directory reads this and omits
+`:directory' from its context when it is nil.  It is read while the
+extractor runs, so an extractor that defers its work carries the answer
+over itself.")
+
+(defvar agent--context-account nil
+  "The account the extractor now running is resolving a directory for.
+`agent--act-on-context' binds this to the account of the backend that
+will run the session, because project sources are scoped by account: an
+extractor looking a directory up in them has to ask the same account the
+core will start the session for.  Bound like
+`agent--context-wants-directory', and nil when no account is selected or
+the payload is bound for a session that is already running.")
 
 (defun agent--resolve-backend ()
   "Return the backend for the current context.
@@ -2886,11 +2895,13 @@ be asynchronous, so the buffer the command was invoked from and the
 backend and account resolved there are captured now and threaded through
 delivery: by the time the continuation runs, the user may have moved or
 selected another account.  A running session brings its own directory, so
-extraction is told not to resolve one; see
-`agent--context-wants-directory'."
-  (let ((origin (current-buffer))
-        (target (unless existing (agent--resolve-backend-account)))
-        (agent--context-wants-directory (not existing)))
+extraction is told not to resolve one, and told which account to resolve
+it for; see `agent--context-wants-directory' and
+`agent--context-account'."
+  (let* ((origin (current-buffer))
+         (target (unless existing (agent--resolve-backend-account)))
+         (agent--context-wants-directory (not existing))
+         (agent--context-account (cdr target)))
     (funcall extractor
              (lambda (context)
                (agent--deliver-context context existing origin target)))))

@@ -25,7 +25,8 @@ be bound instead."
               (lambda (&optional _) ,notification))
              ((symbol-function 'agent-forge--notification-topic)
               (lambda (_notification) ,topic))
-             ((symbol-function 'forge-topic-at-point) (lambda (&optional _) nil)))
+             ((symbol-function 'forge-topic-at-point) (lambda (&optional _) nil))
+             ((symbol-function 'agent-forge--slug) (lambda (_repo) "owner/name")))
      ,@body))
 
 ;;;; Loading
@@ -57,9 +58,60 @@ be bound instead."
           (should (equal (plist-get context :payload)
                          "https://example.com/repo/pull/1"))
           (should-not (plist-get context :submit))
-          (should-not (plist-get context :text)))
+          (should (string-prefix-p "owner/name" (plist-get context :text))))
       (delete-directory worktree t)
       (delete-directory elsewhere t))))
+
+(ert-deftest agent-forge-test-worktree-comes-from-the-project-sources ()
+  "Anchor the context in the clone the account's project sources name.
+Forge records a worktree only for a repository it has seen from a local
+clone, and forgets one whose recorded path stopped being a worktree, so
+the sources are what still know where the clone is."
+  (let ((clone (make-temp-file "agent-forge-test-clone" t))
+        (asked nil)
+        (context nil))
+    (unwind-protect
+        (progn
+          (agent-forge-test--at-point nil 'topic
+            (cl-letf (((symbol-function 'forge-get-repository)
+                       (lambda (_topic &rest _) 'repo))
+                      ((symbol-function 'forge-get-worktree) (lambda (_repo) nil))
+                      ((symbol-function 'agent--slot-value)
+                       (lambda (_repo _slot) "uqbar-es"))
+                      ((symbol-function 'agent-project-repository-directory)
+                       (lambda (name account)
+                         (setq asked (list name account))
+                         clone))
+                      ((symbol-function 'forge-get-url)
+                       (lambda (_topic) "https://example.com/repo/issues/1")))
+              (let ((agent--context-account "epoch"))
+                (agent-forge-context (lambda (c) (setq context c))))))
+          (should (equal asked '("uqbar-es" "epoch")))
+          (should (equal (plist-get context :directory)
+                         (file-name-as-directory clone))))
+      (delete-directory clone t))))
+
+(ert-deftest agent-forge-test-context-without-a-clone-carries-text ()
+  "Leave the directory out when no clone is known, and describe the subject.
+The core reads a project from the text, which is a completion prompt
+rather than a refusal."
+  (let ((context nil))
+    (agent-forge-test--at-point nil 'topic
+      (cl-letf (((symbol-function 'forge-get-repository)
+                 (lambda (_topic &rest _) 'repo))
+                ((symbol-function 'forge-get-worktree) (lambda (_repo) nil))
+                ((symbol-function 'agent--slot-value)
+                 (lambda (_repo _slot) "uqbar-es"))
+                ((symbol-function 'agent-project-repository-directory)
+                 (lambda (_name _account) nil))
+                ((symbol-function 'forge-get-url)
+                 (lambda (_topic) "https://example.com/repo/issues/1")))
+        (agent-forge-context (lambda (c) (setq context c)))))
+    (should-not (plist-get context :directory))
+    (should (equal (plist-get context :text)
+                   "owner/name\nhttps://example.com/repo/issues/1"))
+    (should (equal (plist-get context :payload)
+                   "https://example.com/repo/issues/1"))))
 
 (ert-deftest agent-forge-test-context-requires-a-url ()
   "Signal a user error when the topic at point carries no URL."

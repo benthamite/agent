@@ -176,7 +176,7 @@ A path pattern may contain wildcards. A wildcard is =*=, =?=, or a =[...]= chara
 
 A registry is a JSON file holding a =projects= array, in the format the obsolete ~agent-epoch-project-registry-file~ used to read ([[#h:shared-session-options][Shared session behavior]]). Every entry becomes one candidate, labelled by its =id= and =title=, or by its =id= alone when it records no title. Unlike a path pattern it carries a description: the entry's =summary=, or its =aliases= when it records no summary, followed by its =browser_keywords= and its Slack channels; an entry recording none of the four has no description at all rather than an empty one. The keywords are worth their length: they are the terms the project is recognized by elsewhere, repository slugs and domain names among them, which is what a routed Slack message or email is likeliest to name, whereas aliases are often the title restated. An entry that records a JSON =null= where a string belongs counts as recording nothing, so a null summary falls back to the aliases just as an omitted one does. Later stages use that text to judge which project a piece of text is about. An entry's directory is its first =project_doc_paths= folder when it records one, because that folder holds the project's instruction files, its first =repo_paths= directory when it records only that, and the registry root itself when it records neither. The user option ~agent-project-registry-root~ names the directory those relative paths are expanded against; it defaults to ~nil~, and a registry recording relative paths is unusable until it is set. A source naming a registry that does not exist raises an error rather than being skipped, since it points at a file the user meant to have.
 
-The function ~agent-project-candidates~ returns the candidates for an account as plists with ~:label~, ~:directory~ and ~:description~. Candidates are deduplicated by true path, so listing the same directory twice under different names, or through a symbolic link, yields one entry. A label shared by two candidates is replaced with the abbreviated directory, which is what then appears in completion, so no two projects offer the same string.
+The function ~agent-project-candidates~ returns the candidates for an account as plists with ~:label~, ~:directory~, ~:repository~ and ~:description~. The repository is the candidate's local clone: the directory itself for a path source that is a git repository or worktree, the first =repo_paths= directory for a registry entry, and nil for a project holding no clone of its own. It is what ~agent-project-repository-directory~ answers from, which returns the clone of a named repository for an account, or nil when no source holds one that exists. Forge routing asks it for a repository whose worktree Forge does not know or no longer knows, which is what a repository that moved looks like ([[#h:shared-commands][Shared commands]]). Candidates are deduplicated by true path, so listing the same directory twice under different names, or through a symbolic link, yields one entry. A label shared by two candidates is replaced with the abbreviated directory, which is what then appears in completion, so no two projects offer the same string.
 
 The function ~agent-project-read~ asks for one of those candidates. It takes the account, the text of the thing being routed, the completion prompt and a callback, and calls the callback with the directory of the project chosen. It answers through the callback even when nothing is ranked, so every caller reads the answer the same way: the directory arrives in the callback, never as a return value. An account whose sources contribute no candidate at all raises an error rather than offering an empty prompt.
 
@@ -365,16 +365,22 @@ read; its title goes into the prompt with the URL, since the URL of a failed
 workflow run names the page listing every run of the repository and the title
 is what says which one this is. The
 command is a thin wrapper over the routing layer described below: its
-extractor, ~agent-forge-context~, reads the topic and answers with a context
-anchored in the working tree, so the project reader is never consulted.
+extractor, ~agent-forge-context~, reads the subject at point and answers with a
+context anchored in the working tree, so the project reader is usually never
+consulted.
 
-Unlike Slack routing, it needs no language model and no project sources. A
-Slack message has to be classified to find its project, whereas a Forge
-notification already records its repository and the repository already records
-its working tree. The command signals an error when the repository has no local
-clone, or when the recorded path no longer exists: Forge does not update that
-path when a repository is renamed or moved, so a stale entry is an ordinary
-failure rather than an exceptional one.
+A Slack message has to be classified to find its project, whereas a Forge
+notification already records its repository. Where that repository is cloned is
+a second question, and it is asked in three steps. Forge answers first, from the
+worktree it recorded; it records one only for a repository it has seen from a
+local clone, and it forgets one whose path stopped being a worktree, which is
+what moving a repository does to every path at once. The account's project
+sources answer next, with ~agent-project-repository-directory~: they are where
+the clones live, so they know the current path of a repository that moved and
+the path of one Forge never saw. When neither knows, the context carries no
+directory and the core reads a project from its text, which leads with the
+repository's slug so that ranking puts the right project first. Nothing is
+refused for want of a clone.
 
 The command ~agent-act-on-email~, called on a message in a mu4e headers or
 view buffer, starts a session in the project that message is about and inserts
