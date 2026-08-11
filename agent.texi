@@ -441,8 +441,11 @@ workflow run names the page listing every run of the repository and the title
 is what says which one this is. The
 command is a thin wrapper over the routing layer described below: its
 extractor, @code{agent-forge-context}, reads the subject at point and answers with a
-context anchored in the working tree, so the project reader is usually never
-consulted.
+context suggesting the working tree, so the project reader opens on that clone
+already selected: a bare @samp{RET} starts there, and the same prompt is where a
+different project is chosen instead. Routing a topic therefore ends in the same
+choice as routing a Slack message or a backtrace, rather than starting a session
+outright.
 
 A Slack message has to be classified to find its project, whereas a Forge
 notification already records its repository. Where that repository is cloned is

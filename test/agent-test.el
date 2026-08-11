@@ -2806,7 +2806,7 @@ not autoloaded, so the predicate must answer nil rather than raise."
     (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
               ((symbol-function 'agent-account-current) (lambda (_) "epoch"))
               ((symbol-function 'agent-project-read)
-               (lambda (account text _prompt callback)
+               (lambda (account text _prompt callback &optional _suggestion)
                  (setq asked (list account text))
                  (funcall callback "/tmp/chosen/")))
               ((symbol-function 'agent--start-session-in)
@@ -2821,6 +2821,31 @@ not autoloaded, so the predicate must answer nil rather than raise."
     (should (equal asked '("epoch" "hello")))
     (should (equal started "/tmp/chosen/"))))
 
+(ert-deftest agent-test-suggested-directory-leads-the-project-choice ()
+  "Hand a suggested directory to the project reader instead of starting there.
+A context that suggests a directory is still read for a project, so
+every route ends in the same choice, with the suggestion selected."
+  (let ((suggested nil)
+        (started nil))
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
+              ((symbol-function 'agent-account-current) (lambda (_) "epoch"))
+              ((symbol-function 'agent-project-read)
+               (lambda (_account _text _prompt callback &optional suggestion)
+                 (setq suggested suggestion)
+                 (funcall callback suggestion)))
+              ((symbol-function 'agent--start-session-in)
+               (lambda (_backend dir &optional _prompt)
+                 (setq started dir)
+                 (current-buffer)))
+              ((symbol-function 'agent-send-string) #'ignore)
+              ((symbol-function 'display-buffer) #'ignore))
+      (agent--act-on-context
+       (agent-test--context-extractor
+        '(:suggested-directory "/tmp/clone/" :text "hello" :payload "url"))
+       nil))
+    (should (equal suggested "/tmp/clone/"))
+    (should (equal started "/tmp/clone/"))))
+
 (ert-deftest agent-test-unanchored-context-keeps-the-resolved-account ()
   "Keep the backend account resolved before asynchronous extraction."
   (let ((account "epoch")
@@ -2828,7 +2853,7 @@ not autoloaded, so the predicate must answer nil rather than raise."
     (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'test))
               ((symbol-function 'agent-account-current) (lambda (_) account))
               ((symbol-function 'agent-project-read)
-               (lambda (selected _text _prompt _callback)
+               (lambda (selected _text _prompt _callback &optional _suggestion)
                  (setq asked selected))))
       (agent--act-on-context
        (lambda (callback)

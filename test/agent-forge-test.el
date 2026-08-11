@@ -37,8 +37,10 @@ be bound instead."
 
 ;;;; Context
 
-(ert-deftest agent-forge-test-context-is-anchored-in-the-worktree ()
-  "Anchor the context in the working tree Forge records for the repository."
+(ert-deftest agent-forge-test-context-suggests-the-worktree ()
+  "Offer the working tree Forge records for the repository.
+The tree is suggested rather than imposed, so that routing ends in the
+same project choice every other thing at point ends in."
   (let ((worktree (make-temp-file "agent-forge-test-worktree" t))
         (elsewhere (make-temp-file "agent-forge-test-elsewhere" t))
         (context nil))
@@ -53,8 +55,9 @@ be bound instead."
                        (lambda (_topic) "https://example.com/repo/pull/1")))
               (let ((default-directory (file-name-as-directory elsewhere)))
                 (agent-forge-context (lambda (c) (setq context c))))))
-          (should (equal (plist-get context :directory)
+          (should (equal (plist-get context :suggested-directory)
                          (file-name-as-directory worktree)))
+          (should-not (plist-get context :directory))
           (should (equal (plist-get context :payload)
                          "https://example.com/repo/pull/1"))
           (should-not (plist-get context :submit))
@@ -87,7 +90,7 @@ the sources are what still know where the clone is."
               (let ((agent--context-account "epoch"))
                 (agent-forge-context (lambda (c) (setq context c))))))
           (should (equal asked '("uqbar-es" "epoch")))
-          (should (equal (plist-get context :directory)
+          (should (equal (plist-get context :suggested-directory)
                          (file-name-as-directory clone))))
       (delete-directory clone t))))
 
@@ -108,6 +111,7 @@ rather than a refusal."
                  (lambda (_topic) "https://example.com/repo/issues/1")))
         (agent-forge-context (lambda (c) (setq context c)))))
     (should-not (plist-get context :directory))
+    (should-not (plist-get context :suggested-directory))
     (should (equal (plist-get context :text)
                    "owner/name\nhttps://example.com/repo/issues/1"))
     (should (equal (plist-get context :payload)
@@ -169,8 +173,9 @@ alone names the page listing every run of the repository."
                        (lambda (_notification)
                          "https://example.com/repo/actions")))
               (agent-forge-context (lambda (c) (setq context c)))))
-          (should (equal (plist-get context :directory)
+          (should (equal (plist-get context :suggested-directory)
                          (file-name-as-directory worktree)))
+          (should-not (plist-get context :directory))
           (should (equal (plist-get context :payload)
                          (concat "test workflow run failed\n"
                                  "https://example.com/repo/actions")))

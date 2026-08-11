@@ -348,21 +348,44 @@ directory."
 
 ;;;; Reading
 
-(defun agent-project-read (account text prompt callback)
+(defun agent-project-read (account text prompt callback &optional suggestion)
   "Read a project directory for ACCOUNT and call CALLBACK with it.
 TEXT describes the thing being routed and orders the candidates when TEXT
 and at least one description hold more than whitespace; a blank string is
 nothing to rank on, so no request is made.  PROMPT is the completion
-prompt.  CALLBACK receives the directory of the chosen project."
-  (let ((candidates (agent-project-candidates account)))
+prompt.  CALLBACK receives the directory of the chosen project.
+
+SUGGESTION is a directory the caller worked out for itself.  It is
+offered first, which makes it the answer a bare RET gives, and nothing
+is ranked: a caller that knows the project already has no use for a
+model's opinion of it, and the reader still asks, so every route ends in
+the same choice."
+  (let ((candidates (agent-project--offering suggestion
+                                             (agent-project-candidates account))))
     (unless candidates
       (user-error "No project candidates for account %s" (or account "(none)")))
-    (if (agent-project--rankable-p text candidates)
+    (if (and (not suggestion) (agent-project--rankable-p text candidates))
         (agent-project--rank
          candidates text
          (lambda (ordered)
            (funcall callback (agent-project--complete ordered prompt))))
       (funcall callback (agent-project--complete candidates prompt)))))
+
+(defun agent-project--offering (directory candidates)
+  "Return CANDIDATES with DIRECTORY first, or CANDIDATES when it is nil.
+A directory the sources do not hold is a project all the same, since the
+caller found it, so it joins the candidates rather than being dropped
+from the choice it is meant to lead."
+  (if-let* ((directory)
+            (dir (file-name-as-directory (expand-file-name directory))))
+      (let ((known (seq-find (lambda (candidate)
+                               (equal (file-truename
+                                       (plist-get candidate :directory))
+                                      (file-truename dir)))
+                             candidates)))
+        (cons (or known (agent-project--directory-candidate dir))
+              (remq known candidates)))
+    candidates))
 
 (defun agent-project--rankable-p (text candidates)
   "Return non-nil when TEXT and CANDIDATES give a model something to rank.

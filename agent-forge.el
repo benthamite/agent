@@ -105,13 +105,15 @@ about no topic by comparing its missing number with zero, which raises."
     (forge-get-topic notification)))
 
 (defun agent-forge--worktree-context (subject)
-  "Return the `:directory' part of the context for SUBJECT, or nil.
-Nothing is returned when no clone can be found, and the context then
-carries text alone: the core reads a project for it, which is a
-completion prompt rather than a refusal."
+  "Return the `:suggested-directory' part of the context for SUBJECT, or nil.
+The working tree is offered rather than imposed, so that routing a topic
+ends in the same project choice as routing a Slack message or a
+backtrace, with the repository's own clone already selected.  Nothing is
+returned when no clone can be found, and the choice is then led by the
+context's text instead."
   (when-let* ((agent--context-wants-directory)
               (worktree (agent-forge--worktree (forge-get-repository subject))))
-    (list :directory worktree)))
+    (list :suggested-directory worktree)))
 
 (defun agent-forge--payload (subject notification)
   "Return the prompt payload for SUBJECT, the thing at point.

@@ -266,6 +266,50 @@ The root is normalized like every other candidate directory."
       (should (equal chosen (file-name-as-directory
                              (expand-file-name "alpha" root)))))))
 
+(ert-deftest agent-project-test-read-offers-the-suggestion-first ()
+  "Offer a suggested directory as the default, and rank nothing.
+The caller worked the project out already, so the reader asks with that
+answer selected instead of paying a model to guess at it."
+  (agent-project-test--with-registry file nil
+    (let ((agent-project-registry-root "/tmp/projects/")
+          (agent-project-sources (list (cons "" (list file))))
+          (ranked nil)
+          (offered nil)
+          (chosen nil))
+      (cl-letf (((symbol-function 'agent-project--rank)
+                 (lambda (&rest _) (setq ranked t)))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt labels &rest _)
+                   (setq offered labels)
+                   (car labels))))
+        (agent-project-read nil "some text" "Project: "
+                            (lambda (dir) (setq chosen dir))
+                            "/tmp/projects/alpha/"))
+      (should-not ranked)
+      (should (equal chosen "/tmp/projects/alpha/"))
+      (should (equal (car offered) "alpha - Alpha"))
+      (should (> (length offered) 1)))))
+
+(ert-deftest agent-project-test-read-offers-an-unknown-suggestion ()
+  "Offer a suggested directory the sources do not hold, labelled by its name."
+  (agent-project-test--with-tree root '(("alpha" . t))
+    (let* ((elsewhere (expand-file-name "beta" root))
+           (agent-project-sources
+            (list (cons "" (list (expand-file-name "alpha" root)))))
+           (offered nil)
+           (chosen nil))
+      (make-directory elsewhere t)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt labels &rest _)
+                   (setq offered labels)
+                   (car labels))))
+        (agent-project-read nil nil "Project: "
+                            (lambda (dir) (setq chosen dir))
+                            elsewhere))
+      (should (equal (car offered) "beta"))
+      (should (member "alpha" offered))
+      (should (equal chosen (file-name-as-directory elsewhere))))))
+
 (ert-deftest agent-project-test-read-skips-ranking-for-a-blank-description ()
   "Complete directly when the only description a candidate carries is blank."
   (agent-project-test--with-registry file agent-project-test--blank-summary-json

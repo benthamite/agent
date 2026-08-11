@@ -2872,15 +2872,16 @@ that owns its extractor.
 
 An extractor calls its continuation with a context plist: `:directory'
 when the thing carries a working directory, as an absolute path,
-`:text' when it carries only text for a project to be chosen from,
-`:payload' for what to send, `:submit' for whether to submit it, and an
-optional `:after' thunk run once the payload is delivered, in the
+`:suggested-directory' when it worked one out and the user should still
+be asked, `:text' when it carries only text for a project to be chosen
+from, `:payload' for what to send, `:submit' for whether to submit it,
+and an optional `:after' thunk run once the payload is delivered, in the
 buffer the command was invoked from.  The continuation is called rather
 than returned to because extraction can require network round-trips,
 and it may therefore run in another buffer than the one the thing was
-read from.  An extractor that has to work for its directory leaves
-`:directory' out when `agent--context-wants-directory' says the
-directory would be discarded.")
+read from.  An extractor that has to work for its directory leaves it
+out when `agent--context-wants-directory' says the directory would be
+discarded.")
 
 (defun agent--extractor-at-point ()
   "Return the extractor for the thing at point, or nil when there is none."
@@ -2921,10 +2922,10 @@ of backend and account resolved there."
 
 (defun agent--deliver-to-new-session (context origin target)
   "Start a session for CONTEXT using TARGET and deliver it there.
-An anchored context names its own directory; an unanchored one has its
-project read from the captured account's sources, ranked by its text.
-ORIGIN is the buffer the command was invoked from.  TARGET is a cons of
-backend and account."
+An anchored context names its own directory; any other has its project
+read from the captured account's sources, ranked by its text or led by
+the directory it suggests.  ORIGIN is the buffer the command was invoked
+from.  TARGET is a cons of backend and account."
   (let ((backend (car target))
         (account (cdr target)))
     (if-let* ((directory (plist-get context :directory)))
@@ -2934,7 +2935,8 @@ backend and account."
        (plist-get context :text)
        "Project: "
        (lambda (directory)
-         (agent--start-and-deliver context backend directory origin))))))
+         (agent--start-and-deliver context backend directory origin))
+       (plist-get context :suggested-directory)))))
 
 (defun agent--start-and-deliver (context backend directory origin)
   "Start a BACKEND session in DIRECTORY for CONTEXT and deliver it there.
