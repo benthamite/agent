@@ -548,8 +548,9 @@ source session before closing it.
 The chain is driven by session stop events and guarded by a watchdog. Each
 submitted skill gets up to @code{agent-before-exit-timeout} seconds (default 600) to
 finish; the watchdog restarts when the next skill begins. If the current skill
-exceeds that interval, the chain is abandoned with a warning and the session is
-left open instead of being stranded.
+exceeds that interval, the watchdog warns but keeps the exit request armed. The
+session therefore closes when the skill eventually finishes instead of losing
+the requested exit because the skill ran for more than ten minutes.
 
 Backends can veto that automatic close while the submitted skill invocation is
 still visible as unaccepted prompt input. Codex uses this to avoid closing a

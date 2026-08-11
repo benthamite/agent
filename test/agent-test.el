@@ -1527,8 +1527,8 @@ and globally persisting -- an account the session never had."
           (should (agent--before-exit-transition buf 'step))
           (should exited))))))
 
-(ert-deftest agent-test-before-exit-timeout-aborts-and-warns ()
-  "Reset the chain and warn when the watchdog expires."
+(ert-deftest agent-test-before-exit-timeout-warns-and-keeps-exit-armed ()
+  "Warn on timeout but exit when the skill eventually finishes."
   (let ((agent-backends nil)
         (agent-before-exit-skill-name "session-retro")
         (agent-before-exit-skill-directories nil)
@@ -1548,9 +1548,11 @@ and globally persisting -- an account the session never had."
                    (lambda (_buffer) (setq exited t)))
                   ((symbol-function 'run-at-time)
                    (lambda (time _repeat function &rest args)
-                     (when (equal time agent-before-exit-timeout)
-                       (setq watchdog (cons function args)))
-                     'agent-test-timer))
+                     (if (zerop time)
+                         (apply function args)
+                       (when (equal time agent-before-exit-timeout)
+                         (setq watchdog (cons function args)))
+                       'agent-test-timer)))
                   ((symbol-function 'cancel-timer) #'ignore)
                   ((symbol-function 'message)
                    (lambda (fmt &rest args)
@@ -1558,10 +1560,14 @@ and globally persisting -- an account the session never had."
           (should-not (agent-run-skill-before-exit 'codex buf))
           (should watchdog)
           (apply (car watchdog) (cdr watchdog))
-          (should-not agent--before-exit)
+          (should (eq (plist-get agent--before-exit :state) 'running))
+          (should-not (plist-get agent--before-exit :timer))
           (should-not exited)
           (should (cl-some (lambda (m) (string-match-p "timed out" m))
-                           messages)))))))
+                           messages))
+          (should (agent--before-exit-transition buf 'step))
+          (should exited)
+          (should (eq (plist-get agent--before-exit :state) 'closing)))))))
 
 (ert-deftest agent-test-run-skill-before-exit-submits-in-matching-directory ()
   "Submit a Codex skill in explicitly configured directories."

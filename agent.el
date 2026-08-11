@@ -104,11 +104,11 @@ treated as eligible."
   :group 'agent)
 
 (defcustom agent-before-exit-timeout 600
-  "Seconds before an unfinished before-exit skill is abandoned.
+  "Seconds before an unfinished before-exit skill raises a warning.
 The watchdog restarts whenever the chain advances to another
 skill.  If the current skill runs this long without finishing,
-the watchdog resets the chain state, warns, and leaves the
-session open."
+the watchdog warns but keeps the exit request armed so that the
+session closes when the skill eventually finishes."
   :type 'number
   :group 'agent)
 
@@ -1884,7 +1884,7 @@ exit while the chain runs, and t when there is nothing to run."
 
 (defun agent--before-exit-transition (buffer event)
   "Advance the before-exit chain in BUFFER for EVENT.
-EVENT is one of the symbols `start', `step', and `abort'.  This
+EVENT is one of the symbols `start', `step', and `timeout'.  This
 function is the only writer of `agent--before-exit'.  Return
 non-nil when the chain consumed the event."
   (when (buffer-live-p buffer)
@@ -1892,7 +1892,7 @@ non-nil when the chain consumed the event."
       (pcase event
         ('start (agent--before-exit-start buffer))
         ('step (agent--before-exit-step buffer))
-        ('abort (agent--before-exit-abort buffer))
+        ('timeout (agent--before-exit-timeout buffer))
         (_ (error "Unknown before-exit event: %s" event))))))
 
 (defun agent--before-exit-start (buffer)
@@ -1938,11 +1938,12 @@ Return non-nil when the chain consumed the event."
         (plist-put agent--before-exit :timer
                    (agent--before-exit-start-watchdog buffer))))
 
-(defun agent--before-exit-abort (buffer)
-  "Abandon BUFFER's before-exit chain, leaving the session open."
+(defun agent--before-exit-timeout (buffer)
+  "Warn that BUFFER's skill timed out while keeping its exit armed."
   (when agent--before-exit
-    (agent--before-exit-reset)
-    (message "agent: before-exit skills timed out in %s; leaving session open"
+    (setq agent--before-exit
+          (plist-put agent--before-exit :timer nil))
+    (message "agent: before-exit skill timed out in %s; waiting for completion"
              (buffer-name buffer))
     t))
 
@@ -1979,14 +1980,14 @@ is submitted."
   (setq agent--before-exit nil))
 
 (defun agent--before-exit-start-watchdog (buffer)
-  "Return a timer that aborts BUFFER's chain after the timeout."
+  "Return a timer that warns when BUFFER's chain reaches the timeout."
   (run-at-time agent-before-exit-timeout nil
                #'agent--before-exit-watchdog-fire buffer))
 
 (defun agent--before-exit-watchdog-fire (buffer)
-  "Abort the before-exit chain in BUFFER when the watchdog expires."
+  "Warn about BUFFER's before-exit chain when the watchdog expires."
   (when (buffer-live-p buffer)
-    (agent--before-exit-transition buffer 'abort)))
+    (agent--before-exit-transition buffer 'timeout)))
 
 (defun agent--before-exit-cancel-watchdog ()
   "Cancel the current buffer's before-exit watchdog timer, if any."
