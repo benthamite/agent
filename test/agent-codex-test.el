@@ -586,6 +586,64 @@ Writes a placeholder auth.json so the logged-out session guard in
       (when (buffer-live-p buf)
         (kill-buffer buf)))))
 
+(ert-deftest agent-codex-test-app-server-completion-finishes-exit-chain ()
+  "Advance and close an exit chain from native app-server completions."
+  (let ((buf (generate-new-buffer "*codex:/tmp/project/*"))
+        (codex-app-server-turn-completed-hook
+         '(agent-codex--handle-app-server-turn-completed))
+        submitted
+        exited
+        notified)
+    (unwind-protect
+        (cl-letf (((symbol-function 'codex-prompt-input)
+                   (lambda (&optional _buffer) nil))
+                  ((symbol-function 'agent-codex-submit-command)
+                   (lambda (command &optional _buffer)
+                     (push command submitted)))
+                  ((symbol-function 'agent--before-exit-restart-watchdog)
+                   #'ignore)
+                  ((symbol-function 'agent--before-exit-cancel-watchdog)
+                   #'ignore)
+                  ((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (apply function args)))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
+                  ((symbol-function 'agent-codex-notify)
+                   (lambda (&rest _args) (setq notified t)))
+                  ((symbol-function 'codex--app-server-update-status-overlay)
+                   #'ignore)
+                  ((symbol-function 'codex--app-server-refresh-status-timer)
+                   #'ignore)
+                  ((symbol-function 'codex--app-server-ensure-trailing-newline)
+                   #'ignore)
+                  ((symbol-function 'codex--app-server-flush-turn-queue)
+                   #'ignore))
+          (with-current-buffer buf
+            (setq-local agent--backend 'codex)
+            (setq-local codex-terminal-backend 'app-server)
+            (codex--app-server-turn-completed nil)
+            (should-not agent--before-exit)
+            (should notified)
+            (setq notified nil)
+            (setq-local codex--app-server-queued-turn-inputs '(queued))
+            (codex--app-server-turn-completed nil)
+            (should-not notified)
+            (should-not agent--before-exit)
+            (setq-local codex--app-server-queued-turn-inputs nil)
+            (setq-local agent--before-exit
+                        (list :queue '("update-log") :state 'running))
+            (codex--app-server-turn-completed nil)
+            (should (equal submitted '("$update-log")))
+            (should-not exited)
+            (agent-codex--handle-notification
+             (list :type "Stop" :buffer-name (buffer-name buf)))
+            (should-not exited)
+            (codex--app-server-turn-completed nil)
+            (should exited)))
+      (when (buffer-live-p buf)
+        (kill-buffer buf)))))
+
 (ert-deftest agent-codex-test-detects-background-terminal-work ()
   "Detect Codex status lines that report background terminal work."
   (let ((buf (generate-new-buffer "*codex-test*")))
@@ -1694,12 +1752,15 @@ session that never restarts would otherwise keep every one of them."
   (let ((codex-notification-function #'ignore)
         (codex-start-hook nil)
         (codex-event-hook nil)
+        (codex-app-server-turn-completed-hook nil)
         (codex-command-submitted-hook nil)
         (codex-process-environment-functions nil)
         (agent-scroll-keys-global-mode nil)
         (kill-buffer-query-functions kill-buffer-query-functions))
     (agent-codex-mode 1)
     (should (memq #'agent-codex--handle-notification codex-event-hook))
+    (should (memq #'agent-codex--handle-app-server-turn-completed
+                  codex-app-server-turn-completed-hook))
     (should (memq #'agent-codex-account-env
                   codex-process-environment-functions))
     (should (memq #'agent-codex--note-submission
@@ -1714,6 +1775,7 @@ session that never restarts would otherwise keep every one of them."
                              'codex--send-command-to-buffer))
     (agent-codex-mode -1)
     (should-not (memq #'agent-codex--handle-notification codex-event-hook))
+    (should-not codex-app-server-turn-completed-hook)
     (should-not codex-start-hook)
     (should-not codex-command-submitted-hook)
     (should-not codex-process-environment-functions)

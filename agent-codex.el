@@ -542,7 +542,9 @@ Every handled event also records the native session id reported by
         (agent-codex--note-session-id buf)
         (pcase hook-type
           ("Stop"
-           (agent-session-event buf 'idle-prompt))
+           (unless (with-current-buffer buf
+                     (eq codex-terminal-backend 'app-server))
+             (agent-session-event buf 'idle-prompt)))
           ("PermissionRequest"
            (agent-codex-notify
             (format "%s needs approval"
@@ -555,6 +557,11 @@ Every handled event also records the native session id reported by
             (format "%s: needs your attention"
                     (agent--buffer-session-name buf))))))))
   nil)
+
+(defun agent-codex--handle-app-server-turn-completed ()
+  "Report a native app-server turn completion to Agent."
+  (unless codex--app-server-queued-turn-inputs
+    (agent-session-event (current-buffer) 'idle-prompt)))
 
 ;;;;; Skill runner
 
@@ -1176,6 +1183,8 @@ removes them symmetrically and restores
   (setq agent-codex--saved-notification-function codex-notification-function)
   (setq codex-notification-function #'codex-default-notification)
   (add-hook 'codex-event-hook #'agent-codex--handle-notification)
+  (add-hook 'codex-app-server-turn-completed-hook
+            #'agent-codex--handle-app-server-turn-completed)
   (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
   (dolist (fn agent-codex--start-hook-functions)
     (add-hook 'codex-start-hook fn))
@@ -1194,6 +1203,8 @@ removes them symmetrically and restores
   "Remove Codex backend hooks and advice."
   (setq codex-notification-function agent-codex--saved-notification-function)
   (remove-hook 'codex-event-hook #'agent-codex--handle-notification)
+  (remove-hook 'codex-app-server-turn-completed-hook
+               #'agent-codex--handle-app-server-turn-completed)
   (unless (bound-and-true-p agent-claude-mode)
     (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer)
     (agent-scroll-keys-global-mode -1))

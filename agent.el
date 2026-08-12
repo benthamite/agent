@@ -115,9 +115,12 @@ session closes when the skill eventually finishes."
 (defvar-local agent--before-exit nil
   "State of the before-exit skill chain in this session buffer.
 Nil when no chain has started.  Otherwise a plist with keys
-`:queue' (skill entries not yet submitted), `:state' (`running'
-or `closing'), `:started-at' (`float-time' when the chain
-started), and `:timer' (the watchdog timer, or nil).  Only
+`:queue' (skill entries not yet submitted), `:state'
+(`waiting-for-idle', `running', or `closing'), `:started-at'
+(`float-time' when the chain started), and `:timer' (the watchdog
+timer, or nil).  `:last-completion' records the last accepted
+`stop' or `idle-prompt' event so their duplicate pair advances
+the chain only once.  Only
 `agent--before-exit-transition' may set this variable.")
 
 (defvar-local agent-before-exit-skill-inhibit nil
@@ -894,8 +897,8 @@ of being silently mopped up."
 
 (defun agent--purge-dead-session-keys ()
   "Drop dead buffers from `agent--session-keys', reporting each as a leak.
-`agent--session-teardown' owns key release; a dead entry here
-means a session escaped teardown."
+A dead entry here means buffer-kill cleanup and session teardown
+both failed to release its key."
   (let (dead)
     (maphash (lambda (buf _) (unless (buffer-live-p buf) (push buf dead)))
              agent--session-keys)
@@ -911,7 +914,17 @@ means a session escaped teardown."
       (let ((used (hash-table-values agent--session-keys)))
         (when-let* ((key (cl-find-if (lambda (k) (not (member k used)))
                                       agent--session-key-pool)))
-          (puthash (current-buffer) key agent--session-keys))))))
+          (agent--record-session-key (current-buffer) key))))))
+
+(defun agent--record-session-key (buffer key)
+  "Record KEY for BUFFER and arrange release when BUFFER is killed."
+  (with-current-buffer buffer
+    (add-hook 'kill-buffer-hook #'agent--release-session-key-current nil t))
+  (puthash buffer key agent--session-keys))
+
+(defun agent--release-session-key-current ()
+  "Release the session key owned by the current buffer."
+  (remhash (current-buffer) agent--session-keys))
 
 (defun agent--ensure-all-session-keys ()
   "Ensure every active AI session buffer has a session key."
@@ -921,7 +934,7 @@ means a session escaped teardown."
       (let ((used (hash-table-values agent--session-keys)))
         (when-let* ((key (cl-find-if (lambda (k) (not (member k used)))
                                       agent--session-key-pool)))
-          (puthash buf key agent--session-keys))))))
+          (agent--record-session-key buf key))))))
 
 (defun agent--session-key-index (key)
   "Return the index of KEY in `agent--session-key-pool'."
@@ -1478,7 +1491,7 @@ suppressed.  A `blocked' event never advances the chain.  The
 ready alert fires only for `idle-prompt' events."
   (agent--session-set-state buffer 'awaiting-input)
   (unless (and (memq event '(stop idle-prompt))
-               (agent--before-exit-transition buffer 'step))
+               (agent--before-exit-transition buffer event))
     (when (eq event 'idle-prompt)
       (agent--session-notify-ready buffer))
     (agent--scroll-to-bottom buffer)
@@ -1891,7 +1904,8 @@ non-nil when the chain consumed the event."
     (with-current-buffer buffer
       (pcase event
         ('start (agent--before-exit-start buffer))
-        ('step (agent--before-exit-step buffer))
+        ((or 'step 'stop 'idle-prompt)
+         (agent--before-exit-step buffer event))
         ('timeout (agent--before-exit-timeout buffer))
         (_ (error "Unknown before-exit event: %s" event))))))
 
@@ -1902,34 +1916,67 @@ Return nil when a chain is already running, the buffer inhibits
 the chain, no skill applies, or nothing could be submitted."
   (unless (or agent--before-exit agent-before-exit-skill-inhibit)
     (let* ((backend (agent--detect-backend buffer))
-           (queue (agent--before-exit-skill-queue backend buffer)))
+           (queue (agent--before-exit-skill-queue backend buffer))
+           (busy (eq (agent-session-display-state buffer backend) 'busy)))
       (when queue
         (cl-pushnew #'agent--before-exit-teardown agent--teardown-functions)
         (setq agent--before-exit
               (list :queue queue
-                    :state 'running
+                    :state (if busy
+                               'waiting-for-idle
+                             'running)
                     :started-at (float-time)
                     :timer (agent--before-exit-start-watchdog buffer)))
-        (if (agent--before-exit-submit-next buffer)
+        (if (eq (plist-get agent--before-exit :state) 'waiting-for-idle)
             t
-          (agent--before-exit-reset)
-          nil)))))
+          (if (agent--before-exit-submit-next buffer)
+              t
+            (agent--before-exit-reset)
+            nil))))))
 
-(defun agent--before-exit-step (buffer)
+(defun agent--before-exit-step (buffer &optional completion)
   "Advance BUFFER's running before-exit chain on a stop event.
+COMPLETION is `stop', `idle-prompt', or nil for a synthetic step.
 Submit the next queued skill, or schedule the exit once the queue
 is drained.  When the backend's readiness veto applies, leave the
 chain untouched so it is re-checked on the next stop event.
 Return non-nil when the chain consumed the event."
-  (when (eq (plist-get agent--before-exit :state) 'running)
-    (let ((backend (agent--detect-backend buffer)))
-      (when (agent--before-exit-ready-to-close-p backend buffer)
-        (if (and (plist-get agent--before-exit :queue)
-                 (agent--before-exit-submit-next buffer))
-            (progn
-              (agent--before-exit-restart-watchdog buffer)
-              t)
-          (agent--before-exit-close buffer backend))))))
+  (when (memq (plist-get agent--before-exit :state)
+              '(waiting-for-idle running))
+    (if (agent--before-exit-duplicate-completion-p completion)
+        (progn
+          (setq agent--before-exit
+                (plist-put agent--before-exit :last-completion nil))
+          nil)
+      (when completion
+        (setq agent--before-exit
+              (plist-put agent--before-exit :last-completion completion)))
+      (let ((backend (agent--detect-backend buffer)))
+        (pcase (plist-get agent--before-exit :state)
+          ('waiting-for-idle
+           (when (agent--before-exit-ready-to-close-p backend buffer)
+             (setq agent--before-exit
+                   (plist-put agent--before-exit :state 'running))
+             (if (agent--before-exit-submit-next buffer)
+                 (progn
+                   (agent--before-exit-restart-watchdog buffer)
+                   t)
+               (agent--before-exit-close buffer backend))))
+          ('running
+           (when (agent--before-exit-ready-to-close-p backend buffer)
+             (if (and (plist-get agent--before-exit :queue)
+                      (agent--before-exit-submit-next buffer))
+                 (progn
+                   (agent--before-exit-restart-watchdog buffer)
+                   t)
+               (agent--before-exit-close buffer backend)))))))))
+
+(defun agent--before-exit-duplicate-completion-p (completion)
+  "Return non-nil when COMPLETION duplicates the last completion event."
+  (let ((last (plist-get agent--before-exit :last-completion)))
+    (and (memq completion '(stop idle-prompt))
+         (memq last '(stop idle-prompt))
+         (not (eq completion last)))))
 
 (defun agent--before-exit-restart-watchdog (buffer)
   "Restart BUFFER's watchdog after its before-exit chain advances."

@@ -1451,6 +1451,115 @@ and globally persisting -- an account the session never had."
           (should exited)
           (should (eq (plist-get agent--before-exit :state) 'closing)))))))
 
+(ert-deftest agent-test-before-exit-counts-stop-idle-prompt-pair-once ()
+  "Do not count Stop and its later idle prompt as two completions."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names '("first" "second"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        events
+        exited)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
+          :submit (lambda (command &optional _buffer) (push command events))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (apply function args))))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (agent-session-event buf 'stop)
+          (should (equal events '("/second" "/first")))
+          (agent-session-event buf 'idle-prompt)
+          (should-not exited)
+          (should (eq (plist-get agent--before-exit :state) 'running))
+          (agent-session-event buf 'idle-prompt)
+          (should exited))))))
+
+(ert-deftest agent-test-before-exit-waits-for-active-turn-before-first-skill ()
+  "Do not steer the first exit skill into an active user turn."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names '("update-log"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        (busy t)
+        events
+        exited)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :busy-p (lambda (_buffer) busy)
+          :skill-command-prefix "/"
+          :submit (lambda (command &optional _buffer) (push command events))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (apply function args))))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (should-not events)
+          (should (eq (plist-get agent--before-exit :state)
+                      'waiting-for-idle))
+          (setq busy nil)
+          (should (agent--before-exit-transition buf 'step))
+          (should (equal events '("/update-log")))
+          (should (eq (plist-get agent--before-exit :state) 'running))
+          (should-not exited)
+          (should (agent--before-exit-transition buf 'step))
+          (should exited))))))
+
+(ert-deftest agent-test-exit-kills-buffer-without-deleting-window ()
+  "Kill the session buffer after its skill chain but preserve its window."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names '("update-log"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil))
+    (save-window-excursion
+      (delete-other-windows)
+      (let* ((other (current-buffer))
+             (buf (generate-new-buffer "*one:~/repo/project/:default*"))
+             (other-window (selected-window))
+             (window (split-window-right)))
+        (unwind-protect
+            (progn
+              (set-window-buffer other-window buf)
+              (set-window-buffer window buf)
+              (select-window window)
+              (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buf))
+                :skill-command-prefix "/"
+                :submit (lambda (_command &optional _buffer))))
+              (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                         (lambda (_buffer) nil))
+                        ((symbol-function 'agent--exit-session)
+                         (lambda (buffer) (kill-buffer buffer)))
+                        ((symbol-function 'run-at-time)
+                         (lambda (_time _repeat function &rest args)
+                           (apply function args))))
+                (with-current-buffer buf (agent-exit))
+                (should (window-live-p window))
+                (set-window-buffer window other)
+                (should (agent--before-exit-transition buf 'step))
+                (should-not (buffer-live-p buf))
+                (should (window-live-p window))
+                (should (window-live-p other-window))))
+          (when (buffer-live-p buf) (kill-buffer buf))
+          (when (buffer-live-p other) (set-window-buffer nil other)))))))
+
 (ert-deftest agent-test-before-exit-progress-renews-timeout-and-kills-buffer ()
   "Give each progressing skill a full timeout before killing the buffer."
   (let ((agent-backends nil)
@@ -2630,6 +2739,51 @@ timestamp."
       (agent--session-teardown (current-buffer))
       (should (= calls 1))
       (should-not (gethash (current-buffer) agent--session-keys)))))
+
+(ert-deftest agent-test-session-key-owns-its-buffer-kill-cleanup ()
+  "Assigning a key also arranges its release when the buffer dies."
+  (let ((agent-backends nil)
+        (agent--session-keys (make-hash-table :test 'eq)))
+    (let ((buf (generate-new-buffer " *agent-key-owner*")))
+      (apply #'agent-register-backend
+       'one
+       (agent-test--backend
+        :buffer-p (lambda (candidate) (eq candidate buf))))
+      (with-current-buffer buf (agent--assign-session-key))
+      (should (gethash buf agent--session-keys))
+      (kill-buffer buf)
+      (should-not (gethash buf agent--session-keys)))))
+
+(ert-deftest agent-test-kill-then-resume-does-not-report-key-leak ()
+  "Resuming after process teardown and buffer kill reports no key leak."
+  (let ((agent-backends nil)
+        (agent--session-keys (make-hash-table :test 'eq))
+        buffers warnings)
+    (let ((old (generate-new-buffer " *agent-key-old*"))
+          new)
+      (unwind-protect
+          (progn
+            (setq buffers (list old))
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (memq candidate buffers))
+              :find-all-buffers (lambda () buffers)))
+            (cl-letf (((symbol-function 'agent--report-leak)
+                       (lambda (&rest warning) (push warning warnings))))
+              (with-current-buffer old
+                (agent--install-session-teardown)
+                (agent--assign-session-key)
+                (agent--session-teardown old))
+              (agent--ensure-all-session-keys)
+              (kill-buffer old)
+              (setq new (generate-new-buffer " *agent-key-new*")
+                    buffers (list new))
+              (with-current-buffer new (agent--assign-session-key))
+              (should-not warnings)
+              (should (gethash new agent--session-keys))))
+        (when (buffer-live-p old) (kill-buffer old))
+        (when (buffer-live-p new) (kill-buffer new))))))
 
 (ert-deftest agent-test-session-teardown-survives-erroring-closure ()
   "An erroring closure does not abort the rest of teardown."
