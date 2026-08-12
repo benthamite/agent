@@ -330,10 +330,12 @@
           :display-name-suffix (lambda (_buffer) "branch")))
         (should (equal (agent-display-name buf) "project:branch"))))))
 
-(ert-deftest agent-test-session-groups-use-account-key ()
-  "Group session switcher suffixes by session account."
+(ert-deftest agent-test-session-account-is-a-column-of-its-own ()
+  "Render the session account between the name and the annotation."
   (let ((agent-backends nil)
-        (agent--session-keys (make-hash-table :test 'eq)))
+        (agent--session-keys (make-hash-table :test 'eq))
+        (agent-session-annotation-functions
+         (list (lambda (_buffer) "summary"))))
     (with-temp-buffer
       (rename-buffer "*one:~/repo/a/:default*" t)
       (let ((buf (current-buffer)))
@@ -345,8 +347,70 @@
         (setq-local agent--session
                     (agent-session-create :backend 'one :account "work"))
         (puthash buf "a" agent--session-keys)
-        (should (equal (mapcar #'car (agent--group-sessions-by-account))
-                       '("work")))))))
+        (should (equal (car (agent-test--switcher-labels))
+                       "a work summary"))))))
+
+(ert-deftest agent-test-session-account-column-is-dimmed ()
+  "Carry `agent-session-account' on the account, not on the name."
+  (let ((agent-backends nil)
+        (agent--session-keys (make-hash-table :test 'eq))
+        (agent-session-annotation-functions nil))
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/a/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :find-all-buffers (lambda () (list buf))))
+        (setq-local agent--session
+                    (agent-session-create :backend 'one :account "work"))
+        (puthash buf "a" agent--session-keys)
+        (let ((label (car (agent-test--switcher-labels))))
+          (should (eq (get-text-property (string-search "work" label)
+                                         'face label)
+                      'agent-session-account))
+          (should-not (get-text-property 0 'face label)))))))
+
+(ert-deftest agent-test-accountless-sessions-have-no-account-column ()
+  "Leave the account column out when no session records an account.
+An empty column would indent every annotation past nothing."
+  (let ((agent-session-annotation-functions
+         (list (lambda (_buffer) "summary"))))
+    (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+      (should (equal (car (agent-test--switcher-labels))
+                     "project summary")))))
+
+(ert-deftest agent-test-sessions-are-listed-by-key-not-by-account ()
+  "Order the switcher by home-row key, whatever account each runs under.
+Grouping by account moved a session whenever its neighbours changed
+account; the key a session answers to is the one thing about it that
+does not move."
+  (let* ((agent-backends nil)
+         (agent--session-keys (make-hash-table :test 'eq))
+         (agent-session-annotation-functions nil)
+         (buffers (mapcar #'generate-new-buffer
+                          '("*one:~/repo/first/:default*"
+                            "*one:~/repo/second/:default*"
+                            "*one:~/repo/third/:default*"))))
+    (unwind-protect
+        (progn
+          (apply #'agent-register-backend
+                 'one
+                 (agent-test--backend
+                  :buffer-p (lambda (candidate) (memq candidate buffers))
+                  :find-all-buffers (lambda () buffers)))
+          (cl-loop for buf in buffers
+                   for key in '("a" "s" "d")
+                   for account in '("work" "home" "work")
+                   do (with-current-buffer buf
+                        (setq-local agent--session
+                                    (agent-session-create :backend 'one
+                                                          :account account)))
+                   do (puthash buf key agent--session-keys))
+          (should (equal (mapcar #'car (agent--session-suffix-specs))
+                         '("a" "s" "d"))))
+      (mapc #'kill-buffer buffers))))
 
 ;;;; Switcher annotation width
 
@@ -454,6 +518,13 @@ the frame fit."
 (defun agent-test--switcher-label (buffer)
   "Return the switcher label BUFFER would render with, unpadded."
   (nth 1 (agent--session-suffix-spec buffer "a")))
+
+(defun agent-test--switcher-labels ()
+  "Return the labels the switcher renders for every keyed session.
+Padded exactly as the menu pads them, and ordered by home-row key."
+  (mapcar (lambda (spec) (nth 1 spec))
+          (agent--session-suffix-specs (agent--session-label-pad)
+                                       (agent--session-account-pad))))
 
 (defun agent-test--annotation-column (label)
   "Return the display column LABEL's \"summary\" annotation starts at.
@@ -583,10 +654,12 @@ whitespace and nothing after it."
          (list (lambda (_buffer) "A summary with nowhere to go")))
         (agent-session-annotation-max-width 0))
     (agent-test--with-session-buffer "*one:~/repo/project/:default*"
-      (should (equal (agent--session-label buf 20) "project")))))
+      (should (equal (agent--session-label buf 20 0) "project")))))
 
 (ert-deftest agent-test-session-annotations-align-across-accounts ()
-  "Start every annotation at one column, across all account groups."
+  "Start every annotation at one column, whatever account it belongs to.
+Accounts of unequal width would leave the annotations ragged unless
+the account column is padded as well."
   (let ((agent-backends nil)
         (agent--session-keys (make-hash-table :test 'eq))
         (agent-session-annotation-functions
@@ -610,13 +683,10 @@ whitespace and nothing after it."
             (with-current-buffer long
               (setq-local agent--session
                           (agent-session-create :backend 'one
-                                                :account "home")))
+                                                :account "personal")))
             (puthash short "a" agent--session-keys)
             (puthash long "s" agent--session-keys)
-            (let* ((groups (agent--group-sessions-by-account
-                            (agent--session-label-pad)))
-                   (labels (mapcar (lambda (spec) (nth 1 spec))
-                                   (apply #'append (mapcar #'cdr groups)))))
+            (let ((labels (agent-test--switcher-labels)))
               (should (= (length labels) 2))
               (should (apply #'= (mapcar (lambda (label)
                                            (string-search "summary" label))
@@ -650,12 +720,8 @@ when the columns they land on do not."
             ;; Guard the premise: without double-width characters this
             ;; test would pass whatever the padding counted.
             (should (= (string-width "日本語") 6))
-            (let* ((groups (agent--group-sessions-by-account
-                            (agent--session-label-pad)))
-                   (columns
-                    (mapcar (lambda (spec)
-                              (agent-test--annotation-column (nth 1 spec)))
-                            (apply #'append (mapcar #'cdr groups)))))
+            (let ((columns (mapcar #'agent-test--annotation-column
+                                   (agent-test--switcher-labels))))
               (should (= (length columns) 2))
               (should (apply #'= columns)))))))))
 
@@ -686,10 +752,7 @@ label without one ends."
           (cl-loop for buf in buffers
                    for key in '("a" "s" "d" "f")
                    do (puthash buf key agent--session-keys))
-          (let* ((groups (agent--group-sessions-by-account
-                          (agent--session-label-pad)))
-                 (labels (mapcar (lambda (spec) (nth 1 spec))
-                                 (apply #'append (mapcar #'cdr groups))))
+          (let* ((labels (agent-test--switcher-labels))
                  (annotated (seq-filter (lambda (label)
                                           (string-search "summary" label))
                                         labels))
@@ -2173,8 +2236,8 @@ and globally persisting -- an account the session never had."
                                :directory "~/repo/struct-name-wins/"))
         (should (equal (agent-display-name buf) "struct-name-wins"))))))
 
-(ert-deftest agent-test-session-group-key-prefers-struct-account ()
-  "Group sessions by the account stored in the session struct."
+(ert-deftest agent-test-account-column-reads-the-struct-account ()
+  "Fill the switcher's account column from the session struct."
   (let ((agent-backends nil))
     (with-temp-buffer
       (let ((buf (current-buffer)))
@@ -2187,7 +2250,23 @@ and globally persisting -- an account the session never had."
          (agent-session-create :backend 'one
                                :account "struct-account"
                                :directory "~/repo/a/"))
-        (should (equal (agent--session-group-key buf) "struct-account"))))))
+        (should (equal (agent--session-account-name buf)
+                       "struct-account"))))))
+
+(ert-deftest agent-test-account-column-is-blank-without-an-account ()
+  "Leave the account column blank when the session records none.
+Naming the backend there instead would present a tool as an account."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buf))))
+        (agent--set-session
+         buf
+         (agent-session-create :backend 'one :directory "~/repo/a/"))
+        (should (equal (agent--session-account-name buf) ""))))))
 
 ;;;; Session id recording
 
