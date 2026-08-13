@@ -2021,7 +2021,9 @@ is submitted."
         (setq agent--before-exit
               (plist-put agent--before-exit :queue (cdr queue)))
         (when command
-          (agent-submit command buffer)
+          (let ((display-buffer-overriding-action
+                 '(display-buffer-no-window (allow-no-window . t))))
+            (agent-submit command buffer))
           (message "Started %s; this session will close when the before-exit skills finish"
                    command)
           (setq sent t))))

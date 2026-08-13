@@ -1623,6 +1623,43 @@ and globally persisting -- an account the session never had."
           (when (buffer-live-p buf) (kill-buffer buf))
           (when (buffer-live-p other) (set-window-buffer nil other)))))))
 
+(ert-deftest agent-test-before-exit-skills-stay-in-background ()
+  "Keep delayed before-exit skill submissions out of visible windows."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names '("update-log"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        (busy t)
+        submitted)
+    (save-window-excursion
+      (delete-other-windows)
+      (let* ((other (generate-new-buffer " *agent-background-origin*"))
+             (buf (generate-new-buffer "*one:~/repo/project/:default*"))
+             (window (selected-window)))
+        (unwind-protect
+            (progn
+              (set-window-buffer window other)
+              (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buf))
+                :busy-p (lambda (_buffer) busy)
+                :skill-command-prefix "/"
+                :submit (lambda (command &optional buffer)
+                          (push command submitted)
+                          (display-buffer buffer))))
+              (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                         (lambda (_buffer) nil)))
+                (with-current-buffer buf (agent-exit))
+                (setq busy nil)
+                (should (agent--before-exit-transition buf 'step))
+                (should (equal submitted '("/update-log")))
+                (should (eq (selected-window) window))
+                (should (eq (window-buffer window) other))
+                (should-not (get-buffer-window buf t))))
+          (when (buffer-live-p buf) (kill-buffer buf))
+          (when (buffer-live-p other) (kill-buffer other)))))))
+
 (ert-deftest agent-test-before-exit-progress-renews-timeout-and-kills-buffer ()
   "Give each progressing skill a full timeout before killing the buffer."
   (let ((agent-backends nil)

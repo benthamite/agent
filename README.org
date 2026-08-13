@@ -462,12 +462,14 @@ appended to the submitted command). For example:
 
 ~agent-run-skill-before-exit~ uses each backend's registered skill command
 prefix so Claude sessions receive slash commands and Codex sessions receive
-dollar-prefixed skill commands, then submits the first applicable skill. The skills run in
-order, each submitted after the previous one finishes, and the session exits
-after the last; ordinary ready notifications are left unchanged while the chain
-runs. When ~agent-before-exit-skill-names~ is nil, ~agent-before-exit-skill-name~
-is used as a single-skill fallback. Leave ~agent-before-exit-skill-directories~
-nil to run an unscoped skill before exiting every session.
+dollar-prefixed skill commands, then submits the first applicable skill. The
+skills run in order, each submitted after the previous one finishes, and the
+session exits after the last. These submissions do not display the session, so
+an exit chain continues in the background after the user switches away;
+ordinary ready notifications are left unchanged while the chain runs. When
+~agent-before-exit-skill-names~ is nil, ~agent-before-exit-skill-name~ is used
+as a single-skill fallback. Leave ~agent-before-exit-skill-directories~ nil to
+run an unscoped skill before exiting every session.
 ~agent-before-exit-skill-min-duration-seconds~ defaults to 60 seconds, so very
 short sessions skip the before-exit skills when the backend can report elapsed
 session time.
