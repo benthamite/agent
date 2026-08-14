@@ -3141,6 +3141,13 @@ kills the session, since the Codex CLI has no `/exit'."
     (when (agent--run-before-exit-functions backend buffer)
       (agent--exit-session buffer))))
 
+;;;###autoload
+(defun agent-exit-without-skills ()
+  "Exit the current AI session without running before-exit skills."
+  (interactive)
+  (let ((agent-before-exit-skill-inhibit t))
+    (agent-exit)))
+
 (defun agent--exit-session (buffer)
   "Submit `/exit' to session BUFFER without re-running before-exit hooks."
   (agent-submit "/exit" buffer))
@@ -3625,6 +3632,7 @@ when it is not installed."
     ("B" "switch branch" agent-switch-branch)
     ("h" "handoff" agent-handoff)
     ("x" "exit session" agent-exit)
+    ("X" "exit without skills" agent-exit-without-skills)
     ("r" "restart" agent-restart)
     ("l" "history" agent-history)
     ("L" "login" agent-account-login)]

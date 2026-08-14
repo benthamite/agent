@@ -1208,6 +1208,31 @@ observation."
           (agent-exit))
         (should ran)))))
 
+(ert-deftest agent-test-exit-without-skills-skips-before-exit-skills ()
+  "Exit normally without submitting configured before-exit skills."
+  (let ((agent-backends nil)
+        (agent-before-exit-functions nil)
+        (agent-before-exit-skill-names '("update-log"))
+        other-ran
+        submitted)
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :submit (lambda (command _buffer) (push command submitted))
+          :skill-command-prefix (lambda () "$")))
+        (add-hook 'agent-before-exit-functions #'agent-run-skill-before-exit)
+        (add-hook 'agent-before-exit-functions
+                  (lambda (_backend _buffer) (setq other-ran t)))
+        (agent-exit-without-skills)
+        (should (equal submitted '("/exit")))
+        (should other-ran)
+        (should-not agent--before-exit)
+        (should-not agent-before-exit-skill-inhibit)))))
+
 (ert-deftest agent-test-exit-confirms-when-captured-prompts-pending ()
   "Abort exit when pending captured prompts exist and confirmation is declined."
   (let ((agent-backends nil)
@@ -2936,7 +2961,7 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
 (ert-deftest agent-test-menu-binds-the-unified-commands ()
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
-    (dolist (key '("R" "N" "B" "b" "." "L" "-a" "-c" "-w"))
+    (dolist (key '("R" "N" "B" "b" "." "L" "X" "-a" "-c" "-w"))
       (should (member key keys)))
     (dolist (key '("F" "u" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"))
       (should-not (member key keys)))))
