@@ -1440,7 +1440,8 @@ configured alert style."
   "Show a visual notification with TITLE and MESSAGE."
   (when (memq agent-alert-style '(visual both))
     (when (and (require 'alert nil t) (fboundp 'alert))
-      (alert message :title title))))
+      (let ((clear-message-function (lambda () 'dont-clear-message)))
+        (alert message :title title)))))
 
 (defun agent--alert-sound ()
   "Play the configured alert sound."

@@ -2407,6 +2407,18 @@ and globally persisting -- an account the session never had."
 
 ;;;; Alerts
 
+(ert-deftest agent-test-alert-visual-preserves-echo-area-message ()
+  "Preserve the current echo-area message while the notifier runs."
+  (require 'alert)
+  (let ((agent-alert-style 'visual)
+        (clear-message-function (lambda () 'cleared))
+        result)
+    (cl-letf (((symbol-function 'alert)
+               (lambda (&rest _)
+                 (setq result (funcall clear-message-function)))))
+      (agent--alert-visual "Ready" "Waiting"))
+    (should (eq result 'dont-clear-message))))
+
 (ert-deftest agent-test-alert-sound-error-is-nonfatal ()
   "Report sound playback errors without signaling."
   (let ((sound-file (make-temp-file "agent-test-sound" nil ".aiff"))
