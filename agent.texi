@@ -507,7 +507,19 @@ Because extraction can be asynchronous, the continuation may run long after the 
 
 The commands @code{agent-handoff}, @code{agent-audit-project}, @code{agent-debug-backtrace}, @code{agent-act-on-slack-message}, @code{agent-exit}, and @code{agent-restart} resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (@code{agent-claude-handoff}, @code{agent-codex-restart}, and so on) remain available as obsolete aliases. @code{agent-exit}, bound to @samp{x}, kills the session buffer after any configured before-exit skills finish. @code{agent-exit-without-skills}, bound to @samp{X}, uses the same exit path but inhibits the configured before-exit skills. It still checks for pending captured prompts and runs other before-exit functions. Neither command deletes the Emacs window that displayed the session.
 
-@code{agent-handoff} reads the backend's entry in @code{agent-handoff-files}, kills the current session buffer, and starts a new session with the handoff prompt. @code{agent-handoff-from-emacsclient} accepts the source buffer name from an @samp{emacsclient} argument, so agent-authored handoff commands can close the requesting session even though Emacs evaluates the form outside that buffer. If the source buffer name is unavailable, handoff closes the single existing session buffer for the handoff directory before starting the replacement session, which avoids the CLI's instance-name prompt in unattended loops.
+@code{agent-handoff} reads the backend's entry in @code{agent-handoff-files}, kills the current session buffer, and starts a new session with the handoff prompt. By default the new session keeps the source directory. A handoff file can select another directory with YAML front matter:
+
+@example
+---
+target-directory: ../other-project
+---
+
+Continue from this handoff.
+@end example
+
+The target can be absolute or relative to the source session directory, and it must name an existing directory. @code{agent-handoff} resolves and validates it before it kills the source session. Lisp callers can pass the optional @code{TARGET-DIRECTORY} argument instead; an explicit argument takes precedence over file metadata, and file metadata takes precedence over the source directory.
+
+@code{agent-handoff-from-emacsclient} accepts the source buffer name as its first @samp{emacsclient} argument and the optional target directory as its second argument. This lets agent-authored handoff commands close the requesting session even though Emacs evaluates the form outside that buffer. If the source buffer name is unavailable, handoff closes the single existing session buffer for the source directory before starting the replacement session, which avoids the CLI's instance-name prompt in unattended loops.
 
 @code{agent-restart} kills the current session buffer and resumes the same session in place, preserving the session's directory, instance name, account, and any launch state the backend's @code{:restart-options} function captures. It prompts when the active account differs from the session account, and it leaves the account unset when neither the session nor the global selection names one, so a session that ran under the backend's ambient default home is restarted there rather than pushed onto an account it never used.  Every precondition is checked before the old session is killed: restart refuses when a named account is no longer configured, when the account is logged out, or when no resumable session identity exists, and in each case the running session survives untouched. @code{agent-audit-project} prompts for a project directory and runs each skill in @code{agent-audit-skills} sequentially through the backend's non-interactive prompt runner. @code{agent-debug-backtrace} saves the current Emacs backtrace, asks @samp{gptel} to identify likely packages, and submits instructions to fix the bug to a session started in the selected package source directory, or to a running session under a prefix argument. Its extractor, @code{agent--backtrace-context}, schedules the identification to run after the current command rather than doing it inline, because saving the backtrace kills the @samp{*Backtrace*} buffer, which exits the debugger's recursive edit and unwinds the calling frame. @code{agent-setup-kill-on-exit} arranges for a session buffer to be killed when its process exits, consulting the backend's @code{:before-kill-check} slot first. It is not a menu entry: each backend installs it, along with @code{agent-disable-scrollback-truncation} and, for Codex, @code{agent-fix-rendering}, from its session-start hook, so the menu carries no buffer-maintenance commands.
 
@@ -528,12 +540,14 @@ before exiting matching sessions. Each entry in @code{agent-before-exit-skill-na
 is either a skill-name string or a list whose car is the skill name and whose
 cdr is a plist accepting @code{:directories} (restrict where that skill runs,
 overriding @code{agent-before-exit-skill-directories}) and @code{:args} (a string
-appended to the submitted command). For example:
+appended to the submitted command). Set @code{:receipt} non-nil when the skill must
+confirm its closeout result before the chain can continue. For example:
 
 @lisp
 (setq agent-before-exit-skill-names
       '("session-learning-capture"
-        ("update-log" :directories ("~/My Drive/Epoch") :args "--auto")))
+        ("update-log" :directories ("~/My Drive/Epoch")
+                      :args "--auto" :receipt t)))
 @end lisp
 
 @code{agent-run-skill-before-exit} uses each backend's registered skill command
@@ -546,6 +560,20 @@ ordinary ready notifications are left unchanged while the chain runs. When
 @code{agent-before-exit-skill-names} is nil, @code{agent-before-exit-skill-name} is used
 as a single-skill fallback. Leave @code{agent-before-exit-skill-directories} nil to
 run an unscoped skill before exiting every session.
+
+For a @code{:receipt} entry, Agent creates a private temporary directory and appends
+@code{--receipt-file PATH} to the submitted command. The skill must write one JSON
+object to that path. Its @code{status} must be exactly @code{success}, @code{no-op}, or
+@code{failure}; a failure receipt can include a @code{message}. Agent advances the chain
+or exits only after @code{success} or @code{no-op}. A missing file, invalid JSON, unknown
+status, or @code{failure} stops the chain, keeps the session open, and shows a
+warning. Agent removes the temporary receipt directory after reading it or
+tearing down the session. Receipt gating is per entry: plain entries keep the
+stop-event behavior. This lets a learning-capture entry run independently
+before a receipt-gated bookkeeping entry. Repeating @code{agent-exit} while a chain
+is active does not bypass it; use @code{agent-exit-without-skills} for an explicit
+close that skips configured skills.
+
 @code{agent-before-exit-skill-min-duration-seconds} defaults to 60 seconds, so very
 short sessions skip the before-exit skills when the backend can report elapsed
 session time.
@@ -558,8 +586,9 @@ The chain is driven by session stop events and guarded by a watchdog. Each
 submitted skill gets up to @code{agent-before-exit-timeout} seconds (default 600) to
 finish; the watchdog restarts when the next skill begins. If the current skill
 exceeds that interval, the watchdog warns but keeps the exit request armed. The
-session therefore closes when the skill eventually finishes instead of losing
-the requested exit because the skill ran for more than ten minutes.
+chain checks the result when the skill eventually finishes instead of losing
+the requested exit because the skill ran for more than ten minutes. A gated
+entry still needs an accepted receipt at that point.
 
 Backends can veto that automatic close while the submitted skill invocation is
 still visible as unaccepted prompt input. Codex uses this to avoid closing a

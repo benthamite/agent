@@ -51,6 +51,8 @@ Run `M-x agent-menu` for the unified command menu, or bind it directly:
 (keymap-global-set "H-e" #'agent-menu)
 ```
 
+Handoffs keep the source directory by default, but can carry an existing target directory in YAML front matter or through the Lisp and `emacsclient` APIs. Before-exit skill entries can also require a JSON closeout receipt: only explicit `success` and `no-op` results let the chain continue, while failures, missing receipts, and invalid receipts keep the session open. A repeated exit request cannot bypass an active chain.
+
 ## Documentation
 
 For a comprehensive description of all user options, commands, and functions, see the [manual](README.org).

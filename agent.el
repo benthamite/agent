@@ -80,7 +80,9 @@ Each entry is either a skill-name string, or a list whose car is the skill
 name and whose cdr is a plist accepting `:directories' (a list of directories
 that restrict where the skill runs, overriding
 `agent-before-exit-skill-directories') and `:args' (a string appended to the
-submitted command).
+submitted command).  An entry with `:receipt' non-nil must write a JSON result
+to the path supplied through `--receipt-file'.  Its `status' must be `success',
+`no-op', or `failure'.
 
 Skills are submitted in order, each after the previous one finishes, and the
 session exits after the last.  When nil, `agent-before-exit-skill-name' is used
@@ -116,11 +118,13 @@ session closes when the skill eventually finishes."
   "State of the before-exit skill chain in this session buffer.
 Nil when no chain has started.  Otherwise a plist with keys
 `:queue' (skill entries not yet submitted), `:state'
-(`waiting-for-idle', `running', or `closing'), `:started-at'
-(`float-time' when the chain started), and `:timer' (the watchdog
-timer, or nil).  `:last-completion' records the last accepted
-`stop' or `idle-prompt' event so their duplicate pair advances
-the chain only once.  Only
+\\(`waiting-for-idle', `running', or `closing'), `:started-at'
+\\(`float-time' when the chain started), and `:timer' (the watchdog
+timer, or nil).  `:current-entry' names the running skill entry,
+and `:receipt-file' is its expected closeout receipt, or nil for
+an ungated entry.  `:last-completion' records the last accepted
+`stop' or `idle-prompt' event so their duplicate pair advances the
+chain only once.  Only
 `agent--before-exit-transition' may set this variable.")
 
 (defvar-local agent-before-exit-skill-inhibit nil
@@ -1918,27 +1922,30 @@ non-nil when the chain consumed the event."
 (defun agent--before-exit-start (buffer)
   "Start the before-exit skill chain in BUFFER.
 Return non-nil when a chain started and the exit must wait.
-Return nil when a chain is already running, the buffer inhibits
-the chain, no skill applies, or nothing could be submitted."
-  (unless (or agent--before-exit agent-before-exit-skill-inhibit)
-    (let* ((backend (agent--detect-backend buffer))
-           (queue (agent--before-exit-skill-queue backend buffer))
-           (busy (eq (agent-session-display-state buffer backend) 'busy)))
-      (when queue
-        (cl-pushnew #'agent--before-exit-teardown agent--teardown-functions)
-        (setq agent--before-exit
-              (list :queue queue
-                    :state (if busy
-                               'waiting-for-idle
-                             'running)
-                    :started-at (float-time)
-                    :timer (agent--before-exit-start-watchdog buffer)))
-        (if (eq (plist-get agent--before-exit :state) 'waiting-for-idle)
-            t
-          (if (agent--before-exit-submit-next buffer)
+An existing chain also returns non-nil so a repeated exit request
+cannot bypass it.  Return nil when the buffer inhibits the chain,
+no skill applies, or nothing could be submitted."
+  (if agent--before-exit
+      t
+    (unless agent-before-exit-skill-inhibit
+      (let* ((backend (agent--detect-backend buffer))
+             (queue (agent--before-exit-skill-queue backend buffer))
+             (busy (eq (agent-session-display-state buffer backend) 'busy)))
+        (when queue
+          (cl-pushnew #'agent--before-exit-teardown agent--teardown-functions)
+          (setq agent--before-exit
+                (list :queue queue
+                      :state (if busy
+                                 'waiting-for-idle
+                               'running)
+                      :started-at (float-time)
+                      :timer (agent--before-exit-start-watchdog buffer)))
+          (if (eq (plist-get agent--before-exit :state) 'waiting-for-idle)
               t
-            (agent--before-exit-reset)
-            nil))))))
+            (if (agent--before-exit-submit-next buffer)
+                t
+              (agent--before-exit-reset)
+              nil)))))))
 
 (defun agent--before-exit-step (buffer &optional completion)
   "Advance BUFFER's running before-exit chain on a stop event.
@@ -1970,12 +1977,64 @@ Return non-nil when the chain consumed the event."
                (agent--before-exit-close buffer backend))))
           ('running
            (when (agent--before-exit-ready-to-close-p backend buffer)
-             (if (and (plist-get agent--before-exit :queue)
-                      (agent--before-exit-submit-next buffer))
-                 (progn
-                   (agent--before-exit-restart-watchdog buffer)
-                   t)
-               (agent--before-exit-close buffer backend)))))))))
+             (when (agent--before-exit-accept-receipt-p buffer)
+               (if (and (plist-get agent--before-exit :queue)
+                        (agent--before-exit-submit-next buffer))
+                   (progn
+                     (agent--before-exit-restart-watchdog buffer)
+                     t)
+                 (agent--before-exit-close buffer backend))))))))))
+
+(defun agent--before-exit-accept-receipt-p (buffer)
+  "Return non-nil if BUFFER's current entry has an accepted receipt.
+Ungated entries need no receipt.  A missing, invalid, or failed
+receipt stops the chain and keeps BUFFER open."
+  (if-let* ((file (plist-get agent--before-exit :receipt-file)))
+      (let ((result (agent--before-exit-read-receipt file)))
+        (agent--before-exit-cleanup-receipt)
+        (if (memq (plist-get result :status) '(success no-op))
+            t
+          (agent--before-exit-fail buffer result)))
+    t))
+
+(defun agent--before-exit-read-receipt (file)
+  "Return the validated closeout receipt from FILE.
+The result is a plist whose `:status' is `success', `no-op',
+`failure', `missing', or `invalid'."
+  (if (not (file-readable-p file))
+      '(:status missing :message "no receipt file was written")
+    (condition-case err
+        (let* ((data (with-temp-buffer
+                       (insert-file-contents file)
+                       (json-parse-buffer :object-type 'plist
+                                          :array-type 'list
+                                          :null-object nil
+                                          :false-object nil)))
+               (status (plist-get data :status)))
+          (cond
+           ((equal status "success") (plist-put data :status 'success))
+           ((equal status "no-op") (plist-put data :status 'no-op))
+           ((equal status "failure") (plist-put data :status 'failure))
+           (t (list :status 'invalid
+                    :message (format "invalid receipt status `%s'" status)))))
+      (error (list :status 'invalid
+                   :message (format "invalid receipt: %s"
+                                    (error-message-string err)))))))
+
+(defun agent--before-exit-fail (buffer result)
+  "Stop BUFFER's closeout chain because of receipt RESULT."
+  (let* ((entry (plist-get agent--before-exit :current-entry))
+         (skill (and entry (agent--before-exit-skill-entry-name entry)))
+         (detail (or (plist-get result :message)
+                     (format "status `%s'" (plist-get result :status))))
+         (message-text (format "agent: %s closeout stopped: %s"
+                               (or skill "before-exit skill") detail)))
+    (agent--before-exit-reset)
+    (display-warning 'agent message-text :warning)
+    (message "%s" message-text)
+    (when (buffer-live-p buffer)
+      (agent--session-set-state buffer 'awaiting-input))
+    nil))
 
 (defun agent--before-exit-duplicate-completion-p (completion)
   "Return non-nil when COMPLETION duplicates the last completion event."
@@ -2003,6 +2062,7 @@ Return non-nil when the chain consumed the event."
 (defun agent--before-exit-close (buffer backend)
   "Mark BUFFER's chain as closing and schedule BACKEND's exit."
   (agent--before-exit-cancel-watchdog)
+  (agent--before-exit-cleanup-receipt)
   (setq agent--before-exit (plist-put agent--before-exit :state 'closing))
   (agent-session-event buffer 'exit-request)
   (run-at-time 0 nil #'agent--exit-after-before-exit-skill backend buffer)
@@ -2021,6 +2081,18 @@ is submitted."
         (setq agent--before-exit
               (plist-put agent--before-exit :queue (cdr queue)))
         (when command
+          (agent--before-exit-cleanup-receipt)
+          (let ((receipt-file
+                 (and (agent--before-exit-skill-entry-receipt-p entry)
+                      (agent--before-exit-make-receipt-file))))
+            (setq agent--before-exit
+                  (plist-put agent--before-exit :current-entry entry))
+            (setq agent--before-exit
+                  (plist-put agent--before-exit :receipt-file receipt-file))
+            (when receipt-file
+              (setq command
+                    (concat command " --receipt-file "
+                            (shell-quote-argument receipt-file)))))
           (let ((display-buffer-overriding-action
                  '(display-buffer-no-window (allow-no-window . t))))
             (agent-submit command buffer))
@@ -2029,9 +2101,25 @@ is submitted."
           (setq sent t))))
     sent))
 
+(defun agent--before-exit-make-receipt-file ()
+  "Return a nonexistent receipt path in a new private directory."
+  (let ((directory (make-temp-file "agent-closeout-" t)))
+    (set-file-modes directory #o700)
+    (expand-file-name "receipt.json" directory)))
+
+(defun agent--before-exit-cleanup-receipt ()
+  "Remove the current closeout receipt directory, if any."
+  (when-let* ((file (plist-get agent--before-exit :receipt-file))
+              (directory (file-name-directory file)))
+    (when (file-directory-p directory)
+      (delete-directory directory t))
+    (setq agent--before-exit
+          (plist-put agent--before-exit :receipt-file nil))))
+
 (defun agent--before-exit-reset ()
   "Clear the current buffer's chain state and watchdog."
   (agent--before-exit-cancel-watchdog)
+  (agent--before-exit-cleanup-receipt)
   (setq agent--before-exit nil))
 
 (defun agent--before-exit-start-watchdog (buffer)
@@ -2054,7 +2142,8 @@ is submitted."
   "Cancel the before-exit watchdog at session teardown.
 Member of `agent--teardown-functions', registered when a chain
 starts."
-  (agent--before-exit-cancel-watchdog))
+  (agent--before-exit-cancel-watchdog)
+  (agent--before-exit-cleanup-receipt))
 
 (defun agent--before-exit-ready-to-close-p (backend buffer)
   "Return non-nil when BUFFER can close after a before-exit skill.
@@ -2103,6 +2192,10 @@ Fall back to `agent-before-exit-skill-directories' when ENTRY sets none."
 (defun agent--before-exit-skill-entry-args (entry)
   "Return the extra command-argument string for before-exit ENTRY, or nil."
   (and (consp entry) (plist-get (cdr entry) :args)))
+
+(defun agent--before-exit-skill-entry-receipt-p (entry)
+  "Return non-nil when before-exit ENTRY requires a closeout receipt."
+  (and (consp entry) (plist-get (cdr entry) :receipt)))
 
 (defun agent--before-exit-skill-directory-match-p (backend buffer directories)
   "Return non-nil if BACKEND session BUFFER lies within DIRECTORIES.
@@ -2244,25 +2337,40 @@ skill plists, each augmented with `:backend'."
                          (cl-find candidate candidates :test #'string=))))
 
 ;;;###autoload
-(defun agent-handoff (&optional buffer-name)
+(defun agent-handoff (&optional buffer-name target-directory)
   "Close the current session and start a new one with the handoff prompt.
 The /handoff skill must have been run first to write the handoff
 file.  BUFFER-NAME optionally names the source session buffer; it
-defaults to the current buffer.  The new session starts in the
-same directory with the same account and the handoff contents
+defaults to the current buffer.  TARGET-DIRECTORY optionally
+selects the new session directory and takes precedence over a
+`target-directory' value in the handoff file's YAML front matter.
+Without either value, the new session starts in the source
+directory.  The account is preserved and the handoff contents are
 passed as the initial prompt."
   (interactive)
   (let* ((source (agent--handoff-source-buffer buffer-name))
-         (session (agent--handoff-session source))
-         (backend (agent-session-backend session))
-         (prompt (agent--read-handoff-file (agent--handoff-file backend))))
+         (source-session (agent--handoff-session source))
+         (backend (agent-session-backend source-session))
+         (handoff (agent--read-handoff (agent--handoff-file backend)))
+         (source-directory (agent-session-directory source-session))
+         (requested-directory
+          (or (and target-directory
+                   (not (string-empty-p target-directory))
+                   target-directory)
+              (plist-get handoff :target-directory)))
+         (resolved-directory
+          (and requested-directory
+               (agent--handoff-resolve-directory requested-directory
+                                                 source-directory)))
+         (session (agent--handoff-session-in-directory
+                   source-session resolved-directory)))
     (when (and source
                (not (agent--confirm-no-captured-prompts
                      backend source "Handoff")))
       (user-error "Handoff aborted"))
-    (agent--kill-handoff-source backend source
-                                (agent-session-directory session))
-    (agent-start-session session :initial-prompt prompt)))
+    (agent--kill-handoff-source backend source source-directory)
+    (agent-start-session session :initial-prompt
+                         (plist-get handoff :prompt))))
 
 (defun agent--handoff-source-buffer (buffer-name)
   "Return the session buffer named BUFFER-NAME, or the current buffer.
@@ -2294,14 +2402,60 @@ Without a SOURCE buffer, build a session for a prompted backend in
 
 (defun agent--read-handoff-file (file)
   "Return the trimmed contents of handoff FILE, validating it."
+  (plist-get (agent--read-handoff file) :prompt))
+
+(defun agent--read-handoff (file)
+  "Return the prompt and optional target directory from handoff FILE."
   (unless (file-exists-p file)
     (user-error "No handoff file at %s — run /handoff first" file))
-  (let ((prompt (with-temp-buffer
-                  (insert-file-contents file)
-                  (string-trim (buffer-string)))))
+  (let* ((contents (with-temp-buffer
+                     (insert-file-contents file)
+                     (string-trim (buffer-string))))
+         (metadata (agent--handoff-front-matter contents))
+         (prompt (if metadata
+                     (plist-get metadata :prompt)
+                   contents)))
     (when (string-empty-p prompt)
       (user-error "Handoff file is empty — run /handoff first"))
-    prompt))
+    (list :prompt prompt
+          :target-directory (and metadata
+                                 (plist-get metadata :target-directory)))))
+
+(defun agent--handoff-front-matter (contents)
+  "Return Agent handoff metadata from CONTENTS, or nil.
+Recognize YAML front matter only when it contains a
+`target-directory' field, so ordinary Markdown front matter stays
+part of the prompt."
+  (when (string-match "\\`---[ \t]*\r?\n" contents)
+    (let ((header-start (match-end 0)))
+      (when (string-match "^---[ \t]*\r?\n" contents header-start)
+        (let* ((header-end (match-beginning 0))
+               (prompt-start (match-end 0))
+               (header (substring contents header-start header-end)))
+          (when (string-match
+                 "^target-directory:[ \t]*\\(.*\\)[ \t]*\r?$" header)
+            (list :target-directory (string-trim (match-string 1 header))
+                  :prompt (string-trim (substring contents prompt-start)))))))))
+
+(defun agent--handoff-resolve-directory (directory base-directory)
+  "Return existing DIRECTORY as an absolute path relative to BASE-DIRECTORY."
+  (when (string-empty-p directory)
+    (user-error "Handoff target directory is empty"))
+  (let ((expanded (expand-file-name directory base-directory)))
+    (unless (file-directory-p expanded)
+      (user-error "Handoff target directory does not exist: %s" expanded))
+    (agent-session--normalize-directory expanded)))
+
+(defun agent--handoff-session-in-directory (session directory)
+  "Return SESSION copied with DIRECTORY, or SESSION when DIRECTORY is nil."
+  (if (not directory)
+      session
+    (agent-session-create
+     :backend (agent-session-backend session)
+     :account (agent-session-account session)
+     :directory directory
+     :instance (agent-session-instance session)
+     :id (agent-session-id session))))
 
 (defun agent--kill-handoff-source (backend source dir)
   "Kill SOURCE, or the single existing BACKEND buffer in DIR.
@@ -2329,13 +2483,15 @@ would trigger an instance-name prompt and break unattended loops."
 
 ;;;###autoload
 (defun agent-handoff-from-emacsclient ()
-  "Run `agent-handoff' for the client-provided buffer name.
-The first value in `server-eval-args-left' is treated as the
-session buffer that requested the handoff."
+  "Run `agent-handoff' with client-provided arguments.
+The first value in `server-eval-args-left' names the session
+buffer that requested the handoff.  The optional second value is
+the target directory."
   (interactive)
-  (let ((buffer-name (car server-eval-args-left)))
+  (let ((buffer-name (car server-eval-args-left))
+        (target-directory (cadr server-eval-args-left)))
     (setq server-eval-args-left nil)
-    (agent-handoff buffer-name)))
+    (agent-handoff buffer-name target-directory)))
 
 ;;;###autoload
 (defun agent-run-skill ()

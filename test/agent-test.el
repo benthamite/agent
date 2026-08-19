@@ -9,6 +9,8 @@
 (require 'agent)
 (require 'agent-capture)
 
+(defvar server-eval-args-left)
+
 (defun agent-test--backend (&rest keys)
   "Return a minimal valid backend plist extended with KEYS."
   (append
@@ -1482,6 +1484,135 @@ and globally persisting -- an account the session never had."
       (delete-directory agent-prompt-capture-directory t)
       (delete-directory dir t))))
 
+(ert-deftest agent-test-handoff-front-matter-selects-target-directory ()
+  "Start the handoff session in the file's target directory."
+  (let* ((agent-backends nil)
+         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+         (source-dir (file-name-as-directory
+                      (make-temp-file "agent-handoff-source" t)))
+         (target-dir (file-name-as-directory
+                      (make-temp-file "agent-handoff-target" t)))
+         (handoff-file (expand-file-name "handoff.md" source-dir))
+         killed started)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((buf (current-buffer)))
+            (setq default-directory source-dir)
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))))
+            (with-temp-file handoff-file
+              (insert "---\ntarget-directory: "
+                      (file-relative-name target-dir source-dir)
+                      "\n---\n\ncontinue elsewhere\n"))
+            (cl-letf (((symbol-function 'agent--handoff-file)
+                       (lambda (_backend) handoff-file))
+                      ((symbol-function 'agent-session)
+                       (lambda (&optional _buffer)
+                         (agent-session-create :backend 'one :account "work"
+                                               :directory source-dir)))
+                      ((symbol-function 'agent--force-kill-buffer)
+                       (lambda (buffer) (setq killed buffer)))
+                      ((symbol-function 'agent-start-session)
+                       (cl-function
+                        (lambda (session &key initial-prompt
+                                          &allow-other-keys)
+                          (setq started
+                                (list (agent-session-directory session)
+                                      initial-prompt))))))
+              (agent-handoff))
+            (should (eq killed buf))
+            (should (equal started
+                           (list (agent-session--normalize-directory target-dir)
+                                 "continue elsewhere")))))
+      (delete-directory agent-prompt-capture-directory t)
+      (delete-directory source-dir t)
+      (delete-directory target-dir t))))
+
+(ert-deftest agent-test-handoff-api-directory-overrides-file-metadata ()
+  "Prefer an explicit handoff directory to file metadata."
+  (let* ((agent-backends nil)
+         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+         (source-dir (file-name-as-directory
+                      (make-temp-file "agent-handoff-source" t)))
+         (file-dir (file-name-as-directory
+                    (make-temp-file "agent-handoff-file-target" t)))
+         (api-dir (file-name-as-directory
+                   (make-temp-file "agent-handoff-api-target" t)))
+         (handoff-file (expand-file-name "handoff.md" source-dir))
+         started)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((buf (current-buffer)))
+            (setq default-directory source-dir)
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))))
+            (with-temp-file handoff-file
+              (insert "---\ntarget-directory: " file-dir
+                      "\n---\ncontinue\n"))
+            (cl-letf (((symbol-function 'agent--handoff-file)
+                       (lambda (_backend) handoff-file))
+                      ((symbol-function 'agent-session)
+                       (lambda (&optional _buffer)
+                         (agent-session-create :backend 'one
+                                               :directory source-dir)))
+                      ((symbol-function 'agent--force-kill-buffer) #'ignore)
+                      ((symbol-function 'agent-start-session)
+                       (lambda (session &rest _options)
+                         (setq started session))))
+              (agent-handoff nil api-dir))
+            (should
+             (equal (agent-session-directory started)
+                    (agent-session--normalize-directory api-dir)))))
+      (delete-directory agent-prompt-capture-directory t)
+      (delete-directory source-dir t)
+      (delete-directory file-dir t)
+      (delete-directory api-dir t))))
+
+(ert-deftest agent-test-handoff-rejects-missing-target-before-killing-source ()
+  "Keep the source session when the target directory does not exist."
+  (let* ((agent-backends nil)
+         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+         (source-dir (file-name-as-directory
+                      (make-temp-file "agent-handoff-source" t)))
+         (handoff-file (expand-file-name "handoff.md" source-dir))
+         (missing (expand-file-name "missing" source-dir))
+         killed)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((buf (current-buffer)))
+            (setq default-directory source-dir)
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))))
+            (with-temp-file handoff-file (insert "continue\n"))
+            (cl-letf (((symbol-function 'agent--handoff-file)
+                       (lambda (_backend) handoff-file))
+                      ((symbol-function 'agent-session)
+                       (lambda (&optional _buffer)
+                         (agent-session-create :backend 'one
+                                               :directory source-dir)))
+                      ((symbol-function 'agent--force-kill-buffer)
+                       (lambda (_buffer) (setq killed t))))
+              (should-error (agent-handoff nil missing) :type 'user-error)
+              (should-not killed))))
+      (delete-directory agent-prompt-capture-directory t)
+      (delete-directory source-dir t))))
+
+(ert-deftest agent-test-handoff-from-emacsclient-carries-target-directory ()
+  "Pass the optional second client argument to `agent-handoff'."
+  (let ((server-eval-args-left '("*codex:project*" "/tmp/target"))
+        captured)
+    (cl-letf (((symbol-function 'agent-handoff)
+               (lambda (&rest args) (setq captured args))))
+      (agent-handoff-from-emacsclient))
+    (should (equal captured '("*codex:project*" "/tmp/target")))
+    (should-not server-eval-args-left)))
+
 (ert-deftest agent-test-run-skill-before-exit-submits-codex-skill ()
   "Submit a Codex skill and abort the first exit globally by default."
   (let ((agent-backends nil)
@@ -1504,7 +1635,7 @@ and globally persisting -- an account the session never had."
         (should (eq (plist-get agent--before-exit :state) 'running))
         (should-not (plist-get agent--before-exit :queue))
         (should (numberp (plist-get agent--before-exit :started-at)))
-        (should (agent-run-skill-before-exit 'codex buf))))))
+        (should-not (agent-run-skill-before-exit 'codex buf))))))
 
 (ert-deftest agent-test-before-exit-chain-advances-on-stop-events ()
   "Advance a two-skill chain across stop events, then close."
@@ -1538,6 +1669,167 @@ and globally persisting -- an account the session never had."
           (should (agent--before-exit-transition buf 'step))
           (should exited)
           (should (eq (plist-get agent--before-exit :state) 'closing)))))))
+
+(ert-deftest agent-test-before-exit-receipt-success-advances-chain ()
+  "Advance a gated entry only after an explicit success receipt."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names
+         '(("update-log" :args "--auto" :receipt t) "learning-capture"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        events
+        receipt-directory)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
+          :submit (lambda (command &optional _buffer) (push command events))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil)))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (should (string-match-p
+                   "\\`/update-log --auto --receipt-file " (car events)))
+          (let ((receipt (plist-get agent--before-exit :receipt-file)))
+            (setq receipt-directory (file-name-directory receipt))
+            (should-not (file-exists-p receipt))
+            (with-temp-file receipt
+              (insert "{\"status\":\"success\"}\n")))
+          (should (agent--before-exit-transition buf 'step))
+          (should (equal (car events) "/learning-capture"))
+          (should-not (file-exists-p receipt-directory)))))))
+
+(ert-deftest agent-test-before-exit-receipt-no-op-closes-session ()
+  "Close after a gated entry writes an explicit no-op receipt."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names '(("update-log" :receipt t)))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        exited)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
+          :submit (lambda (_command &optional _buffer))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (apply function args))))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (with-temp-file (plist-get agent--before-exit :receipt-file)
+            (insert "{\"status\":\"no-op\"}"))
+          (should (agent--before-exit-transition buf 'step))
+          (should exited)
+          (should (eq (plist-get agent--before-exit :state) 'closing)))))))
+
+(ert-deftest agent-test-before-exit-receipt-failure-stops-chain ()
+  "Keep the session open when a gated entry reports failure."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names
+         '(("update-log" :receipt t) "must-not-run"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        events
+        warnings
+        exited)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
+          :submit (lambda (command &optional _buffer) (push command events))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
+                  ((symbol-function 'display-warning)
+                   (lambda (_type message &rest _args) (push message warnings))))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (with-temp-file (plist-get agent--before-exit :receipt-file)
+            (insert "{\"status\":\"failure\","
+                    "\"message\":\"commit failed\"}"))
+          (should-not (agent--before-exit-transition buf 'step))
+          (should-not agent--before-exit)
+          (should-not exited)
+          (should (= (length events) 1))
+          (should (string-match-p "commit failed" (car warnings))))))))
+
+(ert-deftest agent-test-before-exit-missing-receipt-stops-chain ()
+  "Keep the session open when a gated entry writes no receipt."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names
+         '(("update-log" :receipt t) "must-not-run"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        warnings)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
+          :submit #'ignore))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil))
+                  ((symbol-function 'display-warning)
+                   (lambda (_type message &rest _args) (push message warnings))))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (should-not (agent--before-exit-transition buf 'step))
+          (should-not agent--before-exit)
+          (should (string-match-p "no receipt" (car warnings))))))))
+
+(ert-deftest agent-test-before-exit-invalid-receipt-is-rejected ()
+  "Reject malformed JSON and unknown closeout statuses."
+  (let ((file (make-temp-file "agent-invalid-receipt")))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert "not json"))
+          (should
+           (eq (plist-get (agent--before-exit-read-receipt file) :status)
+               'invalid))
+          (with-temp-file file (insert "{\"status\":\"done\"}"))
+          (should
+           (eq (plist-get (agent--before-exit-read-receipt file) :status)
+               'invalid)))
+      (delete-file file))))
+
+(ert-deftest agent-test-before-exit-plain-learning-entry-needs-no-receipt ()
+  "Keep an ungated learning capture independent of closeout receipts."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names
+         '("session-learning-capture" ("update-log" :receipt t)))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        events)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
+          :submit (lambda (command &optional _buffer) (push command events))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil)))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (should (equal events '("/session-learning-capture")))
+          (should-not (plist-get agent--before-exit :receipt-file))
+          (should (agent--before-exit-transition buf 'step))
+          (should (string-match-p
+                   "\\`/update-log --receipt-file " (car events)))
+          (should (plist-get agent--before-exit :receipt-file))
+          (agent--before-exit-reset))))))
 
 (ert-deftest agent-test-before-exit-counts-stop-idle-prompt-pair-once ()
   "Do not count Stop and its later idle prompt as two completions."
