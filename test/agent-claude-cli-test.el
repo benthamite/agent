@@ -127,17 +127,56 @@ which the writer finishes, sees valid JSON.  No warning is emitted."
       (delete-file path))))
 
 (ert-deftest agent-claude-cli-test-read-claude-json-invalid-warns-once ()
-  "A persistently invalid file warns once and returns nil."
+  "A persistently invalid file warns once, with a snapshot, and returns nil."
   (let ((path (make-temp-file "claude-json" nil ".json" "{\"a\": "))
         (agent-claude-cli--warned nil)
         (warnings nil))
     (unwind-protect
         (cl-letf (((symbol-function 'display-warning)
                    (lambda (&rest args) (push args warnings)))
-                  ((symbol-function 'sleep-for) #'ignore))
+                  ((symbol-function 'sleep-for) #'ignore)
+                  ((symbol-function 'agent-claude-cli--snapshot-invalid-json)
+                   (lambda (_) "/tmp/snapshot.json")))
           (should (null (agent-claude-cli-read-claude-json path)))
-          (should (= (length warnings) 1)))
+          (should (= (length warnings) 1))
+          (should (string-match-p "snapshot" (nth 1 (car warnings)))))
       (delete-file path))))
+
+(ert-deftest agent-claude-cli-test-read-claude-json-skips-retries-after-warned ()
+  "Once a persistent failure was warned about, reads fail fast.
+The retry delays must not be re-paid on every read of a file already
+known to be corrupt."
+  (let ((path (make-temp-file "claude-json" nil ".json" "{\"a\": "))
+        (agent-claude-cli--warned nil)
+        (sleeps 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'display-warning) #'ignore)
+                  ((symbol-function 'sleep-for)
+                   (lambda (&rest _) (setq sleeps (1+ sleeps))))
+                  ((symbol-function 'agent-claude-cli--snapshot-invalid-json)
+                   (lambda (_) "/tmp/snapshot.json")))
+          (should (null (agent-claude-cli-read-claude-json path)))
+          (let ((first-pass-sleeps sleeps))
+            (should (> first-pass-sleeps 0))
+            (should (null (agent-claude-cli-read-claude-json path)))
+            (should (= sleeps first-pass-sleeps))))
+      (delete-file path))))
+
+(ert-deftest agent-claude-cli-test-write-claude-json-round-trip ()
+  "Write JSON atomically and read it back, leaving no temporary file."
+  (let* ((dir (make-temp-file "claude-json-dir" t))
+         (path (expand-file-name ".claude.json" dir))
+         (data (make-hash-table :test #'equal)))
+    (puthash "a" 1 data)
+    (unwind-protect
+        (progn
+          (agent-claude-cli-write-claude-json path data)
+          (let ((read-back (agent-claude-cli-read-claude-json path)))
+            (should (hash-table-p read-back))
+            (should (= (gethash "a" read-back) 1)))
+          (should (equal (directory-files dir nil "claude")
+                         '(".claude.json"))))
+      (delete-directory dir t))))
 
 ;;;; Transcript JSONL
 

@@ -353,22 +353,54 @@ Modifies TARGET-ENV in place."
              (> (hash-table-count account-env) 0))
     (maphash (lambda (k v) (puthash k v target-env)) account-env)))
 
+(defvar agent-claude-cli-read-retry-delays '(0.2 0.5 1.0)
+  "Seconds to wait before each re-read of a `.claude.json' that failed to parse.
+The CLI rewrites the file frequently, so a read can land mid-write and
+see truncated JSON; each retry gives an in-progress writer more time to
+finish.")
+
 (defun agent-claude-cli-read-claude-json (path)
   "Read and parse the JSON file at PATH.
 Return a hash table, or nil if PATH does not exist or is invalid.  A
-parse failure is retried once after a short delay: the CLI rewrites this
-file frequently, so a read can land mid-write and see truncated JSON.
-Only a failure that persists across the retry is warned about."
+parse failure is retried per `agent-claude-cli-read-retry-delays': the
+CLI rewrites this file frequently, so a read can land mid-write and see
+truncated JSON.  A failure that persists across every retry is warned
+about once, with the invalid bytes preserved in a snapshot file."
   (when (file-exists-p path)
     (or (agent-claude-cli--parse-json-file path)
-        (progn
-          (sleep-for 0.2)
-          (agent-claude-cli--parse-json-file path))
-        (progn
-          (agent-claude-cli--warn-once
-           (list 'claude-json path)
-           "unreadable or invalid JSON at %s" path)
-          nil))))
+        (agent-claude-cli--reread-claude-json path))))
+
+(defun agent-claude-cli--reread-claude-json (path)
+  "Retry parsing PATH, then warn once with an evidence snapshot.
+Return the parsed hash table, or nil when every retry fails.  Once a
+persistent failure for PATH has been warned about, skip the retries so
+a corrupt file does not add delays to every subsequent read."
+  (let ((key (list 'claude-json path)))
+    (unless (member key agent-claude-cli--warned)
+      (or (catch 'parsed
+            (dolist (delay agent-claude-cli-read-retry-delays)
+              (sleep-for delay)
+              (when-let* ((data (agent-claude-cli--parse-json-file path)))
+                (throw 'parsed data)))
+            nil)
+          (progn
+            (agent-claude-cli--warn-once
+             key "unreadable or invalid JSON at %s (snapshot: %s)"
+             path (or (agent-claude-cli--snapshot-invalid-json path)
+                      "copy failed"))
+            nil)))))
+
+(defun agent-claude-cli--snapshot-invalid-json (path)
+  "Copy PATH to a temporary evidence file and return the copy's name.
+The CLI rewrites the file frequently, so the invalid bytes must be
+preserved to distinguish a read that raced a rewrite from real
+corruption.  Return nil if the copy fails."
+  (condition-case nil
+      (let ((evidence (make-temp-file "agent-claude-cli-invalid-json-"
+                                      nil ".json")))
+        (copy-file path evidence t)
+        evidence)
+    (error nil)))
 
 (defun agent-claude-cli--parse-json-file (path)
   "Parse the JSON file at PATH, returning nil on any read or parse error."
@@ -391,11 +423,23 @@ Prefers entries where `hasTrustDialogAccepted' is true."
       (puthash key val table)))))
 
 (defun agent-claude-cli-write-claude-json (path data)
-  "Write DATA as pretty-printed JSON to PATH."
-  (require 'json)
-  (with-temp-file path
-    (insert (json-serialize data))
-    (json-pretty-print-buffer)))
+  "Write DATA as pretty-printed JSON to PATH.
+The JSON is written to a temporary file in PATH's directory and renamed
+into place, so a concurrent reader (another Emacs process or the CLI
+itself) never observes a truncated file."
+  (let* ((path (expand-file-name path))
+         (temp (make-temp-file
+                (expand-file-name ".claude-json-" (file-name-directory path)))))
+    (condition-case err
+        (progn
+          (with-temp-file temp
+            (insert (json-serialize data))
+            (json-pretty-print-buffer))
+          (rename-file temp path t))
+      (error
+       (when (file-exists-p temp)
+         (delete-file temp))
+       (signal (car err) (cdr err))))))
 
 ;;;; Provide
 
