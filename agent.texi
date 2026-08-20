@@ -574,13 +574,9 @@ before a receipt-gated bookkeeping entry. Repeating @code{agent-exit} while a ch
 is active does not bypass it; use @code{agent-exit-without-skills} for an explicit
 close that skips configured skills.
 
-@code{agent-before-exit-skill-min-duration-seconds} defaults to 60 seconds, so very
-short sessions skip the before-exit skills when the backend can report elapsed
-session time.
-Set the buffer-local variable @code{agent-before-exit-skill-inhibit} non-nil for
-orchestration sessions that must close immediately without running the
-configured before-exit skill. Handoff commands set this automatically on the
-source session before closing it.
+@code{agent-exit} runs every applicable configured skill regardless of session
+duration. @code{agent-exit-without-skills} is the only exit command that bypasses
+the skill hook; it still runs other before-exit functions.
 
 The chain is driven by session stop events and guarded by a watchdog. Each
 submitted skill gets up to @code{agent-before-exit-timeout} seconds (default 600) to
@@ -706,7 +702,7 @@ When @code{agent-restart} operates on a Codex session, it resumes codex.el's can
 @findex agent-kill-session-buffer
 The function @code{agent-register-backend} registers an AI tool by constructing an @code{agent-backend} struct from keyword arguments. Backend modules call it at load time. Keywords are validated against the struct's slot names, and the required slots @code{:buffer-p}, @code{:find-all-buffers}, and @code{:start-session} are checked so the shared session layer can rely on a consistent interface.
 
-The full slot set is: identity and presentation (@code{name}, @code{label}, @code{icon}, @code{program}), buffer discovery (@code{buffer-p}, @code{find-all-buffers}, @code{find-buffers-for-dir}), session lifecycle (@code{start-session}, @code{session-identity}, @code{restart-options}), send primitives (@code{send-string}, @code{send-return}, @code{submit}), session state probes (@code{waiting-p}, @code{busy-p}, @code{background-tasks-p}, @code{duration-ms}, @code{display-name-suffix}, @code{notify}), accounts (@code{account-env-var}, @code{accounts}, @code{account-file}, @code{shared-config-items}, @code{canonical-home}, @code{account-init}), skills (@code{run-prompt}, @code{exec-prompt}, @code{skill-roots}, @code{skill-command-prefix}), session history (@code{session-headers}, @code{session-prompt}, @code{resume}, @code{prepare-fork}), integration hooks (@code{sync-theme}), and exit safety (@code{before-exit-ready-to-close-p}, @code{before-kill-check}).
+The full slot set is: identity and presentation (@code{name}, @code{label}, @code{icon}, @code{program}), buffer discovery (@code{buffer-p}, @code{find-all-buffers}, @code{find-buffers-for-dir}), session lifecycle (@code{start-session}, @code{session-identity}, @code{restart-options}), send primitives (@code{send-string}, @code{send-return}, @code{submit}), session state probes (@code{waiting-p}, @code{busy-p}, @code{background-tasks-p}, @code{display-name-suffix}, @code{notify}), accounts (@code{account-env-var}, @code{accounts}, @code{account-file}, @code{shared-config-items}, @code{canonical-home}, @code{account-init}), skills (@code{run-prompt}, @code{exec-prompt}, @code{skill-roots}, @code{skill-command-prefix}), session history (@code{session-headers}, @code{session-prompt}, @code{resume}, @code{prepare-fork}), integration hooks (@code{sync-theme}), and exit safety (@code{before-exit-ready-to-close-p}, @code{before-kill-check}).
 
 The @code{:start-session} slot starts a new session parameterized by an @code{agent-session} identity struct, optionally with an initial prompt or a resume id. The @code{:session-identity} slot returns a live session buffer's CLI session id, used by @code{agent-restart} to resume in place. @code{agent-start-session} is the core dispatcher that starts a session through its backend's @code{:start-session} function, passing any extra backend-specific options through. The @code{:send-string} slot inserts text into a session's prompt without submitting it, @code{:send-return} submits the pending prompt, and @code{:submit} atomically inserts and submits; the core wrappers @code{agent-send-string}, @code{agent-send-return}, and @code{agent-submit} dispatch through these slots and emit the corresponding session events.
 

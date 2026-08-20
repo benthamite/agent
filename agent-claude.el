@@ -218,9 +218,6 @@ Source: lobehub/lobe-icons (MIT).")
   :canonical-home "~/.claude/"
   :account-init #'agent-claude--sync-account-json
   :background-tasks-p #'agent-claude--has-background-tasks-p
-  :duration-ms (lambda (buf)
-                 (with-current-buffer buf
-                   (agent-claude-status-duration-ms)))
   :display-name-suffix #'agent-claude--branch-suffix
   :label "Claude Code"
   :run-prompt #'agent-claude-run-prompt

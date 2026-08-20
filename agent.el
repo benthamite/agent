@@ -97,14 +97,6 @@ When nil, run a configured skill before exiting every session.  An entry in
   :type '(repeat directory)
   :group 'agent)
 
-(defcustom agent-before-exit-skill-min-duration-seconds 60
-  "Minimum session duration before running the before-exit skill.
-Set to nil or 0 to run `agent-before-exit-skill-name' regardless
-of session duration.  Backends that cannot report a duration are
-treated as eligible."
-  :type '(choice (const :tag "Disabled" nil) number)
-  :group 'agent)
-
 (defcustom agent-before-exit-timeout 600
   "Seconds before an unfinished before-exit skill raises a warning.
 The watchdog restarts whenever the chain advances to another
@@ -127,11 +119,6 @@ an ungated entry.  `:last-completion' records the last accepted
 chain only once.  Only
 `agent--before-exit-transition' may set this variable.")
 
-(defvar-local agent-before-exit-skill-inhibit nil
-  "Non-nil means skip the configured before-exit skill in this buffer.
-This is useful for orchestration sessions that must close immediately,
-such as handoff-driven autoloops.")
-
 ;;;; Backend registry
 
 (cl-defstruct (agent-backend
@@ -142,7 +129,7 @@ such as handoff-driven autoloops.")
   buffer-p find-all-buffers find-buffers-for-dir
   start-session session-identity restart-options resume
   send-string send-return submit
-  waiting-p busy-p background-tasks-p duration-ms display-name-suffix
+  waiting-p busy-p background-tasks-p display-name-suffix
   notify
   account-env-var accounts account-file shared-config-items canonical-home
   account-init credential-file login-args
@@ -1924,29 +1911,28 @@ non-nil when the chain consumed the event."
   "Start the before-exit skill chain in BUFFER.
 Return non-nil when a chain started and the exit must wait.
 An existing chain also returns non-nil so a repeated exit request
-cannot bypass it.  Return nil when the buffer inhibits the chain,
-no skill applies, or nothing could be submitted."
+cannot bypass it.  Return nil when no skill applies or nothing
+could be submitted."
   (if agent--before-exit
       t
-    (unless agent-before-exit-skill-inhibit
-      (let* ((backend (agent--detect-backend buffer))
-             (queue (agent--before-exit-skill-queue backend buffer))
-             (busy (eq (agent-session-display-state buffer backend) 'busy)))
-        (when queue
-          (cl-pushnew #'agent--before-exit-teardown agent--teardown-functions)
-          (setq agent--before-exit
-                (list :queue queue
-                      :state (if busy
-                                 'waiting-for-idle
-                               'running)
-                      :started-at (float-time)
-                      :timer (agent--before-exit-start-watchdog buffer)))
-          (if (eq (plist-get agent--before-exit :state) 'waiting-for-idle)
+    (let* ((backend (agent--detect-backend buffer))
+           (queue (agent--before-exit-skill-queue backend buffer))
+           (busy (eq (agent-session-display-state buffer backend) 'busy)))
+      (when queue
+        (cl-pushnew #'agent--before-exit-teardown agent--teardown-functions)
+        (setq agent--before-exit
+              (list :queue queue
+                    :state (if busy
+                               'waiting-for-idle
+                             'running)
+                    :started-at (float-time)
+                    :timer (agent--before-exit-start-watchdog buffer)))
+        (if (eq (plist-get agent--before-exit :state) 'waiting-for-idle)
+            t
+          (if (agent--before-exit-submit-next buffer)
               t
-            (if (agent--before-exit-submit-next buffer)
-                t
-              (agent--before-exit-reset)
-              nil)))))))
+            (agent--before-exit-reset)
+            nil))))))
 
 (defun agent--before-exit-step (buffer &optional completion)
   "Advance BUFFER's running before-exit chain on a stop event.
@@ -2162,14 +2148,12 @@ unaccepted at the prompt."
 
 (defun agent--before-exit-skill-queue (backend buffer)
   "Return the ordered before-exit skill entries applicable to BUFFER.
-Return nil when BACKEND session BUFFER is too short-lived or no configured
-entry matches its directory."
-  (when (agent--before-exit-skill-duration-p backend buffer)
-    (seq-filter
-     (lambda (entry)
-       (agent--before-exit-skill-directory-match-p
-        backend buffer (agent--before-exit-skill-entry-directories entry)))
-     (agent--before-exit-skill-entries))))
+Return nil when no configured entry matches its directory."
+  (seq-filter
+   (lambda (entry)
+     (agent--before-exit-skill-directory-match-p
+      backend buffer (agent--before-exit-skill-entry-directories entry)))
+   (agent--before-exit-skill-entries)))
 
 (defun agent--before-exit-skill-entries ()
   "Return the configured ordered before-exit skill entries.
@@ -2206,19 +2190,6 @@ A nil DIRECTORIES matches every session."
         (cl-some (lambda (candidate)
                    (file-in-directory-p directory (file-truename candidate)))
                  directories))))
-
-(defun agent--before-exit-skill-duration-p (backend buffer)
-  "Return non-nil if BACKEND session BUFFER is old enough."
-  (let* ((duration-ms-fn (when-let* ((struct (agent-backend backend)))
-                           (agent-backend-duration-ms struct)))
-         (duration-ms (when duration-ms-fn
-                        (funcall duration-ms-fn buffer))))
-    (or (not agent-before-exit-skill-min-duration-seconds)
-        (<= agent-before-exit-skill-min-duration-seconds 0)
-        (not duration-ms-fn)
-        (not duration-ms)
-        (>= duration-ms (* agent-before-exit-skill-min-duration-seconds
-                           1000)))))
 
 (defun agent--buffer-directory (_backend buffer)
   "Return the normalized directory for BUFFER's session.
@@ -2465,8 +2436,6 @@ without the requesting buffer name; leaving that buffer alive
 would trigger an instance-name prompt and break unattended loops."
   (when-let* ((target (or source
                           (agent--single-session-buffer-for-dir backend dir))))
-    (with-current-buffer target
-      (setq-local agent-before-exit-skill-inhibit t))
     (agent--force-kill-buffer target)))
 
 (defun agent--single-session-buffer-for-dir (backend dir)
@@ -3302,7 +3271,8 @@ kills the session, since the Codex CLI has no `/exit'."
 (defun agent-exit-without-skills ()
   "Exit the current AI session without running before-exit skills."
   (interactive)
-  (let ((agent-before-exit-skill-inhibit t))
+  (let ((agent-before-exit-functions
+         (remove #'agent-run-skill-before-exit agent-before-exit-functions)))
     (agent-exit)))
 
 (defun agent--exit-session (buffer)

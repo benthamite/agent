@@ -499,13 +499,9 @@ before a receipt-gated bookkeeping entry. Repeating ~agent-exit~ while a chain
 is active does not bypass it; use ~agent-exit-without-skills~ for an explicit
 close that skips configured skills.
 
-~agent-before-exit-skill-min-duration-seconds~ defaults to 60 seconds, so very
-short sessions skip the before-exit skills when the backend can report elapsed
-session time.
-Set the buffer-local variable ~agent-before-exit-skill-inhibit~ non-nil for
-orchestration sessions that must close immediately without running the
-configured before-exit skill. Handoff commands set this automatically on the
-source session before closing it.
+~agent-exit~ runs every applicable configured skill regardless of session
+duration. ~agent-exit-without-skills~ is the only exit command that bypasses
+the skill hook; it still runs other before-exit functions.
 
 The chain is driven by session stop events and guarded by a watchdog. Each
 submitted skill gets up to ~agent-before-exit-timeout~ seconds (default 600) to
@@ -640,7 +636,7 @@ When ~agent-restart~ operates on a Codex session, it resumes codex.el's canonica
 #+findex: agent-kill-session-buffer
 The function ~agent-register-backend~ registers an AI tool by constructing an ~agent-backend~ struct from keyword arguments. Backend modules call it at load time. Keywords are validated against the struct's slot names, and the required slots ~:buffer-p~, ~:find-all-buffers~, and ~:start-session~ are checked so the shared session layer can rely on a consistent interface.
 
-The full slot set is: identity and presentation (~name~, ~label~, ~icon~, ~program~), buffer discovery (~buffer-p~, ~find-all-buffers~, ~find-buffers-for-dir~), session lifecycle (~start-session~, ~session-identity~, ~restart-options~), send primitives (~send-string~, ~send-return~, ~submit~), session state probes (~waiting-p~, ~busy-p~, ~background-tasks-p~, ~duration-ms~, ~display-name-suffix~, ~notify~), accounts (~account-env-var~, ~accounts~, ~account-file~, ~shared-config-items~, ~canonical-home~, ~account-init~), skills (~run-prompt~, ~exec-prompt~, ~skill-roots~, ~skill-command-prefix~), session history (~session-headers~, ~session-prompt~, ~resume~, ~prepare-fork~), integration hooks (~sync-theme~), and exit safety (~before-exit-ready-to-close-p~, ~before-kill-check~).
+The full slot set is: identity and presentation (~name~, ~label~, ~icon~, ~program~), buffer discovery (~buffer-p~, ~find-all-buffers~, ~find-buffers-for-dir~), session lifecycle (~start-session~, ~session-identity~, ~restart-options~), send primitives (~send-string~, ~send-return~, ~submit~), session state probes (~waiting-p~, ~busy-p~, ~background-tasks-p~, ~display-name-suffix~, ~notify~), accounts (~account-env-var~, ~accounts~, ~account-file~, ~shared-config-items~, ~canonical-home~, ~account-init~), skills (~run-prompt~, ~exec-prompt~, ~skill-roots~, ~skill-command-prefix~), session history (~session-headers~, ~session-prompt~, ~resume~, ~prepare-fork~), integration hooks (~sync-theme~), and exit safety (~before-exit-ready-to-close-p~, ~before-kill-check~).
 
 The ~:start-session~ slot starts a new session parameterized by an ~agent-session~ identity struct, optionally with an initial prompt or a resume id. The ~:session-identity~ slot returns a live session buffer's CLI session id, used by ~agent-restart~ to resume in place. ~agent-start-session~ is the core dispatcher that starts a session through its backend's ~:start-session~ function, passing any extra backend-specific options through. The ~:send-string~ slot inserts text into a session's prompt without submitting it, ~:send-return~ submits the pending prompt, and ~:submit~ atomically inserts and submits; the core wrappers ~agent-send-string~, ~agent-send-return~, and ~agent-submit~ dispatch through these slots and emit the corresponding session events.
 
