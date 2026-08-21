@@ -269,6 +269,20 @@ account cache and the starting binding."
           (should (equal init-args '("work"))))
       (delete-directory dir t))))
 
+(ert-deftest agent-account-test-sync-propagates-account-init-errors ()
+  "Do not start with stale configuration after account initialization fails."
+  (let* ((dir (make-temp-file "agent-account" t))
+         (home (expand-file-name "work" dir)))
+    (unwind-protect
+        (agent-account-test--with-backend
+            (list :accounts `(("work" . ,home))
+                  :canonical-home dir
+                  :shared-config-items nil
+                  :account-init (lambda (_account) (error "sync failed")))
+          (should-error (agent-account-sync 'stub "work")
+                        :type 'error))
+      (delete-directory dir t))))
+
 ;;;; Credentials and login
 
 (ert-deftest agent-account-test-logged-in-without-credential-file ()

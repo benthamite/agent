@@ -314,20 +314,15 @@ BACKEND is not registered."
   "Sync shared state into BACKEND ACCOUNT's config home.
 Creates the home directory, ensures each item in the backend's
 shared-config-items slot is a symlink to the canonical home, and
-runs the backend's optional account-init function.  Errors are
-demoted to messages so session startup never aborts on a sync
-failure."
+runs the backend's optional account-init function.  Signal any
+sync error so session startup cannot continue with missing or stale
+configuration."
   (when-let* ((home (agent-account-home backend account)))
     (make-directory home t)
-    (condition-case err
-        (progn
-          (agent-account--ensure-shared-symlinks backend home)
-          (when-let* ((struct (agent-backend backend))
-                      (fn (agent-backend-account-init struct)))
-            (funcall fn account)))
-      (error
-       (message "agent-account: failed to sync %s account %s: %S"
-                backend account err)))))
+    (agent-account--ensure-shared-symlinks backend home)
+    (when-let* ((struct (agent-backend backend))
+                (fn (agent-backend-account-init struct)))
+      (funcall fn account))))
 
 (defun agent-account--ensure-shared-symlinks (backend home)
   "Ensure shared config symlinks exist in BACKEND's account HOME."

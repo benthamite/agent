@@ -129,6 +129,11 @@ trust, memories, session history, and other user-facing Codex
 state remain available regardless of which account is active.
 Only account credentials such as `auth.json' remain account-local.")
 
+(defvar agent-codex--toml-cache (make-hash-table :test #'equal)
+  "Map from config file path to (MTIME . VALUES) for TOML reads.
+VALUES maps (KEY . SECTION) cons keys to string values, so reads
+for different account config files never evict each other.")
+
 ;;;; Backend registration
 
 (defconst agent-codex-icon-svg
@@ -153,6 +158,7 @@ Source: SVG Repo (CC0).")
   :account-file 'agent-codex-account-file
   :shared-config-items 'agent-codex--shared-config-items
   :canonical-home "~/.codex/"
+  :account-init #'agent-codex--account-init
   :credential-file "auth.json"
   :login-args '("login")
   :waiting-p #'agent-codex--waiting-p
@@ -208,6 +214,102 @@ Source: SVG Repo (CC0).")
     (codex--get-or-prompt-for-buffer)))
 
 ;;;;; Account selection
+
+(defun agent-codex--account-init (account)
+  "Synchronize canonical hook trust into Codex ACCOUNT's home.
+Codex keys hook trust by the lexical hooks.json path, even when an
+account home's file is a symlink to the canonical hook file.  Copy
+the canonical path's persisted state to the account-specific path
+without computing new hashes, so modified canonical hooks remain
+untrusted."
+  (when-let* ((home (agent-account-home 'codex account))
+              (canonical (agent-account--canonical-home 'codex)))
+    (agent-codex--sync-hook-trust
+     (expand-file-name "config.toml" canonical)
+     (expand-file-name "hooks.json" canonical)
+     (expand-file-name "hooks.json" home))))
+
+(defun agent-codex--sync-hook-trust (config source-hooks target-hooks)
+  "Copy hook trust in CONFIG from SOURCE-HOOKS to TARGET-HOOKS.
+Require SOURCE-HOOKS and TARGET-HOOKS to resolve to the same file.
+Only already-persisted state is copied; this function never trusts
+the current contents of a changed hook.  Return non-nil when CONFIG
+changed."
+  (unless (and (file-exists-p source-hooks)
+               (file-exists-p target-hooks)
+               (file-equal-p source-hooks target-hooks))
+    (error "Codex account hooks do not share the canonical hooks.json"))
+  (let ((blocks (agent-codex--hook-state-blocks config source-hooks)))
+    (unless blocks
+      (error "Canonical Codex hooks have no persisted trust state"))
+    (agent-codex--write-hook-state-blocks config target-hooks blocks)))
+
+(defun agent-codex--hook-state-blocks (config hooks-file)
+  "Return CONFIG hook-state blocks keyed by suffix for HOOKS-FILE.
+Each element is (SUFFIX . BODY), where SUFFIX begins with the hook
+event separator and BODY is the exact TOML section body."
+  (with-temp-buffer
+    (insert-file-contents config)
+    (goto-char (point-min))
+    (let ((pattern
+           (format "^\\[hooks\\.state\\.\"%s\\(:[^\"]+\\)\"\\][ \t]*$"
+                   (regexp-quote (expand-file-name hooks-file))))
+          blocks)
+      (while (re-search-forward pattern nil t)
+        (let* ((suffix (match-string-no-properties 1))
+               (body-start (line-beginning-position 2))
+               (body-end (save-excursion
+                           (goto-char body-start)
+                           (if (re-search-forward "^\\[" nil t)
+                               (line-beginning-position)
+                             (point-max)))))
+          (push (cons suffix
+                      (concat
+                       (string-trim-right
+                        (buffer-substring-no-properties body-start body-end))
+                       "\n"))
+                blocks)
+          (goto-char body-end)))
+      (nreverse blocks))))
+
+(defun agent-codex--write-hook-state-blocks (config hooks-file blocks)
+  "Write hook-state BLOCKS for HOOKS-FILE into CONFIG.
+Replace existing target sections and append missing sections.  Return
+non-nil when CONFIG changed."
+  (with-temp-buffer
+    (insert-file-contents config)
+    (let ((original (buffer-string)))
+      (dolist (block blocks)
+        (agent-codex--replace-hook-state-block
+         hooks-file (car block) (cdr block)))
+      (unless (equal original (buffer-string))
+        (write-region (point-min) (point-max) config nil 'silent)
+        (remhash config agent-codex--toml-cache)
+        t))))
+
+(defun agent-codex--replace-hook-state-block (hooks-file suffix body)
+  "Replace the current buffer's HOOKS-FILE SUFFIX section with BODY.
+Append the section when it does not exist."
+  (let* ((header (format "[hooks.state.\"%s%s\"]"
+                         (expand-file-name hooks-file) suffix))
+         (pattern (format "^%s[ \t]*$" (regexp-quote header))))
+    (goto-char (point-min))
+    (if (re-search-forward pattern nil t)
+        (let ((start (line-beginning-position))
+              (end (save-excursion
+                     (forward-line 1)
+                     (if (re-search-forward "^\\[" nil t)
+                         (line-beginning-position)
+                       (point-max)))))
+          (delete-region start end)
+          (goto-char start)
+          (insert header "\n" body))
+      (goto-char (point-max))
+      (unless (or (bobp) (bolp))
+        (insert "\n"))
+      (unless (bobp)
+        (insert "\n"))
+      (insert header "\n" body))))
 
 (defun agent-codex-account-env (_buffer-name _dir)
   "Return `CODEX_HOME' for the Codex session being started.
@@ -301,11 +403,6 @@ than stale buffer-local launch state from the replaced session."
         (default-value 'codex-terminal-backend)))
 
 ;;;;; TOML helpers
-
-(defvar agent-codex--toml-cache (make-hash-table :test #'equal)
-  "Map from config file path to (MTIME . VALUES) for TOML reads.
-VALUES maps (KEY . SECTION) cons keys to string values, so reads
-for different account config files never evict each other.")
 
 (defun agent-codex--toml-get (file key &optional section)
   "Return the string value of KEY in TOML FILE, or nil.

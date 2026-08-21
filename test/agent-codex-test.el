@@ -36,6 +36,70 @@
                          (list (format "CODEX_HOME=%s" home)))))
       (delete-directory dir t))))
 
+(ert-deftest agent-codex-test-sync-hook-trust-copies-canonical-state ()
+  "Copy canonical hook trust to a symlinked account hooks path."
+  (let* ((dir (make-temp-file "codex-hook-trust" t))
+         (canonical (expand-file-name ".codex" dir))
+         (account (expand-file-name ".codex-work" dir))
+         (config (expand-file-name "config.toml" canonical))
+         (source-hooks (expand-file-name "hooks.json" canonical))
+         (target-hooks (expand-file-name "hooks.json" account)))
+    (unwind-protect
+        (progn
+          (make-directory canonical t)
+          (make-directory account t)
+          (with-temp-file source-hooks
+            (insert "{\"hooks\":{}}\n"))
+          (make-symbolic-link source-hooks target-hooks)
+          (with-temp-file config
+            (insert (format
+                     "[hooks.state.\"%s:pre_tool_use:0:0\"]\n"
+                     source-hooks))
+            (insert "enabled = false\n")
+            (insert "trusted_hash = \"sha256:known\"\n"))
+          (should (agent-codex--sync-hook-trust
+                   config source-hooks target-hooks))
+          (let ((text (with-temp-buffer
+                        (insert-file-contents config)
+                        (buffer-string))))
+            (should (string-match-p
+                     (regexp-quote
+                      (format
+                       "[hooks.state.\"%s:pre_tool_use:0:0\"]\n"
+                       target-hooks))
+                     text))
+            (let ((start 0)
+                  (count 0))
+              (while (string-match "trusted_hash = \"sha256:known\""
+                                   text start)
+                (setq count (1+ count)
+                      start (match-end 0)))
+              (should (= count 2))))
+          (should-not (agent-codex--sync-hook-trust
+                       config source-hooks target-hooks)))
+      (delete-directory dir t))))
+
+(ert-deftest agent-codex-test-sync-hook-trust-rejects-different-hooks ()
+  "Never inherit trust when an account uses a different hooks file."
+  (let* ((dir (make-temp-file "codex-hook-trust" t))
+         (config (expand-file-name "config.toml" dir))
+         (source-hooks (expand-file-name "source-hooks.json" dir))
+         (target-hooks (expand-file-name "target-hooks.json" dir)))
+    (unwind-protect
+        (progn
+          (dolist (file (list source-hooks target-hooks))
+            (with-temp-file file
+              (insert "{\"hooks\":{}}\n")))
+          (with-temp-file config
+            (insert (format
+                     "[hooks.state.\"%s:pre_tool_use:0:0\"]\n"
+                     source-hooks))
+            (insert "trusted_hash = \"sha256:known\"\n"))
+          (should-error
+           (agent-codex--sync-hook-trust config source-hooks target-hooks)
+           :type 'error))
+      (delete-directory dir t))))
+
 ;;;; TOML helpers
 
 (ert-deftest agent-codex-test-toml-roundtrip ()
@@ -843,8 +907,14 @@ so it must not be read as waiting."
     (unwind-protect
         (progn
           (make-directory canonical t)
+          (with-temp-file (expand-file-name "hooks.json" canonical)
+            (insert "{\"hooks\":{}}\n"))
           (with-temp-file canonical-config
-            (insert "[tui]\ntheme = \"light\"\n"))
+            (insert "[tui]\ntheme = \"light\"\n\n")
+            (insert (format
+                     "[hooks.state.\"%s:pre_tool_use:0:0\"]\n"
+                     (expand-file-name "hooks.json" canonical)))
+            (insert "trusted_hash = \"sha256:known\"\n"))
           (agent-account-sync 'codex "work")
           (should (agent-codex--sync-theme "dark"))
           (should (string-match-p
