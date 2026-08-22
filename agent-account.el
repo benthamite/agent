@@ -416,9 +416,13 @@ Returns the single account without prompting when only one exists."
       (completing-read (format "%s account: " backend) names nil t))))
 
 (defun agent-account-selection-names (backend)
-  "Return BACKEND's selectable names: its pools, then its accounts."
-  (append (agent-account-pools backend)
-          (mapcar #'car (agent-account-list backend))))
+  "Return BACKEND's selectable names: its pools, then its accounts.
+A name that is both a pool and an account appears once and selects
+the pool, so such an account cannot be pinned by name."
+  (cl-remove-duplicates
+   (append (agent-account-pools backend)
+           (mapcar #'car (agent-account-list backend)))
+   :test #'string= :from-end t))
 
 (defun agent-account--selection-table (backend names)
   "Return a completion table over NAMES annotating BACKEND's pools."

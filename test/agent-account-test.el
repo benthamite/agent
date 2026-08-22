@@ -426,6 +426,17 @@ the routing memory is cleared and pool refreshes are stubbed out."
     (should (equal (agent-account-selection-names 'stub)
                    '("epoch" "solo" "e1" "e2")))))
 
+(ert-deftest agent-account-test-pool-name-shadows-account-name ()
+  "List a name shared by a pool and an account once, and resolve it as the pool."
+  (agent-account-test--with-backend
+      (list :accounts '(("epoch" :home "/tmp/e1" :pool "epoch")
+                        ("epoch2" :home "/tmp/e2" :pool "epoch")))
+    (should (equal (agent-account-selection-names 'stub) '("epoch" "epoch2")))
+    (agent-account-test--with-usage '(("epoch" :weekly-pct 100.0)
+                                      ("epoch2" :weekly-pct 5.0))
+      (puthash 'stub "epoch" agent-account--current)
+      (should (equal (agent-account-resolve 'stub) "epoch2")))))
+
 (ert-deftest agent-account-test-load-accepts-pool-name ()
   "Accept a persisted selection naming a pool."
   (let ((file (make-temp-file "agent-account")))
