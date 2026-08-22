@@ -109,6 +109,9 @@ Per-account usage lives in =agent-usage.el= and is keyed by backend and account.
 
 One poller serves every backend. It starts with the first session of any backend and stops when the last one is torn down, polling every account that has a live session plus every member of every pool, so routing has data for idle members too. ~agent-usage-interval~ defaults to =300= seconds and doubles after a failed fetch up to ~agent-usage-max-interval~, which defaults to =900=; a success resets it. Readings are written to ~agent-usage-cache-file~ after every fetch and read back on first use, so a fresh Emacs can route before its first poll completes; a reading older than ~agent-usage-stale-after~ seconds no longer counts for routing. The Claude status helpers ~agent-claude-status-session-usage~ and friends read this store and keep answering ISO timestamps for the reset times.
 
+#+findex: agent-usage-show
+~agent-usage-show~ — bound to =U= in ~agent-menu~ — lists every tracked account in a =*agent-usage*= buffer with its pool, session and weekly percentages, weekly reset time, limit flag, and the age of the reading, then fetches fresh readings and re-renders as each arrives; =g= refreshes again. The limit flag and the percentages are what routing acts on, so the buffer shows at a glance why a pool went to the member it did.
+
 ** Backend minor modes
 :PROPERTIES:
 :CUSTOM_ID: h:minor-modes

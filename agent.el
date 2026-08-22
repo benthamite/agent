@@ -38,6 +38,7 @@
 (require 'subr-x)
 (eval-and-compile (require 'transient))
 (require 'agent-account)
+(require 'agent-usage)
 (require 'agent-project)
 
 ;;;; Split-module autoloads
@@ -3781,7 +3782,8 @@ when it is not installed."
     ("X" "exit without skills" agent-exit-without-skills)
     ("r" "restart" agent-restart)
     ("l" "history" agent-history)
-    ("L" "login" agent-account-login)]
+    ("L" "login" agent-account-login)
+    ("U" "usage" agent-usage-show)]
    ["Tools"
     ("s" "run skill" agent-run-skill)
     ("n" "new CR task" agent-trajectory-new-task)

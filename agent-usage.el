@@ -42,6 +42,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'iso8601)
+(require 'tabulated-list)
 
 (defvar agent-backends)
 (declare-function agent-backend "agent" (name))
@@ -50,6 +51,7 @@
 (declare-function agent-session "agent" (&optional buffer))
 (declare-function agent-session-account "agent" (session))
 (declare-function agent-account-list "agent-account" (backend))
+(declare-function agent-account-pool "agent-account" (backend account))
 (declare-function agent-account-pools "agent-account" (backend))
 (declare-function agent-account-pool-members "agent-account" (backend pool))
 
@@ -260,6 +262,110 @@ nothing if the timer is already running."
   (cancel-timer agent-usage--timer)
   (setq agent-usage--timer
         (run-with-timer interval interval #'agent-usage--poll)))
+
+;;;; Usage buffer
+
+(defvar agent-usage-buffer-name "*agent-usage*"
+  "Name of the buffer listing account usage.")
+
+(defvar agent-usage--pending-refresh 0
+  "Fetches started by `agent-usage-refresh' that have not reported yet.")
+
+(defvar-keymap agent-usage-mode-map
+  :doc "Keymap for `agent-usage-mode'."
+  :parent tabulated-list-mode-map
+  "g" #'agent-usage-refresh)
+
+(define-derived-mode agent-usage-mode tabulated-list-mode "Agent-Usage"
+  "Major mode listing the usage of every tracked account."
+  (setq tabulated-list-format
+        [("Backend" 12 t) ("Account" 12 t) ("Pool" 10 t)
+         ("Session" 8 nil :right-align t) ("Weekly" 8 nil :right-align t)
+         ("Weekly reset" 18 nil) ("Limited" 8 nil) ("Age" 8 nil)])
+  (setq tabulated-list-padding 1)
+  (tabulated-list-init-header))
+
+;;;###autoload
+(defun agent-usage-show ()
+  "Show the usage of every tracked account and refresh it.
+Lists live-session accounts and every pool member of every backend,
+with the latest cached reading, then fetches fresh readings and
+re-renders as they arrive."
+  (interactive)
+  (with-current-buffer (get-buffer-create agent-usage-buffer-name)
+    (unless (derived-mode-p 'agent-usage-mode)
+      (agent-usage-mode))
+    (agent-usage--render)
+    (pop-to-buffer (current-buffer))
+    (agent-usage-refresh)))
+
+(defun agent-usage-refresh ()
+  "Fetch fresh readings for every tracked account and re-render."
+  (interactive)
+  (dolist (entry agent-backends)
+    (let ((backend (car entry)))
+      (when (agent-usage--fetcher backend)
+        (dolist (account (agent-usage--tracked-accounts backend))
+          (cl-incf agent-usage--pending-refresh)
+          (agent-usage-fetch backend account #'agent-usage--refresh-done)))))
+  (message "Refreshing usage for %d account%s..."
+           agent-usage--pending-refresh
+           (if (= agent-usage--pending-refresh 1) "" "s")))
+
+(defun agent-usage--refresh-done (_usage)
+  "Re-render the usage buffer once a refresh fetch reports."
+  (setq agent-usage--pending-refresh (max 0 (1- agent-usage--pending-refresh)))
+  (when-let* ((buffer (get-buffer agent-usage-buffer-name)))
+    (with-current-buffer buffer
+      (agent-usage--render)))
+  (when (zerop agent-usage--pending-refresh)
+    (message "Usage refreshed")))
+
+(defun agent-usage--render ()
+  "Fill the current usage buffer from the store."
+  (setq tabulated-list-entries (agent-usage--entries))
+  (tabulated-list-print t))
+
+(defun agent-usage--entries ()
+  "Return `tabulated-list-entries' for every tracked account."
+  (let (entries)
+    (dolist (entry agent-backends (nreverse entries))
+      (let ((backend (car entry)))
+        (when (agent-usage--fetcher backend)
+          (dolist (account (agent-usage--tracked-accounts backend))
+            (push (agent-usage--entry backend account) entries)))))))
+
+(defun agent-usage--entry (backend account)
+  "Return the tabulated-list entry for BACKEND's ACCOUNT."
+  (let ((usage (agent-usage-get backend account)))
+    (list (cons backend account)
+          (vector (symbol-name backend)
+                  (or account "default")
+                  (or (agent-account-pool backend account) "")
+                  (agent-usage--pct (plist-get usage :session-pct))
+                  (agent-usage--pct (plist-get usage :weekly-pct))
+                  (agent-usage--reset (plist-get usage :weekly-reset))
+                  (if (plist-get usage :limited) "yes" "")
+                  (agent-usage--age usage)))))
+
+(defun agent-usage--pct (value)
+  "Return VALUE as a percentage string, or a dash when unknown."
+  (if (numberp value) (format "%.0f%%" value) "-"))
+
+(defun agent-usage--reset (seconds)
+  "Return float SECONDS as a local timestamp, or an empty string."
+  (if (numberp seconds) (format-time-string "%a %d %b %H:%M" seconds) ""))
+
+(defun agent-usage--age (usage)
+  "Return how long ago USAGE was fetched, or a dash when never."
+  (if-let* ((at (plist-get usage :fetched-at)))
+      (let ((seconds (- (float-time) at)))
+        (cond
+         ((< seconds 60) "now")
+         ((< seconds 3600) (format "%dm" (/ seconds 60)))
+         ((< seconds 86400) (format "%dh" (/ seconds 3600)))
+         (t (format "%dd" (/ seconds 86400)))))
+    "-"))
 
 ;;;; Normalization helpers
 

@@ -167,5 +167,40 @@
               (should-not agent-usage--timer)))
         (kill-buffer buf)))))
 
+;;;; Usage buffer
+
+(ert-deftest agent-usage-test-entry-formats-reading ()
+  "Render a reading's percentages, limit flag, and age."
+  (agent-usage-test--with-store
+    (agent-usage-test--with-backend
+        (list :accounts '(("e1" :home "/tmp/e1" :pool "p")))
+      (agent-usage-record 'stub "e1" '(:session-pct 12.4 :weekly-pct 100.0
+                                       :limited t))
+      (let ((row (cadr (agent-usage--entry 'stub "e1"))))
+        (should (equal (aref row 0) "stub"))
+        (should (equal (aref row 1) "e1"))
+        (should (equal (aref row 2) "p"))
+        (should (equal (aref row 3) "12%"))
+        (should (equal (aref row 4) "100%"))
+        (should (equal (aref row 6) "yes"))
+        (should (equal (aref row 7) "now"))))))
+
+(ert-deftest agent-usage-test-entry-without-reading ()
+  "Render dashes for an account that has never been polled."
+  (agent-usage-test--with-store
+    (agent-usage-test--with-backend (list)
+      (let ((row (cadr (agent-usage--entry 'stub nil))))
+        (should (equal (aref row 1) "default"))
+        (should (equal (aref row 3) "-"))
+        (should (equal (aref row 6) ""))
+        (should (equal (aref row 7) "-"))))))
+
+(ert-deftest agent-usage-test-age-buckets ()
+  "Format ages in minutes, hours, and days."
+  (let ((now (float-time)))
+    (should (equal (agent-usage--age (list :fetched-at (- now 120))) "2m"))
+    (should (equal (agent-usage--age (list :fetched-at (- now 7200))) "2h"))
+    (should (equal (agent-usage--age (list :fetched-at (- now 172800))) "2d"))))
+
 (provide 'agent-usage-test)
 ;;; agent-usage-test.el ends here

@@ -3252,9 +3252,9 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
 (ert-deftest agent-test-menu-binds-the-unified-commands ()
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
-    (dolist (key '("R" "N" "B" "b" "." "L" "X" "-a" "-c" "-w"))
+    (dolist (key '("R" "N" "B" "b" "." "L" "U" "X" "-a" "-c" "-w"))
       (should (member key keys)))
-    (dolist (key '("F" "u" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"))
+    (dolist (key '("F" "u" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"))
       (should-not (member key keys)))))
 
 (ert-deftest agent-test-menu-has-no-alert-toggle-command ()
