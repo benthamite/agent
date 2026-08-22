@@ -47,6 +47,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'transient)
+(require 'agent-usage)
 
 (defvar agent-backends)
 (declare-function agent-backend "agent" (name))
@@ -233,16 +234,145 @@ A pool name is routed to a member; an account name is returned as is."
         (agent-account-route backend selection)
       selection)))
 
+(defcustom agent-account-route-hysteresis 10
+  "Usage points by which another pool member must beat the current one.
+Routing keeps the member it last chose for a pool unless a sibling's
+usage score is lower by at least this much, so near-equal members do
+not alternate between consecutive sessions."
+  :type 'number
+  :group 'agent)
+
+(defvar agent-account--routed (make-hash-table :test #'equal)
+  "Map from (BACKEND . POOL) to the member most recently routed to.")
+
 (defun agent-account-route (backend pool)
   "Return the member of BACKEND's POOL a new session should use.
-Members whose credentials are known missing are skipped.  Returns
-the first remaining member, or the first member when none is
-logged in, so the session start can report the missing login."
-  (let ((members (agent-account-pool-members backend pool)))
-    (or (cl-find-if (lambda (account)
-                      (agent-account-logged-in-p backend account))
-                    members)
-        (car members))))
+Members whose credentials are known missing are skipped.  Among the
+rest, members whose latest usage reading is fresh and marks them as
+limited -- or as having exhausted either window -- are set aside,
+and the remaining members are ranked by `agent-account-usage-score',
+unknown usage ranking last.  The member routed to last time is kept
+unless another beats it by `agent-account-route-hysteresis'.  When
+every member is limited, the one whose weekly window resets soonest
+is returned so the session start can still report the limit.
+Returns nil for an empty pool.  Also refreshes the pool's usage so
+the next routing decision sees current data."
+  (when-let* ((members (agent-account-pool-members backend pool)))
+    (let* ((available (or (cl-remove-if-not
+                           (lambda (account)
+                             (agent-account-logged-in-p backend account))
+                           members)
+                          members))
+           (open (cl-remove-if (lambda (account)
+                                 (agent-account--limited-p backend account))
+                               available))
+           (choice (if open
+                       (agent-account--route-among backend pool open)
+                     (agent-account--soonest-reset backend available))))
+      (puthash (cons backend pool) choice agent-account--routed)
+      (agent-account--announce-route backend pool choice (null open))
+      (agent-usage-refresh-pool backend pool)
+      choice)))
+
+(defun agent-account--route-among (backend pool open)
+  "Return the member of OPEN to route BACKEND's POOL to.
+OPEN is the list of members not currently limited."
+  (let* ((ranked (agent-account--rank-by-usage backend open))
+         (best (car ranked))
+         (current (gethash (cons backend pool) agent-account--routed)))
+    (if (and current
+             (member current open)
+             (agent-account--within-hysteresis-p
+              (agent-account-usage-score backend current)
+              (agent-account-usage-score backend best)))
+        current
+      best)))
+
+(defun agent-account--within-hysteresis-p (current-score best-score)
+  "Return non-nil when CURRENT-SCORE is close enough to BEST-SCORE to keep.
+A current member without a score is kept only when the best has none
+either, since unknown usage should not hold off a known-good member."
+  (cond
+   ((null best-score) t)
+   ((null current-score) nil)
+   (t (< (- current-score best-score) agent-account-route-hysteresis))))
+
+(defun agent-account--rank-by-usage (backend accounts)
+  "Return ACCOUNTS of BACKEND sorted by ascending usage score.
+Accounts without a score come last, in their original order."
+  (let ((scored (mapcar (lambda (account)
+                          (cons account (agent-account-usage-score backend account)))
+                        accounts)))
+    (mapcar #'car
+            (sort scored
+                  (lambda (a b)
+                    (cond
+                     ((and (cdr a) (cdr b)) (< (cdr a) (cdr b)))
+                     ((cdr a) t)
+                     (t nil)))))))
+
+(defun agent-account-usage-score (backend account)
+  "Return a usage score for BACKEND's ACCOUNT, or nil when unknown.
+The score is the larger of the weekly and session percentages from
+the latest fresh reading, with the weekly percentage breaking ties by
+contributing a small fraction, so a member with the same peak but a
+fuller week ranks later.  Lower is better."
+  (when-let* ((usage (agent-usage-get backend account))
+              ((agent-usage-fresh-p usage)))
+    (let ((weekly (plist-get usage :weekly-pct))
+          (session (plist-get usage :session-pct)))
+      (when (or weekly session)
+        (+ (max (or weekly 0) (or session 0))
+           (* 0.01 (or weekly 0)))))))
+
+(defun agent-account--limited-p (backend account)
+  "Return non-nil when a fresh reading says ACCOUNT of BACKEND is limited.
+An account is limited when the backend flags it so or either window
+is at or above 100 percent.  Stale or missing readings never count
+as limited, so an account the poller has not reached stays usable."
+  (when-let* ((usage (agent-usage-get backend account))
+              ((agent-usage-fresh-p usage)))
+    (or (plist-get usage :limited)
+        (>= (or (plist-get usage :weekly-pct) 0) 100)
+        (>= (or (plist-get usage :session-pct) 0) 100))))
+
+(defun agent-account--soonest-reset (backend accounts)
+  "Return the member of ACCOUNTS of BACKEND whose limit lifts soonest.
+The soonest of the weekly and session resets counts; an account with
+no known reset sorts last."
+  (car (sort (copy-sequence accounts)
+             (lambda (a b)
+               (let ((ra (agent-account--next-reset backend a))
+                     (rb (agent-account--next-reset backend b)))
+                 (cond
+                  ((and ra rb) (< ra rb))
+                  (ra t)
+                  (t nil)))))))
+
+(defun agent-account--next-reset (backend account)
+  "Return the earliest known window reset time for BACKEND's ACCOUNT."
+  (when-let* ((usage (agent-usage-get backend account)))
+    (let ((resets (delq nil (list (plist-get usage :weekly-reset)
+                                  (plist-get usage :session-reset)))))
+      (when resets
+        (apply #'min resets)))))
+
+(defun agent-account--announce-route (backend pool account all-limited)
+  "Report that BACKEND's POOL was routed to ACCOUNT.
+ALL-LIMITED non-nil means every member was limited and ACCOUNT is
+merely the one whose limit lifts soonest."
+  (let ((usage (agent-usage-get backend account)))
+    (message "%s pool %s -> %s%s%s" backend pool account
+             (if usage
+                 (format " (weekly %s%%, session %s%%)"
+                         (agent-account--pct (plist-get usage :weekly-pct))
+                         (agent-account--pct (plist-get usage :session-pct)))
+               " (usage unknown)")
+             (if all-limited "; every member is at its limit" ""))))
+
+(defun agent-account--pct (value)
+  "Return VALUE formatted as a whole-number percentage, or a dash."
+  (if (numberp value) (format "%.0f" value) "-"))
 
 (defun agent-account-current (backend)
   "Return the persisted selection for new BACKEND sessions, or nil.

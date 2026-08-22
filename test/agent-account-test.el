@@ -8,6 +8,7 @@
 (require 'cl-lib)
 (require 'agent)
 (require 'agent-account)
+(require 'agent-usage)
 
 (defvar agent-account-test--accounts nil
   "Accounts alist bound by indirection tests.")
@@ -374,6 +375,22 @@ account cache and the starting binding."
     ("e2" :home "/tmp/e2" :pool "epoch" :chrome-profile "Work"))
   "Accounts mixing a bare entry with two pool members.")
 
+(defmacro agent-account-test--with-usage (readings &rest body)
+  "Run BODY with an isolated usage store holding READINGS.
+READINGS is a list of (ACCOUNT . PLIST) recorded for backend `stub';
+the routing memory is cleared and pool refreshes are stubbed out."
+  (declare (indent 1))
+  `(let ((agent-usage--data (make-hash-table :test #'equal))
+         (agent-usage-cache-file (make-temp-file "agent-usage"))
+         (agent-account--routed (make-hash-table :test #'equal))
+         (inhibit-message t))
+     (unwind-protect
+         (cl-letf (((symbol-function 'agent-usage-refresh-pool) #'ignore))
+           (dolist (reading ,readings)
+             (agent-usage-record 'stub (car reading) (cdr reading)))
+           ,@body)
+       (delete-file agent-usage-cache-file))))
+
 (ert-deftest agent-account-test-home-reads-both-entry-shapes ()
   "Read the home from a dotted pair and from a plist entry."
   (agent-account-test--with-backend
@@ -423,23 +440,119 @@ account cache and the starting binding."
   "Resolve a pool selection to a concrete member."
   (agent-account-test--with-backend
       (list :accounts agent-account-test--pooled)
-    (puthash 'stub "epoch" agent-account--current)
-    (should (equal (agent-account-resolve 'stub) "e1"))))
+    (agent-account-test--with-usage nil
+      (puthash 'stub "epoch" agent-account--current)
+      (should (equal (agent-account-resolve 'stub) "e1")))))
 
 (ert-deftest agent-account-test-route-skips-logged-out-member ()
   "Skip a pool member whose credentials file is missing."
   (agent-account-test--with-backend
       (list :accounts agent-account-test--pooled :credential-file "auth.json")
-    (cl-letf (((symbol-function 'file-exists-p)
-               (lambda (path) (string-prefix-p "/tmp/e2" path))))
-      (should (equal (agent-account-route 'stub "epoch") "e2")))))
+    (agent-account-test--with-usage nil
+      (cl-letf (((symbol-function 'file-exists-p)
+                 (lambda (path) (string-prefix-p "/tmp/e2" path))))
+        (should (equal (agent-account-route 'stub "epoch") "e2"))))))
 
 (ert-deftest agent-account-test-route-falls-back-to-first-member ()
   "Return the first member when no member is logged in."
   (agent-account-test--with-backend
       (list :accounts agent-account-test--pooled :credential-file "auth.json")
-    (cl-letf (((symbol-function 'file-exists-p) #'ignore))
-      (should (equal (agent-account-route 'stub "epoch") "e1")))))
+    (agent-account-test--with-usage nil
+      (cl-letf (((symbol-function 'file-exists-p) #'ignore))
+        (should (equal (agent-account-route 'stub "epoch") "e1"))))))
+
+(ert-deftest agent-account-test-route-prefers-lowest-usage ()
+  "Route to the member with the lowest usage score."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (agent-account-test--with-usage
+        '(("e1" :weekly-pct 80.0 :session-pct 10.0)
+          ("e2" :weekly-pct 30.0 :session-pct 50.0))
+      (should (equal (agent-account-route 'stub "epoch") "e2")))))
+
+(ert-deftest agent-account-test-route-excludes-limited-member ()
+  "Set aside a member that is limited or has exhausted a window."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (agent-account-test--with-usage
+        '(("e1" :weekly-pct 5.0 :limited t)
+          ("e2" :weekly-pct 90.0))
+      (should (equal (agent-account-route 'stub "epoch") "e2")))
+    (agent-account-test--with-usage
+        '(("e1" :weekly-pct 100.0)
+          ("e2" :weekly-pct 90.0))
+      (should (equal (agent-account-route 'stub "epoch") "e2")))))
+
+(ert-deftest agent-account-test-route-ignores-stale-limit ()
+  "Treat a stale limited reading as unknown rather than limited."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (agent-account-test--with-usage
+        '(("e1" :weekly-pct 100.0 :limited t :fetched-at 1.0)
+          ("e2" :weekly-pct 90.0))
+      (should (equal (agent-account-route 'stub "epoch") "e2"))
+      (should-not (agent-account--limited-p 'stub "e1")))))
+
+(ert-deftest agent-account-test-route-ranks-unknown-last ()
+  "Prefer a member with a known score over one without."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (agent-account-test--with-usage '(("e2" :weekly-pct 95.0))
+      (should (equal (agent-account-route 'stub "epoch") "e2")))))
+
+(ert-deftest agent-account-test-route-keeps-current-within-hysteresis ()
+  "Keep the last routed member unless a sibling is clearly better."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (agent-account-test--with-usage
+        '(("e1" :weekly-pct 50.0) ("e2" :weekly-pct 45.0))
+      (puthash '(stub . "epoch") "e1" agent-account--routed)
+      (should (equal (agent-account-route 'stub "epoch") "e1")))
+    (agent-account-test--with-usage
+        '(("e1" :weekly-pct 50.0) ("e2" :weekly-pct 20.0))
+      (puthash '(stub . "epoch") "e1" agent-account--routed)
+      (should (equal (agent-account-route 'stub "epoch") "e2")))))
+
+(ert-deftest agent-account-test-route-does-not-keep-unknown-over-known ()
+  "Drop a current member without a score when a sibling has one."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (agent-account-test--with-usage '(("e2" :weekly-pct 60.0))
+      (puthash '(stub . "epoch") "e1" agent-account--routed)
+      (should (equal (agent-account-route 'stub "epoch") "e2")))))
+
+(ert-deftest agent-account-test-route-all-limited-picks-soonest-reset ()
+  "Fall back to the member whose limit lifts soonest when all are limited."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (agent-account-test--with-usage
+        '(("e1" :weekly-pct 100.0 :weekly-reset 2000.0)
+          ("e2" :weekly-pct 100.0 :weekly-reset 1000.0 :session-reset 3000.0))
+      (should (equal (agent-account-route 'stub "epoch") "e2")))))
+
+(ert-deftest agent-account-test-route-records-choice-and-refreshes ()
+  "Remember the routed member and refresh the pool's usage."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (agent-account-test--with-usage nil
+      (let (refreshed)
+        (cl-letf (((symbol-function 'agent-usage-refresh-pool)
+                   (lambda (backend pool) (setq refreshed (list backend pool)))))
+          (agent-account-route 'stub "epoch")
+          (should (equal refreshed '(stub "epoch")))
+          (should (equal (gethash '(stub . "epoch") agent-account--routed)
+                         "e1")))))))
+
+(ert-deftest agent-account-test-usage-score ()
+  "Score by the fuller window, with the weekly share breaking ties."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (agent-account-test--with-usage
+        '(("e1" :weekly-pct 40.0 :session-pct 70.0)
+          ("e2" :weekly-pct 70.0 :session-pct 10.0))
+      (should (< (agent-account-usage-score 'stub "e1")
+                 (agent-account-usage-score 'stub "e2")))
+      (should-not (agent-account-usage-score 'stub "solo")))))
 
 (ert-deftest agent-account-test-resolve-keeps-plain-account ()
   "Return a non-pool selection unchanged."

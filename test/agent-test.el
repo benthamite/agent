@@ -1446,6 +1446,29 @@ and globally persisting -- an account the session never had."
           (should-not prompted))
       (delete-directory home t))))
 
+(ert-deftest agent-test-restart-account-keeps-pool-member ()
+  "Restart on the session's own pool member instead of routing or prompting."
+  (let* ((home (make-temp-file "agent-test-account" t))
+         (agent-backends nil)
+         (agent-account--current (make-hash-table :test #'eq))
+         prompted routed)
+    (unwind-protect
+        (progn
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :accounts `(("e1" :home ,home :pool "p")
+                        ("e2" :home ,home :pool "p"))))
+          (puthash 'one "p" agent-account--current)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) (setq prompted t) "e1"))
+                    ((symbol-function 'agent-account-route)
+                     (lambda (&rest _) (setq routed t) "e1")))
+            (should (equal (agent-restart--account 'one "e2") "e2")))
+          (should-not prompted)
+          (should-not routed))
+      (delete-directory home t))))
+
 (ert-deftest agent-test-restart-without-restart-options-omits-extras ()
   "Restart backends lacking restart-options with only the resume id."
   (let ((agent-backends nil)

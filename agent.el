@@ -3316,14 +3316,18 @@ which one to use."
   "Return the account to restart a BACKEND session with.
 SESSION-ACCOUNT is the account recorded on the session.  Prompt for
 which account to use when it differs from the currently selected
-account.
+account.  When the selection is a pool the session's account belongs
+to, the session's account is kept without prompting.
 
 Return nil when neither is set, because the session ran under the
 backend's ambient default home and the restart must reuse it.
 Prompting here would instead force an account the session never had
 and persist that choice globally, which also hides the session's own
 transcript from account-scoped history browsers."
-  (let ((selected (agent-account-resolve backend)))
+  (let ((selected (if (agent-restart--session-in-selected-pool-p
+                       backend session-account)
+                      session-account
+                    (agent-account-resolve backend))))
     (agent-restart--ensure-account backend selected)
     (cond
      ((and session-account selected
@@ -3336,6 +3340,18 @@ transcript from account-scoped history browsers."
      (selected)
      (session-account
       (agent-restart--ensure-account backend session-account)))))
+
+(defun agent-restart--session-in-selected-pool-p (backend session-account)
+  "Return non-nil when SESSION-ACCOUNT belongs to BACKEND's selected pool.
+A restart then stays on the member the session already ran under
+rather than being routed to a sibling, since the transcript being
+resumed lives in that member's history."
+  (when-let* ((selection (agent-account-current backend))
+              ((agent-account-pool-p backend selection)))
+    (and session-account
+         (member session-account
+                 (agent-account-pool-members backend selection))
+         t)))
 
 (defun agent-restart--ensure-account (backend account)
   "Return ACCOUNT after checking it is configured for BACKEND."
