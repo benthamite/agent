@@ -511,16 +511,13 @@ notification would double-report the same interruption."
   (let ((proc (make-pipe-process :name "agent-usage-test" :noquery t))
         calls
         deleted
-        backed-off)
+        reported)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
                    (lambda (_config-dir) "token"))
                   ((symbol-function 'delete-process)
                    (lambda (process)
                      (setq deleted process)))
-                  ((symbol-function 'agent-claude--usage-backoff)
-                   (lambda ()
-                     (setq backed-off t)))
                   ((symbol-function 'url-retrieve)
                    (lambda (&rest args)
                      (push args calls)
@@ -530,26 +527,23 @@ notification would double-report the same interruption."
                                        "Invalid argument"
                                        proc))
                        :retrieved))))
-          (should (eq (agent-claude--fetch-usage-for-account "personal")
+          (should (eq (agent-claude--usage-fetch
+                       "personal" (lambda (usage) (setq reported (list usage))))
                       :retrieved))
           (should (= (length calls) 2))
           (should (eq deleted proc))
-          (should-not backed-off))
+          (should-not reported))
       (when (process-live-p proc)
         (delete-process proc)))))
 
-(ert-deftest agent-claude-test-fetch-usage-backs-off-after-retry-fails ()
-  "Back off instead of signaling when retrying a usage poll also fails."
+(ert-deftest agent-claude-test-fetch-usage-reports-failure-after-retry-fails ()
+  "Report a failed fetch instead of signaling when the retry also fails."
   (let ((proc (make-pipe-process :name "agent-usage-test" :noquery t))
         (calls 0)
-        backed-off)
+        reported)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
                    (lambda (_config-dir) "token"))
-                  ((symbol-function 'agent-claude--usage-backoff)
-                   (lambda ()
-                     (setq backed-off t)
-                     :backoff))
                   ((symbol-function 'url-retrieve)
                    (lambda (&rest _args)
                      (setq calls (1+ calls))
@@ -557,10 +551,10 @@ notification would double-report the same interruption."
                              (list "Writing to process"
                                    "Invalid argument"
                                    proc)))))
-          (should (eq (agent-claude--fetch-usage-for-account "personal")
-                      :backoff))
+          (agent-claude--usage-fetch
+           "personal" (lambda (usage) (setq reported (list usage))))
           (should (= calls 2))
-          (should backed-off))
+          (should (equal reported '(nil))))
       (when (process-live-p proc)
         (delete-process proc)))))
 
@@ -574,9 +568,51 @@ notification would double-report the same interruption."
                (lambda (&rest _args)
                  (setq observed url-http-attempt-keepalives)
                  :retrieved)))
-      (should (eq (agent-claude--fetch-usage-for-account "personal")
+      (should (eq (agent-claude--usage-fetch "personal" #'ignore)
                   :retrieved))
       (should-not observed))))
+
+(ert-deftest agent-claude-test-fetch-usage-reports-missing-token ()
+  "Report failure without a request when the account has no OAuth token."
+  (let (reported called)
+    (cl-letf (((symbol-function 'agent-claude-cli-oauth-token) #'ignore)
+              ((symbol-function 'url-retrieve)
+               (lambda (&rest _args) (setq called t))))
+      (agent-claude--usage-fetch
+       "personal" (lambda (usage) (setq reported (list usage))))
+      (should-not called)
+      (should (equal reported '(nil))))))
+
+(ert-deftest agent-claude-test-normalize-usage ()
+  "Normalize the usage endpoint's windows into the shared plist shape."
+  (let ((usage (agent-claude--normalize-usage
+                '(:five_hour (:utilization 42 :resets_at "2026-08-22T18:00:00Z")
+                  :seven_day (:utilization 100 :resets_at "2026-08-25T00:00:00Z")))))
+    (should (= (plist-get usage :session-pct) 42.0))
+    (should (= (plist-get usage :weekly-pct) 100.0))
+    (should (plist-get usage :limited))
+    (should (equal (agent-usage-iso-time (plist-get usage :session-reset))
+                   "2026-08-22T18:00:00Z"))))
+
+(ert-deftest agent-claude-test-status-usage-reads-shared-store ()
+  "Read session usage from the shared store keyed by the buffer's account."
+  (let ((agent-usage--data (make-hash-table :test #'equal))
+        (agent-usage-cache-file (make-temp-file "agent-usage")))
+    (unwind-protect
+        (with-temp-buffer
+          (agent--set-session
+           (current-buffer)
+           (agent-session-create :backend 'claude-code :account "personal"
+                                 :directory "~/repo/"))
+          (agent-usage-record 'claude-code "personal"
+                              '(:session-pct 12.0 :weekly-pct 34.0
+                                :session-reset 1787423929.0))
+          (should (= (agent-claude-status-session-usage) 12.0))
+          (should (= (agent-claude-status-weekly-usage) 34.0))
+          (should (equal (agent-claude-status-session-reset)
+                         "2026-08-22T18:38:49Z"))
+          (should-not (agent-claude-status-weekly-reset)))
+      (delete-file agent-usage-cache-file))))
 
 ;;;; Display names
 
@@ -1049,7 +1085,7 @@ notification would double-report the same interruption."
         (claude-code-process-environment-functions nil)
         (kill-buffer-query-functions kill-buffer-query-functions))
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude--fetch-usage) #'ignore)
+        (cl-letf (((symbol-function 'agent-usage--poll) #'ignore)
                   ((symbol-function 'agent-claude--monet-install) #'ignore)
                   ((symbol-function 'agent-claude--monet-remove) #'ignore)
                   ((symbol-function 'claude-code--find-all-claude-buffers)
@@ -1076,7 +1112,7 @@ notification would double-report the same interruption."
         (claude-code-process-environment-functions nil)
         (kill-buffer-query-functions kill-buffer-query-functions))
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude--fetch-usage) #'ignore)
+        (cl-letf (((symbol-function 'agent-usage--poll) #'ignore)
                   ((symbol-function 'agent-claude--monet-install) #'ignore)
                   ((symbol-function 'agent-claude--monet-remove) #'ignore)
                   ((symbol-function 'claude-code--buffer-p)
@@ -1109,7 +1145,7 @@ notification would double-report the same interruption."
         (claude-code-process-environment-functions nil)
         (kill-buffer-query-functions kill-buffer-query-functions))
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude--fetch-usage) #'ignore)
+        (cl-letf (((symbol-function 'agent-usage--poll) #'ignore)
                   ((symbol-function 'agent-claude--monet-install) #'ignore)
                   ((symbol-function 'agent-claude--monet-remove) #'ignore)
                   ((symbol-function 'claude-code--buffer-p)
@@ -1138,7 +1174,7 @@ notification would double-report the same interruption."
         (claude-code-process-environment-functions nil)
         (kill-buffer-query-functions kill-buffer-query-functions))
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude--fetch-usage) #'ignore)
+        (cl-letf (((symbol-function 'agent-usage--poll) #'ignore)
                   ((symbol-function 'agent-claude--monet-install) #'ignore)
                   ((symbol-function 'agent-claude--monet-remove) #'ignore)
                   ((symbol-function 'claude-code--find-all-claude-buffers)
@@ -1159,17 +1195,17 @@ notification would double-report the same interruption."
   (let ((buf-a (generate-new-buffer " *claude-usage-a*"))
         (buf-b (generate-new-buffer " *claude-usage-b*")))
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude--fetch-usage) #'ignore)
+        (cl-letf (((symbol-function 'agent-usage--poll) #'ignore)
                   ((symbol-function 'claude-code--find-all-claude-buffers)
                    (lambda () (list buf-a buf-b))))
           (agent-claude-start-usage-polling)
-          (should agent-claude--usage-timer)
+          (should agent-usage--timer)
           (agent-claude--maybe-stop-usage-polling buf-a)
-          (should agent-claude--usage-timer)
+          (should agent-usage--timer)
           (cl-letf (((symbol-function 'claude-code--find-all-claude-buffers)
                      (lambda () (list buf-b))))
             (agent-claude--maybe-stop-usage-polling buf-b)
-            (should-not agent-claude--usage-timer)))
+            (should-not agent-usage--timer)))
       (agent-claude-stop-usage-polling)
       (kill-buffer buf-a)
       (kill-buffer buf-b))))
@@ -1212,7 +1248,7 @@ session but left its listening server alive until the GC sweep."
     (unwind-protect
         (cl-letf (((symbol-function 'claude-code--buffer-p)
                    (lambda (candidate) (eq candidate buffer)))
-                  ((symbol-function 'agent-claude--fetch-usage) #'ignore)
+                  ((symbol-function 'agent-usage--poll) #'ignore)
                   ((symbol-function 'agent-claude--monet-stop-session)
                    (lambda (key) (push key stopped))))
           (cl-progv '(monet--sessions) (list sessions)
@@ -1266,7 +1302,7 @@ session but left its listening server alive until the GC sweep."
     (unwind-protect
         (cl-letf (((symbol-function 'claude-code--buffer-p)
                    (lambda (candidate) (eq candidate buffer)))
-                  ((symbol-function 'agent-claude--fetch-usage) #'ignore))
+                  ((symbol-function 'agent-usage--poll) #'ignore))
           (cl-progv '(monet--sessions) (list sessions)
             (with-current-buffer buffer
               (set (make-local-variable 'agent-claude--monet-key)

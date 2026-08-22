@@ -25,6 +25,7 @@ The package is split into a small backend-agnostic core and focused modules:
 |----------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | =agent.el=           | Core: backend registry, session identity and state machine, session keys and teardown, unified orchestration commands (handoff, restart, exit, resume, branch navigation, skills, audits, backtrace debugging), transient menu, alerts, theme sync |
 | =agent-account.el=   | Multi-account support shared by all backends: selection, persistence, per-account config homes, symlinked shared state                                                                                                      |
+| =agent-usage.el=     | Per-account usage store and poller shared by all backends                                                                                                                                                                   |
 | =agent-capture.el=   | Persisted Org prompt capture, keyed to the session it targets                                                                                                                                                               |
 | =agent-project.el=   | Account-scoped project sources: registry and path-pattern candidates, model ranking, and the project prompt for things that carry no directory of their own                                                                 |
 | =agent-slack.el=     | Slack-message-to-project routing: reads the message at point as text with no directory of its own, leaving the project to the shared project reader                                                                          |
@@ -89,6 +90,20 @@ An accounts entry is either =(NAME . HOME)= or =(NAME :home HOME :pool POOL ...)
 
 #+findex: agent-account-login
 Credentials are part of the account model too. A backend may declare the account-local credentials file inside each home (=auth.json= for Codex) and the CLI arguments of its login flow. ~agent-account-login~ — bound to =L= in ~agent-menu~ — runs that login flow with the selected account's environment, so the credentials always land in the right account home; running the bare CLI login in a terminal would write to the backend's default home instead. The command shows the login output, including the authentication URL, in a dedicated buffer and reports success or failure when the flow finishes. Session starts guard on the same declaration: when an account's credentials file is missing — after the in-session logout command, or when tokens were removed out of band — ~agent-start-session~ refuses to spawn a session that could only fail to authenticate and points at ~agent-account-login~ instead. Backends that do not declare a credentials file (Claude Code stores credentials in the macOS Keychain) are assumed logged in and never blocked.
+
+** Account usage
+:PROPERTIES:
+:CUSTOM_ID: h:usage
+:END:
+#+vindex: agent-usage-interval
+#+vindex: agent-usage-max-interval
+#+vindex: agent-usage-cache-file
+#+vindex: agent-usage-stale-after
+#+findex: agent-usage-get
+#+findex: agent-usage-fetch
+Per-account usage lives in =agent-usage.el= and is keyed by backend and account. A backend that can report usage declares a ~:usage-fetch~ slot: a function called with an account name and a callback, which it calls with a normalized plist or nil. The plist carries ~:session-pct~ and ~:weekly-pct~ (percent of the short and long windows used), ~:session-reset~ and ~:weekly-reset~ (reset times as float seconds), ~:limited~ (non-nil when the backend refuses further requests), and ~:fetched-at~. Claude reads the undocumented =api/oauth/usage= endpoint with the Keychain OAuth token; Codex reads the ChatGPT =wham/usage= endpoint with the access token and account id stored in the account home's =auth.json=, classifying a window of at least a day as weekly and a shorter one as the session window, so a plan with a single weekly window reports only that. ~agent-usage-get~ answers the latest reading and ~agent-usage-fetch~ refreshes one account.
+
+One poller serves every backend. It starts with the first session of any backend and stops when the last one is torn down, polling every account that has a live session plus every member of every pool, so routing has data for idle members too. ~agent-usage-interval~ defaults to =300= seconds and doubles after a failed fetch up to ~agent-usage-max-interval~, which defaults to =900=; a success resets it. Readings are written to ~agent-usage-cache-file~ after every fetch and read back on first use, so a fresh Emacs can route before its first poll completes; a reading older than ~agent-usage-stale-after~ seconds no longer counts for routing. The Claude status helpers ~agent-claude-status-session-usage~ and friends read this store and keep answering ISO timestamps for the reset times.
 
 ** Backend minor modes
 :PROPERTIES:
@@ -201,8 +216,6 @@ The =agent-todo= module has two options, both formerly named after Claude. ~agen
 :END:
 
 #+vindex: agent-claude-status-interval
-#+vindex: agent-claude-usage-interval
-#+vindex: agent-claude-usage-max-interval
 #+vindex: agent-claude-accounts
 #+vindex: agent-claude-account-file
 #+vindex: agent-claude-settings-file
@@ -216,7 +229,7 @@ The =agent-todo= module has two options, both formerly named after Claude. ~agen
 #+vindex: agent-claude-batch-model
 The Claude backend options control account selection, session metadata, and non-interactive execution. ~agent-claude-accounts~ is an alist of account names to Claude configuration directories, either as bare paths or as plists with a ~:home~ and an optional ~:pool~ ([[#h:account-model][Account model]]), and ~agent-claude-account-file~ stores the selected account across Emacs sessions. Use ~agent-claude-select-account~ or the shared account infix in ~agent-menu~ to switch accounts before starting a new session. Both commands are thin wrappers around ~agent-account-select~, which persists the choice and syncs the account's config home; ~agent-account-init~ prepares or repairs any backend's account home.
 
-Status and usage polling are controlled by integer intervals. ~agent-claude-status-interval~ defaults to =5= seconds and reads status JSON emitted by the bundled statusline script. ~agent-claude-usage-interval~ defaults to =300= seconds and backs off up to ~agent-claude-usage-max-interval~, which defaults to =900= seconds. Usage polling reads the account's OAuth token from the macOS Keychain, so accounts authenticated with an API key rather than an OAuth subscription—whose OAuth Keychain store is an empty JSON object—are silently skipped rather than treated as a broken lookup. The Keychain lookup runs from the temporary-file directory, so a poll that fires while the current buffer's =default-directory= names a deleted worktree cannot break the subprocess spawn.
+Status polling is controlled by ~agent-claude-status-interval~, which defaults to =5= seconds and reads status JSON emitted by the bundled statusline script. Usage polling is shared with the other backends ([[#h:usage][Account usage]]); ~agent-claude-usage-interval~ and ~agent-claude-usage-max-interval~ are obsolete aliases of ~agent-usage-interval~ and ~agent-usage-max-interval~. The Claude fetcher reads the account's OAuth token from the macOS Keychain, so accounts authenticated with an API key rather than an OAuth subscription—whose OAuth Keychain store is an empty JSON object—are silently skipped rather than treated as a broken lookup. The Keychain lookup runs from the temporary-file directory, so a poll that fires while the current buffer's =default-directory= names a deleted worktree cannot break the subprocess spawn.
 
 Batch execution options are passed to =claude -p=. ~agent-claude-batch-permission-mode~ defaults to ="auto"=, ~agent-claude-batch-max-turns~ defaults to =30=, and the allowed tool, model, and appended-system-prompt options let you narrow or expand what non-interactive Claude tasks may do.
 
@@ -640,7 +653,7 @@ When ~agent-restart~ operates on a Codex session, it resumes codex.el's canonica
 #+findex: agent-kill-session-buffer
 The function ~agent-register-backend~ registers an AI tool by constructing an ~agent-backend~ struct from keyword arguments. Backend modules call it at load time. Keywords are validated against the struct's slot names, and the required slots ~:buffer-p~, ~:find-all-buffers~, and ~:start-session~ are checked so the shared session layer can rely on a consistent interface.
 
-The full slot set is: identity and presentation (~name~, ~label~, ~icon~, ~program~), buffer discovery (~buffer-p~, ~find-all-buffers~, ~find-buffers-for-dir~), session lifecycle (~start-session~, ~session-identity~, ~restart-options~), send primitives (~send-string~, ~send-return~, ~submit~), session state probes (~waiting-p~, ~busy-p~, ~background-tasks-p~, ~display-name-suffix~, ~notify~), accounts (~account-env-var~, ~accounts~, ~account-file~, ~shared-config-items~, ~canonical-home~, ~account-init~), skills (~run-prompt~, ~exec-prompt~, ~skill-roots~, ~skill-command-prefix~), session history (~session-headers~, ~session-prompt~, ~resume~, ~prepare-fork~), integration hooks (~sync-theme~), and exit safety (~before-exit-ready-to-close-p~, ~before-kill-check~).
+The full slot set is: identity and presentation (~name~, ~label~, ~icon~, ~program~), buffer discovery (~buffer-p~, ~find-all-buffers~, ~find-buffers-for-dir~), session lifecycle (~start-session~, ~session-identity~, ~restart-options~), send primitives (~send-string~, ~send-return~, ~submit~), session state probes (~waiting-p~, ~busy-p~, ~background-tasks-p~, ~display-name-suffix~, ~notify~), accounts (~account-env-var~, ~accounts~, ~account-file~, ~shared-config-items~, ~canonical-home~, ~account-init~, ~credential-file~, ~login-args~, ~usage-fetch~), skills (~run-prompt~, ~exec-prompt~, ~skill-roots~, ~skill-command-prefix~), session history (~session-headers~, ~session-prompt~, ~resume~, ~prepare-fork~), integration hooks (~sync-theme~), and exit safety (~before-exit-ready-to-close-p~, ~before-kill-check~).
 
 The ~:start-session~ slot starts a new session parameterized by an ~agent-session~ identity struct, optionally with an initial prompt or a resume id. The ~:session-identity~ slot returns a live session buffer's CLI session id, used by ~agent-restart~ to resume in place. ~agent-start-session~ is the core dispatcher that starts a session through its backend's ~:start-session~ function, passing any extra backend-specific options through. The ~:send-string~ slot inserts text into a session's prompt without submitting it, ~:send-return~ submits the pending prompt, and ~:submit~ atomically inserts and submits; the core wrappers ~agent-send-string~, ~agent-send-return~, and ~agent-submit~ dispatch through these slots and emit the corresponding session events.
 

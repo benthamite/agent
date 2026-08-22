@@ -31,10 +31,15 @@
 (require 'codex)
 (eval-and-compile (require 'agent))
 (require 'agent-account)
+(require 'agent-usage)
 (require 'cl-lib)
 (require 'json)
 (require 'subr-x)
 (require 'transient)
+(require 'url)
+
+(defvar url-http-end-of-headers)
+(defvar url-http-attempt-keepalives)
 
 ;;;; Variables
 
@@ -162,6 +167,7 @@ Source: SVG Repo (CC0).")
   :account-init #'agent-codex--account-init
   :credential-file "auth.json"
   :login-args '("login")
+  :usage-fetch #'agent-codex--usage-fetch
   :waiting-p #'agent-codex--waiting-p
   :background-tasks-p #'agent-codex--has-background-tasks-p
   :busy-p #'agent-codex--busy-p
@@ -322,6 +328,98 @@ prompts or touches the filesystem.  Config-home syncing happens in
 never trigger filesystem mutation."
   (when-let* ((account (agent-account-resolve 'codex)))
     (agent-account-env 'codex account)))
+
+(defconst agent-codex--usage-endpoint
+  "https://chatgpt.com/backend-api/wham/usage"
+  "ChatGPT backend endpoint reporting Codex rate-limit windows.
+Authenticated with the `access_token' and `account_id' stored in an
+account home's `auth.json'.  Last verified against codex-cli 0.149.0
+on 2026-08-22.")
+
+(defun agent-codex--usage-fetch (account callback)
+  "Fetch usage for ACCOUNT and call CALLBACK with a normalized plist.
+Reads the OAuth tokens from ACCOUNT's `auth.json' and queries
+`agent-codex--usage-endpoint'.  CALLBACK receives nil when the
+account has no usable tokens or the request fails.  This is the
+Codex backend's `:usage-fetch' slot."
+  (if-let* ((auth (agent-codex--usage-auth account)))
+      (let ((url-http-attempt-keepalives nil)
+            (url-request-method "GET")
+            (url-request-extra-headers
+             `(("Authorization" . ,(concat "Bearer " (car auth)))
+               ("ChatGPT-Account-Id" . ,(cdr auth)))))
+        (condition-case err
+            (url-retrieve agent-codex--usage-endpoint
+                          #'agent-codex--handle-usage-response
+                          (list account callback) t t)
+          (error
+           (message "agent-codex usage poll failed for %s: %s"
+                    account (error-message-string err))
+           (funcall callback nil))))
+    (funcall callback nil)))
+
+(defun agent-codex--usage-auth (account)
+  "Return (ACCESS-TOKEN . ACCOUNT-ID) from ACCOUNT's `auth.json', or nil."
+  (when-let* ((home (or (agent-account-home 'codex account)
+                        (and (null account) (expand-file-name "~/.codex"))))
+              (file (expand-file-name "auth.json" home))
+              ((file-readable-p file)))
+    (condition-case nil
+        (let* ((json (with-temp-buffer
+                       (insert-file-contents file)
+                       (json-parse-buffer :object-type 'plist)))
+               (tokens (plist-get json :tokens))
+               (token (plist-get tokens :access_token))
+               (id (plist-get tokens :account_id)))
+          (when (and (stringp token) (stringp id))
+            (cons token id)))
+      (error nil))))
+
+(defun agent-codex--handle-usage-response (status _account callback)
+  "Handle the async usage response and report to CALLBACK.
+STATUS is the plist passed by `url-retrieve'.  CALLBACK receives the
+normalized usage plist, or nil on any error."
+  (unwind-protect
+      (funcall callback
+               (when (and (null (plist-get status :error))
+                          url-http-end-of-headers)
+                 (goto-char url-http-end-of-headers)
+                 (condition-case nil
+                     (agent-codex--normalize-usage
+                      (json-parse-buffer :object-type 'plist
+                                         :null-object nil))
+                   (json-parse-error nil))))
+    (kill-buffer)))
+
+(defun agent-codex--normalize-usage (data)
+  "Return the normalized usage plist for the endpoint response DATA.
+DATA's `:rate_limit' holds `:primary_window' and `:secondary_window'
+plists with `:used_percent', `:limit_window_seconds' and `:reset_at'.
+Windows are classified by length: one of at least a day is the weekly
+window, a shorter one the session window.  A plan with a single
+window therefore reports only the window it has."
+  (let* ((limit (plist-get data :rate_limit))
+         (windows (delq nil (list (plist-get limit :primary_window)
+                                  (plist-get limit :secondary_window))))
+         (weekly (agent-codex--usage-window windows t))
+         (session (agent-codex--usage-window windows nil)))
+    (list :session-pct (car session)
+          :session-reset (cdr session)
+          :weekly-pct (car weekly)
+          :weekly-reset (cdr weekly)
+          :limited (and (plist-get limit :limit_reached) t)
+          :fetched-at (float-time))))
+
+(defun agent-codex--usage-window (windows weekly)
+  "Return (PCT . RESET) for the window in WINDOWS matching WEEKLY, or nil.
+WEEKLY non-nil selects a window of at least one day, nil a shorter one."
+  (when-let* ((window (cl-find-if
+                       (lambda (w)
+                         (let ((seconds (or (plist-get w :limit_window_seconds) 0)))
+                           (eq (and weekly t) (>= seconds 86400))))
+                       windows)))
+    (agent-usage-window (plist-get window :used_percent)
+                        (plist-get window :reset_at))))
 
 (defun agent-codex--effective-codex-home ()
   "Return the Codex home for noninteractive helper discovery.

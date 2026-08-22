@@ -1856,5 +1856,58 @@ session that never restarts would otherwise keep every one of them."
     (should-not (advice-member-p #'agent-codex--intercept-exit-to-buffer
                                  'codex--send-command-to-buffer))))
 
+;;;; Usage
+
+(ert-deftest agent-codex-test-normalize-usage-single-weekly-window ()
+  "Map a plan with one week-long window to the weekly fields only."
+  (let ((usage (agent-codex--normalize-usage
+                '(:rate_limit (:allowed nil :limit_reached t
+                               :primary_window (:used_percent 100
+                                                :limit_window_seconds 604800
+                                                :reset_at 1787423929)
+                               :secondary_window nil)))))
+    (should (= (plist-get usage :weekly-pct) 100.0))
+    (should (= (plist-get usage :weekly-reset) 1787423929.0))
+    (should-not (plist-get usage :session-pct))
+    (should (plist-get usage :limited))))
+
+(ert-deftest agent-codex-test-normalize-usage-two-windows ()
+  "Classify the short window as session and the long one as weekly."
+  (let ((usage (agent-codex--normalize-usage
+                '(:rate_limit (:limit_reached nil
+                               :primary_window (:used_percent 7
+                                                :limit_window_seconds 18000
+                                                :reset_at 10)
+                               :secondary_window (:used_percent 55
+                                                  :limit_window_seconds 604800
+                                                  :reset_at 20))))))
+    (should (= (plist-get usage :session-pct) 7.0))
+    (should (= (plist-get usage :session-reset) 10.0))
+    (should (= (plist-get usage :weekly-pct) 55.0))
+    (should-not (plist-get usage :limited))))
+
+(ert-deftest agent-codex-test-usage-auth-reads-auth-json ()
+  "Read the access token and account id from the account's auth.json."
+  (let* ((home (make-temp-file "agent-codex-home" t))
+         (agent-codex-accounts (list (cons "acct" home))))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "auth.json" home)
+            (insert "{\"tokens\":{\"access_token\":\"tok\",\"account_id\":\"id\"}}"))
+          (should (equal (agent-codex--usage-auth "acct") '("tok" . "id")))
+          (should-not (agent-codex--usage-auth "missing")))
+      (delete-directory home t))))
+
+(ert-deftest agent-codex-test-usage-fetch-reports-missing-auth ()
+  "Report failure without a request when no tokens are available."
+  (let ((agent-codex-accounts nil)
+        reported called)
+    (cl-letf (((symbol-function 'agent-codex--usage-auth) #'ignore)
+              ((symbol-function 'url-retrieve)
+               (lambda (&rest _args) (setq called t))))
+      (agent-codex--usage-fetch "acct" (lambda (u) (setq reported (list u))))
+      (should-not called)
+      (should (equal reported '(nil))))))
+
 (provide 'agent-codex-test)
 ;;; agent-codex-test.el ends here

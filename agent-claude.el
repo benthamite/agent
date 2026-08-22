@@ -31,6 +31,7 @@
 (require 'claude-code)
 (eval-and-compile (require 'agent))
 (require 'agent-account)
+(require 'agent-usage)
 (require 'agent-claude-cli)
 (require 'consult)
 (require 'subr-x)
@@ -72,18 +73,10 @@ These directories are not loaded by ordinary Claude Code sessions."
   :type 'integer
   :group 'agent-claude)
 
-(defcustom agent-claude-usage-interval 300
-  "Base interval in seconds between usage API polls.
-Fetches 5-hour session and 7-day weekly utilization from the API.
-On HTTP 429 responses the interval doubles, up to
-`agent-claude-usage-max-interval'; it resets on success."
-  :type 'integer
-  :group 'agent-claude)
-
-(defcustom agent-claude-usage-max-interval 900
-  "Maximum polling interval in seconds after repeated 429 backoffs."
-  :type 'integer
-  :group 'agent-claude)
+(define-obsolete-variable-alias 'agent-claude-usage-interval
+  'agent-usage-interval "0.2")
+(define-obsolete-variable-alias 'agent-claude-usage-max-interval
+  'agent-usage-max-interval "0.2")
 
 (defcustom agent-claude-accounts nil
   "Alist of account names to `CLAUDE_CONFIG_DIR' paths.
@@ -167,14 +160,8 @@ ended in that window.")
 (defvar-local agent-claude--status-timer nil
   "Timer for periodic status polling in the current Claude buffer.")
 
-(defvar agent-claude--usage-data (make-hash-table :test #'equal)
-  "Hash table mapping account names to parsed usage plists.")
-
-(defvar agent-claude--usage-timer nil
-  "Timer for periodic usage API polling.")
-
-(defvar agent-claude--usage-current-interval nil
-  "Current polling interval in seconds, possibly increased by backoff.")
+(define-obsolete-variable-alias 'agent-claude--usage-timer
+  'agent-usage--timer "0.2")
 
 (defvar agent-codex-mode)
 (defvar eat-terminal)
@@ -218,6 +205,7 @@ Source: lobehub/lobe-icons (MIT).")
   :shared-config-items 'agent-claude--shared-config-items
   :canonical-home "~/.claude/"
   :account-init #'agent-claude--sync-account-json
+  :usage-fetch #'agent-claude--usage-fetch
   :background-tasks-p #'agent-claude--has-background-tasks-p
   :display-name-suffix #'agent-claude--branch-suffix
   :label "Claude Code"
@@ -813,19 +801,20 @@ buffer name for sessions started before the UUID existed."
 
 ;;;;; Usage polling
 
-(defun agent-claude--fetch-usage ()
-  "Fetch usage data for all accounts with active sessions."
-  (dolist (account (agent-claude--active-accounts))
-    (agent-claude--fetch-usage-for-account account)))
+(defun agent-claude--usage-fetch (account callback)
+  "Fetch usage for ACCOUNT and call CALLBACK with a normalized plist.
+Reads the OAuth token from the macOS Keychain and queries the
+undocumented `api/oauth/usage' endpoint.  CALLBACK receives nil when
+the account has no OAuth token or the request fails.  This is the
+Claude backend's `:usage-fetch' slot."
+  (if-let* ((token (agent-claude-cli-oauth-token
+                    (agent-claude--account-config-dir account))))
+      (agent-claude--fetch-usage-with-token account token callback t)
+    (funcall callback nil)))
 
 (defun agent-claude--fetch-usage-for-account (account)
-  "Fetch usage data for ACCOUNT asynchronously.
-Reads the OAuth token from the macOS Keychain and queries the
-undocumented `api/oauth/usage' endpoint.  Stores the parsed
-response in `agent-claude--usage-data' keyed by ACCOUNT."
-  (when-let* ((token (agent-claude-cli-oauth-token
-                      (agent-claude--account-config-dir account))))
-    (agent-claude--fetch-usage-with-token account token t)))
+  "Fetch usage for ACCOUNT into the shared usage store."
+  (agent-usage-fetch 'claude-code account))
 
 (defun agent-claude--account-config-dir (account)
   "Return the expanded `CLAUDE_CONFIG_DIR' for ACCOUNT, or nil.
@@ -834,29 +823,32 @@ either because ACCOUNT is nil or because it has no entry in
 `agent-claude-accounts'."
   (agent-account-home 'claude-code account))
 
-(defun agent-claude--fetch-usage-with-token (account token retry)
-  "Fetch usage data for ACCOUNT with TOKEN.
+(defun agent-claude--fetch-usage-with-token (account token callback retry)
+  "Fetch usage data for ACCOUNT with TOKEN, reporting to CALLBACK.
 If RETRY is non-nil, retry stale URL process write failures once."
   (condition-case err
-      (agent-claude--url-retrieve-usage account token)
+      (agent-claude--url-retrieve-usage account token callback)
     (file-error
-     (agent-claude--handle-usage-retrieve-error account token err retry))))
+     (agent-claude--handle-usage-retrieve-error
+      account token callback err retry))))
 
-(defun agent-claude--url-retrieve-usage (account token)
-  "Start the async usage request for ACCOUNT with TOKEN."
+(defun agent-claude--url-retrieve-usage (account token callback)
+  "Start the async usage request for ACCOUNT with TOKEN.
+CALLBACK receives the normalized result."
   (agent-claude-cli-fetch-usage
-   token #'agent-claude--handle-usage-response (list account)))
+   token #'agent-claude--handle-usage-response (list account callback)))
 
-(defun agent-claude--handle-usage-retrieve-error (account token err retry)
+(defun agent-claude--handle-usage-retrieve-error (account token callback err retry)
   "Handle synchronous usage request error ERR for ACCOUNT.
-TOKEN is reused only when RETRY allows a stale-process retry."
+TOKEN is reused only when RETRY allows a stale-process retry;
+otherwise CALLBACK is told the fetch failed."
   (agent-claude--delete-error-process err)
   (if (and retry (agent-claude--url-process-write-error-p err))
-      (agent-claude--fetch-usage-with-token account token nil)
+      (agent-claude--fetch-usage-with-token account token callback nil)
     (message "agent-claude usage poll failed for %s: %s"
              (or account "default")
              (error-message-string err))
-    (agent-claude--usage-backoff)))
+    (funcall callback nil)))
 
 (defun agent-claude--url-process-write-error-p (err)
   "Return non-nil if ERR is a URL process write failure."
@@ -879,92 +871,54 @@ TOKEN is reused only when RETRY allows a stale-process retry."
       (setq items (cdr items)))
     process))
 
-(defun agent-claude--handle-usage-response (status account)
-  "Handle the async usage API response for ACCOUNT.
-STATUS is the plist passed by `url-retrieve'."
+(defun agent-claude--handle-usage-response (status _account callback)
+  "Handle the async usage API response and report to CALLBACK.
+STATUS is the plist passed by `url-retrieve'.  CALLBACK receives
+the normalized usage plist, or nil on any error, including a 429."
   (unwind-protect
-      (let ((err (plist-get status :error)))
-        (if (agent-claude--usage-response-429-p err)
-            (agent-claude--usage-backoff)
-          (when (and (null err) url-http-end-of-headers)
-            (goto-char url-http-end-of-headers)
-            (condition-case nil
-                (progn
-                  (puthash account
-                           (json-parse-buffer :object-type 'plist)
-                           agent-claude--usage-data)
-                  (agent-claude--usage-reset-interval))
-              (json-parse-error nil)))))
+      (funcall callback
+               (let ((err (plist-get status :error)))
+                 (when (and (null err) url-http-end-of-headers)
+                   (goto-char url-http-end-of-headers)
+                   (condition-case nil
+                       (agent-claude--normalize-usage
+                        (json-parse-buffer :object-type 'plist))
+                     (json-parse-error nil)))))
     (kill-buffer)))
 
-(defun agent-claude--usage-response-429-p (err)
-  "Return non-nil if ERR indicates an HTTP 429 response."
-  (and (consp err)
-       (eq (car err) 'error)
-       (member 429 (cdr err))))
+(defun agent-claude--normalize-usage (data)
+  "Return the normalized usage plist for the endpoint response DATA.
+DATA holds `:five_hour' and `:seven_day' windows with `:utilization'
+percentages and `:resets_at' ISO timestamps."
+  (let ((five (agent-claude--usage-window (plist-get data :five_hour)))
+        (seven (agent-claude--usage-window (plist-get data :seven_day))))
+    (list :session-pct (car five)
+          :session-reset (cdr five)
+          :weekly-pct (car seven)
+          :weekly-reset (cdr seven)
+          :limited (or (>= (or (car five) 0) 100)
+                       (>= (or (car seven) 0) 100))
+          :fetched-at (float-time))))
 
-(defun agent-claude--usage-backoff ()
-  "Double the polling interval, capped at the configured maximum."
-  (let ((new-interval (min (* 2 (or agent-claude--usage-current-interval
-                                    agent-claude-usage-interval))
-                           agent-claude-usage-max-interval)))
-    (setq agent-claude--usage-current-interval new-interval)
-    (agent-claude--usage-reschedule new-interval)))
-
-(defun agent-claude--usage-reset-interval ()
-  "Reset the polling interval to the base value after a successful fetch."
-  (when (and agent-claude--usage-current-interval
-             (> agent-claude--usage-current-interval
-                agent-claude-usage-interval))
-    (setq agent-claude--usage-current-interval
-          agent-claude-usage-interval)
-    (agent-claude--usage-reschedule
-     agent-claude-usage-interval)))
-
-(defun agent-claude--usage-reschedule (interval)
-  "Cancel the current usage timer and restart it with INTERVAL seconds."
-  (when agent-claude--usage-timer
-    (cancel-timer agent-claude--usage-timer)
-    (setq agent-claude--usage-timer
-          (run-with-timer interval interval
-                          #'agent-claude--fetch-usage))))
+(defun agent-claude--usage-window (window)
+  "Return (PCT . RESET) for the endpoint WINDOW plist, or nil."
+  (agent-usage-window (plist-get window :utilization)
+                      (plist-get window :resets_at)))
 
 (defun agent-claude--session-account (&optional buffer)
   "Return the account recorded for BUFFER's Claude session, or nil."
   (when-let* ((session (agent-session buffer)))
     (agent-session-account session)))
 
-(defun agent-claude--active-accounts ()
-  "Return a list of unique account names with active Claude sessions.
-Returns a list containing nil when no multi-account setup exists."
-  (let ((accounts nil))
-    (dolist (buf (claude-code--find-all-claude-buffers))
-      (when (buffer-live-p buf)
-        (cl-pushnew (agent-claude--session-account buf) accounts
-                    :test #'equal)))
-    (or accounts (list nil))))
-
 (defun agent-claude-start-usage-polling ()
-  "Start polling the usage API.
-Does nothing if the timer is already running."
+  "Start the shared usage poller; see `agent-usage-start-polling'."
   (interactive)
-  (unless agent-claude--usage-timer
-    (setq agent-claude--usage-current-interval
-          agent-claude-usage-interval)
-    (agent-claude--fetch-usage)
-    (setq agent-claude--usage-timer
-          (run-with-timer
-           agent-claude-usage-interval
-           agent-claude-usage-interval
-           #'agent-claude--fetch-usage))))
+  (agent-usage-start-polling))
 
 (defun agent-claude-stop-usage-polling ()
-  "Stop polling the usage API."
+  "Stop the shared usage poller; see `agent-usage-stop-polling'."
   (interactive)
-  (when agent-claude--usage-timer
-    (cancel-timer agent-claude--usage-timer)
-    (setq agent-claude--usage-timer nil
-          agent-claude--usage-current-interval nil)))
+  (agent-usage-stop-polling))
 
 (defvar-local agent-claude--session-teardown-registered nil
   "Non-nil when this Claude buffer has registered session teardown.")
@@ -999,11 +953,8 @@ the account-wide usage poller is running."
            (memq #'agent--session-teardown-current kill-buffer-hook))))
 
 (defun agent-claude--maybe-stop-usage-polling (buffer)
-  "Stop usage polling when BUFFER was the last live Claude session."
-  (when (null (cl-remove buffer
-                         (cl-remove-if-not #'buffer-live-p
-                                           (claude-code--find-all-claude-buffers))))
-    (agent-claude-stop-usage-polling)))
+  "Stop usage polling when BUFFER was the last live session of any backend."
+  (agent-usage-maybe-stop-polling buffer))
 
 ;;;;; Status accessors
 
@@ -1068,31 +1019,25 @@ CACHE_READ_INPUT_TOKENS."
 
 (defun agent-claude--usage-for-buffer ()
   "Return the usage plist for the current buffer's account."
-  (gethash (agent-claude--session-account) agent-claude--usage-data))
+  (agent-usage-get 'claude-code (agent-claude--session-account)))
 
 (defun agent-claude-status-session-usage ()
   "Return the 5-hour session utilization percentage."
-  (when-let* ((data (agent-claude--usage-for-buffer))
-              (five (plist-get data :five_hour)))
-    (plist-get five :utilization)))
+  (plist-get (agent-claude--usage-for-buffer) :session-pct))
 
 (defun agent-claude-status-weekly-usage ()
   "Return the 7-day weekly utilization percentage."
-  (when-let* ((data (agent-claude--usage-for-buffer))
-              (seven (plist-get data :seven_day)))
-    (plist-get seven :utilization)))
+  (plist-get (agent-claude--usage-for-buffer) :weekly-pct))
 
 (defun agent-claude-status-session-reset ()
   "Return the 5-hour session reset time as an ISO string."
-  (when-let* ((data (agent-claude--usage-for-buffer))
-              (five (plist-get data :five_hour)))
-    (plist-get five :resets_at)))
+  (agent-usage-iso-time
+   (plist-get (agent-claude--usage-for-buffer) :session-reset)))
 
 (defun agent-claude-status-weekly-reset ()
   "Return the 7-day weekly reset time as an ISO string."
-  (when-let* ((data (agent-claude--usage-for-buffer))
-              (seven (plist-get data :seven_day)))
-    (plist-get seven :resets_at)))
+  (agent-usage-iso-time
+   (plist-get (agent-claude--usage-for-buffer) :weekly-reset)))
 
 ;;;;; Alert
 

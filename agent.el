@@ -132,7 +132,7 @@ chain only once.  Only
   waiting-p busy-p background-tasks-p display-name-suffix
   notify
   account-env-var accounts account-file shared-config-items canonical-home
-  account-init credential-file login-args
+  account-init credential-file login-args usage-fetch
   run-prompt exec-prompt skill-roots skill-command-prefix
   session-headers session-prompt prepare-fork
   sync-theme
@@ -191,9 +191,11 @@ into each account home), `:canonical-home' (the backend's default
 config directory), `:account-init' (function called with the
 account name after syncing), `:credential-file' (account-local
 credentials file inside the account home, used to detect
-logged-out accounts), and `:login-args' (arguments appended to
+logged-out accounts), `:login-args' (arguments appended to
 `:program' to run the backend's login flow; see
-`agent-account-login').  The `:accounts', `:account-file',
+`agent-account-login'), and `:usage-fetch' (function called with
+an account name and a callback that receives a normalized usage
+plist or nil; see `agent-usage').  The `:accounts', `:account-file',
 `:shared-config-items', `:canonical-home', `:credential-file',
 and `:login-args' values may each be a literal value, a function
 returning one, or a symbol naming a variable, resolved at read
