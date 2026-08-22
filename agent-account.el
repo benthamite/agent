@@ -25,6 +25,11 @@
 ;;; Commentary:
 
 ;; Single home for multi-account state shared by all agent backends.
+;; Accounts are declared per backend as (NAME . HOME) or as
+;; (NAME :home HOME :pool POOL ...).  Accounts sharing a `:pool' are
+;; interchangeable: the persisted selection may name a pool instead of
+;; an account, and `agent-account-resolve' then routes each new session
+;; to one member via `agent-account-route'.
 ;; Account identity lives in exactly two places: the persisted current
 ;; account (file-backed, cached in `agent-account--current') and the
 ;; per-session account recorded in the `agent-session' struct.  The
@@ -86,9 +91,26 @@ Returns the account name, or nil when the prompt was quit."
     (user-error "No accounts configured for backend `%s'" backend))
   (when-let* ((account (agent-account--prompt backend)))
     (agent-account-set backend account)
-    (agent-account-sync backend account)
-    (message "Switched %s to account: %s" backend account)
+    (agent-account-sync-selection backend account)
+    (message "Switched %s to %s: %s" backend
+             (if (agent-account-pool-p backend account) "pool" "account")
+             account)
     account))
+
+(defun agent-account-sync-selection (backend selection)
+  "Sync the config home of SELECTION for BACKEND.
+SELECTION is an account name, whose single home is synced, or a pool
+name, in which case every member's home is synced so routing can
+pick any of them without a further filesystem step."
+  (dolist (account (agent-account--selection-accounts backend selection))
+    (agent-account-sync backend account)))
+
+(defun agent-account--selection-accounts (backend selection)
+  "Return the account names SELECTION stands for in BACKEND.
+A pool name expands to its members; an account name to itself."
+  (if (agent-account-pool-p backend selection)
+      (agent-account-pool-members backend selection)
+    (list selection)))
 
 ;;;###autoload
 (defun agent-account-init (backend account)
@@ -121,7 +143,7 @@ backends without a `login-args' slot.  Return the login process."
   (interactive (list (agent-account--read-backend #'agent-account--login-args)))
   (unless (agent-account--login-args backend)
     (user-error "Backend `%s' does not support login from Emacs" backend))
-  (let ((account (or account (agent-account--prompt backend))))
+  (let ((account (or account (agent-account--prompt-account backend))))
     (unless account
       (user-error "No account selected"))
     (agent-account-sync backend account)
@@ -187,22 +209,47 @@ it returns non-nil when called with the backend symbol."
 (defun agent-account-resolve (backend &optional prompt-p)
   "Return the account to use for BACKEND, or nil.
 Resolution order: the in-flight `agent-account--starting' binding
-when it belongs to BACKEND, then the persisted current account,
+when it belongs to BACKEND, then the persisted current selection,
 then -- only when PROMPT-P is non-nil -- an interactive prompt
-whose choice is persisted.  Returns nil when BACKEND has no
+whose choice is persisted.  A selection naming a pool is routed to
+one of its members with `agent-account-route', so the result is
+always a concrete account name.  Returns nil when BACKEND has no
 accounts configured."
   (when (agent-account-list backend)
     (or (and (eq (car-safe agent-account--starting) backend)
              (cdr agent-account--starting))
-        (agent-account-current backend)
-        (when prompt-p
-          (when-let* ((account (agent-account--prompt backend)))
-            (agent-account-set backend account))))))
+        (agent-account--route-selection
+         backend
+         (or (agent-account-current backend)
+             (when prompt-p
+               (when-let* ((account (agent-account--prompt backend)))
+                 (agent-account-set backend account))))))))
+
+(defun agent-account--route-selection (backend selection)
+  "Return the concrete account SELECTION stands for in BACKEND.
+A pool name is routed to a member; an account name is returned as is."
+  (when selection
+    (if (agent-account-pool-p backend selection)
+        (agent-account-route backend selection)
+      selection)))
+
+(defun agent-account-route (backend pool)
+  "Return the member of BACKEND's POOL a new session should use.
+Members whose credentials are known missing are skipped.  Returns
+the first remaining member, or the first member when none is
+logged in, so the session start can report the missing login."
+  (let ((members (agent-account-pool-members backend pool)))
+    (or (cl-find-if (lambda (account)
+                      (agent-account-logged-in-p backend account))
+                    members)
+        (car members))))
 
 (defun agent-account-current (backend)
-  "Return the account used for new BACKEND sessions, or nil.
-Loads the persisted selection from the backend's account file on
-first use and caches it; `agent-account-set' updates both."
+  "Return the persisted selection for new BACKEND sessions, or nil.
+The selection is an account name or a pool name; callers that need
+a concrete account use `agent-account-resolve'.  Loads the
+selection from the backend's account file on first use and caches
+it; `agent-account-set' updates both."
   (let ((cached (gethash backend agent-account--current 'unset)))
     (when (eq cached 'unset)
       (setq cached (or (agent-account--load backend) 'none))
@@ -211,20 +258,56 @@ first use and caches it; `agent-account-set' updates both."
       cached)))
 
 (defun agent-account-set (backend account)
-  "Persist ACCOUNT as the current account for BACKEND.
-Updates the in-memory cache and the backend's account file.
-Returns ACCOUNT."
+  "Persist ACCOUNT as the current selection for BACKEND.
+ACCOUNT is an account name or a pool name.  Updates the in-memory
+cache and the backend's account file.  Returns ACCOUNT."
   (puthash backend account agent-account--current)
   (agent-account--save backend account)
   account)
 
 (defun agent-account--prompt (backend)
-  "Prompt for one of BACKEND's accounts and return its name, or nil.
+  "Prompt for one of BACKEND's accounts or pools and return its name.
+Pools are listed before the accounts and annotated with their
+members.  Returns the single account without prompting when only
+one exists, and nil when the prompt is quit."
+  (when-let* ((names (agent-account-selection-names backend)))
+    (if (= (length names) 1)
+        (car names)
+      (completing-read (format "%s account: " backend)
+                       (agent-account--selection-table backend names)
+                       nil t))))
+
+(defun agent-account--prompt-account (backend)
+  "Prompt for one of BACKEND's accounts, never a pool, and return it.
 Returns the single account without prompting when only one exists."
   (when-let* ((names (mapcar #'car (agent-account-list backend))))
     (if (= (length names) 1)
         (car names)
       (completing-read (format "%s account: " backend) names nil t))))
+
+(defun agent-account-selection-names (backend)
+  "Return BACKEND's selectable names: its pools, then its accounts."
+  (append (agent-account-pools backend)
+          (mapcar #'car (agent-account-list backend))))
+
+(defun agent-account--selection-table (backend names)
+  "Return a completion table over NAMES annotating BACKEND's pools."
+  (lambda (string pred action)
+    (if (eq action 'metadata)
+        `(metadata
+          (annotation-function
+           . ,(lambda (name) (agent-account--selection-annotation backend name)))
+          (display-sort-function . identity)
+          (cycle-sort-function . identity))
+      (complete-with-action action names string pred))))
+
+(defun agent-account--selection-annotation (backend name)
+  "Return the completion annotation for NAME in BACKEND."
+  (if (agent-account-pool-p backend name)
+      (format "  pool: %s"
+              (string-join (agent-account-pool-members backend name) ", "))
+    (when-let* ((pool (agent-account-pool backend name)))
+      (format "  in pool %s" pool))))
 
 (defun agent-account--load (backend)
   "Read BACKEND's persisted account name from its account file.
@@ -236,7 +319,7 @@ not configured."
                    (with-temp-buffer
                      (insert-file-contents file)
                      (buffer-string)))))
-        (when (alist-get name (agent-account-list backend) nil nil #'string=)
+        (when (member name (agent-account-selection-names backend))
           name)))))
 
 (defun agent-account--save (backend account)
@@ -266,9 +349,47 @@ and `agent-start-session' -- never from process-environment hooks."
 (defun agent-account-home (backend account)
   "Return the expanded config home directory for BACKEND's ACCOUNT.
 Return nil when ACCOUNT is nil or not configured."
-  (when-let* ((dir (alist-get account (agent-account-list backend)
-                              nil nil #'string=)))
+  (when-let* ((dir (agent-account-property backend account :home)))
     (expand-file-name dir)))
+
+(defun agent-account-property (backend account key)
+  "Return property KEY of BACKEND's ACCOUNT, or nil.
+KEY is a keyword.  An entry of the form (NAME . HOME) has only a
+`:home' property; an entry of the form (NAME :home HOME ...) has
+every property in its plist."
+  (when-let* ((entry (agent-account-entry backend account)))
+    (let ((spec (cdr entry)))
+      (if (stringp spec)
+          (and (eq key :home) spec)
+        (plist-get spec key)))))
+
+(defun agent-account-entry (backend account)
+  "Return the accounts-list entry named ACCOUNT for BACKEND, or nil."
+  (when (stringp account)
+    (assoc account (agent-account-list backend))))
+
+(defun agent-account-pool (backend account)
+  "Return the name of the pool BACKEND's ACCOUNT belongs to, or nil."
+  (agent-account-property backend account :pool))
+
+(defun agent-account-pools (backend)
+  "Return the distinct pool names declared by BACKEND's accounts."
+  (let (pools)
+    (dolist (entry (agent-account-list backend) (nreverse pools))
+      (when-let* ((pool (agent-account-pool backend (car entry))))
+        (cl-pushnew pool pools :test #'string=)))))
+
+(defun agent-account-pool-p (backend name)
+  "Return non-nil when NAME is a pool declared by BACKEND's accounts."
+  (and (stringp name)
+       (member name (agent-account-pools backend))
+       t))
+
+(defun agent-account-pool-members (backend pool)
+  "Return the names of BACKEND's accounts belonging to POOL, in order."
+  (cl-loop for entry in (agent-account-list backend)
+           when (equal (agent-account-pool backend (car entry)) pool)
+           collect (car entry)))
 
 (defun agent-account-logged-in-p (backend account)
   "Return non-nil unless ACCOUNT's BACKEND credentials are known missing.
@@ -290,9 +411,10 @@ configured home."
 
 (defun agent-account-list (backend)
   "Return the accounts alist for BACKEND.
-Each entry is (NAME . HOME-DIRECTORY).  The backend's accounts
-slot may hold an alist, a function returning one, or a symbol
-naming a variable holding one."
+Each entry is (NAME . HOME-DIRECTORY) or (NAME :home HOME-DIRECTORY
+:pool POOL ...); see `agent-account-property'.  The backend's
+accounts slot may hold an alist, a function returning one, or a
+symbol naming a variable holding one."
   (agent-account--backend-value backend #'agent-backend-accounts))
 
 (defun agent-account--backend-value (backend accessor)
@@ -424,7 +546,7 @@ The `backend' slot names the registered backend symbol."))
   (oset obj value value)
   (when value
     (agent-account-set (oref obj backend) value)
-    (agent-account-sync (oref obj backend) value)))
+    (agent-account-sync-selection (oref obj backend) value)))
 
 (cl-defmethod transient-init-value ((obj agent-account-variable))
   "Initialize OBJ's value from the persisted current account."

@@ -183,7 +183,8 @@ support the commands that dispatch on it.
 
 Multi-account backends provide the optional account keys read by
 `agent-account': `:account-env-var' (environment variable naming
-the account config home), `:accounts' (alist of (NAME . HOME)),
+the account config home), `:accounts' (alist of (NAME . HOME) or
+(NAME :home HOME :pool POOL ...) entries),
 `:account-file' (file persisting the current account name),
 `:shared-config-items' (items symlinked from the canonical home
 into each account home), `:canonical-home' (the backend's default
@@ -432,7 +433,7 @@ from the currently selected account."
 Derive the backend with `agent--detect-backend', the directory
 and instance by parsing BUFFER's name, and the account from the
 in-flight `agent-account--starting' binding when it belongs to
-the backend, falling back to the persisted current account.
+the backend, falling back to the resolved current selection.
 Return nil when BUFFER belongs to no registered backend or its
 name encodes no directory."
   (when-let* ((session (agent--derive-session buffer)))
@@ -445,7 +446,7 @@ name encodes no directory."
               (directory (agent--session-directory-from-buffer-name name)))
     (let ((account (or (and (eq (car-safe agent-account--starting) backend)
                             (cdr agent-account--starting))
-                       (agent-account-current backend))))
+                       (agent-account-resolve backend))))
       (agent-session-create
        :backend backend
        :account account
@@ -3387,7 +3388,7 @@ only when the context does not name one."))
   (when-let* ((value)
               (backend (oref obj backend)))
     (agent-account-set backend value)
-    (agent-account-sync backend value))
+    (agent-account-sync-selection backend value))
   (oset obj value (agent--account-summary)))
 
 (cl-defmethod transient-format-value ((obj agent--account-variable))

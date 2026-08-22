@@ -104,7 +104,8 @@ Example:
 (defcustom agent-claude-account-file
   (expand-file-name ".claude-current-account" "~")
   "File storing the name of the currently active Claude account.
-The file contains a single account name from `agent-claude-accounts'.
+The file contains a single account or pool name from
+`agent-claude-accounts'.
 Written by `agent-claude-select-account', read at session start."
   :type 'file
   :group 'agent-claude)
@@ -336,10 +337,8 @@ backend's account-init step.
 Only writes `.claude.json' when actual changes are detected, to
 avoid triggering file-change detection in running Claude Code
 sessions."
-  (when-let* ((config-dir (alist-get account agent-claude-accounts
-                                     nil nil #'string=))
-              (target-path (expand-file-name
-                            ".claude.json" (expand-file-name config-dir))))
+  (when-let* ((config-dir (agent-account-home 'claude-code account))
+              (target-path (expand-file-name ".claude.json" config-dir)))
     (condition-case err
         (let* ((target (agent-claude-cli-read-claude-json target-path))
                (canonical (agent-claude-cli-read-claude-json
@@ -396,10 +395,13 @@ config.  For duplicate keys, prefers entries where
 (defun agent-claude--all-claude-json-paths ()
   "Return paths to the canonical and all account `.claude.json' files."
   (cons (expand-file-name ".claude.json" "~")
-        (mapcar (lambda (entry)
-                  (expand-file-name ".claude.json"
-                                    (expand-file-name (cdr entry))))
-                agent-claude-accounts)))
+        (mapcar (lambda (home) (expand-file-name ".claude.json" home))
+                (agent-claude--account-homes))))
+
+(defun agent-claude--account-homes ()
+  "Return the expanded config homes of every configured Claude account."
+  (mapcar (lambda (entry) (agent-account-home 'claude-code (car entry)))
+          agent-claude-accounts))
 
 ;;;###autoload
 (defun agent-claude-select-account ()
@@ -830,10 +832,7 @@ response in `agent-claude--usage-data' keyed by ACCOUNT."
 Nil means ACCOUNT uses the default `~/.claude' configuration,
 either because ACCOUNT is nil or because it has no entry in
 `agent-claude-accounts'."
-  (when-let* ((config-dir (and (stringp account)
-                               (alist-get account agent-claude-accounts
-                                          nil nil #'string=))))
-    (expand-file-name config-dir)))
+  (agent-account-home 'claude-code account))
 
 (defun agent-claude--fetch-usage-with-token (account token retry)
   "Fetch usage data for ACCOUNT with TOKEN.
@@ -1538,10 +1537,8 @@ changed."
 (defun agent-claude--all-claude-settings-paths ()
   "Return paths to canonical and account `settings.json' files."
   (cons (expand-file-name "settings.json" "~/.claude/")
-        (mapcar (lambda (entry)
-                  (expand-file-name "settings.json"
-                                    (expand-file-name (cdr entry))))
-                agent-claude-accounts)))
+        (mapcar (lambda (home) (expand-file-name "settings.json" home))
+                (agent-claude--account-homes))))
 
 (defun agent-claude--primary-or-existing-files (paths)
   "Return the first file from PATHS, plus any other existing files."

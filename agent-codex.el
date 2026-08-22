@@ -63,7 +63,8 @@ Example:
 (defcustom agent-codex-account-file
   (expand-file-name ".codex-current-account" "~")
   "File storing the name of the currently active Codex account.
-The file contains a single account name from `agent-codex-accounts'.
+The file contains a single account or pool name from
+`agent-codex-accounts'.
 Written by `agent-codex-select-account', read at session start."
   :type 'file
   :group 'agent-codex)

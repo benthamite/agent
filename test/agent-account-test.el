@@ -365,5 +365,101 @@ account cache and the starting binding."
           (should (equal synced '(stub . "personal"))))
       (delete-file file))))
 
+
+;;;; Pools
+
+(defconst agent-account-test--pooled
+  '(("solo" . "/tmp/solo")
+    ("e1" :home "/tmp/e1" :pool "epoch")
+    ("e2" :home "/tmp/e2" :pool "epoch" :chrome-profile "Work"))
+  "Accounts mixing a bare entry with two pool members.")
+
+(ert-deftest agent-account-test-home-reads-both-entry-shapes ()
+  "Read the home from a dotted pair and from a plist entry."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (should (equal (agent-account-home 'stub "solo") "/tmp/solo"))
+    (should (equal (agent-account-home 'stub "e1") "/tmp/e1"))
+    (should-not (agent-account-home 'stub "epoch"))
+    (should-not (agent-account-home 'stub nil))))
+
+(ert-deftest agent-account-test-property-reads-plist-keys ()
+  "Expose extra plist keys; a dotted pair has only `:home'."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (should (equal (agent-account-property 'stub "e2" :chrome-profile) "Work"))
+    (should-not (agent-account-property 'stub "solo" :chrome-profile))
+    (should (equal (agent-account-property 'stub "solo" :home) "/tmp/solo"))))
+
+(ert-deftest agent-account-test-pools-and-members ()
+  "List pools in declaration order and members per pool."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (should (equal (agent-account-pools 'stub) '("epoch")))
+    (should (agent-account-pool-p 'stub "epoch"))
+    (should-not (agent-account-pool-p 'stub "e1"))
+    (should (equal (agent-account-pool-members 'stub "epoch") '("e1" "e2")))
+    (should (equal (agent-account-pool 'stub "e2") "epoch"))
+    (should-not (agent-account-pool 'stub "solo"))))
+
+(ert-deftest agent-account-test-selection-names-lists-pools-first ()
+  "Offer pools before accounts when selecting."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (should (equal (agent-account-selection-names 'stub)
+                   '("epoch" "solo" "e1" "e2")))))
+
+(ert-deftest agent-account-test-load-accepts-pool-name ()
+  "Accept a persisted selection naming a pool."
+  (let ((file (make-temp-file "agent-account")))
+    (unwind-protect
+        (agent-account-test--with-backend
+            (list :accounts agent-account-test--pooled :account-file file)
+          (with-temp-file file (insert "epoch\n"))
+          (should (equal (agent-account-current 'stub) "epoch")))
+      (delete-file file))))
+
+(ert-deftest agent-account-test-resolve-routes-pool-to-member ()
+  "Resolve a pool selection to a concrete member."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (puthash 'stub "epoch" agent-account--current)
+    (should (equal (agent-account-resolve 'stub) "e1"))))
+
+(ert-deftest agent-account-test-route-skips-logged-out-member ()
+  "Skip a pool member whose credentials file is missing."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled :credential-file "auth.json")
+    (cl-letf (((symbol-function 'file-exists-p)
+               (lambda (path) (string-prefix-p "/tmp/e2" path))))
+      (should (equal (agent-account-route 'stub "epoch") "e2")))))
+
+(ert-deftest agent-account-test-route-falls-back-to-first-member ()
+  "Return the first member when no member is logged in."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled :credential-file "auth.json")
+    (cl-letf (((symbol-function 'file-exists-p) #'ignore))
+      (should (equal (agent-account-route 'stub "epoch") "e1")))))
+
+(ert-deftest agent-account-test-resolve-keeps-plain-account ()
+  "Return a non-pool selection unchanged."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (puthash 'stub "solo" agent-account--current)
+    (should (equal (agent-account-resolve 'stub) "solo"))))
+
+(ert-deftest agent-account-test-sync-selection-syncs-every-member ()
+  "Sync each member home when the selection is a pool."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (let (synced)
+      (cl-letf (((symbol-function 'agent-account-sync)
+                 (lambda (_backend account) (push account synced))))
+        (agent-account-sync-selection 'stub "epoch")
+        (should (equal (nreverse synced) '("e1" "e2")))
+        (setq synced nil)
+        (agent-account-sync-selection 'stub "solo")
+        (should (equal synced '("solo")))))))
+
 (provide 'agent-account-test)
 ;;; agent-account-test.el ends here
