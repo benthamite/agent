@@ -387,7 +387,8 @@ normalized usage plist, or nil on any error."
                  (condition-case nil
                      (agent-codex--normalize-usage
                       (json-parse-buffer :object-type 'plist
-                                         :null-object nil))
+                                         :null-object nil
+                                         :false-object nil))
                    (json-parse-error nil))))
     (kill-buffer)))
 

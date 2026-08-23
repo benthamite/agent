@@ -1886,6 +1886,26 @@ session that never restarts would otherwise keep every one of them."
     (should (= (plist-get usage :weekly-pct) 55.0))
     (should-not (plist-get usage :limited))))
 
+(ert-deftest agent-codex-test-handle-usage-response-parses-json-false ()
+  "Treat a JSON `false' `limit_reached' as not limited."
+  (let ((buffer (generate-new-buffer " *codex usage*"))
+        result)
+    (with-current-buffer buffer
+      (insert "HTTP/1.1 200 OK\n\n"
+              "{\"rate_limit\":{\"allowed\":true,\"limit_reached\":false,"
+              "\"primary_window\":{\"used_percent\":0,"
+              "\"limit_window_seconds\":604800,\"reset_at\":1788058494},"
+              "\"secondary_window\":null}}")
+      (goto-char (point-min))
+      (search-forward "\n\n")
+      (setq-local url-http-end-of-headers (point))
+      (agent-codex--handle-usage-response
+       nil "epoch" (lambda (usage) (setq result usage))))
+    (should result)
+    (should-not (plist-get result :limited))
+    (should (= (plist-get result :weekly-pct) 0.0))
+    (should-not (buffer-live-p buffer))))
+
 (ert-deftest agent-codex-test-usage-auth-reads-auth-json ()
   "Read the access token and account id from the account's auth.json."
   (let* ((home (make-temp-file "agent-codex-home" t))
