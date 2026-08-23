@@ -223,6 +223,8 @@ The =agent-todo= module has two options, both formerly named after Claude. ~agen
 :END:
 
 #+vindex: agent-claude-status-interval
+#+vindex: agent-claude-submit-delay
+#+vindex: agent-claude-submit-retries
 #+vindex: agent-claude-accounts
 #+vindex: agent-claude-account-file
 #+vindex: agent-claude-settings-file
@@ -545,8 +547,15 @@ the running Codex renders an unrecognised prompt marker.
 
 Backends can provide an atomic submit operation for before-exit commands.
 Claude and Codex both target the resolved session buffer directly, insert the
-skill command, and submit it once before the terminal buffer is displayed
-again. Codex delegates this to =codex.el='s target-buffer submit helper.
+skill command, and submit it before the terminal buffer is displayed again.
+Codex delegates this to =codex.el='s target-buffer submit helper. Claude
+inserts the command, waits ~agent-claude-submit-delay~ seconds with
+~sleep-for~ (pending keyboard input cannot shorten it, as it would a
+~sit-for~, and a Return that arrives too soon is folded into the inserted text
+as a newline), and sends Return. It then checks the prompt line and re-sends
+Return up to ~agent-claude-submit-retries~ times while the command is still
+sitting there unsubmitted, since Claude Code occasionally swallows the first
+one; the prompt marker's trailing space is a no-break space under =eat=.
 
 ** Branch navigation
 :PROPERTIES:

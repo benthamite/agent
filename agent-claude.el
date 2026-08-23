@@ -226,6 +226,16 @@ Source: lobehub/lobe-icons (MIT).")
 
 ;;;;; Exit
 
+(defcustom agent-claude-submit-delay 0.2
+  "Seconds to wait between inserting a command and sending Return."
+  :type 'number
+  :group 'agent-claude)
+
+(defcustom agent-claude-submit-retries 3
+  "Times to re-send Return when a submitted command stays in the prompt."
+  :type 'integer
+  :group 'agent-claude)
+
 (defun agent-claude-send-command (cmd &optional buffer)
   "Insert CMD into BUFFER's Claude Code prompt without submitting it."
   (when-let* ((claude-buffer (agent-claude--target-buffer buffer)))
@@ -235,18 +245,50 @@ Source: lobehub/lobe-icons (MIT).")
     claude-buffer))
 
 (defun agent-claude-send-return (&optional buffer)
-  "Submit the active prompt in BUFFER's Claude Code session."
+  "Submit the active prompt in BUFFER's Claude Code session.
+Wait with `sleep-for' rather than `sit-for' so pending keyboard input
+cannot cut the delay short and fold the Return into the inserted
+text."
   (when-let* ((claude-buffer (agent-claude--target-buffer buffer)))
     (with-current-buffer claude-buffer
-      (sit-for 0.1)
+      (sleep-for agent-claude-submit-delay)
       (claude-code--term-send-string claude-code-terminal-backend (kbd "RET"))
       (display-buffer claude-buffer))
     claude-buffer))
 
 (defun agent-claude-submit-command (cmd &optional buffer)
-  "Insert CMD into BUFFER's Claude Code prompt and submit it atomically."
+  "Insert CMD into BUFFER's Claude Code prompt and submit it atomically.
+Re-send Return up to `agent-claude-submit-retries' times while CMD
+remains visible in the prompt, since Claude Code occasionally absorbs
+the first Return into the inserted text."
   (when-let* ((claude-buffer (agent-claude-send-command cmd buffer)))
-    (agent-claude-send-return claude-buffer)))
+    (agent-claude-send-return claude-buffer)
+    (run-at-time 0.7 nil #'agent-claude--retry-submit
+                 claude-buffer cmd agent-claude-submit-retries)
+    claude-buffer))
+
+(defun agent-claude--prompt-pending-p (cmd buffer)
+  "Return non-nil when BUFFER's Claude prompt still shows CMD unsubmitted.
+The prompt line starts with `❯' followed by a space that eat renders as
+a no-break space."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (save-excursion
+        (goto-char (point-max))
+        (let ((needle (substring cmd 0 (min 40 (length cmd)))))
+          (and (re-search-backward "^[❯>][  ]"
+                                   (max (point-min) (- (point-max) 4000)) t)
+               (string-match-p (regexp-quote needle)
+                               (buffer-substring-no-properties
+                                (point) (min (point-max) (+ (point) 600))))))))))
+
+(defun agent-claude--retry-submit (buffer cmd remaining)
+  "Send Return to BUFFER again while CMD sits unsubmitted, REMAINING times."
+  (when (and (> remaining 0) (agent-claude--prompt-pending-p cmd buffer))
+    (with-current-buffer buffer
+      (claude-code--term-send-string claude-code-terminal-backend (kbd "RET")))
+    (run-at-time 0.7 nil #'agent-claude--retry-submit
+                 buffer cmd (1- remaining))))
 
 (defun agent-claude--target-buffer (buffer)
   "Return the Claude Code target BUFFER, current buffer, or prompted buffer."
