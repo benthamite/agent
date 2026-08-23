@@ -111,6 +111,27 @@
 
 ;;;; Page scrolling
 
+(ert-deftest agent-test-scroll-to-bottom-ignores-global-eat-terminal ()
+  "Ignore stale global EAT state in a nonterminal session buffer."
+  (let ((was-bound (boundp 'eat-terminal))
+        (old-default (and (boundp 'eat-terminal)
+                          (default-value 'eat-terminal)))
+        called)
+    (unwind-protect
+        (progn
+          (set-default 'eat-terminal 'stale-terminal)
+          (with-temp-buffer
+            (should-not (local-variable-p 'eat-terminal))
+            (cl-letf (((symbol-function 'eat-term-display-cursor)
+                       (lambda (_terminal)
+                         (setq called t)
+                         (point-min))))
+              (agent--scroll-to-bottom (current-buffer)))
+            (should-not called)))
+      (if was-bound
+          (set-default 'eat-terminal old-default)
+        (makunbound 'eat-terminal)))))
+
 (ert-deftest agent-test-setup-scroll-keys-overrides-terminal-navigation ()
   "Make PageUp and PageDown scroll instead of reaching terminal keymaps."
   (let ((minor-mode-overriding-map-alist nil))

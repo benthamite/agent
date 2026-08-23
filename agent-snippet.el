@@ -157,7 +157,7 @@ if a snippet was expanded."
 (defun agent-setup-snippet-keys ()
   "Enable yasnippet TAB expansion in the current AI session buffer."
   (when (and (agent--detect-backend (current-buffer))
-             (bound-and-true-p eat-terminal)
+             (agent--eat-terminal-p)
              (require 'yasnippet nil t))
     (yas-minor-mode 1)
     (agent-snippet--keys-mode 1)))

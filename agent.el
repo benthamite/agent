@@ -1542,11 +1542,16 @@ registered, falling back to `agent-notify'."
 
 ;;;; Scroll to bottom
 
+(defun agent--eat-terminal-p ()
+  "Return non-nil when the current buffer owns a live EAT terminal."
+  (and (local-variable-p 'eat-terminal)
+       (bound-and-true-p eat-terminal)))
+
 (defun agent--scroll-to-bottom (buffer)
   "Scroll BUFFER and its windows to the terminal cursor."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (when (bound-and-true-p eat-terminal)
+      (when (agent--eat-terminal-p)
         (let ((cursor-pos (eat-term-display-cursor eat-terminal)))
           (goto-char cursor-pos)
           (dolist (window (get-buffer-window-list nil nil t))
@@ -1612,7 +1617,7 @@ registered, falling back to `agent-notify'."
   "Return non-nil when WINDOW displays an agent EAT terminal."
   (and (window-live-p window)
        (with-current-buffer (window-buffer window)
-         (and (bound-and-true-p eat-terminal)
+         (and (agent--eat-terminal-p)
               (agent--detect-backend (current-buffer))))))
 
 (defun agent--scroll-command-advice-add ()
@@ -1654,7 +1659,7 @@ ORIGINAL and ARGS describe the wrapped command call."
   "Send terminal mouse wheel EVENT to WINDOW or the current AI terminal."
   (let ((buffer (if window (window-buffer window) (current-buffer))))
     (with-current-buffer buffer
-      (unless (bound-and-true-p eat-terminal)
+      (unless (agent--eat-terminal-p)
         (user-error "Not in an EAT terminal session"))
       (let* ((window (or window
                          (get-buffer-window buffer t)
@@ -1674,7 +1679,7 @@ ORIGINAL and ARGS describe the wrapped command call."
   "Make PageUp and PageDown scroll the current AI terminal buffer."
   (interactive)
   (when (and (agent--detect-backend (current-buffer))
-             (bound-and-true-p eat-terminal))
+             (agent--eat-terminal-p))
     (agent-scroll-keys-mode 1)
     (setq minor-mode-overriding-map-alist
           (assq-delete-all 'agent-scroll-keys-mode
@@ -1716,7 +1721,7 @@ Without this, eat truncates terminal output to
 `eat-term-scrollback-size' lines, causing older AI session output
 to vanish."
   (interactive)
-  (when (bound-and-true-p eat-terminal)
+  (when (agent--eat-terminal-p)
     (if (fboundp 'eat-term-set-scrollback-size)
         (eat-term-set-scrollback-size eat-terminal most-positive-fixnum)
       (setq-local eat-term-scrollback-size nil))))
@@ -1727,7 +1732,7 @@ to vanish."
   "When already in an AI buffer, send escape directly without prompting.
 ORIG-FN is the original escape command."
   (if (agent--detect-backend (current-buffer))
-      (when (bound-and-true-p eat-terminal)
+      (when (agent--eat-terminal-p)
         (eat-term-send-string eat-terminal (kbd "ESC")))
     (funcall orig-fn)))
 
