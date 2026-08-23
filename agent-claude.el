@@ -1102,6 +1102,14 @@ nil if the type cannot be determined."
               (alist-get 'type parsed)))
       (error nil))))
 
+(defun agent-claude--note-user-submission (&rest _)
+  "Emit a `user-submit' session event for the current Claude buffer.
+Installed as advice on claude-code.el's Return-key paths, which only
+the user reaches; programmatic submissions go through
+`claude-code--term-send-string' directly."
+  (when (claude-code--buffer-p (current-buffer))
+    (agent-session-event (current-buffer) 'user-submit)))
+
 (defun agent-claude--note-submission (&rest _)
   "Emit a `submit' session event for the current Claude buffer.
 Installed as advice on claude-code.el's send paths because that
@@ -1948,9 +1956,9 @@ symmetrically and restores `claude-code-notification-function'."
   (add-hook 'claude-code-process-environment-functions
             #'agent-claude--sync-theme-before-start)
   (advice-add 'claude-code--eat-send-return :before
-              #'agent-claude--note-submission)
+              #'agent-claude--note-user-submission)
   (advice-add 'claude-code--vterm-send-return :before
-              #'agent-claude--note-submission)
+              #'agent-claude--note-user-submission)
   (advice-add 'claude-code--do-send-command :before
               #'agent-claude--note-submission)
   (advice-add 'claude-code-send-escape :around
@@ -1988,8 +1996,8 @@ symmetrically and restores `claude-code-notification-function'."
                #'agent-claude--status-uuid-env)
   (remove-hook 'claude-code-process-environment-functions
                #'agent-claude--sync-theme-before-start)
-  (advice-remove 'claude-code--eat-send-return #'agent-claude--note-submission)
-  (advice-remove 'claude-code--vterm-send-return #'agent-claude--note-submission)
+  (advice-remove 'claude-code--eat-send-return #'agent-claude--note-user-submission)
+  (advice-remove 'claude-code--vterm-send-return #'agent-claude--note-user-submission)
   (advice-remove 'claude-code--do-send-command #'agent-claude--note-submission)
   (advice-remove 'claude-code-send-escape
                  #'agent-claude--send-escape-in-current-buffer)

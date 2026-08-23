@@ -1737,6 +1737,38 @@ and globally persisting -- an account the session never had."
           (should exited)
           (should (eq (plist-get agent--before-exit :state) 'closing)))))))
 
+(ert-deftest agent-test-before-exit-user-submit-cancels-armed-chain ()
+  "A user-typed prompt disarms a chain so a later stop cannot fire it."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names '("update-log" "session-retro"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        (events nil)
+        exited)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'codex
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "$"
+          :submit (lambda (cmd &optional _buffer) (push cmd events))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (apply function args))))
+          (should-not (agent-run-skill-before-exit 'codex buf))
+          (should (equal events '("$update-log")))
+          (agent-session-event buf 'user-submit)
+          (should-not agent--before-exit)
+          (should (eq agent--session-state 'busy))
+          (should-not (agent--before-exit-transition buf 'step))
+          (should (equal events '("$update-log")))
+          (should-not exited))))))
+
 (ert-deftest agent-test-before-exit-receipt-success-advances-chain ()
   "Advance a gated entry only after an explicit success receipt."
   (let ((agent-backends nil)

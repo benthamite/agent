@@ -1462,7 +1462,11 @@ configured alert style."
 (defun agent-session-event (buffer event)
   "Apply session EVENT to BUFFER's state machine.
 EVENT is one of the symbols `stop', `idle-prompt', `blocked',
-`submit', `activity', and `exit-request'.  A `blocked' event marks the
+`submit', `user-submit', `activity', and `exit-request'.  A
+`user-submit' event is a prompt the user typed and sent from the
+terminal; it cancels any armed before-exit chain in BUFFER, since
+the user is evidently still working there, and then counts as a
+`submit'.  A `blocked' event marks the
 session as waiting on the user without firing a ready alert, for cases
 where the backend has already alerted, such as a permission or input
 dialog.  An `activity' event marks the session busy on evidence that it
@@ -1480,6 +1484,9 @@ and on submissions that start no turn."
       ((or 'submit 'activity)
        (unless (eq (buffer-local-value 'agent--session-state buffer) 'busy)
          (agent--session-set-state buffer 'busy)))
+      ('user-submit
+       (agent--before-exit-cancel-for-user buffer)
+       (agent-session-event buffer 'submit))
       ('exit-request
        (agent--session-set-state buffer 'closing))
       (_ (error "Unknown agent session event: %s" event)))))
@@ -2133,6 +2140,19 @@ is submitted."
   (when-let* ((timer (plist-get agent--before-exit :timer)))
     (cancel-timer timer)
     (setq agent--before-exit (plist-put agent--before-exit :timer nil))))
+
+(defun agent--before-exit-cancel-for-user (buffer)
+  "Cancel BUFFER's before-exit chain because the user submitted a prompt.
+A chain that stays armed after the user resumes work would fire its
+next skill into that work on the next stop event."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and agent--before-exit
+                 (memq (plist-get agent--before-exit :state)
+                       '(waiting-for-idle running)))
+        (agent--before-exit-reset)
+        (message "agent: before-exit chain cancelled in %s; the user submitted a prompt"
+                 (buffer-name buffer))))))
 
 (defun agent--before-exit-teardown ()
   "Cancel the before-exit watchdog at session teardown.

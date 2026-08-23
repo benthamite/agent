@@ -545,6 +545,14 @@ autosuggestion text. The readiness check recognises the standard Codex prompt
 markers (=›= and =❯=); a chain that stalls after the first skill usually means
 the running Codex renders an unrecognised prompt marker.
 
+A chain stays armed across stop events until its queue drains, so a chain
+whose command was typed but never accepted would otherwise fire its next skill
+into whatever the user does in that buffer later. A prompt the user sends from
+the terminal therefore cancels any armed chain in that buffer, with a message.
+Claude reports such prompts as a ~user-submit~ session event from its Return
+key paths; Codex's submission hook runs for programmatic sends too, so it
+reports plain ~submit~ events and cannot cancel a chain this way.
+
 Backends can provide an atomic submit operation for before-exit commands.
 Claude and Codex both target the resolved session buffer directly, insert the
 skill command, and submit it before the terminal buffer is displayed again.
