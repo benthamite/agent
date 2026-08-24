@@ -1154,12 +1154,18 @@ they proceed only once the user answers."
             (format "%s: needs your attention" name)))))))
   nil)
 
-(defconst agent-claude--turn-in-progress-regexp "esc to interrupt"
-  "Regexp matching the hint Claude Code renders while a turn is running.
-The spinner line reads e.g. \"Baking… (esc to interrupt)\" during a
-turn and is rewritten to \"Baked for 59s\" once the turn ends.")
+(defconst agent-claude--turn-in-progress-regexp
+  (concat "\\(?:^[^[:space:]] [[:alpha:]]+… (\\|esc to interrupt"
+          "\\|esc to give additional instructions\\)")
+  "Regexp matching what Claude Code renders while a turn is running.
+The spinner line reads e.g. \"✢ Billowing… (4m 35s · ↓ 6.7k tokens)\":
+a glyph, a verb ending in an ellipsis, and a parenthesised elapsed
+time.  Once the turn ends it is rewritten to \"✻ Baked for 59s\", with
+no ellipsis.  Older releases printed \"(esc to interrupt)\" instead, and
+a session blocked on a background task shows \"(esc to give additional
+instructions)\"; both also count as running.")
 
-(defconst agent-claude--idle-prompt-regexp "^[❯>][  ]"
+(defconst agent-claude--idle-prompt-regexp "^[❯>][ \u00a0]"
   "Regexp matching the start of Claude Code's input prompt line.
 The prompt character is followed by a space that eat renders as a
 no-break space.")
@@ -1179,7 +1185,7 @@ turn it accepts and then drops, for instance at the context limit,
 fires no Stop hook, so `agent--session-state' stays `busy' forever.
 The rendered screen is the one source that cannot go stale, so the
 session is waiting when the tail shows the input prompt and no
-\"esc to interrupt\" hint.  A `busy' state younger than
+running-turn spinner line.  A `busy' state younger than
 `agent-claude-terminal-idle-grace' is trusted over the screen, since
 the spinner takes a moment to appear after a submission."
   (let ((buf (or buffer (current-buffer))))

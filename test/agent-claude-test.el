@@ -266,6 +266,24 @@ notification would double-report the same interruption."
      (setq agent--session-state-changed-at (- (float-time) 60))
      (should-not (agent-claude--terminal-waiting-p (current-buffer))))))
 
+(ert-deftest agent-claude-test-terminal-waiting-respects-spinner-line ()
+  "The elapsed-time spinner line means a turn is running."
+  (agent-claude-test--with-fake-process
+   (lambda ()
+     (insert "\u2722 Billowing\u2026 (4m 35s \u00b7 \u2193 6.7k tokens)\n\n\u276f \u00a0\n")
+     (setq agent--session-state 'busy)
+     (setq agent--session-state-changed-at (- (float-time) 60))
+     (should-not (agent-claude--terminal-waiting-p (current-buffer))))))
+
+(ert-deftest agent-claude-test-terminal-waiting-respects-background-task-wait ()
+  "Waiting on a background task is a running turn, not user-blocked."
+  (agent-claude-test--with-fake-process
+   (lambda ()
+     (insert "Waiting for task (esc to give additional instructions)\n\u276f \u00a0\n")
+     (setq agent--session-state 'busy)
+     (setq agent--session-state-changed-at (- (float-time) 60))
+     (should-not (agent-claude--terminal-waiting-p (current-buffer))))))
+
 (ert-deftest agent-claude-test-terminal-waiting-trusts-fresh-busy-state ()
   "A busy state younger than the grace period wins over the screen."
   (agent-claude-test--with-fake-process
