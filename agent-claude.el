@@ -1206,10 +1206,11 @@ the spinner takes a moment to appear after a submission."
                             limit t))))))))))
 
 (defconst agent-claude--background-tasks-regexp
-  "· *[0-9]+ +\\(shells?\\|monitors?\\)"
+  "· *\\(?:← *\\)?[0-9]+ +\\(shells?\\|monitors?\\|agents?\\)"
   "Regexp matching the background-task count in Claude's status line.
-Claude Code renders \"· N shells\" or \"· N monitors\" near the
-footer when background Bash processes or Task agent are running.")
+Claude Code renders \"· N shells\", \"· N monitors\", or \"· ← N agents\"
+near the footer when background Bash processes, monitors, or Task
+agents are running.")
 
 (defconst agent-claude--remote-control-active-regexp
   "Remote Control active"
