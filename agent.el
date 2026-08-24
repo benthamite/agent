@@ -137,7 +137,7 @@ chain only once.  Only
   run-prompt exec-prompt skill-roots skill-command-prefix
   session-headers session-prompt prepare-fork
   sync-theme
-  before-exit-ready-to-close-p before-kill-check)
+  before-exit-ready-to-close-p before-kill-check idle-p)
 
 (defvar agent-backends nil
   "Alist of registered AI backends.
@@ -2186,11 +2186,15 @@ unaccepted at the prompt."
 
 (defun agent--backend-affirms-idle-p (backend buffer)
   "Return non-nil when BACKEND's close-readiness probe affirms BUFFER is idle.
-Unlike `agent--before-exit-ready-to-close-p', a backend without a
-probe returns nil here: only positive evidence may override a busy
-session state, whereas the absence of a veto may not."
+The `:idle-p' probe supplies positive idle evidence, so a backend
+without one returns nil here.  It is separate from
+`:before-exit-ready-to-close-p' on purpose: that veto runs on every
+chain step, where a probe with observation lag (such as a screen
+scrape not yet redrawn at the moment a stop event fires) would
+strand the chain, while this probe is consulted only when arming
+and when the watchdog fires."
   (when-let* ((struct (agent-backend backend))
-              (fn (agent-backend-before-exit-ready-to-close-p struct)))
+              (fn (agent-backend-idle-p struct)))
     (funcall fn buffer)))
 
 (defun agent--exit-after-before-exit-skill (_backend buffer)
