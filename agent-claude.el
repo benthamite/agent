@@ -207,6 +207,7 @@ Source: lobehub/lobe-icons (MIT).")
   :account-init #'agent-claude--sync-account-json
   :usage-fetch #'agent-claude--usage-fetch
   :background-tasks-p #'agent-claude--has-background-tasks-p
+  :waiting-p #'agent-claude--terminal-waiting-p
   :display-name-suffix #'agent-claude--branch-suffix
   :label "Claude Code"
   :run-prompt #'agent-claude-run-prompt
@@ -1152,6 +1153,51 @@ they proceed only once the user answers."
             label
             (format "%s: needs your attention" name)))))))
   nil)
+
+(defconst agent-claude--turn-in-progress-regexp "esc to interrupt"
+  "Regexp matching the hint Claude Code renders while a turn is running.
+The spinner line reads e.g. \"Baking… (esc to interrupt)\" during a
+turn and is rewritten to \"Baked for 59s\" once the turn ends.")
+
+(defconst agent-claude--idle-prompt-regexp "^[❯>][  ]"
+  "Regexp matching the start of Claude Code's input prompt line.
+The prompt character is followed by a space that eat renders as a
+no-break space.")
+
+(defcustom agent-claude-terminal-idle-grace 2
+  "Seconds a `busy' state must be old before the terminal can override it.
+Right after a submission the CLI has not yet drawn its spinner, so
+the screen briefly looks idle; the state machine wins during that
+window."
+  :type 'number
+  :group 'agent-claude)
+
+(defun agent-claude--terminal-waiting-p (&optional buffer)
+  "Return non-nil when the terminal of Claude session BUFFER shows an idle prompt.
+Claude Code publishes no idle signal that survives every failure: a
+turn it accepts and then drops, for instance at the context limit,
+fires no Stop hook, so `agent--session-state' stays `busy' forever.
+The rendered screen is the one source that cannot go stale, so the
+session is waiting when the tail shows the input prompt and no
+\"esc to interrupt\" hint.  A `busy' state younger than
+`agent-claude-terminal-idle-grace' is trusted over the screen, since
+the spinner takes a moment to appear after a submission."
+  (let ((buf (or buffer (current-buffer))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (and (get-buffer-process buf)
+             (not (and (eq agent--session-state 'busy)
+                       agent--session-state-changed-at
+                       (< (- (float-time) agent--session-state-changed-at)
+                          agent-claude-terminal-idle-grace)))
+             (save-excursion
+               (goto-char (point-max))
+               (let ((limit (max (point-min) (- (point-max) 4000))))
+                 (and (re-search-backward agent-claude--idle-prompt-regexp
+                                          limit t)
+                      (not (re-search-backward
+                            agent-claude--turn-in-progress-regexp
+                            limit t))))))))))
 
 (defconst agent-claude--background-tasks-regexp
   "· *[0-9]+ +\\(shells?\\|monitors?\\)"

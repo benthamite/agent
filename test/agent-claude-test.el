@@ -237,6 +237,50 @@ notification would double-report the same interruption."
       (agent-claude--note-submission))
     (should (eq agent--session-state 'awaiting-input))))
 
+;;;; Terminal idle detection
+
+(defun agent-claude-test--with-fake-process (body)
+  "Run BODY in a temp buffer that has a live dummy process."
+  (with-temp-buffer
+    (let ((proc (start-process "agent-claude-test-idle" (current-buffer)
+                               "sleep" "30")))
+      (unwind-protect
+          (funcall body)
+        (delete-process proc)))))
+
+(ert-deftest agent-claude-test-terminal-waiting-detects-idle-prompt ()
+  "An idle prompt with no interrupt hint is waiting even when state is stale."
+  (agent-claude-test--with-fake-process
+   (lambda ()
+     (insert "\u2727 Baked for 59s\n\n\u276f \u00a0\n")
+     (setq agent--session-state 'busy)
+     (setq agent--session-state-changed-at (- (float-time) 60))
+     (should (agent-claude--terminal-waiting-p (current-buffer))))))
+
+(ert-deftest agent-claude-test-terminal-waiting-respects-running-turn ()
+  "The interrupt hint means a turn is running, whatever the prompt shows."
+  (agent-claude-test--with-fake-process
+   (lambda ()
+     (insert "\u2727 Baking\u2026 (esc to interrupt)\n\n\u276f \u00a0\n")
+     (setq agent--session-state 'busy)
+     (setq agent--session-state-changed-at (- (float-time) 60))
+     (should-not (agent-claude--terminal-waiting-p (current-buffer))))))
+
+(ert-deftest agent-claude-test-terminal-waiting-trusts-fresh-busy-state ()
+  "A busy state younger than the grace period wins over the screen."
+  (agent-claude-test--with-fake-process
+   (lambda ()
+     (insert "\u276f \u00a0\n")
+     (setq agent--session-state 'busy)
+     (setq agent--session-state-changed-at (float-time))
+     (should-not (agent-claude--terminal-waiting-p (current-buffer))))))
+
+(ert-deftest agent-claude-test-terminal-waiting-needs-process ()
+  "A dead terminal never reports as waiting."
+  (with-temp-buffer
+    (insert "\u276f \u00a0\n")
+    (should-not (agent-claude--terminal-waiting-p (current-buffer)))))
+
 ;;;; Background task detection
 
 (ert-deftest agent-claude-test-has-background-tasks-detects-remote-control ()
