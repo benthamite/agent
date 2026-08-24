@@ -302,15 +302,15 @@ notification would double-report the same interruption."
 ;;;; Background task detection
 
 (ert-deftest agent-claude-test-has-background-tasks-detects-agents ()
-  "Detect the footer's running-agent count as background work."
+  "Detect a per-session running-agent count as background work."
   (with-temp-buffer
-    (insert "\u23f5\u23f5 auto mode on (shift+tab to cycle) \u00b7 \u2190 2 agents\n")
+    (insert "\u23f5\u23f5 auto mode on \u00b7 2 agents\n")
     (should (agent-claude--has-background-tasks-p (current-buffer)))))
 
-(ert-deftest agent-claude-test-has-background-tasks-ignores-agents-hint ()
-  "The bare \"for agents\" hint is not a task count."
+(ert-deftest agent-claude-test-has-background-tasks-ignores-fleet-count ()
+  "The cross-session fleet indicator \"\u2190 N agents\" is not this session's work."
   (with-temp-buffer
-    (insert "\u23f5\u23f5 auto mode on (shift+tab to cycle) \u00b7 \u2190 for agents\n")
+    (insert "\u23f5\u23f5 auto mode on (shift+tab to cycle) \u00b7 \u2190 2 agents\n")
     (should-not (agent-claude--has-background-tasks-p (current-buffer)))))
 
 (ert-deftest agent-claude-test-has-background-tasks-detects-remote-control ()

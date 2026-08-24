@@ -1936,7 +1936,8 @@ could be submitted."
         t)
     (let* ((backend (agent--detect-backend buffer))
            (queue (agent--before-exit-skill-queue backend buffer))
-           (busy (eq (agent-session-display-state buffer backend) 'busy)))
+           (busy (and (eq (agent-session-display-state buffer backend) 'busy)
+                      (not (agent--backend-affirms-idle-p backend buffer)))))
       (when queue
         (cl-pushnew #'agent--before-exit-teardown agent--teardown-functions)
         (setq agent--before-exit
@@ -2060,12 +2061,19 @@ The result is a plist whose `:status' is `success', `no-op',
                    (agent--before-exit-start-watchdog buffer))))
 
 (defun agent--before-exit-timeout (buffer)
-  "Warn that BUFFER's skill timed out while keeping its exit armed."
+  "Advance or warn when BUFFER's before-exit watchdog fires.
+A chain still waiting for idle whose backend now affirms the
+session is idle missed its stop event, so the watchdog advances it
+instead of warning."
   (when agent--before-exit
     (setq agent--before-exit
           (plist-put agent--before-exit :timer nil))
-    (message "agent: before-exit skill timed out in %s; waiting for completion"
-             (buffer-name buffer))
+    (or (and (eq (plist-get agent--before-exit :state) 'waiting-for-idle)
+             (agent--backend-affirms-idle-p (agent--detect-backend buffer)
+                                            buffer)
+             (agent--before-exit-step buffer))
+        (message "agent: before-exit skill timed out in %s; waiting for completion"
+                 (buffer-name buffer)))
     t))
 
 (defun agent--before-exit-close (buffer backend)
@@ -2175,6 +2183,15 @@ unaccepted at the prompt."
             (fn (agent-backend-before-exit-ready-to-close-p struct)))
       (funcall fn buffer)
     t))
+
+(defun agent--backend-affirms-idle-p (backend buffer)
+  "Return non-nil when BACKEND's close-readiness probe affirms BUFFER is idle.
+Unlike `agent--before-exit-ready-to-close-p', a backend without a
+probe returns nil here: only positive evidence may override a busy
+session state, whereas the absence of a veto may not."
+  (when-let* ((struct (agent-backend backend))
+              (fn (agent-backend-before-exit-ready-to-close-p struct)))
+    (funcall fn buffer)))
 
 (defun agent--exit-after-before-exit-skill (_backend buffer)
   "Exit the session in BUFFER without re-running before-exit hooks."

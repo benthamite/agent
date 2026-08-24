@@ -207,7 +207,7 @@ Source: lobehub/lobe-icons (MIT).")
   :account-init #'agent-claude--sync-account-json
   :usage-fetch #'agent-claude--usage-fetch
   :background-tasks-p #'agent-claude--has-background-tasks-p
-  :waiting-p #'agent-claude--terminal-waiting-p
+  :before-exit-ready-to-close-p #'agent-claude--terminal-waiting-p
   :display-name-suffix #'agent-claude--branch-suffix
   :label "Claude Code"
   :run-prompt #'agent-claude-run-prompt
@@ -1180,6 +1180,10 @@ window."
 
 (defun agent-claude--terminal-waiting-p (&optional buffer)
   "Return non-nil when the terminal of Claude session BUFFER shows an idle prompt.
+Used only by the before-exit chain, as the backend's
+`:before-exit-ready-to-close-p'; the switcher's display state stays
+with the session-event state machine, which screen scraping is not
+reliable enough to override.
 Claude Code publishes no idle signal that survives every failure: a
 turn it accepts and then drops, for instance at the context limit,
 fires no Stop hook, so `agent--session-state' stays `busy' forever.
@@ -1206,10 +1210,11 @@ the spinner takes a moment to appear after a submission."
                             limit t))))))))))
 
 (defconst agent-claude--background-tasks-regexp
-  "· *\\(?:← *\\)?[0-9]+ +\\(shells?\\|monitors?\\|agents?\\)"
+  "· *[0-9]+ +\\(shells?\\|monitors?\\|agents?\\)"
   "Regexp matching the background-task count in Claude's status line.
-Claude Code renders \"· N shells\", \"· N monitors\", or \"· ← N agents\"
-near the footer when background Bash processes, monitors, or Task
+Claude Code renders \"· N shells\", \"· N monitors\", or \"· N agents\"
+near the footer.  The fleet indicator \"· ← N agents\" counts agents
+across every session, so the arrow form is deliberately not matched when background Bash processes, monitors, or Task
 agents are running.")
 
 (defconst agent-claude--remote-control-active-regexp
