@@ -522,8 +522,12 @@ warning. Agent removes the temporary receipt directory after reading it or
 tearing down the session. Receipt gating is per entry: plain entries keep the
 stop-event behavior. This lets a learning-capture entry run independently
 before a receipt-gated bookkeeping entry. Repeating ~agent-exit~ while a chain
-is active does not bypass it; use ~agent-exit-without-skills~ for an explicit
-close that skips configured skills.
+is active does not bypass it; it reports the chain's state in the echo area,
+and ~agent-exit-without-skills~ is the explicit close that skips configured
+skills. When ~agent-exit~ is called on a session that is still responding, the
+chain arms in a waiting state and starts its first skill on the next stop
+event; a message says so at arming time, since nothing else is visible until
+the turn ends.
 
 ~agent-exit~ runs every applicable configured skill regardless of session
 duration. ~agent-exit-without-skills~ is the only exit command that bypasses

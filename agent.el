@@ -1930,7 +1930,10 @@ An existing chain also returns non-nil so a repeated exit request
 cannot bypass it.  Return nil when no skill applies or nothing
 could be submitted."
   (if agent--before-exit
-      t
+      (progn
+        (message "Before-exit chain already armed (%s); use `agent-exit-without-skills' to bypass it"
+                 (plist-get agent--before-exit :state))
+        t)
     (let* ((backend (agent--detect-backend buffer))
            (queue (agent--before-exit-skill-queue backend buffer))
            (busy (eq (agent-session-display-state buffer backend) 'busy)))
@@ -1944,7 +1947,10 @@ could be submitted."
                     :started-at (float-time)
                     :timer (agent--before-exit-start-watchdog buffer)))
         (if (eq (plist-get agent--before-exit :state) 'waiting-for-idle)
-            t
+            (progn
+              (message "Session is busy; before-exit skills will start when it goes idle (watchdog in %ss)"
+                       agent-before-exit-timeout)
+              t)
           (if (agent--before-exit-submit-next buffer)
               t
             (agent--before-exit-reset)
