@@ -1888,6 +1888,41 @@ and globally persisting -- an account the session never had."
           (should-not agent--before-exit)
           (should (string-match-p "no receipt" (car warnings))))))))
 
+(ert-deftest agent-test-before-exit-missing-receipt-waits-while-busy ()
+  "Defer a missing receipt while the backend still reports the session busy."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names '(("update-log" :receipt t)))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        (busy t)
+        warnings exited)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
+          :submit #'ignore
+          :idle-p (lambda (_buffer) (not busy))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
+                  ((symbol-function 'display-warning)
+                   (lambda (_type message &rest _args) (push message warnings))))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (let ((file (plist-get agent--before-exit :receipt-file)))
+            (should-not (agent--before-exit-transition buf 'stop))
+            (should (eq (plist-get agent--before-exit :state) 'running))
+            (should-not warnings)
+            (with-temp-file file (insert "{\"status\":\"success\"}"))
+            (setq busy nil)
+            (should (agent--before-exit-transition buf 'stop))
+            (should (eq (plist-get agent--before-exit :state) 'closing))
+            (should-not exited)
+            (should-not warnings)))))))
+
 (ert-deftest agent-test-before-exit-invalid-receipt-is-rejected ()
   "Reject malformed JSON and unknown closeout statuses."
   (let ((file (make-temp-file "agent-invalid-receipt")))

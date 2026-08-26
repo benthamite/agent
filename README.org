@@ -518,7 +518,8 @@ object to that path. Its ~status~ must be exactly ~success~, ~no-op~, or
 ~failure~; a failure receipt can include a ~message~. Agent advances the chain
 or exits only after ~success~ or ~no-op~. A missing file, invalid JSON, unknown
 status, or ~failure~ stops the chain, keeps the session open, and shows a
-warning. Agent removes the temporary receipt directory after reading it or
+warning; a missing file is ignored while the backend's idle probe still shows
+the session working, since that completion event belongs to an earlier turn. Agent removes the temporary receipt directory after reading it or
 tearing down the session. Receipt gating is per entry: plain entries keep the
 stop-event behavior. This lets a learning-capture entry run independently
 before a receipt-gated bookkeeping entry. Repeating ~agent-exit~ while a chain

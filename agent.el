@@ -1998,14 +1998,36 @@ Return non-nil when the chain consumed the event."
 (defun agent--before-exit-accept-receipt-p (buffer)
   "Return non-nil if BUFFER's current entry has an accepted receipt.
 Ungated entries need no receipt.  A missing, invalid, or failed
-receipt stops the chain and keeps BUFFER open."
+receipt stops the chain and keeps BUFFER open.  A receipt that is
+missing while the backend still shows the session working is not a
+failure: the completion event belongs to an earlier turn (a late Stop
+hook or a stray idle notification), so the chain stays armed and
+re-checks on the next event."
   (if-let* ((file (plist-get agent--before-exit :receipt-file)))
       (let ((result (agent--before-exit-read-receipt file)))
-        (agent--before-exit-cleanup-receipt)
-        (if (memq (plist-get result :status) '(success no-op))
-            t
-          (agent--before-exit-fail buffer result)))
+        (cond
+         ((and (eq (plist-get result :status) 'missing)
+               (agent--backend-denies-idle-p (agent--detect-backend buffer)
+                                             buffer))
+          (message "agent: no receipt yet and %s is still working; waiting"
+                   (buffer-name buffer))
+          nil)
+         ((memq (plist-get result :status) '(success no-op))
+          (agent--before-exit-cleanup-receipt)
+          t)
+         (t
+          (agent--before-exit-cleanup-receipt)
+          (agent--before-exit-fail buffer result))))
     t))
+
+(defun agent--backend-denies-idle-p (backend buffer)
+  "Return non-nil when BACKEND's idle probe reports BUFFER as still working.
+Unlike `agent--backend-affirms-idle-p', a backend without an
+`:idle-p' probe returns nil here, so it cannot defer a decision it has
+no evidence for."
+  (when-let* ((struct (agent-backend backend))
+              (fn (agent-backend-idle-p struct)))
+    (not (funcall fn buffer))))
 
 (defun agent--before-exit-read-receipt (file)
   "Return the validated closeout receipt from FILE.
