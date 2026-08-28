@@ -727,6 +727,15 @@ Applied in the session switcher when no session event has reached a
 buffer, so that an unknown state is not presented as a known one."
   :group 'agent)
 
+(defface agent-snoozed
+  '((t :inherit shadow :slant italic))
+  "Face for snoozed sessions in the session switcher.
+Applied to the whole entry of a session marked with
+`agent-toggle-snooze', in place of any state face, so that a session
+set aside as not actionable is not colored as one that wants
+attention."
+  :group 'agent)
+
 (defface agent-session-account
   '((t :inherit shadow))
   "Face for the account column in the session switcher.
@@ -775,6 +784,13 @@ Only `agent-session-event' may set this variable.")
 
 (defvar-local agent--session-state-changed-at nil
   "Value of `float-time' at this session's last state transition.")
+
+(defvar-local agent--snoozed nil
+  "Non-nil when this AI session is snoozed.
+A snoozed session is one the user has set aside as not actionable for
+now: it keeps its key and stays reachable, but the switcher lists it
+last and dimmed, `agent-jump-to-waiting' skips it, and it fires no
+ready alert.  Only `agent-toggle-snooze' sets this variable.")
 
 (defvar agent--sync-theme-timer nil
   "Pending timer for deferred theme sync, or nil.")
@@ -1060,7 +1076,8 @@ If sessions exist, show a transient menu with home-row keys."
   "Switch to an AI session or start a new one."
   [["Actions"
     ("w" "jump to waiting" agent-jump-to-waiting)
-    ("e" "new session" agent-start-new-session)]
+    ("e" "new session" agent-start-new-session)
+    ("S" "snooze/unsnooze" agent-toggle-snooze)]
    ["Sessions"
     :class transient-column
     :setup-children agent--session-switcher-children]])
@@ -1077,21 +1094,32 @@ are only known once every session has been measured."
      (apply #'vector (agent--session-suffix-specs name-pad account-pad)))))
 
 (defun agent--session-suffix-specs (&optional name-pad account-pad)
-  "Return the switcher's suffix specs, sorted by home-row key.
+  "Return the switcher's suffix specs, active sessions first.
 NAME-PAD and ACCOUNT-PAD are the widths to pad the name and account
-columns to; nil pads nothing.  One flat list rather than one list per
-account, so that a session is found by the key it always answers to
-instead of by the account it happens to run under."
-  (let (specs)
+columns to; nil pads nothing.  Within each group the specs are sorted
+by home-row key.  One flat list rather than one list per account, so
+that a session is found by the key it always answers to instead of by
+the account it happens to run under.  Snoozed sessions come after
+every active one, so the sessions worth toggling between sit together
+at the top; a snoozed session keeps its key, so moving it does not
+change how it is reached."
+  (let (active snoozed)
     (maphash (lambda (buf key)
                (when (buffer-live-p buf)
-                 (push (agent--session-suffix-spec
-                        buf key name-pad account-pad)
-                       specs)))
+                 (let ((spec (agent--session-suffix-spec
+                              buf key name-pad account-pad)))
+                   (if (agent-session-snoozed-p buf)
+                       (push spec snoozed)
+                     (push spec active)))))
              agent--session-keys)
-    (sort specs (lambda (a b)
-                  (< (agent--session-key-index (car a))
-                     (agent--session-key-index (car b)))))))
+    (append (agent--sort-specs-by-key active)
+            (agent--sort-specs-by-key snoozed))))
+
+(defun agent--sort-specs-by-key (specs)
+  "Return SPECS sorted by the position of their key in the key pool."
+  (sort specs (lambda (a b)
+                (< (agent--session-key-index (car a))
+                   (agent--session-key-index (car b))))))
 
 (defconst agent--switcher-suffix-padding 2
   "Columns a transient suffix spends beyond its key and description.
@@ -1310,7 +1338,9 @@ nothing."
          (state (agent-session-display-state buf backend))
          (cmd (make-symbol (format "ai-switch-%s" key)))
          (spec (list key label cmd)))
-    (when-let* ((face (agent--session-state-face state)))
+    (when-let* ((face (if (agent-session-snoozed-p buf)
+                          'agent-snoozed
+                        (agent--session-state-face state))))
       (setq spec (append spec (list :face face))))
     (fset cmd (lambda () (interactive) (switch-to-buffer buf)))
     spec))
@@ -1379,6 +1409,29 @@ Sessions with reported background work are distinguished from idle ones."
   (when-let* ((struct (and backend (agent-backend backend)))
               (fn (agent-backend-background-tasks-p struct)))
     (funcall fn buffer)))
+
+;;;; Snoozing
+
+(defun agent-session-snoozed-p (buffer)
+  "Return non-nil when session BUFFER is snoozed."
+  (buffer-local-value 'agent--snoozed buffer))
+
+;;;###autoload
+(defun agent-toggle-snooze (&optional buffer)
+  "Snooze session BUFFER, or unsnooze it when it is already snoozed.
+BUFFER defaults to the current session buffer, and is prompted for
+when the current buffer is not a session or with a prefix argument.
+A snoozed session is set aside as not actionable for now: the switcher
+lists it last in the `agent-snoozed' face, `agent-jump-to-waiting'
+skips it, and it fires no ready alert, while its key and its buffer
+stay as they were.  Snoozing is a property of the buffer, so it ends
+with the session."
+  (interactive (list (and current-prefix-arg (agent--read-session-buffer))))
+  (let ((buf (agent--resolve-session-buffer buffer)))
+    (with-current-buffer buf
+      (setq agent--snoozed (not agent--snoozed))
+      (message "%s %s" (agent-display-name buf)
+               (if agent--snoozed "snoozed" "unsnoozed")))))
 
 ;;;; Buffer protection
 
@@ -1513,7 +1566,7 @@ ready alert fires only for `idle-prompt' events."
     (setq agent--session-state-changed-at (float-time))))
 
 (defun agent--session-notify-ready (buffer)
-  "Fire the ready alert for session BUFFER.
+  "Fire the ready alert for session BUFFER, unless it is snoozed.
 Dispatch through the backend's `:notify' function when one is
 registered, falling back to `agent-notify'."
   (let* ((backend (agent--detect-backend buffer))
@@ -1523,17 +1576,20 @@ registered, falling back to `agent-notify'."
          (name (agent--buffer-session-name buffer))
          (notify (or (and struct (agent-backend-notify struct))
                      #'agent-notify)))
-    (funcall notify
+    (unless (agent-session-snoozed-p buffer)
+      (funcall notify
              (format "%s ready" label)
-             (format "%s: waiting for your response" name))))
+             (format "%s: waiting for your response" name)))))
 
 ;;;###autoload
 (defun agent-jump-to-waiting ()
-  "Switch to the AI session that most recently started waiting for input."
+  "Switch to the AI session that most recently started waiting for input.
+Snoozed sessions are skipped, since they were set aside as not
+actionable."
   (interactive)
   (let (best-buf best-time)
     (dolist (buf (agent--find-all-buffers))
-      (when (buffer-live-p buf)
+      (when (and (buffer-live-p buf) (not (agent-session-snoozed-p buf)))
         (let ((ts (and (agent--session-waiting-p buf)
                        (buffer-local-value 'agent--session-state-changed-at
                                            buf))))
@@ -3848,6 +3904,7 @@ when it is not installed."
   [["Sessions"
     ("e" "start or switch" agent-start-or-switch)
     ("w" "jump to waiting" agent-jump-to-waiting)
+    ("z" "snooze/unsnooze" agent-toggle-snooze)
     ("R" "resume" agent-resume)
     ("N" "new branch" agent-create-branch)
     ("B" "switch branch" agent-switch-branch)

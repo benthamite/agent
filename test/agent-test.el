@@ -536,6 +536,82 @@ the frame fit."
     (cl-letf (((symbol-function 'frame-width) (lambda (&optional _) 30)))
       (should (= (agent--session-annotation-width 20) 20)))))
 
+;;;; Snoozing
+
+(defmacro agent-test--with-two-sessions (&rest body)
+  "Run BODY with buffers `a' and `b' registered under one backend.
+They hold session keys \"a\" and \"s\" and are killed afterwards."
+  (declare (indent 0) (debug t))
+  `(let ((agent-backends nil)
+         (agent--session-keys (make-hash-table :test 'eq))
+         (agent-session-annotation-functions nil)
+         (a (generate-new-buffer "*one:~/repo/first/:default*"))
+         (b (generate-new-buffer "*one:~/repo/second/:default*")))
+     (unwind-protect
+         (progn
+           (apply #'agent-register-backend
+                  'one
+                  (agent-test--backend
+                   :buffer-p (lambda (candidate) (memq candidate (list a b)))
+                   :find-all-buffers (lambda () (list a b))))
+           (puthash a "a" agent--session-keys)
+           (puthash b "s" agent--session-keys)
+           ,@body)
+       (kill-buffer a)
+       (kill-buffer b))))
+
+(ert-deftest agent-test-toggle-snooze-flips-the-flag ()
+  "Snooze a session on the first toggle and unsnooze it on the second."
+  (agent-test--with-two-sessions
+    (agent-toggle-snooze a)
+    (should (agent-session-snoozed-p a))
+    (should-not (agent-session-snoozed-p b))
+    (agent-toggle-snooze a)
+    (should-not (agent-session-snoozed-p a))))
+
+(ert-deftest agent-test-snoozed-sessions-are-listed-last ()
+  "List snoozed sessions after every active one, keeping their keys."
+  (agent-test--with-two-sessions
+    (agent-toggle-snooze a)
+    (should (equal (mapcar #'car (agent--session-suffix-specs)) '("s" "a")))))
+
+(ert-deftest agent-test-snoozed-session-wears-the-snoozed-face ()
+  "Render a snoozed session with `agent-snoozed' whatever its state."
+  (agent-test--with-two-sessions
+    (with-current-buffer a
+      (setq-local agent--session-state 'awaiting-input))
+    (agent-toggle-snooze a)
+    (should (eq (plist-get (nthcdr 3 (agent--session-suffix-spec a "a")) :face)
+                'agent-snoozed))
+    (should (eq (plist-get (nthcdr 3 (agent--session-suffix-spec b "s")) :face)
+                'agent-unknown))))
+
+(ert-deftest agent-test-jump-to-waiting-skips-snoozed-sessions ()
+  "Skip a snoozed session even when it started waiting most recently."
+  (agent-test--with-two-sessions
+    (let (switched)
+      (dolist (pair (list (cons a 200.0) (cons b 100.0)))
+        (with-current-buffer (car pair)
+          (setq-local agent--session-state 'awaiting-input)
+          (setq-local agent--session-state-changed-at (cdr pair))))
+      (agent-toggle-snooze a)
+      (cl-letf (((symbol-function 'switch-to-buffer)
+                 (lambda (buffer) (setq switched buffer))))
+        (agent-jump-to-waiting))
+      (should (eq switched b)))))
+
+(ert-deftest agent-test-snoozed-session-fires-no-ready-alert ()
+  "Suppress the ready alert for a snoozed session."
+  (agent-test--with-two-sessions
+    (let (alerts)
+      (cl-letf (((symbol-function 'agent-notify)
+                 (lambda (&rest args) (push args alerts))))
+        (agent-toggle-snooze a)
+        (agent--session-notify-ready a)
+        (should-not alerts)
+        (agent--session-notify-ready b)
+        (should (= (length alerts) 1))))))
+
 ;;;; Switcher annotations
 
 (defun agent-test--switcher-label (buffer)

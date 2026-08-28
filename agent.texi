@@ -45,6 +45,7 @@ Architecture
 * Session state machine::
 * Session teardown and leak policy::
 * Account model::
+* Account usage::
 * Backend minor modes::
 
 User options
@@ -92,6 +93,8 @@ The package is split into a small backend-agnostic core and focused modules:
 @tab Core: backend registry, session identity and state machine, session keys and teardown, unified orchestration commands (handoff, restart, exit, resume, branch navigation, skills, audits, backtrace debugging), transient menu, alerts, theme sync
 @item @samp{agent-account.el}
 @tab Multi-account support shared by all backends: selection, persistence, per-account config homes, symlinked shared state
+@item @samp{agent-usage.el}
+@tab Per-account usage store and poller shared by all backends
 @item @samp{agent-capture.el}
 @tab Persisted Org prompt capture, keyed to the session it targets
 @item @samp{agent-project.el}
@@ -128,6 +131,7 @@ The package depends on @samp{transient} for menus, @samp{consult} for completion
 * Session state machine::
 * Session teardown and leak policy::
 * Account model::
+* Account usage::
 * Backend minor modes::
 @end menu
 
@@ -158,10 +162,34 @@ Session resource cleanup has a single owner: @code{agent--session-teardown} runs
 
 @findex agent-account-select
 @findex agent-account-init
-Multi-account state lives in @samp{agent-account.el} and is keyed by backend. Each backend declares an accounts alist mapping account names to per-account configuration homes (@code{agent-claude-accounts}, @code{agent-codex-accounts}), a persisted selection file that survives Emacs restarts (@code{agent-claude-account-file}, @code{agent-codex-account-file}), and the environment variable that points the CLI at the selected home: @samp{CLAUDE_CONFIG_DIR} for Claude Code and @samp{CODEX_HOME} for Codex. Account homes keep credentials separate, while shared state (settings, hooks, skills, sessions, history) is symlinked from the backend's canonical home so it remains available after switching accounts; conflicting account-local files are backed up to timestamped @samp{*.agent-backup-*} siblings first. @code{agent-account-select} persists a choice and syncs the account home, and @code{agent-account-init} prepares or repairs a home. The account infix in @code{agent-menu} always asks which backend to change before it asks for an account; it never silently infers the backend from the buffer where the menu happened to be opened. When the merge engine reads a home's @samp{.claude.json}, a parse failure is retried over increasing delays before warning, since a running CLI rewrites the file frequently and a read can land mid-write; a failure that persists is warned about once, with the invalid bytes preserved in a snapshot file so a torn read can be told apart from real corruption. Writes go to a temporary file that is renamed into place, so concurrent readers never observe a truncated @samp{.claude.json}. The account a session was started under is recorded in its @code{agent-session} struct, so restart and handoff preserve it even after the global selection changes.
+Multi-account state lives in @samp{agent-account.el} and is keyed by backend. Each backend declares an accounts alist mapping account names to per-account configuration homes (@code{agent-claude-accounts}, @code{agent-codex-accounts}), a persisted selection file that survives Emacs restarts (@code{agent-claude-account-file}, @code{agent-codex-account-file}), and the environment variable that points the CLI at the selected home: @samp{CLAUDE_CONFIG_DIR} for Claude Code and @samp{CODEX_HOME} for Codex. Account homes keep credentials separate, while shared state (settings, hooks, skills, sessions, history) is symlinked from the backend's canonical home so it remains available after switching accounts; conflicting account-local files are backed up to timestamped @samp{*.agent-backup-*} siblings first. Codex hook trust is keyed by the lexical @samp{hooks.json} path rather than the symlink target, so account sync copies the canonical path's persisted trust state to the account path. It copies existing hashes rather than computing new ones; a changed canonical hook therefore remains untrusted. Any sync failure aborts session startup instead of letting a session run with missing or stale policy. @code{agent-account-select} persists a choice and syncs the account home, and @code{agent-account-init} prepares or repairs a home. The account infix in @code{agent-menu} always asks which backend to change before it asks for an account; it never silently infers the backend from the buffer where the menu happened to be opened. When the merge engine reads a home's @samp{.claude.json}, a parse failure is retried over increasing delays before warning, since a running CLI rewrites the file frequently and a read can land mid-write; a failure that persists is warned about once, with the invalid bytes preserved in a snapshot file so a torn read can be told apart from real corruption. Writes go to a temporary file that is renamed into place, so concurrent readers never observe a truncated @samp{.claude.json}. The account a session was started under is recorded in its @code{agent-session} struct, so restart and handoff preserve it even after the global selection changes.
+
+@findex agent-account-property
+@findex agent-account-route
+An accounts entry is either @samp{(NAME . HOME)} or @samp{(NAME :home HOME :pool POOL ...)}. The plist form carries arbitrary further properties, read with @code{agent-account-property}, for integrations that need per-account settings beyond the home. Accounts sharing a @code{:pool} are interchangeable: they hold the same configuration and differ only in whose quota they spend. The selection prompt lists pools ahead of accounts, and selecting a pool persists the pool name, so @code{agent-account-current} may answer with a pool; @code{agent-account-resolve} always answers with a concrete account, routing a pool selection through @code{agent-account-route}. Selecting a pool syncs every member's home, so routing never has to touch the filesystem. A member chosen by name pins that account as before. A pool may carry the same name as one of its members — convenient when an existing selection file names the first of what became several equivalent accounts — in which case the name is listed once and selects the pool, so that member can no longer be pinned by name.
+
+@vindex agent-account-route-hysteresis
+@findex agent-account-usage-score
+Routing skips members whose credentials are missing, then sets aside members whose latest fresh usage reading (@ref{Account usage}) flags them as limited or shows either window at 100%. The rest are ranked by @code{agent-account-usage-score}: the larger of the weekly and session percentages, with the weekly share breaking ties, so lower is better; a member with no fresh reading ranks after every member with one. The member the pool was last routed to is kept unless a sibling beats it by @code{agent-account-route-hysteresis} points (default @samp{10}), so near-equal members do not alternate between consecutive sessions — except that a current member with unknown usage never holds off a sibling with a known score. When every member is limited, the one whose window resets soonest is returned, and the echo area says so, so the session start can still report the limit. Every routing decision is announced with the chosen member's usage and followed by a refresh of the pool's readings. A restart of a session whose account belongs to the selected pool stays on that member rather than being routed to a sibling, because the transcript being resumed lives in that member's history.
 
 @findex agent-account-login
 Credentials are part of the account model too. A backend may declare the account-local credentials file inside each home (@samp{auth.json} for Codex) and the CLI arguments of its login flow. @code{agent-account-login} — bound to @samp{L} in @code{agent-menu} — runs that login flow with the selected account's environment, so the credentials always land in the right account home; running the bare CLI login in a terminal would write to the backend's default home instead. The command shows the login output, including the authentication URL, in a dedicated buffer and reports success or failure when the flow finishes. Session starts guard on the same declaration: when an account's credentials file is missing — after the in-session logout command, or when tokens were removed out of band — @code{agent-start-session} refuses to spawn a session that could only fail to authenticate and points at @code{agent-account-login} instead. Backends that do not declare a credentials file (Claude Code stores credentials in the macOS Keychain) are assumed logged in and never blocked.
+
+@node Account usage
+@section Account usage
+
+@vindex agent-usage-interval
+@vindex agent-usage-max-interval
+@vindex agent-usage-cache-file
+@vindex agent-usage-stale-after
+@findex agent-usage-get
+@findex agent-usage-fetch
+Per-account usage lives in @samp{agent-usage.el} and is keyed by backend and account. A backend that can report usage declares a @code{:usage-fetch} slot: a function called with an account name and a callback, which it calls with a normalized plist or nil. The plist carries @code{:session-pct} and @code{:weekly-pct} (percent of the short and long windows used), @code{:session-reset} and @code{:weekly-reset} (reset times as float seconds), @code{:limited} (non-nil when the backend refuses further requests), and @code{:fetched-at}. Claude reads the undocumented @samp{api/oauth/usage} endpoint with the Keychain OAuth token; Codex reads the ChatGPT @samp{wham/usage} endpoint with the access token and account id stored in the account home's @samp{auth.json}, classifying a window of at least a day as weekly and a shorter one as the session window, so a plan with a single weekly window reports only that. @code{agent-usage-get} answers the latest reading and @code{agent-usage-fetch} refreshes one account.
+
+One poller serves every backend. It starts with the first session of any backend and stops when the last one is torn down, polling every account that has a live session plus every member of every pool, so routing has data for idle members too. @code{agent-usage-interval} defaults to @samp{300} seconds and doubles after a failed fetch up to @code{agent-usage-max-interval}, which defaults to @samp{900}; a success resets it. Readings are written to @code{agent-usage-cache-file} after every fetch and read back on first use, so a fresh Emacs can route before its first poll completes; a reading older than @code{agent-usage-stale-after} seconds no longer counts for routing. The Claude status helpers @code{agent-claude-status-session-usage} and friends read this store and keep answering ISO timestamps for the reset times.
+
+@findex agent-usage-show
+@code{agent-usage-show} — bound to @samp{U} in @code{agent-menu} — lists every tracked account in a @samp{*agent-usage*} buffer with its pool, session and weekly percentages, weekly reset time, limit flag, and the age of the reading, then fetches fresh readings and re-renders as each arrives; @samp{g} refreshes again. The limit flag and the percentages are what routing acts on, so the buffer shows at a glance why a pool went to the member it did.
 
 @node Backend minor modes
 @section Backend minor modes
@@ -271,8 +299,8 @@ The @samp{agent-todo} module has two options, both formerly named after Claude. 
 @section Claude Code backend
 
 @vindex agent-claude-status-interval
-@vindex agent-claude-usage-interval
-@vindex agent-claude-usage-max-interval
+@vindex agent-claude-submit-delay
+@vindex agent-claude-submit-retries
 @vindex agent-claude-accounts
 @vindex agent-claude-account-file
 @vindex agent-claude-settings-file
@@ -284,9 +312,9 @@ The @samp{agent-todo} module has two options, both formerly named after Claude. 
 @vindex agent-claude-batch-max-turns
 @vindex agent-claude-batch-system-prompt
 @vindex agent-claude-batch-model
-The Claude backend options control account selection, session metadata, and non-interactive execution. @code{agent-claude-accounts} is an alist of account names to Claude configuration directories, and @code{agent-claude-account-file} stores the selected account across Emacs sessions. Use @code{agent-claude-select-account} or the shared account infix in @code{agent-menu} to switch accounts before starting a new session. Both commands are thin wrappers around @code{agent-account-select}, which persists the choice and syncs the account's config home; @code{agent-account-init} prepares or repairs any backend's account home.
+The Claude backend options control account selection, session metadata, and non-interactive execution. @code{agent-claude-accounts} is an alist of account names to Claude configuration directories, either as bare paths or as plists with a @code{:home} and an optional @code{:pool} (@ref{Account model}), and @code{agent-claude-account-file} stores the selected account across Emacs sessions. Use @code{agent-claude-select-account} or the shared account infix in @code{agent-menu} to switch accounts before starting a new session. Both commands are thin wrappers around @code{agent-account-select}, which persists the choice and syncs the account's config home; @code{agent-account-init} prepares or repairs any backend's account home.
 
-Status and usage polling are controlled by integer intervals. @code{agent-claude-status-interval} defaults to @samp{5} seconds and reads status JSON emitted by the bundled statusline script. @code{agent-claude-usage-interval} defaults to @samp{300} seconds and backs off up to @code{agent-claude-usage-max-interval}, which defaults to @samp{900} seconds. Usage polling reads the account's OAuth token from the macOS Keychain, so accounts authenticated with an API key rather than an OAuth subscription—whose OAuth Keychain store is an empty JSON object—are silently skipped rather than treated as a broken lookup. The Keychain lookup runs from the temporary-file directory, so a poll that fires while the current buffer's @samp{default-directory} names a deleted worktree cannot break the subprocess spawn.
+Status polling is controlled by @code{agent-claude-status-interval}, which defaults to @samp{5} seconds and reads status JSON emitted by the bundled statusline script. Usage polling is shared with the other backends (@ref{Account usage}); @code{agent-claude-usage-interval} and @code{agent-claude-usage-max-interval} are obsolete aliases of @code{agent-usage-interval} and @code{agent-usage-max-interval}. The Claude fetcher reads the account's OAuth token from the macOS Keychain, so accounts authenticated with an API key rather than an OAuth subscription—whose OAuth Keychain store is an empty JSON object—are silently skipped rather than treated as a broken lookup. The Keychain lookup runs from the temporary-file directory, so a poll that fires while the current buffer's @samp{default-directory} names a deleted worktree cannot break the subprocess spawn.
 
 Batch execution options are passed to @samp{claude -p}. @code{agent-claude-batch-permission-mode} defaults to @samp{"auto"}, @code{agent-claude-batch-max-turns} defaults to @samp{30}, and the allowed tool, model, and appended-system-prompt options let you narrow or expand what non-interactive Claude tasks may do.
 
@@ -303,7 +331,7 @@ Claude hook setup is explicit. @code{agent-claude-settings-file} names the setti
 @vindex agent-codex-exec-approval-policy
 @vindex agent-codex-exec-sandbox-mode
 @vindex agent-codex-exec-skip-git-repo-check
-The Codex backend options control account selection, skill discovery, and non-interactive execution. @code{agent-codex-accounts} is an alist of account names to Codex home directories, and @code{agent-codex-account-file} stores the selected account across Emacs sessions. Account homes keep credentials such as @samp{auth.json} separate, while shared Codex state such as @samp{config.toml}, @samp{hooks.json}, skills, sessions, and @samp{history.jsonl} is symlinked from @samp{~/.codex/} so hooks, skills, project trust, and chat history remain available after switching accounts; the Claude backend shares state between account homes the same way. When an account-local file conflicts with a shared item, it is backed up to a timestamped @samp{*.agent-backup-*} sibling before the symlink is created, so no local state is silently lost. Use @code{agent-codex-select-account} or the shared account infix in @code{agent-menu} to switch accounts before starting a new session. The infix asks for the backend explicitly even when the menu was opened in a session buffer, preventing a choice intended for one backend from changing another. Both commands persist the choice and sync the account's config home; @code{agent-account-init} prepares or repairs any backend's account home.
+The Codex backend options control account selection, skill discovery, and non-interactive execution. @code{agent-codex-accounts} is an alist of account names to Codex home directories, either as bare paths or as plists with a @code{:home} and an optional @code{:pool} (@ref{Account model}), and @code{agent-codex-account-file} stores the selected account across Emacs sessions. Account homes keep credentials such as @samp{auth.json} separate, while shared Codex state such as @samp{config.toml}, @samp{hooks.json}, skills, sessions, and @samp{history.jsonl} is symlinked from @samp{~/.codex/} so hooks, skills, project trust, and chat history remain available after switching accounts; the Claude backend shares state between account homes the same way. When an account-local file conflicts with a shared item, it is backed up to a timestamped @samp{*.agent-backup-*} sibling before the symlink is created, so no local state is silently lost. Use @code{agent-codex-select-account} or the shared account infix in @code{agent-menu} to switch accounts before starting a new session. The infix asks for the backend explicitly even when the menu was opened in a session buffer, preventing a choice intended for one backend from changing another. Both commands persist the choice and sync the account's config home; @code{agent-account-init} prepares or repairs any backend's account home.
 
 @code{agent-codex-skill-directories} is a list of additional directories scanned for Codex skills. The backend also scans standard Codex skill locations and project-local skill directories.
 
@@ -360,6 +388,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-menu
 @findex agent-start-or-switch
 @findex agent-jump-to-waiting
+@findex agent-toggle-snooze
 @findex agent-run-skill
 @findex agent-post-push-ci
 @findex agent-trajectory-new-task
@@ -383,11 +412,13 @@ The command @code{agent-menu} opens the unified transient menu. Every entry in i
 @findex agent-history
 The command @code{agent-history}, bound to @samp{l} in the Sessions column, opens the Agent Log menu for browsing, opening, searching, and resuming historical sessions across backends. Agent Log is an optional package: loading @samp{agent} never requires it, @code{agent-history} loads it on demand, and invoking the command without Agent Log installed signals a clear error. Neither @code{agent-menu} nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
 
-In EAT-backed Claude and Codex session buffers, @code{agent-setup-scroll-keys} makes PageUp and PageDown send terminal mouse-wheel events, matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window.
+In EAT-backed Claude and Codex session buffers, @code{agent-setup-scroll-keys} makes PageUp and PageDown send terminal mouse-wheel events, matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window. Terminal helpers require buffer-local EAT state, so native app-server sessions cannot inherit a stale terminal from a killed buffer.
 
 The command @code{agent-start-or-switch} is the main entry point. If no sessions exist, it starts a new session through the selected backend. If sessions already exist, it opens the session switcher. Sessions receive stable home-row keys where possible and display backend icons next to their labels.
 
 The switcher lists every session in one flat list ordered by home-row key, whatever account each session runs under. The account is a column of its own, between the session name and its annotation, shown dimmed in the @code{agent-session-account} face. A session is therefore found at the key it always answers to, rather than at a position that moves when a neighbor's account changes. Sessions whose backend has no accounts configured leave the column blank, and when no session on screen records an account the column is left out altogether.
+
+A session that is waiting for something you can only do later can be set aside with @code{agent-toggle-snooze}, bound to @samp{z} in @code{agent-menu} and to @samp{S} in the switcher; invoking it again unsnoozes. A snoozed session keeps its key and its buffer, but the switcher lists it after every active session in the dimmed italic @code{agent-snoozed} face instead of a state color, @code{agent-jump-to-waiting} skips it, and it fires no ready alert when its turn ends. The command acts on the current session, and prompts for one when the current buffer is not a session or with a prefix argument. The mark is a property of the buffer, so it ends with the session and is not carried over by a restart or a handoff.
 
 @vindex agent-session-annotation-functions
 Sessions can also carry a one-line annotation after their name, shown dimmed in the @code{agent-session-annotation} face. The text comes from @code{agent-session-annotation-functions}, an abnormal hook: each function is called with a session buffer and returns a string, or @code{nil} to leave the session to the functions after it. The first non-nil answer is the one shown, and the functions after it are not called. @samp{agent} renders whatever it returns and knows nothing about where the text comes from. Whitespace in the answer is collapsed to single spaces, so a multi-line answer cannot break the menu's layout, and an answer that is blank or not a string counts as no annotation. Sessions without an annotation — including sessions every function declines to annotate — render exactly as they did before annotations existed. The default is @code{nil}, which shows session names alone; Agent Log adds a function that supplies each session's stored one-line summary (@uref{https://github.com/benthamite/agent-log, agent-log}), and with no such integration loaded the switcher looks unchanged. Because this is a hook, an integration adds itself with @code{add-hook} rather than taking a slot over: a function you installed yourself keeps working whichever loads first, and @code{remove-hook} takes either one back out.
@@ -567,12 +598,17 @@ object to that path. Its @code{status} must be exactly @code{success}, @code{no-
 @code{failure}; a failure receipt can include a @code{message}. Agent advances the chain
 or exits only after @code{success} or @code{no-op}. A missing file, invalid JSON, unknown
 status, or @code{failure} stops the chain, keeps the session open, and shows a
-warning. Agent removes the temporary receipt directory after reading it or
+warning; a missing file is ignored while the backend's idle probe still shows
+the session working, since that completion event belongs to an earlier turn. Agent removes the temporary receipt directory after reading it or
 tearing down the session. Receipt gating is per entry: plain entries keep the
 stop-event behavior. This lets a learning-capture entry run independently
 before a receipt-gated bookkeeping entry. Repeating @code{agent-exit} while a chain
-is active does not bypass it; use @code{agent-exit-without-skills} for an explicit
-close that skips configured skills.
+is active does not bypass it; it reports the chain's state in the echo area,
+and @code{agent-exit-without-skills} is the explicit close that skips configured
+skills. When @code{agent-exit} is called on a session that is still responding, the
+chain arms in a waiting state and starts its first skill on the next stop
+event; a message says so at arming time, since nothing else is visible until
+the turn ends.
 
 @code{agent-exit} runs every applicable configured skill regardless of session
 duration. @code{agent-exit-without-skills} is the only exit command that bypasses
@@ -594,10 +630,25 @@ autosuggestion text. The readiness check recognises the standard Codex prompt
 markers (@samp{›} and @samp{❯}); a chain that stalls after the first skill usually means
 the running Codex renders an unrecognised prompt marker.
 
+A chain stays armed across stop events until its queue drains, so a chain
+whose command was typed but never accepted would otherwise fire its next skill
+into whatever the user does in that buffer later. A prompt the user sends from
+the terminal therefore cancels any armed chain in that buffer, with a message.
+Claude reports such prompts as a @code{user-submit} session event from its Return
+key paths; Codex's submission hook runs for programmatic sends too, so it
+reports plain @code{submit} events and cannot cancel a chain this way.
+
 Backends can provide an atomic submit operation for before-exit commands.
 Claude and Codex both target the resolved session buffer directly, insert the
-skill command, and submit it once before the terminal buffer is displayed
-again. Codex delegates this to @samp{codex.el}'s target-buffer submit helper.
+skill command, and submit it before the terminal buffer is displayed again.
+Codex delegates this to @samp{codex.el}'s target-buffer submit helper. Claude
+inserts the command, waits @code{agent-claude-submit-delay} seconds with
+@code{sleep-for} (pending keyboard input cannot shorten it, as it would a
+@code{sit-for}, and a Return that arrives too soon is folded into the inserted text
+as a newline), and sends Return. It then checks the prompt line and re-sends
+Return up to @code{agent-claude-submit-retries} times while the command is still
+sitting there unsubmitted, since Claude Code occasionally swallows the first
+one; the prompt marker's trailing space is a no-break space under @samp{eat}.
 
 @node Branch navigation
 @section Branch navigation
@@ -702,7 +753,7 @@ When @code{agent-restart} operates on a Codex session, it resumes codex.el's can
 @findex agent-kill-session-buffer
 The function @code{agent-register-backend} registers an AI tool by constructing an @code{agent-backend} struct from keyword arguments. Backend modules call it at load time. Keywords are validated against the struct's slot names, and the required slots @code{:buffer-p}, @code{:find-all-buffers}, and @code{:start-session} are checked so the shared session layer can rely on a consistent interface.
 
-The full slot set is: identity and presentation (@code{name}, @code{label}, @code{icon}, @code{program}), buffer discovery (@code{buffer-p}, @code{find-all-buffers}, @code{find-buffers-for-dir}), session lifecycle (@code{start-session}, @code{session-identity}, @code{restart-options}), send primitives (@code{send-string}, @code{send-return}, @code{submit}), session state probes (@code{waiting-p}, @code{busy-p}, @code{background-tasks-p}, @code{display-name-suffix}, @code{notify}), accounts (@code{account-env-var}, @code{accounts}, @code{account-file}, @code{shared-config-items}, @code{canonical-home}, @code{account-init}), skills (@code{run-prompt}, @code{exec-prompt}, @code{skill-roots}, @code{skill-command-prefix}), session history (@code{session-headers}, @code{session-prompt}, @code{resume}, @code{prepare-fork}), integration hooks (@code{sync-theme}), and exit safety (@code{before-exit-ready-to-close-p}, @code{before-kill-check}).
+The full slot set is: identity and presentation (@code{name}, @code{label}, @code{icon}, @code{program}), buffer discovery (@code{buffer-p}, @code{find-all-buffers}, @code{find-buffers-for-dir}), session lifecycle (@code{start-session}, @code{session-identity}, @code{restart-options}), send primitives (@code{send-string}, @code{send-return}, @code{submit}), session state probes (@code{waiting-p}, @code{busy-p}, @code{background-tasks-p}, @code{display-name-suffix}, @code{notify}), accounts (@code{account-env-var}, @code{accounts}, @code{account-file}, @code{shared-config-items}, @code{canonical-home}, @code{account-init}, @code{credential-file}, @code{login-args}, @code{usage-fetch}), skills (@code{run-prompt}, @code{exec-prompt}, @code{skill-roots}, @code{skill-command-prefix}), session history (@code{session-headers}, @code{session-prompt}, @code{resume}, @code{prepare-fork}), integration hooks (@code{sync-theme}), and exit safety (@code{before-exit-ready-to-close-p}, @code{before-kill-check}, @code{idle-p}).
 
 The @code{:start-session} slot starts a new session parameterized by an @code{agent-session} identity struct, optionally with an initial prompt or a resume id. The @code{:session-identity} slot returns a live session buffer's CLI session id, used by @code{agent-restart} to resume in place. @code{agent-start-session} is the core dispatcher that starts a session through its backend's @code{:start-session} function, passing any extra backend-specific options through. The @code{:send-string} slot inserts text into a session's prompt without submitting it, @code{:send-return} submits the pending prompt, and @code{:submit} atomically inserts and submits; the core wrappers @code{agent-send-string}, @code{agent-send-return}, and @code{agent-submit} dispatch through these slots and emit the corresponding session events.
 
@@ -728,7 +779,7 @@ The slots that carry the unified session commands are all optional, and a backen
 @findex agent-codex-status-model
 @findex agent-codex-status-effort
 @findex agent-codex-status-duration-ms
-The Claude and Codex status helpers are intended for modeline integrations such as @samp{doom-modeline}. Claude status functions read the current session status JSON and expose model, reasoning effort, cost, context, duration, and token information. Claude usage functions expose account-level utilization returned by the Anthropic usage endpoint. Codex status functions expose the configured model, reasoning effort, and elapsed session duration. When Codex has no explicit reasoning-effort override, the status helper reports Codex's default @samp{medium} effort. The session switcher uses backend busy, input-readiness, and background-work detectors to avoid showing actively responding sessions as waiting, and to distinguish truly idle waiting sessions from sessions that are accepting input while background terminals, agents, or tasks are still running. A session counts as waiting only when it is blocked on the user, meaning it has stopped and will not proceed until the user submits something. Being able to queue text mid-turn is not waiting, since both CLIs accept typed input at any point. Codex app-server sessions learn turn boundaries from the JSON-RPC stream, so an inactive turn on a live app server is authoritative for waiting and an active turn is authoritative for busy, regardless of whether the prompt accepts input. Terminal sessions have no such signal and fall back to the session-event state machine and to scanning rendered status text. Codex prompt submission clears the previous waiting marker at the target buffer, so a session does not remain colored as waiting after the user sends a new prompt.
+The Claude and Codex status helpers are intended for modeline integrations such as @samp{doom-modeline}. Claude status functions read the current session status JSON and expose model, reasoning effort, cost, context, duration, and token information. Claude usage functions expose account-level utilization returned by the Anthropic usage endpoint. Codex status functions expose the configured model, reasoning effort, and elapsed session duration. When Codex has no explicit reasoning-effort override, the status helper reports Codex's default @samp{medium} effort. The session switcher uses backend busy, input-readiness, and background-work detectors to avoid showing actively responding sessions as waiting, and to distinguish truly idle waiting sessions from sessions that are accepting input while background terminals, agents, or tasks are still running. For Claude that evidence is the footer count — @samp{· N shells}, @samp{· N monitors}, or @samp{· ← N agents} — plus the Remote Control task UI@. A session counts as waiting only when it is blocked on the user, meaning it has stopped and will not proceed until the user submits something. Being able to queue text mid-turn is not waiting, since both CLIs accept typed input at any point. Codex app-server sessions learn turn boundaries from the JSON-RPC stream, so an inactive turn on a live app server is authoritative for waiting and an active turn is authoritative for busy, regardless of whether the prompt accepts input. Terminal sessions have no such signal and fall back to the session-event state machine and to scanning rendered status text. For Claude, @code{agent-claude--terminal-waiting-p} reports idle when the rendered tail shows the input prompt and no running-turn spinner line (a glyph, a verb ending in an ellipsis, and a parenthesised elapsed time, e.g. @samp{✢ Billowing… (4m 35s)}; the older @samp{esc to interrupt} hint and the background-task @samp{esc to give additional instructions} prompt also count as running). It is registered as the backend's @code{:idle-p} — not @code{:before-exit-ready-to-close-p}, whose veto runs on every chain step, where the screen's redraw lag behind the Stop hook would strand the chain — and consulted only by the before-exit chain: when arming, a busy session whose terminal affirms idleness arms immediately, and the watchdog advances a chain stranded in @code{waiting-for-idle} whose stop event never arrived — a turn the CLI accepts and then drops, for instance at the context limit, fires no Stop hook. Screen scraping is not reliable enough to drive the switcher, so display state stays with the session-event state machine. A @code{busy} state younger than @code{agent-claude-terminal-idle-grace} seconds is trusted over the screen, since the spinner takes a moment to appear after a submission. Codex prompt submission clears the previous waiting marker at the target buffer, so a session does not remain colored as waiting after the user sends a new prompt.
 
 @node Transient menu
 @chapter Transient menu
