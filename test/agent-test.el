@@ -612,6 +612,62 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
         (agent--session-notify-ready b)
         (should (= (length alerts) 1))))))
 
+(ert-deftest agent-test-timed-snooze-schedules-expiry-in-hours ()
+  "Arm a timed snooze's expiry timer the given number of hours out."
+  (agent-test--with-two-sessions
+    (let (delay)
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (secs _repeat fn &rest args)
+                   (setq delay secs)
+                   (cons fn args))))
+        (agent-toggle-snooze a 2))
+      (should (agent-session-snoozed-p a))
+      (should (= delay (* 2 3600))))))
+
+(ert-deftest agent-test-indefinite-snooze-arms-no-timer ()
+  "Arm no expiry timer when the snooze was given no duration."
+  (agent-test--with-two-sessions
+    (agent-toggle-snooze a)
+    (should (agent-session-snoozed-p a))
+    (should-not (buffer-local-value 'agent--snooze-timer a))))
+
+(ert-deftest agent-test-unsnooze-cancels-the-expiry-timer ()
+  "Cancel a timed snooze's expiry timer when toggled off early."
+  (agent-test--with-two-sessions
+    (agent-toggle-snooze a 3)
+    (let ((timer (buffer-local-value 'agent--snooze-timer a)))
+      (should (memq timer timer-list))
+      (agent-toggle-snooze a)
+      (should-not (memq timer timer-list))
+      (should-not (buffer-local-value 'agent--snooze-timer a)))))
+
+(ert-deftest agent-test-snooze-expiry-unsnoozes-and-realerts ()
+  "Unsnooze at expiry and fire the alert a waiting session suppressed."
+  (agent-test--with-two-sessions
+    (let (alerts)
+      (cl-letf (((symbol-function 'agent-notify)
+                 (lambda (&rest args) (push args alerts))))
+        (agent-toggle-snooze a 1)
+        (with-current-buffer a
+          (setq-local agent--session-state 'awaiting-input))
+        (agent--snooze-expire a)
+        (should-not (agent-session-snoozed-p a))
+        (should-not (buffer-local-value 'agent--snooze-timer a))
+        (should (= (length alerts) 1))))))
+
+(ert-deftest agent-test-snooze-expiry-stays-quiet-when-not-waiting ()
+  "Fire no alert at expiry when the session is not awaiting input."
+  (agent-test--with-two-sessions
+    (let (alerts)
+      (cl-letf (((symbol-function 'agent-notify)
+                 (lambda (&rest args) (push args alerts))))
+        (agent-toggle-snooze a 1)
+        (with-current-buffer a
+          (setq-local agent--session-state 'busy))
+        (agent--snooze-expire a)
+        (should-not (agent-session-snoozed-p a))
+        (should-not alerts)))))
+
 ;;;; Switcher annotations
 
 (defun agent-test--switcher-label (buffer)

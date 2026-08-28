@@ -790,7 +790,13 @@ Only `agent-session-event' may set this variable.")
 A snoozed session is one the user has set aside as not actionable for
 now: it keeps its key and stays reachable, but the switcher lists it
 last and dimmed, `agent-jump-to-waiting' skips it, and it fires no
-ready alert.  Only `agent-toggle-snooze' sets this variable.")
+ready alert.  Set only by `agent-toggle-snooze', and cleared by it or
+by `agent--snooze-expire' when a timed snooze runs out.")
+
+(defvar-local agent--snooze-timer nil
+  "Pending timer ending this session's timed snooze, or nil.
+Armed by `agent-toggle-snooze' when the snooze was given a duration in
+hours; an indefinite snooze arms no timer.")
 
 (defvar agent--sync-theme-timer nil
   "Pending timer for deferred theme sync, or nil.")
@@ -1417,21 +1423,65 @@ Sessions with reported background work are distinguished from idle ones."
   (buffer-local-value 'agent--snoozed buffer))
 
 ;;;###autoload
-(defun agent-toggle-snooze (&optional buffer)
+(defun agent-toggle-snooze (&optional buffer hours)
   "Snooze session BUFFER, or unsnooze it when it is already snoozed.
 BUFFER defaults to the current session buffer, and is prompted for
 when the current buffer is not a session or with a prefix argument.
-A snoozed session is set aside as not actionable for now: the switcher
-lists it last in the `agent-snoozed' face, `agent-jump-to-waiting'
-skips it, and it fires no ready alert, while its key and its buffer
-stay as they were.  Snoozing is a property of the buffer, so it ends
-with the session."
-  (interactive (list (and current-prefix-arg (agent--read-session-buffer))))
+When snoozing, HOURS bounds the snooze: after that many hours the
+session unsnoozes by itself, firing the ready alert at that point if
+it is waiting for input.  Interactively, HOURS is read from the
+minibuffer; leave it blank to snooze indefinitely, as a nil HOURS
+does.  A snoozed session is set aside as not actionable for now: the
+switcher lists it last in the `agent-snoozed' face,
+`agent-jump-to-waiting' skips it, and it fires no ready alert, while
+its key and its buffer stay as they were.  Snoozing is a property of
+the buffer, so it ends with the session."
+  (interactive
+   (let ((buf (agent--resolve-session-buffer
+               (and current-prefix-arg (agent--read-session-buffer)))))
+     (list buf (unless (agent-session-snoozed-p buf)
+                 (agent--read-snooze-hours)))))
   (let ((buf (agent--resolve-session-buffer buffer)))
     (with-current-buffer buf
+      (agent--cancel-snooze-timer)
       (setq agent--snoozed (not agent--snoozed))
+      (when (and agent--snoozed hours)
+        (setq agent--snooze-timer
+              (run-at-time (* hours 3600) nil #'agent--snooze-expire buf)))
       (message "%s %s" (agent-display-name buf)
-               (if agent--snoozed "snoozed" "unsnoozed")))))
+               (cond ((and agent--snoozed hours)
+                      (format "snoozed for %s hour%s" hours
+                              (if (= hours 1) "" "s")))
+                     (agent--snoozed "snoozed")
+                     (t "unsnoozed"))))))
+
+(defun agent--read-snooze-hours ()
+  "Read a snooze duration in hours, or nil for an indefinite snooze."
+  (let ((input (string-trim
+                (read-string "Snooze for hours (blank for indefinitely): "))))
+    (unless (string-empty-p input)
+      (let ((hours (string-to-number input)))
+        (unless (> hours 0)
+          (user-error "Snooze duration must be a positive number of hours"))
+        hours))))
+
+(defun agent--cancel-snooze-timer ()
+  "Cancel the current buffer's pending snooze-expiry timer, if any."
+  (when agent--snooze-timer
+    (cancel-timer agent--snooze-timer)
+    (setq agent--snooze-timer nil)))
+
+(defun agent--snooze-expire (buffer)
+  "End session BUFFER's timed snooze.
+Runs from the timer armed by `agent-toggle-snooze': clears the snoozed
+mark and fires the ready alert that snoozing suppressed when the
+session is waiting for input."
+  (when (and (buffer-live-p buffer) (agent-session-snoozed-p buffer))
+    (with-current-buffer buffer
+      (setq agent--snoozed nil)
+      (setq agent--snooze-timer nil))
+    (when (agent--session-waiting-p buffer)
+      (agent--session-notify-ready buffer))))
 
 ;;;; Buffer protection
 
