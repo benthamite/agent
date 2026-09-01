@@ -255,8 +255,11 @@ unknown usage ranking last.  The member routed to last time is kept
 unless another beats it by `agent-account-route-hysteresis'.  When
 every member is limited, the one whose weekly window resets soonest
 is returned so the session start can still report the limit.
-Returns nil for an empty pool.  Also refreshes the pool's usage so
-the next routing decision sees current data."
+Returns nil for an empty pool.  Announces the route only when it
+differs from the pool's previous one, since resolution also runs for
+background processes and would otherwise spam the echo area.  Also
+refreshes the pool's usage so the next routing decision sees current
+data."
   (when-let* ((members (agent-account-pool-members backend pool)))
     (let* ((available (or (cl-remove-if-not
                            (lambda (account)
@@ -268,9 +271,11 @@ the next routing decision sees current data."
                                available))
            (choice (if open
                        (agent-account--route-among backend pool open)
-                     (agent-account--soonest-reset backend available))))
+                     (agent-account--soonest-reset backend available)))
+           (previous (gethash (cons backend pool) agent-account--routed)))
       (puthash (cons backend pool) choice agent-account--routed)
-      (agent-account--announce-route backend pool choice (null open))
+      (unless (equal choice previous)
+        (agent-account--announce-route backend pool choice (null open)))
       (agent-usage-refresh-pool backend pool)
       choice)))
 
@@ -359,8 +364,9 @@ no known reset sorts last."
 
 (defun agent-account--announce-route (backend pool account all-limited)
   "Report that BACKEND's POOL was routed to ACCOUNT.
-ALL-LIMITED non-nil means every member was limited and ACCOUNT is
-merely the one whose limit lifts soonest."
+Called only when the route changed hands; ALL-LIMITED non-nil means
+every member was limited and ACCOUNT is merely the one whose limit
+lifts soonest."
   (let ((usage (agent-usage-get backend account)))
     (message "%s pool %s -> %s%s%s" backend pool account
              (if usage

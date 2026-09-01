@@ -554,6 +554,23 @@ the routing memory is cleared and pool refreshes are stubbed out."
           (should (equal (gethash '(stub . "epoch") agent-account--routed)
                          "e1")))))))
 
+(ert-deftest agent-account-test-route-announces-only-on-change ()
+  "Announce a route when it changes hands, not on every resolution."
+  (agent-account-test--with-backend
+      (list :accounts agent-account-test--pooled)
+    (agent-account-test--with-usage
+        '(("e1" :weekly-pct 10.0) ("e2" :weekly-pct 50.0))
+      (let (announced)
+        (cl-letf (((symbol-function 'agent-account--announce-route)
+                   (lambda (_backend _pool account _all-limited)
+                     (push account announced))))
+          (agent-account-route 'stub "epoch")
+          (agent-account-route 'stub "epoch")
+          (should (equal announced '("e1")))
+          (agent-usage-record 'stub "e1" '(:weekly-pct 90.0))
+          (agent-account-route 'stub "epoch")
+          (should (equal announced '("e2" "e1"))))))))
+
 (ert-deftest agent-account-test-usage-score ()
   "Score by the fuller window, with the weekly share breaking ties."
   (agent-account-test--with-backend
