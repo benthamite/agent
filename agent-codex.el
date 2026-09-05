@@ -114,6 +114,7 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (defvar codex-reasoning-effort)
 (defvar codex--session-id)
 (defvar codex--app-server-process)
+(defvar codex--app-server-current-model-id)
 (defvar codex--app-server-thread-id)
 (defvar codex--app-server-turn-active-p)
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
@@ -616,7 +617,9 @@ read cache for FILE."
 
 (defun agent-codex-status-model ()
   "Return the model name for the current Codex session."
-  (agent-codex--read-config-model (agent-codex--session-account)))
+  (or codex--app-server-current-model-id
+      codex-model
+      (agent-codex--read-config-model (agent-codex--session-account))))
 
 (defun agent-codex-status-effort ()
   "Return the reasoning effort for the current Codex session."

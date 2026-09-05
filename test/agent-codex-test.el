@@ -174,6 +174,15 @@
                          "gpt-5.5")))
       (delete-directory dir t))))
 
+(ert-deftest agent-codex-test-status-model-prefers-buffer-override ()
+  "Return the live buffer-local model before config."
+  (with-temp-buffer
+    (setq-local codex--app-server-current-model-id "gpt-6-astra")
+    (setq-local codex-model "gpt-5.6-sol")
+    (cl-letf (((symbol-function 'agent-codex--read-config-model)
+               (lambda (_account) "gpt-5.5")))
+      (should (equal (agent-codex-status-model) "gpt-6-astra")))))
+
 (ert-deftest agent-codex-test-read-config-effort-uses-account-home ()
   "Read reasoning effort configuration from the selected account's CODEX_HOME."
   (let* ((dir (make-temp-file "codex-account" t))
