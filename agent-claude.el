@@ -868,10 +868,11 @@ either because ACCOUNT is nil or because it has no entry in
 
 (defun agent-claude--fetch-usage-with-token (account token callback retry)
   "Fetch usage data for ACCOUNT with TOKEN, reporting to CALLBACK.
-If RETRY is non-nil, retry stale URL process write failures once."
+If RETRY is non-nil, retry stale URL process write failures once.
+Other synchronous request errors report failure to CALLBACK without retrying."
   (condition-case err
       (agent-claude--url-retrieve-usage account token callback)
-    (file-error
+    (error
      (agent-claude--handle-usage-retrieve-error
       account token callback err retry))))
 

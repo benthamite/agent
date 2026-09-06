@@ -632,6 +632,44 @@ notification would double-report the same interruption."
       (when (process-live-p proc)
         (delete-process proc)))))
 
+(ert-deftest agent-claude-test-fetch-usage-reports-dns-failure ()
+  "Report synchronous DNS failure once without retrying or debugging."
+  (let ((calls 0)
+        (debug-on-error t)
+        reported)
+    (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
+               (lambda (_config-dir) "token"))
+              ((symbol-function 'url-retrieve)
+               (lambda (&rest _args)
+                 (cl-incf calls)
+                 (error "api.anthropic.com/443 nodename nor servname provided, or not known"))))
+      (agent-claude--usage-fetch
+       "personal" (lambda (usage) (push usage reported)))
+      (should (= calls 1))
+      (should (equal reported '(nil))))))
+
+(ert-deftest agent-claude-test-fetch-usage-reports-dns-failure-on-retry ()
+  "Report DNS failure on the stale-process retry without a third attempt."
+  (let ((proc (make-pipe-process :name "agent-usage-test" :noquery t))
+        (calls 0)
+        reported)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
+                   (lambda (_config-dir) "token"))
+                  ((symbol-function 'url-retrieve)
+                   (lambda (&rest _args)
+                     (if (= (cl-incf calls) 1)
+                         (signal 'file-error
+                                 (list "Writing to process" "Invalid argument" proc))
+                       (error "api.anthropic.com/443 nodename nor servname provided, or not known")))))
+          (agent-claude--usage-fetch
+           "personal" (lambda (usage) (push usage reported)))
+          (should (= calls 2))
+          (should-not (process-live-p proc))
+          (should (equal reported '(nil))))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
 (ert-deftest agent-claude-test-fetch-usage-disables-url-keepalives ()
   "Do not keep idle URL connections open for periodic usage polling."
   (let ((url-http-attempt-keepalives t)
