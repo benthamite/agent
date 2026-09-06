@@ -462,6 +462,8 @@ this account."
 
 ;;;;; Parameterized session start
 
+(declare-function codex--directory "codex" ())
+
 (cl-defun agent-codex--start-session (session &key initial-prompt resume-id
                                               fork terminal-backend)
   "Start the Codex session described by SESSION; return its buffer.
@@ -480,6 +482,9 @@ requested branch."
      "Codex session %s can't be branched yet: it hasn't produced any output.
 Run at least one turn in it, then branch again"
      resume-id))
+  (setf (agent-session-directory session)
+        (agent--session-source-directory
+         (or (agent-session-directory session) (codex--directory))))
   (let ((buffer (codex-start-session
                  :directory (agent-session-directory session)
                  :instance-name (agent-session-instance session)

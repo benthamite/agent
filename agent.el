@@ -812,6 +812,8 @@ hours; an indefinite snooze arms no timer.")
 (declare-function alert "alert")
 (declare-function elpaca-get "elpaca")
 (declare-function elpaca-source-dir "elpaca")
+(declare-function elpaca--queued "elpaca")
+(declare-function elpaca<-build-dir "elpaca")
 (declare-function find-library-name "find-func")
 (declare-function project-root "project" (project))
 (declare-function org-get-todo-state "org" ())
@@ -3120,6 +3122,26 @@ going either way."
     (kill-buffer)
     (message "Backtrace saved to %s" (abbreviate-file-name file))
     file))
+
+(defun agent--session-source-directory (directory)
+  "Resolve DIRECTORY to its registered Elpaca source when in a build tree.
+Use the package's source root, since build layouts can rearrange source
+files.  Leave directories outside registered build trees unchanged.
+Refuse a missing source instead of starting in a replaceable build tree."
+  (if-let* (((fboundp 'elpaca--queued))
+             (entry
+              (cl-find-if
+               (lambda (entry)
+                 (when-let* ((build (elpaca<-build-dir (cdr entry))))
+                   (string-prefix-p
+                    (file-name-as-directory (expand-file-name build))
+                    (file-name-as-directory (expand-file-name directory)))))
+               (elpaca--queued))))
+      (let ((source (elpaca-source-dir (cdr entry))))
+        (if (and source (file-directory-p source))
+            (file-name-as-directory (expand-file-name source))
+          (user-error "Elpaca source directory is missing: %s" source)))
+    directory))
 
 (defun agent--package-source-directory (package)
   "Return a source directory for PACKAGE, or nil."

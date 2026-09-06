@@ -1287,6 +1287,9 @@ CLI as the opening user message.  RESUME-ID resumes that session id.
 FORK non-nil adds `--fork-session' to a resume.  The session account
 is bound as `agent-account--starting' by `agent-start-session' so
 environment hooks see it at spawn time."
+  (setf (agent-session-directory session)
+        (agent--session-source-directory
+         (or (agent-session-directory session) (claude-code--directory))))
   (let* ((switches (append (when resume-id (list "--resume" resume-id))
                            (when fork (list "--fork-session"))
                            (when initial-prompt (list initial-prompt))))

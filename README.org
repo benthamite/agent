@@ -12,6 +12,13 @@
 
 This manual describes the features and customization options for the Emacs Lisp package =agent.el=.
 
+When you start a Claude or Codex session from a registered Elpaca build tree,
+Agent uses that package’s source checkout. Elpaca can replace build directories
+during a rebuild, which invalidates a running process’s working directory. This
+applies to explicit session directories and directories inferred from the current
+buffer. Other directories retain their usual behavior. A missing registered source
+directory prevents the session from starting.
+
 * Overview
 :PROPERTIES:
 :CUSTOM_ID: h:overview
