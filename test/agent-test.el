@@ -1599,12 +1599,14 @@ and globally persisting -- an account the session never had."
           (should-not prompted))
       (delete-directory home t))))
 
-(ert-deftest agent-test-restart-account-keeps-pool-member ()
-  "Restart on the session's own pool member instead of routing or prompting."
+(ert-deftest agent-test-restart-account-routes-selected-pool ()
+  "Restart routes away from an exhausted member without prompting."
   (let* ((home (make-temp-file "agent-test-account" t))
          (agent-backends nil)
          (agent-account--current (make-hash-table :test #'eq))
-         prompted routed)
+         (agent-account--routed (make-hash-table :test #'equal))
+         (agent-usage--data (make-hash-table :test #'equal))
+         (agent-usage-cache-file (expand-file-name "usage" home)))
     (unwind-protect
         (progn
           (apply #'agent-register-backend
@@ -1613,14 +1615,70 @@ and globally persisting -- an account the session never had."
             :accounts `(("e1" :home ,home :pool "p")
                         ("e2" :home ,home :pool "p"))))
           (puthash 'one "p" agent-account--current)
+          (puthash '(one . "p") "e2" agent-account--routed)
+          (agent-usage-record 'one "e1" '(:weekly-pct 30.0))
+          (agent-usage-record 'one "e2" '(:weekly-pct 100.0))
           (cl-letf (((symbol-function 'completing-read)
-                     (lambda (&rest _) (setq prompted t) "e1"))
-                    ((symbol-function 'agent-account-route)
-                     (lambda (&rest _) (setq routed t) "e1")))
-            (should (equal (agent-restart--account 'one "e2") "e2")))
-          (should-not prompted)
-          (should-not routed))
+                     (lambda (&rest _) (ert-fail "Unexpected account prompt")))
+                    ((symbol-function 'agent-usage-refresh-pool) #'ignore))
+            (should (equal (agent-restart--account 'one "e2") "e1"))
+            (should (equal (agent-restart--account 'one "e1") "e1"))
+            (should (equal (agent-account-current 'one) "p"))))
       (delete-directory home t))))
+
+(ert-deftest agent-test-restart-account-prompts-outside-selected-pool ()
+  "A selected pool does not silently replace an unrelated session account."
+  (let ((agent-backends nil)
+        (agent-account--current (make-hash-table :test #'eq))
+        choices)
+    (apply #'agent-register-backend
+     'one
+     (agent-test--backend
+      :accounts '(("e1" :home "/tmp/e1" :pool "p")
+                  ("personal" :home "/tmp/personal"))))
+    (puthash 'one "p" agent-account--current)
+    (cl-letf (((symbol-function 'agent-account-route) (lambda (&rest _) "e1"))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt candidates &rest _)
+                 (setq choices candidates)
+                 "personal")))
+      (should (equal (agent-restart--account 'one "personal") "personal"))
+      (should (equal choices '("e1" "personal"))))))
+
+(ert-deftest agent-test-restart-reroutes-with-session-identity ()
+  "Rerouting changes the account while retaining the conversation identity."
+  (let ((agent-backends nil)
+        (agent-account--current (make-hash-table :test #'eq))
+        killed resumed)
+    (with-temp-buffer
+      (setq-local agent--session
+                  (agent-session-create :backend 'one :account "e2"
+                                        :directory "~/repo/" :instance "test"
+                                        :id "sid-123"))
+      (apply #'agent-register-backend
+       'one
+       (agent-test--backend
+        :accounts '(("e1" :home "/tmp/e1" :pool "p")
+                    ("e2" :home "/tmp/e2" :pool "p"))
+        :session-identity (lambda (_buffer) "sid-123")))
+      (puthash 'one "p" agent-account--current)
+      (cl-letf (((symbol-function 'agent-account-route) (lambda (&rest _) "e1"))
+                ((symbol-function 'agent--confirm-no-captured-prompts)
+                 (lambda (&rest _) t))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) (ert-fail "Unexpected account prompt")))
+                ((symbol-function 'agent--force-kill-buffer)
+                 (lambda (_buffer) (setq killed t)))
+                ((symbol-function 'agent-start-session)
+                 (lambda (session &rest options)
+                   (setq resumed
+                         (list (agent-session-account session)
+                               (agent-session-directory session)
+                               (agent-session-instance session)
+                               (plist-get options :resume-id))))))
+        (agent-restart))
+      (should killed)
+      (should (equal resumed '("e1" "~/repo/" "test" "sid-123"))))))
 
 (ert-deftest agent-test-restart-without-restart-options-omits-extras ()
   "Restart backends lacking restart-options with only the resume id."
