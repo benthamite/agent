@@ -704,6 +704,70 @@ The buffer is bound to `buf' and holds session key \"a\"."
          (puthash buf "a" agent--session-keys)
          ,@body))))
 
+(ert-deftest agent-test-transcript-update-excludes-tools-and-old-turns ()
+  "Read real JSONL records, excluding reasoning, tools, and earlier turns."
+  (let ((file (make-temp-file "agent-update-")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "{\"type\":\"response_item\",\"timestamp\":\"2026-09-20T12:00:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Testing fix\"}]}}\n")
+            (insert "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"text\":\"private\"}}\n"))
+          (should (equal (agent--transcript-latest-update
+                          file (file-attribute-size (file-attributes file)) nil)
+                         "Testing fix"))
+          (should-not (agent--transcript-latest-update
+                       file (file-attribute-size (file-attributes file))
+                       (float-time (date-to-time "2026-09-20T13:00:00Z"))))
+          (write-region "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Next task\"}}\n"
+                        nil file t 'silent)
+          (should-not (agent--transcript-latest-update
+                       file (file-attribute-size (file-attributes file)) nil))
+          (write-region "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Checking the next task\"}]}}\n{\"type\":"
+                        nil file t 'silent)
+          (should (equal (agent--transcript-latest-update
+                          file (file-attribute-size (file-attributes file)) nil)
+                         "Checking the next task")))
+      (delete-file file))))
+
+(ert-deftest agent-test-transcript-update-survives-tool-only-tail ()
+  "Keep a previously observed update when an overlapping tail has only tools."
+  (let ((file (make-temp-file "agent-update-")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"done\"}}\n"))
+          (should (equal (agent--transcript-latest-update
+                          file (file-attribute-size (file-attributes file)) nil
+                          "Testing fix")
+                         "Testing fix")))
+      (delete-file file))))
+
+(ert-deftest agent-test-session-state-age-preserves-transition ()
+  "Duplicate events and summary updates must not reset state age."
+  (with-temp-buffer
+    (let ((now 100.0))
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now)))
+        (agent--session-set-state (current-buffer) 'busy)
+        (setq now 225.0)
+        (agent--session-set-state (current-buffer) 'busy)
+        (should (equal (agent--session-state-age (current-buffer)) "2m"))
+        (agent--session-set-state (current-buffer) 'awaiting-input)
+        (should (equal (agent--session-state-age (current-buffer)) "0s"))))))
+
+(ert-deftest agent-test-session-detail-columns-fit ()
+  "Keep both summaries and age in the available switcher width."
+  (let ((agent-session-annotation-functions
+         (list (lambda (_) "Session summary")))
+        (agent-session-state-summary-functions
+         (list (lambda (_) "Testing the pagination fix"))))
+    (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+      (setq-local agent--session-state-changed-at (- (float-time) 125))
+      (cl-letf (((symbol-function 'frame-width) (lambda (&optional _) 90)))
+        (let ((label (car (agent-test--switcher-labels))))
+          (should (string-match-p "Session summary +2m +Testing" label))
+          (should (<= (+ (string-width label)
+                         (agent--switcher-sessions-column-offset) 3) 90)))))))
+
 (ert-deftest agent-test-session-label-is-plain-without-annotation-function ()
   "Render session labels exactly as before when nothing annotates them."
   (let ((agent-session-annotation-functions nil))

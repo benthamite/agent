@@ -498,6 +498,28 @@ value with (agent-session-id (agent-session BUFFER))."
   :type 'hook
   :group 'agent)
 
+(defcustom agent-session-state-summary-functions nil
+  "Abnormal hook supplying the latest update for a live session buffer.
+Each function receives the buffer and returns a string or nil.  The first
+non-nil string is shown after the session summary and state age.  Functions
+must read cached data without I/O or other side effects."
+  :type 'hook
+  :group 'agent)
+
+(defvar agent-session-transcript-functions nil
+  "Hook returning a local transcript path for a live session buffer.
+Each function receives the buffer and returns its JSONL transcript path or
+nil.  Called periodically, never while formatting the session switcher.")
+
+(defvar-local agent--session-update-cache nil
+  "Latest transcript cache: identity, file signature, and assistant text.")
+
+(defvar agent--session-update-timer nil
+  "Timer refreshing the latest assistant updates.")
+
+(defvar agent--session-detail-widths nil
+  "Dynamically bound widths of the summary, age, and latest-update columns.")
+
 (defcustom agent-session-annotation-functions nil
   "Abnormal hook supplying a short annotation for a live session buffer.
 Each function is called with the session buffer and returns a
@@ -749,6 +771,9 @@ One of the symbols `unknown', `busy', `awaiting-input', and `closing'.
 Buffers start as `unknown' because no session event has been observed
 yet; assuming `busy' would report a state that was never seen.
 Only `agent-session-event' may set this variable.")
+
+(defvar-local agent--session-last-waiting-event-at nil
+  "Time of the last waiting event, including repeated state reports.")
 
 (defvar-local agent--session-state-changed-at nil
   "Value of `float-time' at this session's last state transition.")
@@ -1079,7 +1104,9 @@ the account it happens to run under.  Snoozed sessions come after
 every active one, so the sessions worth toggling between sit together
 at the top; a snoozed session keeps its key, so moving it does not
 change how it is reached."
-  (let (active snoozed)
+  (let ((agent--session-detail-widths
+         (agent--session-detail-widths (or name-pad 0) (or account-pad 0)))
+        active snoozed)
     (maphash (lambda (buf key)
                (when (buffer-live-p buf)
                  (let ((spec (agent--session-suffix-spec
@@ -1235,13 +1262,195 @@ width at zero."
          (width (and annotation
                      (agent--session-annotation-width
                       (string-width prefix)))))
-    (if (or (not annotation) (<= width 0))
-        (string-trim-right prefix)
-      (concat prefix
-              " "
-              (propertize (truncate-string-to-width
-                           annotation width nil nil t)
-                          'face 'agent-session-annotation)))))
+    (if agent--session-detail-widths
+        (agent--session-detail-label buffer prefix annotation)
+      (if (or (not annotation) (<= width 0))
+          (string-trim-right prefix)
+        (concat prefix
+                " "
+                (propertize (truncate-string-to-width
+                             annotation width nil nil t)
+                            'face 'agent-session-annotation))))))
+
+(defun agent--refresh-session-updates ()
+  "Refresh cached assistant updates and the open switcher without model calls."
+  (dolist (buffer (agent-session-buffers))
+    (condition-case err
+        (agent--refresh-session-update buffer)
+      (error
+       (with-current-buffer buffer (setq agent--session-update-cache nil))
+       (message "Agent update unavailable for %s: %s"
+                (buffer-name buffer) (error-message-string err)))))
+  (when (and transient--prefix
+             (eq (oref transient--prefix command) 'agent--session-switcher)
+             (not (active-minibuffer-window)))
+    (transient--refresh-transient)))
+
+(defun agent--refresh-session-update (buffer)
+  "Refresh BUFFER's latest update from a bounded tail of its transcript."
+  (with-current-buffer buffer
+    (let* ((session (agent-session buffer))
+           (identity (and session (cons (agent-session-backend session)
+                                        (agent-session-id session))))
+           (cached-identity (car agent--session-update-cache))
+           (path (run-hook-with-args-until-success
+                  'agent-session-transcript-functions buffer))
+           (attributes (and path (not (file-remote-p path))
+                            (file-attributes path)))
+           (signature (and attributes
+                           (list path (file-attribute-size attributes)
+                                 (file-attribute-modification-time attributes)))))
+      (unless (and (equal identity cached-identity)
+                   (equal signature (cadr agent--session-update-cache)))
+        (setq agent--session-update-cache
+              (list identity signature
+                    (when signature
+                      (agent--transcript-latest-update
+                       path (file-attribute-size attributes)
+                       (and (eq agent--session-state 'busy)
+                            agent--session-state-changed-at)
+                       (when (and (equal identity cached-identity)
+                                  (equal path (car (cadr agent--session-update-cache)))
+                                  (let ((old-size (cadr (cadr agent--session-update-cache))))
+                                    (and old-size
+                                         (<= old-size (file-attribute-size attributes))
+                                         (<= (- (file-attribute-size attributes) old-size)
+                                             65535))))
+                         (nth 2 agent--session-update-cache))))))))))
+
+(defun agent--transcript-latest-update (path size since &optional previous)
+  "Read latest assistant text from PATH of SIZE bytes, after SINCE if non-nil.
+Read at most 64 KiB.  A user message clears the preceding assistant update.
+Tool results and reasoning are excluded.  An incomplete final JSONL record
+is left for the next refresh.  PREVIOUS is the cached update when the
+new tail overlaps the previous read, so tool-only output preserves it."
+  (with-temp-buffer
+    (let ((start (max 0 (- size 65535)))
+          (latest previous))
+      (insert-file-contents path nil (max 0 (1- start)) size)
+      (goto-char (point-min))
+      (when (> start 0) (forward-line 1))
+      (while (search-forward "\n" nil t)
+        (let* ((end (1- (point)))
+               (line (buffer-substring-no-properties
+                      (line-beginning-position 0) end))
+               (record (json-parse-string line :object-type 'plist
+                                          :array-type 'list))
+               (message (agent--transcript-message record)))
+          (when message
+            (setq latest
+                  (when (and (equal (car message) "assistant")
+                             (or (not since)
+                                 (when-let* ((stamp (plist-get record :timestamp)))
+                                   (>= (float-time (date-to-time stamp)) since))))
+                    (cdr message))))))
+      latest)))
+
+(defun agent--transcript-message (record)
+  "Return RECORD's user or assistant text as (ROLE . TEXT), or nil.
+Accept Claude messages and Codex response-item messages."
+  (let* ((type (plist-get record :type))
+         (message (pcase type
+                    ((or "assistant" "user") (plist-get record :message))
+                    ("response_item"
+                     (let ((payload (plist-get record :payload)))
+                       (when (equal (plist-get payload :type) "message")
+                         payload)))))
+         (role (plist-get message :role))
+         (content (plist-get message :content))
+         (text (if (stringp content) content
+                 (mapconcat (lambda (part)
+                              (if (member (plist-get part :type)
+                                          '("text" "input_text" "output_text"))
+                                  (or (plist-get part :text) "") ""))
+                            content " "))))
+    (when (and (member role '("assistant" "user"))
+               (not (string-empty-p (string-trim text))))
+      (cons role text))))
+
+(defun agent--session-latest-update (buffer)
+  "Return BUFFER's cached assistant update, without reading its transcript."
+  (nth 2 (buffer-local-value 'agent--session-update-cache buffer)))
+
+(add-hook 'agent-session-state-summary-functions #'agent--session-latest-update t)
+(when (timerp agent--session-update-timer)
+  (cancel-timer agent--session-update-timer))
+(setq agent--session-update-timer
+      (run-with-timer 5 5 #'agent--refresh-session-updates))
+
+(defun agent--session-state-age (buffer)
+  "Return time since BUFFER's last state transition, or an empty string."
+  (when-let* ((since (buffer-local-value 'agent--session-state-changed-at buffer)))
+    (let ((seconds (max 0 (floor (- (float-time) since)))))
+      (cond ((< seconds 60) (format "%ds" seconds))
+            ((< seconds 3600) (format "%dm" (/ seconds 60)))
+            ((< seconds 86400) (format "%dh" (/ seconds 3600)))
+            (t (format "%dd" (/ seconds 86400)))))))
+
+(defun agent--session-state-summary (buffer)
+  "Return BUFFER's cached latest update as a single line, or nil."
+  (when-let* ((text (run-hook-with-args-until-success
+                    'agent-session-state-summary-functions buffer))
+              ((stringp text)))
+    (let ((line (string-trim
+                 (replace-regexp-in-string "[ \t\n\r\f\v]+" " " text))))
+      (unless (string-empty-p line) line))))
+
+(defun agent--session-detail-widths (name-pad account-pad)
+  "Allocate summary columns after NAME-PAD and ACCOUNT-PAD display columns."
+  (let* ((age (agent--session-column-width
+               (lambda (buffer) (or (agent--session-state-age buffer) ""))))
+         (state (agent--session-column-width
+                 (lambda (buffer) (or (agent--session-state-summary buffer) ""))))
+         (summary (agent--session-column-width
+                   (lambda (buffer) (or (agent--session-annotation buffer) ""))))
+         (available (max 0 (- (frame-width)
+                              (agent--switcher-sessions-column-offset)
+                              agent--switcher-suffix-padding
+                              agent--switcher-session-key-width
+                              name-pad account-pad
+                              (agent--session-icon-overflow)
+                              (if (> account-pad 0) 1 0)
+                              agent--session-annotation-margin 3 age))))
+    (when (or (> age 0) (> state 0))
+      (when agent-session-annotation-max-width
+        (setq summary (min summary agent-session-annotation-max-width)))
+      (let ((summary-width (min summary
+                                (max (/ available 2) (- available state)))))
+        (list summary-width age (min state (- available summary-width)))))))
+
+(defun agent--session-icon-overflow ()
+  "Return extra display columns occupied by graphical backend icons."
+  (if (not (display-graphic-p)) 0
+    (let ((extra 0))
+      (maphash (lambda (buffer _key)
+                 (when (buffer-live-p buffer)
+                   (let ((text (agent--session-label-base buffer)))
+                     (setq extra
+                           (max extra
+                                (- (ceiling (/ (float (string-pixel-width text))
+                                               (frame-char-width)))
+                                   (string-width text)))))))
+               agent--session-keys)
+      extra)))
+
+(defun agent--session-detail-label (buffer prefix annotation)
+  "Join BUFFER's PREFIX, ANNOTATION, state age, and latest update."
+  (string-trim-right
+   (concat prefix " "
+           (mapconcat
+            #'identity
+            (cl-loop for text in (list (or annotation "")
+                                      (or (agent--session-state-age buffer) "")
+                                      (or (agent--session-state-summary buffer) ""))
+                     for width in agent--session-detail-widths
+                     when (> width 0)
+                     collect (propertize
+                              (agent--pad-to
+                               (truncate-string-to-width text width nil nil t)
+                               width)
+                              'face 'agent-session-annotation))
+            " "))))
 
 (defun agent--session-label-prefix (buffer name-pad account-pad)
   "Return BUFFER's name and account columns, padded and joined.
@@ -1571,6 +1780,8 @@ advance the before-exit chain first; when it consumes the event,
 the ready alert, scrolling, and display-name refresh are
 suppressed.  A `blocked' event never advances the chain.  The
 ready alert fires only for `idle-prompt' events."
+  (with-current-buffer buffer
+    (setq agent--session-last-waiting-event-at (float-time)))
   (agent--session-set-state buffer 'awaiting-input)
   (unless (and (memq event '(stop idle-prompt))
                (agent--before-exit-transition buffer event))
@@ -1582,8 +1793,11 @@ ready alert fires only for `idle-prompt' events."
 (defun agent--session-set-state (buffer state)
   "Set BUFFER's session state to STATE and record the transition time."
   (with-current-buffer buffer
-    (setq agent--session-state state)
-    (setq agent--session-state-changed-at (float-time))))
+    (unless (eq agent--session-state state)
+      (when (and (eq state 'busy) agent--session-update-cache)
+        (setf (nth 2 agent--session-update-cache) nil))
+      (setq agent--session-state state)
+      (setq agent--session-state-changed-at (float-time)))))
 
 (defun agent--session-notify-ready (buffer)
   "Fire the ready alert for session BUFFER, unless it is snoozed.

@@ -1010,6 +1010,14 @@ unified session switcher."
     (agent--ensure-all-session-keys)
     (transient-setup 'agent--session-switcher)))
 
+(defun agent-codex--session-transcript (buffer)
+  "Return the transcript path for Codex session BUFFER, or nil."
+  (when-let* ((session (agent-session buffer))
+              ((eq (agent-session-backend session) 'codex)))
+    (buffer-local-value 'codex--session-transcript-file buffer)))
+
+(add-hook 'agent-session-transcript-functions #'agent-codex--session-transcript)
+
 ;;;;; Branch navigation
 
 ;;;###autoload

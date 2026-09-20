@@ -355,10 +355,43 @@ A session that is waiting for something you can only do later can be set aside w
 #+vindex: agent-session-annotation-functions
 Sessions can also carry a one-line annotation after their name, shown dimmed in the ~agent-session-annotation~ face. The text comes from ~agent-session-annotation-functions~, an abnormal hook: each function is called with a session buffer and returns a string, or ~nil~ to leave the session to the functions after it. The first non-nil answer is the one shown, and the functions after it are not called. =agent= renders whatever it returns and knows nothing about where the text comes from. Whitespace in the answer is collapsed to single spaces, so a multi-line answer cannot break the menu's layout, and an answer that is blank or not a string counts as no annotation. Sessions without an annotation — including sessions every function declines to annotate — render exactly as they did before annotations existed. The default is ~nil~, which shows session names alone; Agent Log adds a function that supplies each session's stored one-line summary ([[https://github.com/benthamite/agent-log][agent-log]]), and with no such integration loaded the switcher looks unchanged. Because this is a hook, an integration adds itself with ~add-hook~ rather than taking a slot over: a function you installed yourself keeps working whichever loads first, and ~remove-hook~ takes either one back out.
 
+#+vindex: agent-session-state-summary-functions
+#+vindex: agent-session-transcript-functions
+The switcher keeps the session summary and adds two columns after it: the
+age of the current state and the latest assistant update. Ages use seconds,
+minutes, hours, or days (=12s=, =2m=, =1h=, =3d=), measured from the last
+state transition. Repeated events reporting the same state do not reset the
+age; neither do changes to either summary. An unobserved transition has no
+age. Ages are recomputed when the menu opens and during its five-second refresh.
+
+The latest update is an excerpt of the assistant's own text, not a generated
+summary or a claim that the task succeeded. Claude and Codex supply their
+recorded transcript paths through ~agent-session-transcript-functions~.
+Every five seconds, a cache checks those local transcripts and
+reads at most their last 64 KiB when they change. Tool results and reasoning
+are excluded. A new turn clears the previous update until newer assistant
+text is available. Missing transcripts or unavailable recent text leave the
+column blank. No model requests are made, and menu rendering performs no
+transcript I/O.
+
+~agent-session-state-summary-functions~ supplies the update column using the
+same cheap, first-non-nil convention as the session-summary hook. Its default
+provider reads the transcript cache; another integration can supply more
+specific state text by adding a function before that provider.
+
 Names, accounts, and annotations each line up in one column: names are padded to the widest name in the menu and accounts to the widest account, measured in display columns, so a name containing double-width characters does not push the columns after it to the right. Padding that nothing follows is trimmed, so a session with no annotation ends at its account, and a session with neither ends at its name.
 
 #+vindex: agent-session-annotation-max-width
-Annotations are truncated with an ellipsis to fit the switcher window, which is as wide as the frame. The fit subtracts everything the line spends around the annotation: the columns to the left of the Sessions column, the key and the padding transient formats a suffix with, the padded name and account columns, one separator column, and a two-column right margin. A frame too narrow for that budget yields a short annotation rather than none, since the fit never drops below twenty columns. Setting ~agent-session-annotation-max-width~ to an integer caps the result ([[#h:shared-session-options][Shared session behavior]]); it can only narrow an annotation, never widen it past what the frame holds. A cap that leaves no room — that is, =0= — renders the bare label instead.
+The session summary and latest-update columns are aligned across rows and
+truncated with an ellipsis to fit the frame. After reserving the name,
+account, graphical icon width, age, separators, and menu margins, each text
+column can use half
+the remaining width; space unused by a short update is available to the
+session summary, and space unused by a short summary is available to the
+update. ~agent-session-annotation-max-width~ caps only the session summary.
+A zero cap hides that summary without hiding the age or latest update.
+When neither new column has data, the original annotation layout is used.
+
 
 A function added to ~agent-session-annotation-functions~ must be cheap and free of side effects: building the switcher calls it more than once per session, because aligning the annotations needs every label's width before any label is final. Reading a value from memory is appropriate; reading a file or contacting a process is not.
 

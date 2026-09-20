@@ -753,7 +753,7 @@ new identifier is recorded without marking the session busy."
 
 (defun agent-claude--turn-ended-since-last-poll-p (buffer)
   "Return non-nil when BUFFER stopped responding since the previous poll."
-  (let ((changed (buffer-local-value 'agent--session-state-changed-at buffer))
+  (let ((changed (buffer-local-value 'agent--session-last-waiting-event-at buffer))
         (polled agent-claude--status-polled-at))
     (and changed polled (> changed polled)
          (eq (buffer-local-value 'agent--session-state buffer)
@@ -1924,6 +1924,15 @@ unconditionally recenter with `(recenter -1)'."
 ;;;;; Restart
 
 (define-obsolete-function-alias 'agent-claude-restart #'agent-restart "0.2")
+
+(defun agent-claude--session-transcript (buffer)
+  "Return the transcript path for claude-code session BUFFER, or nil."
+  (when-let* ((session (agent-session buffer))
+              ((eq (agent-session-backend session) 'claude-code)))
+    (with-current-buffer buffer
+      (plist-get agent-claude--status-data :transcript_path))))
+
+(add-hook 'agent-session-transcript-functions #'agent-claude--session-transcript)
 
 ;;;;; Branch navigation
 
