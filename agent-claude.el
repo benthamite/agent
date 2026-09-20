@@ -797,6 +797,14 @@ Restarted sessions reuse buffer names, so files keyed by buffer
 name would be inherited from dead processes; the UUID is unique
 per CLI process.")
 
+(defun agent-claude--publisher-token (buffer)
+  "Return the Claude publisher process token for session BUFFER."
+  (when-let* ((session (agent-session buffer))
+              ((eq (agent-session-backend session) 'claude-code)))
+    (buffer-local-value 'agent-claude--status-uuid buffer)))
+
+(add-hook 'agent-session-status-token-functions #'agent-claude--publisher-token)
+
 (defun agent-claude--status-uuid-env (_buffer-name _dir)
   "Return the AGENT_SESSION_UUID environment entry for a new session."
   (setq agent-claude--pending-status-uuid (agent-claude--generate-uuid))
@@ -1924,15 +1932,6 @@ unconditionally recenter with `(recenter -1)'."
 ;;;;; Restart
 
 (define-obsolete-function-alias 'agent-claude-restart #'agent-restart "0.2")
-
-(defun agent-claude--session-transcript (buffer)
-  "Return the transcript path for claude-code session BUFFER, or nil."
-  (when-let* ((session (agent-session buffer))
-              ((eq (agent-session-backend session) 'claude-code)))
-    (with-current-buffer buffer
-      (plist-get agent-claude--status-data :transcript_path))))
-
-(add-hook 'agent-session-transcript-functions #'agent-claude--session-transcript)
 
 ;;;;; Branch navigation
 

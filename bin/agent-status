@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Publish a short current-state description to the calling Emacs agent session."""
+import argparse
+import base64
+import json
+import os
+import subprocess
+import sys
+
+
+def request_payload(text, backend, environ):
+    """Resolve an unambiguous session from the caller's inherited environment."""
+    buffers = {"codex": environ.get("CODEX_BUFFER_NAME"),
+               "claude-code": environ.get("CLAUDE_BUFFER_NAME")}
+    if backend is None:
+        candidates = [key for key, value in buffers.items() if value]
+        if len(candidates) != 1:
+            raise ValueError("Expected exactly one Emacs agent buffer; use --backend if both are set")
+        backend = candidates[0]
+    if not buffers[backend]:
+        raise ValueError(f"No Emacs buffer recorded for {backend}")
+    normalized = " ".join(text.split())
+    if len(normalized) > 160:
+        raise ValueError("Status must be at most 160 characters")
+    session_id = environ.get("CODEX_THREAD_ID") if backend == "codex" else None
+    process_token = environ.get("AGENT_SESSION_UUID") if backend == "claude-code" else None
+    if not (session_id or process_token):
+        raise ValueError("No publisher identity recorded for this agent session")
+    return {"buffer": buffers[backend], "backend": backend,
+            "text": normalized, "session_id": session_id, "process_token": process_token}
+
+
+def expression(payload):
+    """Encode all caller-controlled values as JSON data, never Lisp source."""
+    encoded = base64.b64encode(json.dumps(payload).encode()).decode("ascii")
+    return (
+        '(let ((request (json-parse-string '
+        f'(decode-coding-string (base64-decode-string "{encoded}") (quote utf-8)) '
+        ':object-type (quote plist) :null-object nil))) '
+        '(agent-session-set-status (plist-get request :buffer) '
+        '(intern (plist-get request :backend)) (plist-get request :text) '
+        '(plist-get request :session_id) (plist-get request :process_token)))'
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("text", help="Factual current state, up to 160 characters; empty clears")
+    parser.add_argument("--backend", choices=("codex", "claude-code"))
+    parser.add_argument("--socket-name", default=os.environ.get("EMACS_SOCKET_NAME"))
+    args = parser.parse_args()
+    try:
+        payload = request_payload(args.text, args.backend, os.environ)
+        command = ["emacsclient"]
+        if args.socket_name:
+            command.extend(["--socket-name", args.socket_name])
+        command.extend(["--eval", expression(payload)])
+        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+        if result.returncode or result.stdout.strip() != "t":
+            raise ValueError(result.stderr.strip() or result.stdout.strip() or "Emacs rejected status")
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        print(f"agent-status: {error}", file=sys.stderr)
+        return 1
+    print("Status updated")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

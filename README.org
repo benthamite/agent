@@ -356,40 +356,58 @@ A session that is waiting for something you can only do later can be set aside w
 Sessions can also carry a one-line annotation after their name, shown dimmed in the ~agent-session-annotation~ face. The text comes from ~agent-session-annotation-functions~, an abnormal hook: each function is called with a session buffer and returns a string, or ~nil~ to leave the session to the functions after it. The first non-nil answer is the one shown, and the functions after it are not called. =agent= renders whatever it returns and knows nothing about where the text comes from. Whitespace in the answer is collapsed to single spaces, so a multi-line answer cannot break the menu's layout, and an answer that is blank or not a string counts as no annotation. Sessions without an annotation — including sessions every function declines to annotate — render exactly as they did before annotations existed. The default is ~nil~, which shows session names alone; Agent Log adds a function that supplies each session's stored one-line summary ([[https://github.com/benthamite/agent-log][agent-log]]), and with no such integration loaded the switcher looks unchanged. Because this is a hook, an integration adds itself with ~add-hook~ rather than taking a slot over: a function you installed yourself keeps working whichever loads first, and ~remove-hook~ takes either one back out.
 
 #+vindex: agent-session-state-summary-functions
-#+vindex: agent-session-transcript-functions
+#+vindex: agent-session-status-token-functions
+#+findex: agent-session-set-status
 The switcher keeps the session summary and adds two columns after it: the
-age of the current state and the latest assistant update. Ages use seconds,
-minutes, hours, or days (=12s=, =2m=, =1h=, =3d=), measured from the last
-state transition. Repeated events reporting the same state do not reset the
-age; neither do changes to either summary. An unobserved transition has no
-age. Ages are recomputed when the menu opens and during its five-second refresh.
+age of the current state and a short state description published by the agent.
+Ages use seconds, minutes, hours, or days (=12s=, =2m=, =1h=, =3d=), measured
+from the last observed state transition. Repeated events reporting the same
+state do not reset the age; neither do changes to either summary. An
+unobserved transition has no age. Ages refresh every five seconds while the
+menu is open.
 
-The latest update is an excerpt of the assistant's own text, not a generated
-summary or a claim that the task succeeded. Claude and Codex supply their
-recorded transcript paths through ~agent-session-transcript-functions~.
-Every five seconds, a cache checks those local transcripts and
-reads at most their last 64 KiB when they change. Tool results and reasoning
-are excluded. A new turn clears the previous update until newer assistant
-text is available. Missing transcripts or unavailable recent text leave the
-column blank. No model requests are made, and menu rendering performs no
-transcript I/O.
+The state description is explicitly authored by the working agent, for
+example “Testing pagination fix” or “Waiting for your decision about bindings”.
+It is not extracted from the chat and requires no separate summarizer.
+Until an agent publishes an update, the column is blank. A new turn or a
+changed native session identity clears the previous description; a completed
+turn retains its final update. Publication does not alter the state color or
+its age, and a claim of completion remains the agent's report.
 
-~agent-session-state-summary-functions~ supplies the update column using the
-same cheap, first-non-nil convention as the session-summary hook. Its default
-provider reads the transcript cache; another integration can supply more
-specific state text by adding a function before that provider.
+The executable =bin/agent-status= accepts a status string of at most 160
+characters (an empty string clears it). It routes through =CODEX_BUFFER_NAME=
+or =CLAUDE_BUFFER_NAME=, requiring =--backend codex= or
+=--backend claude-code= if both are present. Codex requires =CODEX_THREAD_ID= to match the target session's recorded
+identity; Claude requires =AGENT_SESSION_UUID= to match its process token,
+so an old process cannot update a replacement session with the same name. The helper
+rejects absent or mismatched sessions, passes text as encoded JSON rather
+than executable Lisp, and reports failures. =--socket-name= (or
+=EMACS_SOCKET_NAME=) selects a non-default Emacs server. Only the main agent
+should publish status: subagents can inherit their parent's buffer variable.
+
+Instruct agents to publish a factual phrase of roughly 5–12 words at task
+start, meaningful phase changes, blockers, and before their final response.
+Installing this instruction affects sessions that read it; already running
+agents need to receive the instruction before they will publish updates.
+
+The public function ~agent-session-set-status~ accepts a buffer name, backend
+symbol, status text, optional native session id, and optional process token. The hook ~agent-session-status-token-functions~ supplies backend process tokens.
+The function validates the target and text, stores the update in that buffer, and refreshes an open switcher.
+~agent-session-state-summary-functions~ supplies the column using the same
+cheap, first-non-nil convention as the session-summary hook. The built-in
+provider reads the published status without transcript I/O or model calls.
 
 Names, accounts, and annotations each line up in one column: names are padded to the widest name in the menu and accounts to the widest account, measured in display columns, so a name containing double-width characters does not push the columns after it to the right. Padding that nothing follows is trimmed, so a session with no annotation ends at its account, and a session with neither ends at its name.
 
 #+vindex: agent-session-annotation-max-width
-The session summary and latest-update columns are aligned across rows and
+The session summary and state-description columns are aligned across rows and
 truncated with an ellipsis to fit the frame. After reserving the name,
 account, graphical icon width, age, separators, and menu margins, each text
 column can use half
 the remaining width; space unused by a short update is available to the
 session summary, and space unused by a short summary is available to the
 update. ~agent-session-annotation-max-width~ caps only the session summary.
-A zero cap hides that summary without hiding the age or latest update.
+A zero cap hides that summary without hiding the age or state description.
 When neither new column has data, the original annotation layout is used.
 
 

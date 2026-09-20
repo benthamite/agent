@@ -499,26 +499,24 @@ value with (agent-session-id (agent-session BUFFER))."
   :group 'agent)
 
 (defcustom agent-session-state-summary-functions nil
-  "Abnormal hook supplying the latest update for a live session buffer.
+  "Abnormal hook supplying an explicit state description for a live session buffer.
 Each function receives the buffer and returns a string or nil.  The first
 non-nil string is shown after the session summary and state age.  Functions
 must read cached data without I/O or other side effects."
   :type 'hook
   :group 'agent)
 
-(defvar agent-session-transcript-functions nil
-  "Hook returning a local transcript path for a live session buffer.
-Each function receives the buffer and returns its JSONL transcript path or
-nil.  Called periodically, never while formatting the session switcher.")
+(defvar agent-session-status-token-functions nil
+  "Hook returning a backend's publisher process token for a session buffer.")
 
-(defvar-local agent--session-update-cache nil
-  "Latest transcript cache: identity, file signature, and assistant text.")
+(defvar-local agent--session-published-status nil
+  "Concise current-state description explicitly published by this agent.")
 
-(defvar agent--session-update-timer nil
-  "Timer refreshing the latest assistant updates.")
+(defvar agent--session-switcher-timer nil
+  "Timer refreshing state ages in the open session switcher.")
 
 (defvar agent--session-detail-widths nil
-  "Dynamically bound widths of the summary, age, and latest-update columns.")
+  "Dynamically bound widths of the summary, age, and state-description columns.")
 
 (defcustom agent-session-annotation-functions nil
   "Abnormal hook supplying a short annotation for a live session buffer.
@@ -552,6 +550,7 @@ variables."
     (when-let* ((session (agent-session buffer)))
       (unless (equal (agent-session-id session) id)
         (setf (agent-session-id session) id)
+        (with-current-buffer buffer (setq agent--session-published-status nil))
         (run-hook-with-args 'agent-session-id-functions buffer)))))
 
 (defun agent-session-buffers ()
@@ -1272,111 +1271,56 @@ width at zero."
                              annotation width nil nil t)
                             'face 'agent-session-annotation))))))
 
-(defun agent--refresh-session-updates ()
-  "Refresh cached assistant updates and the open switcher without model calls."
-  (dolist (buffer (agent-session-buffers))
-    (condition-case err
-        (agent--refresh-session-update buffer)
-      (error
-       (with-current-buffer buffer (setq agent--session-update-cache nil))
-       (message "Agent update unavailable for %s: %s"
-                (buffer-name buffer) (error-message-string err)))))
+(defun agent-session-set-status
+    (buffer-name backend text &optional session-id process-token)
+  "Publish TEXT as the current state of BUFFER-NAME's BACKEND session.
+SESSION-ID, when supplied, must match the recorded native session identity.
+PROCESS-TOKEN, when supplied, must match the backend publisher process token.
+Reject missing sessions, mismatched identities, and text longer than 160
+characters.  Collapse whitespace; empty text clears the status.  This does
+not change the session's lifecycle state or its state-transition timestamp."
+  (let* ((buffer (get-buffer buffer-name))
+         (session (and buffer (agent-session buffer))))
+    (unless (and session (memq buffer (agent-session-buffers)))
+      (user-error "No live agent session named %s" buffer-name))
+    (unless (eq backend (agent-session-backend session))
+      (user-error "Backend does not match session %s" buffer-name))
+    (when (and session-id (not (equal session-id (agent-session-id session))))
+      (user-error "Session identity does not match %s" buffer-name))
+    (when (and process-token
+               (not (equal process-token
+                           (run-hook-with-args-until-success
+                            'agent-session-status-token-functions buffer))))
+      (user-error "Publisher process does not match %s" buffer-name))
+    (unless (stringp text)
+      (user-error "Status must be a string"))
+    (let ((status (string-trim
+                   (replace-regexp-in-string "[ \t\n\r\f\v]+" " " text))))
+      (when (> (length status) 160)
+        (user-error "Status must be at most 160 characters"))
+      (with-current-buffer buffer
+        (setq agent--session-published-status
+              (unless (string-empty-p status) status))))
+    (agent--refresh-session-switcher)
+    t))
+
+(defun agent--session-published-status (buffer)
+  "Return BUFFER's explicitly published state description."
+  (buffer-local-value 'agent--session-published-status buffer))
+
+(defun agent--refresh-session-switcher ()
+  "Refresh status text and ages when the session switcher is open."
   (when (and transient--prefix
              (eq (oref transient--prefix command) 'agent--session-switcher)
              (not (active-minibuffer-window)))
     (transient--refresh-transient)))
 
-(defun agent--refresh-session-update (buffer)
-  "Refresh BUFFER's latest update from a bounded tail of its transcript."
-  (with-current-buffer buffer
-    (let* ((session (agent-session buffer))
-           (identity (and session (cons (agent-session-backend session)
-                                        (agent-session-id session))))
-           (cached-identity (car agent--session-update-cache))
-           (path (run-hook-with-args-until-success
-                  'agent-session-transcript-functions buffer))
-           (attributes (and path (not (file-remote-p path))
-                            (file-attributes path)))
-           (signature (and attributes
-                           (list path (file-attribute-size attributes)
-                                 (file-attribute-modification-time attributes)))))
-      (unless (and (equal identity cached-identity)
-                   (equal signature (cadr agent--session-update-cache)))
-        (setq agent--session-update-cache
-              (list identity signature
-                    (when signature
-                      (agent--transcript-latest-update
-                       path (file-attribute-size attributes)
-                       (and (eq agent--session-state 'busy)
-                            agent--session-state-changed-at)
-                       (when (and (equal identity cached-identity)
-                                  (equal path (car (cadr agent--session-update-cache)))
-                                  (let ((old-size (cadr (cadr agent--session-update-cache))))
-                                    (and old-size
-                                         (<= old-size (file-attribute-size attributes))
-                                         (<= (- (file-attribute-size attributes) old-size)
-                                             65535))))
-                         (nth 2 agent--session-update-cache))))))))))
-
-(defun agent--transcript-latest-update (path size since &optional previous)
-  "Read latest assistant text from PATH of SIZE bytes, after SINCE if non-nil.
-Read at most 64 KiB.  A user message clears the preceding assistant update.
-Tool results and reasoning are excluded.  An incomplete final JSONL record
-is left for the next refresh.  PREVIOUS is the cached update when the
-new tail overlaps the previous read, so tool-only output preserves it."
-  (with-temp-buffer
-    (let ((start (max 0 (- size 65535)))
-          (latest previous))
-      (insert-file-contents path nil (max 0 (1- start)) size)
-      (goto-char (point-min))
-      (when (> start 0) (forward-line 1))
-      (while (search-forward "\n" nil t)
-        (let* ((end (1- (point)))
-               (line (buffer-substring-no-properties
-                      (line-beginning-position 0) end))
-               (record (json-parse-string line :object-type 'plist
-                                          :array-type 'list))
-               (message (agent--transcript-message record)))
-          (when message
-            (setq latest
-                  (when (and (equal (car message) "assistant")
-                             (or (not since)
-                                 (when-let* ((stamp (plist-get record :timestamp)))
-                                   (>= (float-time (date-to-time stamp)) since))))
-                    (cdr message))))))
-      latest)))
-
-(defun agent--transcript-message (record)
-  "Return RECORD's user or assistant text as (ROLE . TEXT), or nil.
-Accept Claude messages and Codex response-item messages."
-  (let* ((type (plist-get record :type))
-         (message (pcase type
-                    ((or "assistant" "user") (plist-get record :message))
-                    ("response_item"
-                     (let ((payload (plist-get record :payload)))
-                       (when (equal (plist-get payload :type) "message")
-                         payload)))))
-         (role (plist-get message :role))
-         (content (plist-get message :content))
-         (text (if (stringp content) content
-                 (mapconcat (lambda (part)
-                              (if (member (plist-get part :type)
-                                          '("text" "input_text" "output_text"))
-                                  (or (plist-get part :text) "") ""))
-                            content " "))))
-    (when (and (member role '("assistant" "user"))
-               (not (string-empty-p (string-trim text))))
-      (cons role text))))
-
-(defun agent--session-latest-update (buffer)
-  "Return BUFFER's cached assistant update, without reading its transcript."
-  (nth 2 (buffer-local-value 'agent--session-update-cache buffer)))
-
-(add-hook 'agent-session-state-summary-functions #'agent--session-latest-update t)
-(when (timerp agent--session-update-timer)
-  (cancel-timer agent--session-update-timer))
-(setq agent--session-update-timer
-      (run-with-timer 5 5 #'agent--refresh-session-updates))
+(add-hook 'agent-session-state-summary-functions
+          #'agent--session-published-status t)
+(when (timerp agent--session-switcher-timer)
+  (cancel-timer agent--session-switcher-timer))
+(setq agent--session-switcher-timer
+      (run-with-timer 5 5 #'agent--refresh-session-switcher))
 
 (defun agent--session-state-age (buffer)
   "Return time since BUFFER's last state transition, or an empty string."
@@ -1388,7 +1332,7 @@ Accept Claude messages and Codex response-item messages."
             (t (format "%dd" (/ seconds 86400)))))))
 
 (defun agent--session-state-summary (buffer)
-  "Return BUFFER's cached latest update as a single line, or nil."
+  "Return BUFFER's published state description as a single line, or nil."
   (when-let* ((text (run-hook-with-args-until-success
                     'agent-session-state-summary-functions buffer))
               ((stringp text)))
@@ -1435,7 +1379,7 @@ Accept Claude messages and Codex response-item messages."
       extra)))
 
 (defun agent--session-detail-label (buffer prefix annotation)
-  "Join BUFFER's PREFIX, ANNOTATION, state age, and latest update."
+  "Join BUFFER's PREFIX, ANNOTATION, state age, and state description."
   (string-trim-right
    (concat prefix " "
            (mapconcat
@@ -1767,6 +1711,7 @@ and on submissions that start no turn."
        (unless (eq (buffer-local-value 'agent--session-state buffer) 'busy)
          (agent--session-set-state buffer 'busy)))
       ('user-submit
+       (with-current-buffer buffer (setq agent--session-published-status nil))
        (agent--before-exit-cancel-for-user buffer)
        (agent-session-event buffer 'submit))
       ('exit-request
@@ -1794,8 +1739,8 @@ ready alert fires only for `idle-prompt' events."
   "Set BUFFER's session state to STATE and record the transition time."
   (with-current-buffer buffer
     (unless (eq agent--session-state state)
-      (when (and (eq state 'busy) agent--session-update-cache)
-        (setf (nth 2 agent--session-update-cache) nil))
+      (when (eq state 'busy)
+        (setq agent--session-published-status nil))
       (setq agent--session-state state)
       (setq agent--session-state-changed-at (float-time)))))
 

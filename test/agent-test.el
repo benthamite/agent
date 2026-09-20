@@ -704,43 +704,44 @@ The buffer is bound to `buf' and holds session key \"a\"."
          (puthash buf "a" agent--session-keys)
          ,@body))))
 
-(ert-deftest agent-test-transcript-update-excludes-tools-and-old-turns ()
-  "Read real JSONL records, excluding reasoning, tools, and earlier turns."
-  (let ((file (make-temp-file "agent-update-")))
-    (unwind-protect
-        (progn
-          (with-temp-file file
-            (insert "{\"type\":\"response_item\",\"timestamp\":\"2026-09-20T12:00:00Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Testing fix\"}]}}\n")
-            (insert "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\",\"text\":\"private\"}}\n"))
-          (should (equal (agent--transcript-latest-update
-                          file (file-attribute-size (file-attributes file)) nil)
-                         "Testing fix"))
-          (should-not (agent--transcript-latest-update
-                       file (file-attribute-size (file-attributes file))
-                       (float-time (date-to-time "2026-09-20T13:00:00Z"))))
-          (write-region "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Next task\"}}\n"
-                        nil file t 'silent)
-          (should-not (agent--transcript-latest-update
-                       file (file-attribute-size (file-attributes file)) nil))
-          (write-region "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Checking the next task\"}]}}\n{\"type\":"
-                        nil file t 'silent)
-          (should (equal (agent--transcript-latest-update
-                          file (file-attribute-size (file-attributes file)) nil)
-                         "Checking the next task")))
-      (delete-file file))))
+(ert-deftest agent-test-session-published-status-is-explicit-and-isolated ()
+  "Publish only to the matching session without changing state age."
+  (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+    (setq-local agent--session
+                (agent-session-create :backend 'one :id "session-1"))
+    (setq-local agent--session-state 'busy
+                agent--session-state-changed-at 100.0)
+    (should (agent-session-set-status (buffer-name buf) 'one
+                                     "Testing  pagination\nfix" "session-1"))
+    (should (equal (agent--session-state-summary buf) "Testing pagination fix"))
+    (should (= agent--session-state-changed-at 100.0))
+    (should-error (agent-session-set-status (buffer-name buf) 'one
+                                           "Wrong session" "session-2")
+                  :type 'user-error)
+    (let ((agent-session-status-token-functions (list (lambda (_) "process-1"))))
+      (should-error (agent-session-set-status (buffer-name buf) 'one
+                                             "Old process" nil "process-2")
+                    :type 'user-error)
+      (should (agent-session-set-status (buffer-name buf) 'one
+                                       "Testing pagination fix" nil "process-1")))
+    (should-error (agent-session-set-status (buffer-name buf) 'other "Wrong backend")
+                  :type 'user-error)
+    (should-error (agent-session-set-status (buffer-name buf) 'one
+                                           (make-string 161 ?x)) :type 'user-error)
+    (should (equal (agent--session-state-summary buf) "Testing pagination fix"))
+    (agent--session-set-state buf 'awaiting-input)
+    (should (agent--session-state-summary buf))
+    (agent-session-event buf 'submit)
+    (should-not (agent--session-state-summary buf))))
 
-(ert-deftest agent-test-transcript-update-survives-tool-only-tail ()
-  "Keep a previously observed update when an overlapping tail has only tools."
-  (let ((file (make-temp-file "agent-update-")))
-    (unwind-protect
-        (progn
-          (with-temp-file file
-            (insert "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call_output\",\"output\":\"done\"}}\n"))
-          (should (equal (agent--transcript-latest-update
-                          file (file-attribute-size (file-attributes file)) nil
-                          "Testing fix")
-                         "Testing fix")))
-      (delete-file file))))
+(ert-deftest agent-test-session-published-status-clears-on-identity-change ()
+  "A replacement conversation must not inherit its predecessor's status."
+  (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+    (setq-local agent--session
+                (agent-session-create :backend 'one :id "session-1"))
+    (agent-session-set-status (buffer-name buf) 'one "Awaiting review")
+    (agent--note-session-id buf "session-2")
+    (should-not (agent--session-state-summary buf))))
 
 (ert-deftest agent-test-session-state-age-preserves-transition ()
   "Duplicate events and summary updates must not reset state age."
