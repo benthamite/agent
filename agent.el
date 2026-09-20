@@ -45,6 +45,7 @@
 
 (autoload 'agent-capture-prompt "agent-capture" nil t)
 (autoload 'agent-insert-captured-prompt "agent-capture" nil t)
+(autoload 'agent-batch-todos "agent-todo" nil t)
 (autoload 'agent-act-on-slack-message "agent-slack" nil t)
 (autoload 'agent-act-on-forge-notification "agent-forge" nil t)
 (autoload 'agent-act-on-email "agent-mu4e" nil t)
@@ -619,39 +620,6 @@ Each entry is a skill name without prefix; each is invoked with
 New directories entered by the user are automatically added."
   :type '(repeat directory)
   :group 'agent)
-
-(defconst agent-trajectory--legacy-agent-c-root-default
-  (expand-file-name "~/Trajectory/agent-c/")
-  "Previous default for `agent-trajectory-agent-c-root'.")
-
-(defcustom agent-trajectory-reasoning-tasks-root
-  (expand-file-name "~/Trajectory/reasoning-tasks/")
-  "Root directory containing Trajectory reasoning-tasks worktrees."
-  :type 'directory
-  :group 'agent)
-
-(make-obsolete-variable 'agent-trajectory-agent-c-root
-                        'agent-trajectory-reasoning-tasks-root "0.2")
-
-(defcustom agent-trajectory-sync-worktree-script
-  (expand-file-name
-   "~/My Drive/dotfiles/claude/hooks/sync-reasoning-tasks-worktree.sh")
-  "Script that initializes and syncs a reasoning-tasks task worktree.
-This SessionStart hook is the single source of truth for composing the
-local `AGENTS.md'/`CLAUDE.md' instruction overlay, linking the
-canonical key and injecting private skills.  `agent-trajectory-new-task'
-runs it once so a fresh worktree matches what every later session start
-produces.  Overlay locations are configured through the script's
-SYNC_REASONING_TASKS_* environment variables, not through Emacs."
-  :type 'file
-  :group 'agent)
-
-(make-obsolete-variable 'agent-trajectory-agent-c-overlay-directory
-                        'agent-trajectory-sync-worktree-script "0.2")
-(make-obsolete-variable 'agent-trajectory-reasoning-tasks-overlay-directory
-                        'agent-trajectory-sync-worktree-script "0.2")
-(make-obsolete-variable 'agent-trajectory-parent-agents-file
-                        'agent-trajectory-sync-worktree-script "0.2")
 
 (defcustom agent-alert-on-ready nil
   "When non-nil, alert the user when an AI session finishes responding."
@@ -2804,138 +2772,6 @@ When COMMIT is nil, use the current Git HEAD."
     (string-trim (buffer-string))))
 
 ;;;###autoload
-(defun agent-trajectory-new-task (slug)
-  "Create a Trajectory reasoning-tasks worktree for SLUG.
-SLUG must be the exact task slug and a single path component.  The
-new worktree is created at
-`agent-trajectory-reasoning-tasks-root'/SLUG on branch pablo/SLUG
-from origin/main, then wired to the canonical Rubric Studio
-`.claude/.env' symlink, and sparse-checked-out to
-`.claude'/`meta'/`platform' so the checkout stays small instead of
-materializing the whole repo's task corpus.  Finally, run
-`agent-trajectory-sync-worktree-script' in the new worktree so it
-gets the same local instruction overlay, key link and private
-skills as any later session start."
-  (interactive (list (agent-trajectory--read-task-slug)))
-  (let* ((slug (agent-trajectory--validate-task-slug slug))
-         (root (agent-trajectory--root-directory))
-         (target (expand-file-name slug root)))
-    (agent-trajectory--git root "fetch" "origin" "main")
-    (agent-trajectory--git root "worktree" "add" target
-                           "-b" (concat "pablo/" slug) "origin/main")
-    (agent-trajectory--link-task-key root target)
-    (agent-trajectory--sparse-task-worktree target)
-    (agent-trajectory--sync-worktree target)
-    (dired target)
-    (message "Ready: cd %s && claude-trajectory" target)
-    target))
-
-(defun agent-trajectory--read-task-slug ()
-  "Read a Trajectory reasoning-tasks slug from the minibuffer."
-  (agent-trajectory--validate-task-slug
-   (read-string "Task slug: ")))
-
-(defun agent-trajectory--root-directory ()
-  "Return the Trajectory reasoning-tasks worktree root directory."
-  (file-name-as-directory
-   (expand-file-name
-    (or (agent-trajectory--legacy-custom-directory
-         'agent-trajectory-agent-c-root
-         agent-trajectory--legacy-agent-c-root-default)
-        agent-trajectory-reasoning-tasks-root))))
-
-(defun agent-trajectory--validate-task-slug (slug)
-  "Return normalized task SLUG, or signal if it is unsafe."
-  (let ((slug (string-trim (or slug ""))))
-    (unless (string-match-p "\\`[[:alnum:]][[:alnum:]_-]*\\'" slug)
-      (user-error "Task slug must be a single path component"))
-    slug))
-
-(defun agent-trajectory--git (root &rest args)
-  "Run git in ROOT's main worktree with ARGS."
-  (let ((default-directory (expand-file-name "main/" root)))
-    (with-temp-buffer
-      (let ((exit (apply #'process-file "git" nil (current-buffer) nil args)))
-        (unless (zerop exit)
-          (user-error "Git failed in %s: git %s\n%s"
-                      default-directory
-                      (string-join args " ")
-                      (string-trim (buffer-string))))))))
-
-(defun agent-trajectory--link-task-key (root target)
-  "Link TARGET's `.claude/.env' to the canonical key under ROOT."
-  (let* ((claude-dir (expand-file-name ".claude" target))
-         (link (expand-file-name ".env" claude-dir))
-         (key (expand-file-name "reasoning-tasks-cr-studio/.claude/.env" root)))
-    (make-directory claude-dir t)
-    (when (or (file-exists-p link) (file-symlink-p link))
-      (user-error "Refusing to overwrite existing key link: %s" link))
-    (make-symbolic-link key link)))
-
-(defun agent-trajectory--sparse-task-worktree (target)
-  "Sparse-checkout TARGET to the directories a CR task worktree needs.
-Keep `.claude', `meta' and `platform' (root files stay too), dropping
-the rest of the repo's large task corpus; the new task's own files are
-created under `tasks/' as work proceeds.  Best-effort: a failure is
-reported but does not abort task creation."
-  (let ((default-directory (file-name-as-directory target)))
-    (condition-case err
-        (agent-trajectory--git-command
-         "sparse-checkout" "set" ".claude" "meta" "platform")
-      (error
-       (message "agent-trajectory: sparse-checkout skipped (%s)"
-                (error-message-string err))))))
-
-(defun agent-trajectory--sync-worktree (target)
-  "Run the reasoning-tasks sync hook script in TARGET.
-Delegates to `agent-trajectory-sync-worktree-script', the single
-source of truth for the local instruction overlay.  Best-effort: a
-failure is reported but does not abort task creation, since the same
-script re-runs on every session start."
-  (let ((script (expand-file-name agent-trajectory-sync-worktree-script))
-        (default-directory (file-name-as-directory target)))
-    (if (file-readable-p script)
-        (agent-trajectory--run-sync-script script)
-      (message "agent-trajectory: worktree sync skipped (unreadable %s)"
-               script))))
-
-(defun agent-trajectory--run-sync-script (script)
-  "Run sync SCRIPT in `default-directory', reporting failure.
-Passes SYNC_REASONING_TASKS_SKIP_FETCH=1 because the caller just
-fetched, and points CLAUDE_PROJECT_DIR at the worktree so the script
-acts on it rather than on any inherited project directory."
-  (let ((process-environment
-         (append (list "SYNC_REASONING_TASKS_SKIP_FETCH=1"
-                       (concat "CLAUDE_PROJECT_DIR="
-                               (directory-file-name default-directory)))
-                 process-environment)))
-    (with-temp-buffer
-      (unless (zerop (process-file "bash" nil (current-buffer) nil script))
-        (message "agent-trajectory: worktree sync failed\n%s"
-                 (string-trim (buffer-string)))))))
-
-(defun agent-trajectory--legacy-custom-directory (symbol old-default)
-  "Return obsolete SYMBOL's directory if it differs from OLD-DEFAULT."
-  (when (and (boundp symbol)
-             (stringp (symbol-value symbol)))
-    (let ((value (file-name-as-directory
-                  (expand-file-name (symbol-value symbol))))
-          (default (file-name-as-directory
-                    (expand-file-name old-default))))
-      (unless (equal value default)
-        (symbol-value symbol)))))
-
-(defun agent-trajectory--git-command (&rest args)
-  "Run git with ARGS in `default-directory'."
-  (with-temp-buffer
-    (let ((exit (apply #'process-file "git" nil (current-buffer) nil args)))
-      (unless (zerop exit)
-        (user-error "Git failed in %s: git %s\n%s"
-                    default-directory
-                    (string-join args " ")
-                    (string-trim (buffer-string)))))))
-
-;;;###autoload
 (defun agent-audit-project ()
   "Run a comprehensive project audit via the selected backend.
 Sequentially runs each skill in `agent-audit-skills' with
@@ -3978,15 +3814,14 @@ when it is not installed."
     ("N" "new branch" agent-create-branch)
     ("B" "switch branch" agent-switch-branch)
     ("h" "handoff" agent-handoff)
-    ("x" "exit session" agent-exit)
-    ("X" "exit without skills" agent-exit-without-skills)
+    ("x" "exit" agent-exit)
+    ("X" "exit immediately" agent-exit-without-skills)
     ("r" "restart" agent-restart)
-    ("l" "history" agent-history)
+    ("H" "history" agent-history)
     ("L" "login" agent-account-login)
     ("U" "usage" agent-usage-show)]
    ["Tools"
     ("s" "run skill" agent-run-skill)
-    ("n" "new CR task" agent-trajectory-new-task)
     ("c" "post-push CI" agent-post-push-ci)
     ("a" "audit project" agent-audit-project)
     ("." "act on thing at point" agent-act-on-thing-at-point)]

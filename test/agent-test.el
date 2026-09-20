@@ -1121,85 +1121,6 @@ observation."
             (should (string-match-p "--no-push --commit abc123" ran))))
       (delete-directory root t))))
 
-(ert-deftest agent-test-trajectory-new-task-uses-origin-main ()
-  "Create a Trajectory reasoning-tasks task from origin/main."
-  (let* ((root (file-name-as-directory
-         (make-temp-file "agent-trajectory" t)))
-         (agent-trajectory-reasoning-tasks-root root)
-         (agent-trajectory-sync-worktree-script
-          (expand-file-name "missing-sync.sh" root))
-         (slug "model-spec-inclusion")
-         (target (expand-file-name slug root))
-         (calls nil)
-         opened)
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "main" root))
-          (cl-letf (((symbol-function 'process-file)
-                     (lambda (program _infile buffer _display &rest args)
-                       (push (cons program args) calls)
-                       (when buffer
-                         (with-current-buffer buffer
-                           (insert "ok\n")))
-                       0))
-                    ((symbol-function 'dired)
-                     (lambda (dir) (setq opened dir))))
-            (agent-trajectory-new-task slug)
-            (should (equal (reverse calls)
-                           `(("git" "fetch" "origin" "main")
-                             ("git" "worktree" "add" ,target
-                              "-b" ,(concat "pablo/" slug)
-                              "origin/main")
-                             ("git" "sparse-checkout" "set"
-                              ".claude" "meta" "platform"))))
-            (should (equal opened target))
-            (should (file-directory-p (expand-file-name ".claude" target)))
-            (should (file-symlink-p (expand-file-name ".claude/.env" target)))
-            (should (equal
-                     (file-symlink-p (expand-file-name ".claude/.env" target))
-                     (expand-file-name
-                      "reasoning-tasks-cr-studio/.claude/.env" root)))))
-      (delete-directory root t))))
-
-(ert-deftest agent-test-trajectory-new-task-runs-sync-script ()
-  "Delegate worktree overlay setup to the sync hook script."
-  (let* ((root (file-name-as-directory
-                (make-temp-file "agent-trajectory" t)))
-         (script (make-temp-file "agent-sync-script"))
-         (agent-trajectory-reasoning-tasks-root root)
-         (agent-trajectory-sync-worktree-script script)
-         (slug "ai-race-information-hazards")
-         (target (expand-file-name slug root))
-         sync-call)
-    (unwind-protect
-        (progn
-          (make-directory (expand-file-name "main" root))
-          (cl-letf (((symbol-function 'process-file)
-                     (lambda (program _infile buffer _display &rest args)
-                       (when (equal program "bash")
-                         (setq sync-call (list default-directory args
-                                               process-environment)))
-                       (when buffer
-                         (with-current-buffer buffer
-                           (insert "ok\n")))
-                       0))
-                    ((symbol-function 'dired) #'ignore))
-            (agent-trajectory-new-task slug)
-            (should (equal (nth 0 sync-call)
-                           (file-name-as-directory target)))
-            (should (equal (nth 1 sync-call) (list script)))
-            (should (member "SYNC_REASONING_TASKS_SKIP_FETCH=1"
-                            (nth 2 sync-call)))
-            (should (member (concat "CLAUDE_PROJECT_DIR=" target)
-                            (nth 2 sync-call)))))
-      (delete-directory root t)
-      (delete-file script))))
-
-(ert-deftest agent-test-trajectory-new-task-rejects-path-slugs ()
-  "Reject task slugs that are not a single path component."
-  (should-error (agent-trajectory-new-task "../bad") :type 'user-error)
-  (should-error (agent-trajectory-new-task "nested/task") :type 'user-error))
-
 (ert-deftest agent-test-skill-result-does-not-modify-new-user-buffer ()
   "Display skill output in a result buffer, not an unrelated new buffer."
   (let ((unrelated (get-buffer-create "*agent-unrelated*"))
@@ -3530,9 +3451,9 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
 (ert-deftest agent-test-menu-binds-the-unified-commands ()
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
-    (dolist (key '("R" "N" "B" "b" "." "L" "U" "X" "-a" "-c" "-w"))
+    (dolist (key '("H" "R" "N" "B" "b" "." "L" "U" "X" "-a" "-c" "-w"))
       (should (member key keys)))
-    (dolist (key '("F" "u" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"))
+    (dolist (key '("l" "n" "F" "u" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"))
       (should-not (member key keys)))))
 
 (ert-deftest agent-test-menu-has-no-alert-toggle-command ()

@@ -398,7 +398,6 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-toggle-snooze
 @findex agent-run-skill
 @findex agent-post-push-ci
-@findex agent-trajectory-new-task
 @findex agent-handoff
 @findex agent-handoff-from-emacsclient
 @findex agent-audit-project
@@ -414,10 +413,13 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-setup-kill-on-exit
 @findex agent-setup-scroll-keys
 @findex agent-snippet-tab
-The command @code{agent-menu} opens the unified transient menu. Every entry in it works with either backend: session switching, waiting-session jumps, resuming a past session, creating a branch of the current session, switching between branches, handoff, restart, exit, history browsing, skill execution, Trajectory CR task worktree creation, project audit, one dispatcher that acts on the thing at point, and a separate Prompts section for prompt capture, captured prompt insertion, and batch TODO processing.
+The command @code{agent-menu} opens the unified transient menu. Every entry in it works with either backend: session switching, waiting-session jumps, resuming a past session, creating a branch of the current session, switching between branches, handoff, restart, exit, history browsing, skill execution, project audit, one dispatcher that acts on the thing at point, and a separate Prompts section for prompt capture, captured prompt insertion, and batch TODO processing.
+
+The Sessions column labels @code{agent-exit} (@samp{x}) as “exit” and
+@code{agent-exit-without-skills} (@samp{X}) as “exit immediately”.
 
 @findex agent-history
-The command @code{agent-history}, bound to @samp{l} in the Sessions column, opens the Agent Log menu for browsing, opening, searching, and resuming historical sessions across backends. Agent Log is an optional package: loading @samp{agent} never requires it, @code{agent-history} loads it on demand, and invoking the command without Agent Log installed signals a clear error. Neither @code{agent-menu} nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
+The command @code{agent-history}, bound to @samp{H} in the Sessions column, opens the Agent Log menu for browsing, opening, searching, and resuming historical sessions across backends. Agent Log is an optional package: loading @samp{agent} never requires it, @code{agent-history} loads it on demand, and invoking the command without Agent Log installed signals a clear error. Neither @code{agent-menu} nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
 
 In EAT-backed Claude and Codex session buffers, @code{agent-setup-scroll-keys} makes PageUp and PageDown send terminal mouse-wheel events, matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window. Terminal helpers require buffer-local EAT state, so native app-server sessions cannot inherit a stale terminal from a killed buffer.
 
@@ -445,19 +447,6 @@ The command @code{agent-post-push-ci} runs the @code{post-push-ci} skill through
 selected backend with @samp{--no-push --commit HEAD}. Use it after a push has
 already happened and you want an agent to inspect GitHub Actions failures, fix
 the root cause, and continue the authorized CI closeout loop.
-
-The command @code{agent-trajectory-new-task} creates a Trajectory @samp{reasoning-tasks}
-task worktree from @samp{origin/main} at @samp{~/Trajectory/reasoning-tasks/<slug>},
-checks out branch @samp{pablo/<slug>}, wires the worktree's @samp{.claude/.env} symlink to the canonical
-Rubric Studio key, sparse-checks out the worktree to @samp{.claude}, @samp{meta} and
-@samp{platform} (keeping the checkout small instead of materializing the whole task
-corpus), runs the sync hook script configured by
-@code{agent-trajectory-sync-worktree-script}, and opens the new worktree in Dired.
-The sync script is the same SessionStart hook every later session runs, and
-the single source of truth for composing the local @samp{AGENTS.md} and @samp{CLAUDE.md}
-instruction overlay, linking the canonical key and injecting private skills.
-The command is the Emacs equivalent of the shell @samp{newtask} helper, but it does
-not depend on the local @samp{main} worktree's current branch.
 
 The command @code{agent-act-on-slack-message}, called on a message in a Slack room
 buffer, starts a session in the project that message is about and inserts its
