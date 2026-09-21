@@ -3510,12 +3510,18 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
 (ert-deftest agent-test-menu-binds-the-unified-commands ()
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
-    (dolist (key '("l" "R" "N" "B" "L" "u" "n" "X" "-a" "-c" "-w"
+    (dolist (key '("l" "r" "R" "e" "N" "B" "L" "u" "n" "X" "-a" "-c" "-w"
                    "t ." "t r" "t a" "t c" "t o" "p c" "p i" "p b"))
       (should (member key keys)))
     (dolist (key '("H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
                    "." "s" "a" "c" "o" "p" "i" "b"))
-      (should-not (member key keys)))))
+      (should-not (member key keys))))
+  (dolist (binding '(("r" . agent-resume)
+                     ("R" . agent-restart)
+                     ("e" . agent-select-session)))
+    (should (eq (plist-get (cdr (transient-get-suffix 'agent-menu (car binding)))
+                           :command)
+                (cdr binding)))))
 
 (ert-deftest agent-test-menu-has-no-alert-toggle-command ()
   "Toggle alerts through the option infix alone, not a command."

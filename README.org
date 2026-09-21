@@ -45,7 +45,7 @@ The package is split into a small backend-agnostic core and focused modules:
 | =agent-codex.el=     | Codex backend: integrates =codex.el= with theme sync, =codex exec= execution, =config.toml= helpers, modeline helpers, and ~agent-codex-mode~                                                                               |
 | =agent-chief.el=     | Inspectable chief-of-staff loop: Emacs owns timers, state, context collection, and notifications, while Claude Code or Codex provides one-shot judgment on each tick                                                        |
 
-The main workflow is to load =agent.el=, require the backend modules you use, and enable their minor modes (see [[#h:minor-modes][Backend minor modes]]); loading a backend module installs nothing by itself. Once the Claude and Codex modules are active, =M-x agent-menu= and =M-x agent-start-or-switch= operate across both tools. Sessions are listed with their account in a column of its own, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
+The main workflow is to load =agent.el=, require the backend modules you use, and enable their minor modes (see [[#h:minor-modes][Backend minor modes]]); loading a backend module installs nothing by itself. Once the Claude and Codex modules are active, =M-x agent-menu= and =M-x agent-select-session= operate across both tools. Sessions are listed with their account in a column of its own, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
 
 The package depends on =transient= for menus, =consult= for completion, =claude-code.el= for the Claude backend, and =codex.el= for the Codex backend. All four are declared in the package metadata so that the package manager builds =agent= with them available; the backend modules hard-require their respective backend at load time. Optional integrations use packages such as =yasnippet=, =doom-modeline=, =gptel=, =agent-log=, and =monet= when those are available.
 
@@ -316,7 +316,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 :END:
 
 #+findex: agent-menu
-#+findex: agent-start-or-switch
+#+findex: agent-select-session
 #+findex: agent-jump-to-waiting
 #+findex: agent-toggle-snooze
 #+findex: agent-run-skill
@@ -338,9 +338,11 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 #+findex: agent-snippet-tab
 The command ~agent-menu~ opens the unified transient menu. Every entry in it works with either backend: session switching, waiting-session jumps, resuming a past session, creating a branch of the current session, switching between branches, handoff, restart, exit, history browsing, skill execution, project audit, one dispatcher that acts on the thing at point, and a Prompts section beneath Tools in the same column for prompt capture, captured prompt insertion, and batch TODO processing.
 
-The Sessions column holds general session management: new session (=n=), resume,
-start or switch, jump to waiting, log, login, and usage (=u=). The Current session
-column holds branching, snoozing, handoff, restart, and exit commands. It labels
+The Sessions section holds general session management: new session (=n=),
+resume session (=r=), select session (=e=), jump to waiting, and log.
+The Account section beneath it holds login (=L=) and usage (=u=).
+The Current session column holds branching, toggle snooze (=z=), handoff,
+restart (=R=), and exit commands. It labels
 ~agent-exit~ (=x=) as “exit” and ~agent-exit-without-skills~ (=X=) as “exit immediately”.
 
 Tools use the =t= prefix: act on thing at point (=t .=), run skill (=t r=),
@@ -354,7 +356,7 @@ The command ~agent-history~, labeled “log” and bound to =l= in the Sessions 
 
 In EAT-backed Claude and Codex session buffers, ~agent-setup-scroll-keys~ makes PageUp and PageDown send terminal mouse-wheel events, matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window. Terminal helpers require buffer-local EAT state, so native app-server sessions cannot inherit a stale terminal from a killed buffer.
 
-The command ~agent-start-or-switch~ is the main entry point. If no sessions exist, it starts a new session through the selected backend. If sessions already exist, it opens the session switcher, which contains only session entries. Sessions receive stable home-row keys where possible and display backend icons next to their labels.
+The command ~agent-select-session~ opens the session switcher, which contains only existing session entries. If no sessions are active, it reports that there are none; use ~agent-start-new-session~ (=n=) to start one. Sessions receive stable home-row keys where possible and display backend icons next to their labels.
 
 The switcher lists every session in one flat list ordered by home-row key, whatever account each session runs under. The account is a column of its own, between the session name and its annotation, shown dimmed in the ~agent-session-account~ face. A session is therefore found at the key it always answers to, rather than at a position that moves when a neighbor's account changes. Sessions whose backend has no accounts configured leave the column blank, and when no session on screen records an account the column is left out altogether.
 
@@ -810,7 +812,7 @@ The Claude and Codex status helpers are intended for modeline integrations such 
 :END:
 
 #+findex: agent-menu
-~agent-menu~ is a single static prefix defined in =agent.el=, laid out in four columns: Sessions, Current session, Tools with Prompts beneath it, and Options. Nothing in the layout depends on which backends are loaded, because every command in it is backend-agnostic. Each one resolves a backend from the current session buffer, or asks when nothing names one, and then dispatches through that backend's slots, so the same key operates on a Claude session and a Codex session alike. There is no longer any mechanism for a backend module to add entries to the menu, and this is deliberate: a backend contributes an implementation for a slot, and the command that calls that slot lives in =agent.el=.
+~agent-menu~ is a single static prefix defined in =agent.el=, laid out in four columns: Sessions with Account beneath it, Current session, Tools with Prompts beneath it, and Options. Nothing in the layout depends on which backends are loaded, because every command in it is backend-agnostic. Each one resolves a backend from the current session buffer, or asks when nothing names one, and then dispatches through that backend's slots, so the same key operates on a Claude session and a Codex session alike. There is no longer any mechanism for a backend module to add entries to the menu, and this is deliberate: a backend contributes an implementation for a slot, and the command that calls that slot lives in =agent.el=.
 
 In the Options group, =-c= selects an account. It acts on the current or prompted backend, while its value shows every registered backend's current account at once, so one entry replaces the per-backend account selectors the menu used to carry. The infix shares its implementation with the per-backend account commands in =agent-account.el=, and syncs the selected account's config home as soon as the selection is made.
 

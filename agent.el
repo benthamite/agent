@@ -1037,16 +1037,14 @@ Returns the cached value when available."
 ;;;; Session switcher
 
 ;;;###autoload
-(defun agent-start-or-switch ()
-  "Start a new AI session or switch to an existing one.
-If no sessions are active, prompt for which backend to start.
-If sessions exist, show a transient menu with home-row keys."
+(defun agent-select-session ()
+  "Select an existing AI session using a transient menu with home-row keys.
+Signal a user error when no sessions are active."
   (interactive)
-  (let ((all-bufs (agent--find-all-buffers)))
-    (if (null all-bufs)
-        (agent-start-new-session)
-      (agent--ensure-all-session-keys)
-      (transient-setup 'agent--session-switcher))))
+  (unless (agent--find-all-buffers)
+    (user-error "No active AI sessions"))
+  (agent--ensure-all-session-keys)
+  (transient-setup 'agent--session-switcher))
 
 (defun agent-start-new-session ()
   "Start a new session, prompting for backend if multiple are registered."
@@ -3965,18 +3963,20 @@ when it is not installed."
   "Dispatch AI session commands."
   [["Sessions"
     ("n" "new session" agent-start-new-session)
-    ("R" "resume" agent-resume)
-    ("e" "start or switch" agent-start-or-switch)
+    ("r" "resume session" agent-resume)
+    ("e" "select session" agent-select-session)
     ("w" "jump to waiting" agent-jump-to-waiting)
     ("l" "log" agent-history)
+    ""
+    "Account"
     ("L" "login" agent-account-login)
     ("u" "usage" agent-usage-show)]
    ["Current session"
     ("N" "new branch" agent-create-branch)
     ("B" "switch branch" agent-switch-branch)
-    ("z" "snooze/unsnooze" agent-toggle-snooze)
+    ("z" "toggle snooze" agent-toggle-snooze)
     ("h" "handoff" agent-handoff)
-    ("r" "restart" agent-restart)
+    ("R" "restart" agent-restart)
     ("x" "exit" agent-exit)
     ("X" "exit immediately" agent-exit-without-skills)]
    ["Tools"
