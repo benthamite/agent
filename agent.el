@@ -3964,16 +3964,12 @@ when it is not installed."
   [["Sessions"
     ("n" "new session" agent-start-new-session)
     ("r" "resume session" agent-resume)
-    ("e" "select session" agent-select-session)
+    ("s" "select session" agent-select-session)
     ("w" "jump to waiting" agent-jump-to-waiting)
-    ("l" "log" agent-history)
-    ""
-    "Account"
-    ("L" "login" agent-account-login)
-    ("u" "usage" agent-usage-show)]
+    ("l" "open log" agent-history)]
    ["Current session"
-    ("N" "new branch" agent-create-branch)
-    ("B" "switch branch" agent-switch-branch)
+    ("b n" "new branch" agent-create-branch)
+    ("b s" "switch branch" agent-switch-branch)
     ("z" "toggle snooze" agent-toggle-snooze)
     ("h" "handoff" agent-handoff)
     ("R" "restart" agent-restart)
@@ -3995,7 +3991,11 @@ when it is not installed."
     ("-p" agent--infix-protect-buffers)
     ("-w" agent--infix-warn-kill-with-branches)
     ("-a" agent--infix-alert-on-ready)
-    ("-t" agent--infix-sync-theme)]])
+    ("-t" agent--infix-sync-theme)
+    ""
+    "Account"
+    ("a l" "login" agent-account-login)
+    ("a u" "usage" agent-usage-show)]])
 
 (transient-define-infix agent--infix-alert-on-ready ()
   "Toggle `agent-alert-on-ready'."
