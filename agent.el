@@ -3962,6 +3962,8 @@ when it is not installed."
     (user-error "Package `agent-log' is required for history browsing"))
   (call-interactively #'agent-log-menu))
 
+(autoload 'agent-run-open "agent-run" nil t)
+
 ;;;###autoload (autoload 'agent-menu "agent" nil t)
 (transient-define-prefix agent-menu ()
   "Dispatch AI session commands."
@@ -3983,6 +3985,7 @@ when it is not installed."
     ("s" "run skill" agent-run-skill)
     ("c" "post-push CI" agent-post-push-ci)
     ("a" "audit project" agent-audit-project)
+    ("o" "orchestration run" agent-run-open)
     ("." "act on thing at point" agent-act-on-thing-at-point)]
    ["Prompts"
     ("p" "capture prompt" agent-capture-prompt)

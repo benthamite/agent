@@ -67,6 +67,7 @@ User options
 Commands
 
 * Shared commands::
+* Orchestration run view::
 * Branch navigation::
 * Org TODO commands::
 * Chief-of-staff commands::
@@ -382,6 +383,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 
 @menu
 * Shared commands::
+* Orchestration run view::
 * Branch navigation::
 * Org TODO commands::
 * Chief-of-staff commands::
@@ -419,7 +421,7 @@ The Sessions column labels @code{agent-exit} (@samp{x}) as “exit” and
 @code{agent-exit-without-skills} (@samp{X}) as “exit immediately”.
 
 @findex agent-history
-The command @code{agent-history}, bound to @samp{H} in the Sessions column, opens the Agent Log menu for browsing, opening, searching, and resuming historical sessions across backends. Agent Log is an optional package: loading @samp{agent} never requires it, @code{agent-history} loads it on demand, and invoking the command without Agent Log installed signals a clear error. Neither @code{agent-menu} nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
+The command @code{agent-history}, labeled “log” and bound to @samp{l} in the Sessions column, opens the Agent Log menu for browsing, opening, searching, and resuming historical sessions across backends. Agent Log is an optional package: loading @samp{agent} never requires it, @code{agent-history} loads it on demand, and invoking the command without Agent Log installed signals a clear error. Neither @code{agent-menu} nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
 
 In EAT-backed Claude and Codex session buffers, @code{agent-setup-scroll-keys} makes PageUp and PageDown send terminal mouse-wheel events, matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window. Terminal helpers require buffer-local EAT state, so native app-server sessions cannot inherit a stale terminal from a killed buffer.
 
@@ -696,6 +698,38 @@ as a newline), and sends Return. It then checks the prompt line and re-sends
 Return up to @code{agent-claude-submit-retries} times while the command is still
 sitting there unsubmitted, since Claude Code occasionally swallows the first
 one; the prompt marker's trailing space is a no-break space under @samp{eat}.
+
+@node Orchestration run view
+@section Orchestration run view
+
+@findex agent-run-open
+@findex agent-run-mode
+The command @code{agent-run-open}, bound to @samp{o} in the Tools column of
+@code{agent-menu}, opens an @samp{orchestrate-review} run JSON file in a read-only
+@code{agent-run-mode} buffer. Select the private run file created by the skill;
+the command remembers opened filenames for the current Emacs session and
+does not scan temporary directories. Each run has its own view.
+
+The view shows the recorded stage, phase, status, author and reviewer, and
+the latest stage-level progress with the progress file's age. Pending delivery
+reconciliation and a recorded incomplete return appear as attention items.
+Old progress does not establish that an actor stopped. A returned implementation
+is distinct from a completed run; the helper still owns verification evidence
+and completion. This view does not validate the full workflow contract.
+
+Session links recheck the recorded native identity before opening a buffer.
+An unavailable or replaced session is labeled unavailable. Legacy version-2
+runs remain readable, but actors without recorded identities cannot be linked.
+File links open the run record, progress file, run directory, or repository.
+The run format does not record ordinary spec/plan paths or blocker descriptions;
+the view says so rather than looking through conversations to infer them.
+
+Visible views refresh every five seconds; @samp{g} refreshes immediately and @samp{q}
+quits the window. Killing a view cancels its refresh timer. A read failure
+replaces the display with an explicit error, so stale data cannot appear current.
+Only local files are supported. Run reads are limited to 4 MiB, and progress
+reads to the final 16 KiB@. The view never submits prompts, advances phases,
+reads transcripts, inspects internal tasks, or starts workers.
 
 @node Branch navigation
 @section Branch navigation
