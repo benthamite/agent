@@ -3976,7 +3976,7 @@ when it is not installed."
     ("x" "exit" agent-exit)
     ("X" "exit immediately" agent-exit-without-skills)
     ("r" "restart" agent-restart)
-    ("H" "history" agent-history)
+    ("l" "log" agent-history)
     ("L" "login" agent-account-login)
     ("U" "usage" agent-usage-show)]
    ["Tools"

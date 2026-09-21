@@ -342,7 +342,7 @@ The Sessions column labels ~agent-exit~ (=x=) as “exit” and
 ~agent-exit-without-skills~ (=X=) as “exit immediately”.
 
 #+findex: agent-history
-The command ~agent-history~, bound to =H= in the Sessions column, opens the Agent Log menu for browsing, opening, searching, and resuming historical sessions across backends. Agent Log is an optional package: loading =agent= never requires it, ~agent-history~ loads it on demand, and invoking the command without Agent Log installed signals a clear error. Neither ~agent-menu~ nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
+The command ~agent-history~, labeled “log” and bound to =l= in the Sessions column, opens the Agent Log menu for browsing, opening, searching, and resuming historical sessions across backends. Agent Log is an optional package: loading =agent= never requires it, ~agent-history~ loads it on demand, and invoking the command without Agent Log installed signals a clear error. Neither ~agent-menu~ nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
 
 In EAT-backed Claude and Codex session buffers, ~agent-setup-scroll-keys~ makes PageUp and PageDown send terminal mouse-wheel events, matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window. Terminal helpers require buffer-local EAT state, so native app-server sessions cannot inherit a stale terminal from a killed buffer.
 
