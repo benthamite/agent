@@ -1268,7 +1268,8 @@ width at zero."
 (defun agent-session-set-status
     (buffer-name backend text &optional session-id process-token)
   "Publish TEXT as the current state of BUFFER-NAME's BACKEND session.
-SESSION-ID, when supplied, must match the recorded native session identity.
+SESSION-ID, when supplied, must match the backend's current native identity.
+Use the recorded identity only for backends without an identity resolver.
 PROCESS-TOKEN, when supplied, must match the backend publisher process token.
 Reject missing sessions, mismatched identities, and text longer than 160
 characters.  Collapse whitespace; empty text clears the status.  This does
@@ -1279,8 +1280,14 @@ not change the session's lifecycle state or its state-transition timestamp."
       (user-error "No live agent session named %s" buffer-name))
     (unless (eq backend (agent-session-backend session))
       (user-error "Backend does not match session %s" buffer-name))
-    (when (and session-id (not (equal session-id (agent-session-id session))))
-      (user-error "Session identity does not match %s" buffer-name))
+    (when session-id
+      (let* ((definition (agent-backend backend))
+             (resolver (and definition
+                            (agent-backend-session-identity definition)))
+             (identity (if resolver (funcall resolver buffer)
+                         (agent-session-id session))))
+        (unless (equal session-id identity)
+          (user-error "Session identity does not match %s" buffer-name))))
     (when (and process-token
                (not (equal process-token
                            (run-hook-with-args-until-success
@@ -1292,6 +1299,7 @@ not change the session's lifecycle state or its state-transition timestamp."
                    (replace-regexp-in-string "[ \t\n\r\f\v]+" " " text))))
       (when (> (length status) 160)
         (user-error "Status must be at most 160 characters"))
+      (when session-id (agent--note-session-id buffer session-id))
       (with-current-buffer buffer
         (setq agent--session-published-status
               (unless (string-empty-p status) status))))

@@ -728,6 +728,28 @@ The buffer is bound to `buf' and holds session key \"a\"."
     (agent-session-event buf 'submit)
     (should-not (agent--session-state-summary buf))))
 
+(ert-deftest agent-test-session-published-status-uses-native-identity ()
+  "Accept startup identities and reject stale publishers despite cached ids."
+  (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+    (setq-local agent--session (agent-session-create :backend 'one))
+    (let ((native-id "current"))
+      (setf (agent-backend-session-identity (agent-backend 'one))
+            (lambda (_) native-id))
+      (should (agent-session-set-status (buffer-name buf) 'one
+                                       "Checking startup" "current"))
+      (should (equal (agent-session-id agent--session) "current"))
+      (setq native-id "replacement")
+      (should-error (agent-session-set-status (buffer-name buf) 'one
+                                             "Stale publisher" "current")
+                    :type 'user-error)
+      (should (agent-session-set-status (buffer-name buf) 'one
+                                       "Checking replacement" "replacement"))
+      (should (equal (agent-session-id agent--session) "replacement"))
+      (setq native-id nil)
+      (should-error (agent-session-set-status (buffer-name buf) 'one
+                                             "Unknown identity" "replacement")
+                    :type 'user-error))))
+
 (ert-deftest agent-test-session-published-status-clears-on-identity-change ()
   "A replacement conversation must not inherit its predecessor's status."
   (agent-test--with-session-buffer "*one:~/repo/project/:default*"

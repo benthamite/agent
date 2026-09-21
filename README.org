@@ -387,8 +387,10 @@ its age, and a claim of completion remains the agent's report.
 The executable =bin/agent-status= accepts a status string of at most 160
 characters (an empty string clears it). It routes through =CODEX_BUFFER_NAME=
 or =CLAUDE_BUFFER_NAME=, requiring =--backend codex= or
-=--backend claude-code= if both are present. Codex requires =CODEX_THREAD_ID= to match the target session's recorded
-identity; Claude requires =AGENT_SESSION_UUID= to match its process token,
+=--backend claude-code= if both are present. Codex requires =CODEX_THREAD_ID= to match the backend's current native
+identity, including before the first submission has cached that identity.
+A registered identity resolver is authoritative even when it returns no id;
+only backends without one use their recorded identity. Claude requires =AGENT_SESSION_UUID= to match its process token,
 so an old process cannot update a replacement session with the same name. The helper
 rejects absent or mismatched sessions, passes text as encoded JSON rather
 than executable Lisp, and reports failures. =--socket-name= (or
