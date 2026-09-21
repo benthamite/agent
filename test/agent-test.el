@@ -480,15 +480,9 @@ measure; treating it as zero would understate the column."
                                             :command ignore)))))
     (should-error (agent--switcher-column-width column))))
 
-(ert-deftest agent-test-switcher-sessions-column-offset-clears-actions ()
-  "Start the Sessions column two columns past the Actions column.
-The expected value is derived from the Actions column's own contents,
-so renaming an action updates this test's expectation with it, while a
-change in transient's layout representation breaks it loudly."
-  (should (= (agent--switcher-sessions-column-offset)
-             (+ 2 (max (length "Actions")
-                       (+ 2 1 (length "jump to waiting"))
-                       (+ 2 1 (length "new session")))))))
+(ert-deftest agent-test-switcher-sessions-column-offset-starts-at-zero ()
+  "Start the Sessions column at zero now that it is the only column."
+  (should (zerop (agent--switcher-sessions-column-offset))))
 
 (ert-deftest agent-test-switcher-sessions-column-offset-requires-a-sessions-column ()
   "Signal when no column of the layout is headed \"Sessions\".
@@ -3516,9 +3510,11 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
 (ert-deftest agent-test-menu-binds-the-unified-commands ()
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
-    (dolist (key '("l" "R" "N" "B" "b" "." "L" "U" "X" "-a" "-c" "-w"))
+    (dolist (key '("l" "R" "N" "B" "L" "u" "n" "X" "-a" "-c" "-w"
+                   "t ." "t r" "t a" "t c" "t o" "p c" "p i" "p b"))
       (should (member key keys)))
-    (dolist (key '("H" "n" "F" "u" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"))
+    (dolist (key '("H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
+                   "." "s" "a" "c" "o" "p" "i" "b"))
       (should-not (member key keys)))))
 
 (ert-deftest agent-test-menu-has-no-alert-toggle-command ()

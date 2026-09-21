@@ -1073,12 +1073,8 @@ If sessions exist, show a transient menu with home-row keys."
                          :account (agent-account-resolve backend t))))
 
 (transient-define-prefix agent--session-switcher ()
-  "Switch to an AI session or start a new one."
-  [["Actions"
-    ("w" "jump to waiting" agent-jump-to-waiting)
-    ("e" "new session" agent-start-new-session)
-    ("S" "snooze/unsnooze" agent-toggle-snooze)]
-   ["Sessions"
+  "Switch to an existing AI session."
+  [["Sessions"
     :class transient-column
     :setup-children agent--session-switcher-children]])
 
@@ -3968,35 +3964,38 @@ when it is not installed."
 (transient-define-prefix agent-menu ()
   "Dispatch AI session commands."
   [["Sessions"
+    ("n" "new session" agent-start-new-session)
+    ("R" "resume" agent-resume)
     ("e" "start or switch" agent-start-or-switch)
     ("w" "jump to waiting" agent-jump-to-waiting)
-    ("z" "snooze/unsnooze" agent-toggle-snooze)
-    ("R" "resume" agent-resume)
-    ("N" "new branch" agent-create-branch)
-    ("B" "switch branch" agent-switch-branch)
-    ("h" "handoff" agent-handoff)
-    ("x" "exit" agent-exit)
-    ("X" "exit immediately" agent-exit-without-skills)
-    ("r" "restart" agent-restart)
     ("l" "log" agent-history)
     ("L" "login" agent-account-login)
-    ("U" "usage" agent-usage-show)]
+    ("u" "usage" agent-usage-show)]
+   ["Current session"
+    ("N" "new branch" agent-create-branch)
+    ("B" "switch branch" agent-switch-branch)
+    ("z" "snooze/unsnooze" agent-toggle-snooze)
+    ("h" "handoff" agent-handoff)
+    ("r" "restart" agent-restart)
+    ("x" "exit" agent-exit)
+    ("X" "exit immediately" agent-exit-without-skills)]
    ["Tools"
-    ("s" "run skill" agent-run-skill)
-    ("c" "post-push CI" agent-post-push-ci)
-    ("a" "audit project" agent-audit-project)
-    ("o" "orchestration run" agent-run-open)
-    ("." "act on thing at point" agent-act-on-thing-at-point)]
-   ["Prompts"
-    ("p" "capture prompt" agent-capture-prompt)
-    ("i" "insert prompt" agent-insert-captured-prompt)
-    ("b" "batch todos" agent-batch-todos)]
+    ("t ." "act on thing at point" agent-act-on-thing-at-point)
+    ("t r" "run skill" agent-run-skill)
+    ("t a" "audit project" agent-audit-project)
+    ("t c" "post-push CI" agent-post-push-ci)
+    ("t o" "orchestration run" agent-run-open)
+    ""
+    "Prompts"
+    ("p c" "capture prompt" agent-capture-prompt)
+    ("p i" "insert prompt" agent-insert-captured-prompt)
+    ("p b" "batch todos" agent-batch-todos)]
    ["Options"
-    ("-a" agent--infix-alert-on-ready)
-    ("-p" agent--infix-protect-buffers)
-    ("-t" agent--infix-sync-theme)
     ("-c" agent--infix-account)
-    ("-w" agent--infix-warn-kill-with-branches)]])
+    ("-p" agent--infix-protect-buffers)
+    ("-w" agent--infix-warn-kill-with-branches)
+    ("-a" agent--infix-alert-on-ready)
+    ("-t" agent--infix-sync-theme)]])
 
 (transient-define-infix agent--infix-alert-on-ready ()
   "Toggle `agent-alert-on-ready'."
