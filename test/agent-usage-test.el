@@ -169,6 +169,41 @@
 
 ;;;; Usage buffer
 
+(ert-deftest agent-usage-test-view-refreshes-idle-configured-accounts ()
+  "Display and refresh idle configured accounts without background polling."
+  (agent-usage-test--with-store
+    (let (fetched
+          (agent-usage--pending-refresh 0)
+          (agent-usage-buffer-name " *usage-test-view*"))
+      (agent-usage-test--with-backend
+          (list :accounts '(("solo" . "/tmp/solo"))
+                :usage-fetch (lambda (account callback)
+                               (push account fetched)
+                               (funcall callback '(:weekly-pct 23.0))))
+        (should-not (agent-usage--tracked-accounts 'stub))
+        (agent-usage-refresh)
+        (should (equal fetched '("solo")))
+        (should (zerop agent-usage--pending-refresh))
+        (with-temp-buffer
+          (agent-usage-mode)
+          (agent-usage--render)
+          (should (string-match-p "solo.*23%" (buffer-string))))))))
+
+(ert-deftest agent-usage-test-display-default-without-sessions ()
+  "Include the default account even without a live session."
+  (agent-usage-test--with-backend (list)
+    (should (equal (agent-usage--display-accounts 'stub) '(nil)))))
+
+(ert-deftest agent-usage-test-display-deduplicates-active-accounts ()
+  "Keep configured and tracked accounts without duplicating shared names."
+  (agent-usage-test--with-backend
+      (list :accounts '(("solo" . "/tmp/solo")
+                        ("pool" :home "/tmp/pool" :pool "p")))
+    (cl-letf (((symbol-function 'agent-usage--active-accounts)
+               (lambda (_backend) '("solo" nil))))
+      (should (equal (agent-usage--display-accounts 'stub)
+                     '("solo" "pool" nil))))))
+
 (ert-deftest agent-usage-test-entry-formats-reading ()
   "Render a reading's percentages, limit flag, and age."
   (agent-usage-test--with-store

@@ -277,7 +277,7 @@ nothing if the timer is already running."
   "g" #'agent-usage-refresh)
 
 (define-derived-mode agent-usage-mode tabulated-list-mode "Agent-Usage"
-  "Major mode listing the usage of every tracked account."
+  "Major mode listing usage for configured and active accounts."
   (setq tabulated-list-format
         [("Backend" 12 t) ("Account" 12 t) ("Pool" 10 t)
          ("Session" 8 nil :right-align t) ("Weekly" 8 nil :right-align t)
@@ -287,8 +287,8 @@ nothing if the timer is already running."
 
 ;;;###autoload
 (defun agent-usage-show ()
-  "Show the usage of every tracked account and refresh it.
-Lists live-session accounts and every pool member of every backend,
+  "Show account usage and refresh it.
+Lists configured accounts, live-session accounts, and pool members,
 with the latest cached reading, then fetches fresh readings and
 re-renders as they arrive."
   (interactive)
@@ -300,12 +300,12 @@ re-renders as they arrive."
     (agent-usage-refresh)))
 
 (defun agent-usage-refresh ()
-  "Fetch fresh readings for every tracked account and re-render."
+  "Fetch fresh readings for every displayed account and re-render."
   (interactive)
   (dolist (entry agent-backends)
     (let ((backend (car entry)))
       (when (agent-usage--fetcher backend)
-        (dolist (account (agent-usage--tracked-accounts backend))
+        (dolist (account (agent-usage--display-accounts backend))
           (cl-incf agent-usage--pending-refresh)
           (agent-usage-fetch backend account #'agent-usage--refresh-done)))))
   (message "Refreshing usage for %d account%s..."
@@ -327,13 +327,22 @@ re-renders as they arrive."
   (tabulated-list-print t))
 
 (defun agent-usage--entries ()
-  "Return `tabulated-list-entries' for every tracked account."
+  "Return `tabulated-list-entries' for every displayed account."
   (let (entries)
     (dolist (entry agent-backends (nreverse entries))
       (let ((backend (car entry)))
         (when (agent-usage--fetcher backend)
-          (dolist (account (agent-usage--tracked-accounts backend))
+          (dolist (account (agent-usage--display-accounts backend))
             (push (agent-usage--entry backend account) entries)))))))
+
+(defun agent-usage--display-accounts (backend)
+  "Return BACKEND's configured and tracked accounts for the usage view.
+Without configured or tracked accounts, include the default account."
+  (or (cl-remove-duplicates
+       (append (mapcar #'car (agent-account-list backend))
+               (agent-usage--tracked-accounts backend))
+       :test #'equal :from-end t)
+      (list nil)))
 
 (defun agent-usage--entry (backend account)
   "Return the tabulated-list entry for BACKEND's ACCOUNT."
