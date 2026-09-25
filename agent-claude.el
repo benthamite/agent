@@ -314,10 +314,43 @@ ORIG-FN is `claude-code-send-escape'.  The upstream implementation uses
 the same project directory, that triggers a selection prompt--defeating
 the purpose of \\`ESC\\' as a quick interrupt.  This advice short-circuits
 the lookup: if the current buffer is already a Claude buffer, send the
-escape sequence directly to it."
+escape sequence directly to it, then schedule
+`agent-claude--check-interrupt'."
   (if (claude-code--buffer-p (current-buffer))
-      (claude-code--term-send-string claude-code-terminal-backend (kbd "ESC"))
+      (progn
+        (claude-code--term-send-string claude-code-terminal-backend (kbd "ESC"))
+        (agent-claude--schedule-interrupt-check (current-buffer)))
     (funcall orig-fn)))
+
+(defcustom agent-claude-interrupt-check-delay 1.5
+  "Seconds after an escape before checking whether it interrupted the turn.
+The delay gives Claude Code time to redraw its input prompt."
+  :type 'number
+  :group 'agent-claude)
+
+(defun agent-claude--schedule-interrupt-check (buffer)
+  "Arrange to check whether the escape just sent to BUFFER ended its turn.
+Only a `busy' session is checked, since an escape cannot interrupt a
+turn that is not running."
+  (when (eq (buffer-local-value 'agent--session-state buffer) 'busy)
+    (run-at-time agent-claude-interrupt-check-delay nil
+                 #'agent-claude--check-interrupt buffer (float-time))))
+
+(defun agent-claude--check-interrupt (buffer escaped-at)
+  "Mark BUFFER waiting when the escape sent at ESCAPED-AT interrupted its turn.
+Claude Code fires no hook when the user interrupts a turn, so without
+this check the session stays `busy' until some later turn ends.  An
+escape does not always interrupt, as when it only dismisses a menu, so
+the terminal must confirm the idle prompt.  A state change after
+ESCAPED-AT, such as a new submission, supersedes the check.  The event
+is `blocked' because the user, who just interrupted, needs no ready
+alert."
+  (when (and (buffer-live-p buffer)
+             (eq (buffer-local-value 'agent--session-state buffer) 'busy)
+             (< (buffer-local-value 'agent--session-state-changed-at buffer)
+                escaped-at)
+             (agent-claude--terminal-waiting-p buffer))
+    (agent-session-event buffer 'blocked)))
 
 ;;;;; Buffer protection
 
@@ -732,12 +765,11 @@ switches as soon as the status line reports them."
   "Mark BUFFER busy when NEW-DATA reports a turn that has not been seen.
 NEW-DATA is the freshly parsed status plist.
 
-Claude Code publishes no turn-start hook, so a turn the user did not
-type -- one driven by remote control, a scheduled task, or a resumed
-background job -- is otherwise unobservable, and the session keeps
-displaying as waiting while it works.  The statusline reports a fresh
-`prompt_id' for every turn whatever its origin, so a changed value
-means a new turn began.
+The prompt and tool hooks forwarded by `notify-emacs-state.sh' report
+most turn starts at once, but a turn Claude starts without a user
+prompt and runs without tools fires none of them.  The statusline
+reports a fresh `prompt_id' for every turn whatever its origin, so a
+changed value means a new turn began.
 
 A turn shorter than the poll interval both starts and ends between two
 polls.  Its `stop' event has already landed by the time the change is
@@ -1190,10 +1222,11 @@ window."
 (defun agent-claude--terminal-waiting-p (&optional buffer)
   "Return non-nil when the terminal of Claude session BUFFER shows an idle prompt.
 Registered as the backend's `:idle-p' and consulted only when the
-before-exit chain arms or its watchdog fires.  The screen redraw
-lags the Stop hook, so this probe must not gate ordinary chain
-steps, and screen scraping is not reliable enough to drive the
-switcher's display state either.
+before-exit chain arms or its watchdog fires, and by
+`agent-claude--check-interrupt' after the user sends an escape.  The
+screen redraw lags the Stop hook, so this probe must not gate ordinary
+chain steps, and screen scraping is not reliable enough to drive the
+switcher's display state on its own.
 Claude Code publishes no idle signal that survives every failure: a
 turn it accepts and then drops, for instance at the context limit,
 fires no Stop hook, so `agent--session-state' stays `busy' forever.
@@ -1252,15 +1285,30 @@ Control active\"."
   "Handle a turn-state event from the Claude Code CLI.
 MESSAGE is a plist with :type, :buffer-name, :json-data, and :args.
 
-Claude Code publishes no hook for the start of a turn, so turns the user
-did not type cannot be observed directly.  The `notify-emacs-state.sh'
-hook wrapper forwards ordinary lifecycle events in their place:
-`activity' when the session is demonstrably working, and `blocked' when
-it will not proceed without the user."
+The `notify-emacs-state.sh' hook wrapper forwards Claude Code's
+prompt, tool, and subagent hooks as `activity', which marks the session
+busy whoever started the turn: the user, remote control, or a resumed
+background task.  Tool hooks also return a session to busy once the
+user answers a permission dialog.  An event sent before the session
+last started waiting is stale and ignored; see
+`agent-claude--stale-hook-event-p'."
   (when-let* ((event (memq (plist-get message :type) '(activity blocked)))
-              (buf (get-buffer (plist-get message :buffer-name))))
+              (buf (get-buffer (plist-get message :buffer-name)))
+              ((not (agent-claude--stale-hook-event-p buf message))))
     (agent-session-event buf (car event)))
   nil)
+
+(defun agent-claude--stale-hook-event-p (buffer message)
+  "Return non-nil when hook MESSAGE was sent before BUFFER last began waiting.
+The first of MESSAGE's :args, when present, is the send time as a
+`float-time' string.  Hook wrappers deliver events in the background,
+so the tool hook that closes a turn can reach Emacs after the turn's
+stop event; applying it then would strand the session as busy."
+  (when-let* ((sent (car (plist-get message :args)))
+              ((stringp sent))
+              (waiting (buffer-local-value
+                        'agent--session-last-waiting-event-at buffer)))
+    (< (string-to-number sent) waiting)))
 
 (defun agent-claude--handle-stop (message)
   "Handle a stop event from the Claude Code CLI.
@@ -1653,6 +1701,7 @@ Return non-nil when PATH was written."
   (agent-claude-ensure-statusline-config)
   (agent-claude-ensure-stop-hook-config)
   (agent-claude-ensure-notification-hook-config)
+  (agent-claude-ensure-state-hook-config)
   (message "agent-claude: updated %s" agent-claude-settings-file))
 
 (defun agent-claude-ensure-statusline-config (&optional file)
@@ -1678,6 +1727,15 @@ FILE defaults to `agent-claude-settings-file'."
   (agent-claude--update-settings
    (or file agent-claude-settings-file)
    #'agent-claude--ensure-notification-hook))
+
+(defun agent-claude-ensure-state-hook-config (&optional file)
+  "Ensure FILE has the Claude Code turn-lifecycle hooks.
+FILE defaults to `agent-claude-settings-file'.  See
+`agent-claude--state-hook-events'."
+  (interactive)
+  (agent-claude--update-settings
+   (or file agent-claude-settings-file)
+   #'agent-claude--ensure-state-hooks))
 
 (defun agent-claude--update-settings (file updater)
   "Read JSON settings FILE, apply UPDATER, and write when changed."
@@ -1746,6 +1804,23 @@ FILE defaults to `agent-claude-settings-file'."
   "Ensure SETTINGS has the agent Notification hook."
   (agent-claude--ensure-hook
    settings "Notification" (agent-claude--notification-hook-command) 5))
+
+(defconst agent-claude--state-hook-events
+  '(("UserPromptSubmit" . "activity")
+    ("PreToolUse" . "activity")
+    ("PostToolUse" . "activity")
+    ("PostToolUseFailure" . "activity")
+    ("SubagentStart" . "activity")
+    ("StopFailure" . "stop"))
+  "Claude Code hooks forwarded to Emacs, with the event each one sends.
+`activity' marks the session busy and `stop' marks it waiting.
+`StopFailure' ends a turn on an API error, which fires no Stop hook.")
+
+(defun agent-claude--ensure-state-hooks (settings)
+  "Ensure SETTINGS has every hook in `agent-claude--state-hook-events'."
+  (pcase-dolist (`(,name . ,type) agent-claude--state-hook-events)
+    (agent-claude--ensure-hook
+     settings name (agent-claude--state-hook-command type) 5)))
 
 (defun agent-claude--ensure-hook (settings name command timeout)
   "Ensure SETTINGS hook NAME includes COMMAND with optional TIMEOUT."
@@ -1825,6 +1900,21 @@ TIMEOUT, when non-nil, is written as the hook command timeout."
     (format "%s %s"
             (shell-quote-argument fire-and-forget)
             (shell-quote-argument notification))))
+
+(defun agent-claude--state-hook-command (type)
+  "Return the command string for a hook that sends session event TYPE."
+  (let ((fire-and-forget
+         (expand-file-name "fire-and-forget.sh"
+                           agent-claude--hooks-directory))
+        (state
+         (expand-file-name "notify-emacs-state.sh"
+                           agent-claude--hooks-directory)))
+    (agent-claude--require-executable fire-and-forget)
+    (agent-claude--require-executable state)
+    (format "%s %s %s"
+            (shell-quote-argument fire-and-forget)
+            (shell-quote-argument state)
+            type)))
 
 (defun agent-claude--require-executable (file)
   "Return FILE or signal an error if it is not executable."

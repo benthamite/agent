@@ -152,6 +152,27 @@ not start, such as one resumed after a background task finishes."
           (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))
       (kill-buffer buf))))
 
+;; Hook wrappers deliver events in the background, so a tool event can
+;; land after the stop event of the turn it belongs to.
+(ert-deftest agent-claude-test-activity-sent-before-stop-is-ignored ()
+  "Ignore an activity event sent before the session last began waiting."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq-local agent--session-state 'awaiting-input)
+            (setq-local agent--session-last-waiting-event-at 200.0))
+          (agent-claude--handle-session-state
+           (list :type 'activity :buffer-name (buffer-name buf)
+                 :args '("199.5")))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input))
+          (agent-claude--handle-session-state
+           (list :type 'activity :buffer-name (buffer-name buf)
+                 :args '("200.5")))
+          (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))
+      (kill-buffer buf))))
+
 (ert-deftest agent-claude-test-blocked-hook-event-marks-session-waiting ()
   "Mark sessions blocked when the CLI reports they cannot proceed alone."
   (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
@@ -1082,6 +1103,114 @@ notification would double-report the same interruption."
             (should (gethash "Notification" hooks))))
       (delete-file settings)
       (delete-file wrapper))))
+
+(ert-deftest agent-claude-test-ensure-state-hook-config-adds-each-event ()
+  "Write one state hook per forwarded event, and only once."
+  (let ((settings (make-temp-file "hooks-test" nil ".json")))
+    (unwind-protect
+        (progn
+          (with-temp-file settings (insert "{}"))
+          (should (agent-claude-ensure-state-hook-config settings))
+          (should-not (agent-claude-ensure-state-hook-config settings))
+          (let ((hooks (gethash "hooks"
+                                (agent-claude--read-json-object settings))))
+            (pcase-dolist (`(,name . ,type) agent-claude--state-hook-events)
+              (let ((entries (append (gethash name hooks) nil)))
+                (should (= (length entries) 1))
+                (should (string-suffix-p
+                         (concat "notify-emacs-state.sh " type)
+                         (gethash "command"
+                                  (aref (gethash "hooks" (car entries))
+                                        0))))))))
+      (delete-file settings))))
+
+(ert-deftest agent-claude-test-state-hook-script-forwards-event ()
+  "Forward TYPE, the buffer name, and a send time to emacsclient."
+  (let* ((bin (make-temp-file "agent-bin" t))
+         (log (expand-file-name "args" bin))
+         (script (expand-file-name "notify-emacs-state.sh"
+                                   agent-claude--hooks-directory))
+         (process-environment
+          (append (list (concat "PATH=" bin ":" (getenv "PATH"))
+                        "CLAUDE_BUFFER_NAME=*claude:\"q\"*")
+                  process-environment)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "emacsclient" bin)
+            (insert "#!/bin/sh\nprintf '%s\\n' \"$@\" > " log "\n"))
+          (set-file-modes (expand-file-name "emacsclient" bin) #o755)
+          (with-temp-buffer
+            (insert "{}")
+            (call-process-region (point-min) (point-max) script
+                                 nil nil nil "activity"))
+          (let* ((args (with-temp-buffer
+                         (insert-file-contents log)
+                         (split-string (buffer-string) "\n" t)))
+                 (form (car (read-from-string (cadr args)))))
+            (should (equal (car args) "--eval"))
+            (should (equal (nth 1 (cadr form)) 'activity))
+            (should (equal (nth 2 form) "*claude:\"q\"*"))
+            (should (< (abs (- (string-to-number (nth 3 form)) (float-time)))
+                       60))))
+      (delete-directory bin t))))
+
+(ert-deftest agent-claude-test-state-hook-script-skips-non-emacs-sessions ()
+  "Do not call emacsclient for a Claude session outside Emacs."
+  (let* ((bin (make-temp-file "agent-bin" t))
+         (log (expand-file-name "args" bin))
+         (script (expand-file-name "notify-emacs-state.sh"
+                                   agent-claude--hooks-directory))
+         (process-environment
+          (cons (concat "PATH=" bin ":" (getenv "PATH"))
+                (seq-remove (lambda (var)
+                              (string-prefix-p "CLAUDE_BUFFER_NAME=" var))
+                            process-environment))))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "emacsclient" bin)
+            (insert "#!/bin/sh\ntouch " log "\n"))
+          (set-file-modes (expand-file-name "emacsclient" bin) #o755)
+          (call-process script nil nil nil "activity")
+          (should-not (file-exists-p log)))
+      (delete-directory bin t))))
+
+;;;; Interrupt detection
+
+(ert-deftest agent-claude-test-interrupt-marks-idle-terminal-waiting ()
+  "Mark a busy session waiting when its terminal is idle after an escape."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent--session-state 'busy)
+      (setq-local agent--session-state-changed-at 100.0)
+      (cl-letf (((symbol-function 'agent-claude--terminal-waiting-p)
+                 (lambda (&optional _) t))
+                ((symbol-function 'agent--scroll-to-bottom) #'ignore)
+                ((symbol-function 'agent--refresh-display-names-deferred)
+                 #'ignore))
+        (agent-claude--check-interrupt buf 150.0))
+      (should (eq agent--session-state 'awaiting-input)))))
+
+(ert-deftest agent-claude-test-interrupt-check-needs-idle-terminal ()
+  "Leave a session busy when the escape did not end its turn."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent--session-state 'busy)
+      (setq-local agent--session-state-changed-at 100.0)
+      (cl-letf (((symbol-function 'agent-claude--terminal-waiting-p)
+                 (lambda (&optional _) nil)))
+        (agent-claude--check-interrupt buf 150.0))
+      (should (eq agent--session-state 'busy)))))
+
+(ert-deftest agent-claude-test-interrupt-check-yields-to-later-state ()
+  "Skip the check when the session changed state after the escape."
+  (with-temp-buffer
+    (let ((buf (current-buffer)))
+      (setq-local agent--session-state 'busy)
+      (setq-local agent--session-state-changed-at 160.0)
+      (cl-letf (((symbol-function 'agent-claude--terminal-waiting-p)
+                 (lambda (&optional _) t)))
+        (agent-claude--check-interrupt buf 150.0))
+      (should (eq agent--session-state 'busy)))))
 
 ;;;; Session capture
 
