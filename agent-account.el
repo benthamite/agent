@@ -589,11 +589,12 @@ configuration."
 (defun agent-account--ensure-shared-symlinks (backend home)
   "Ensure shared config symlinks exist in BACKEND's account HOME."
   (when-let* ((canonical (agent-account--canonical-home backend)))
-    (dolist (item (agent-account--backend-value
-                   backend #'agent-backend-shared-config-items))
-      (agent-account--ensure-shared-symlink
-       (expand-file-name item canonical)
-       (expand-file-name item home)))))
+    (unless (file-equal-p canonical home)
+      (dolist (item (agent-account--backend-value
+                     backend #'agent-backend-shared-config-items))
+        (agent-account--ensure-shared-symlink
+         (expand-file-name item canonical)
+         (expand-file-name item home))))))
 
 (defun agent-account--canonical-home (backend)
   "Return BACKEND's canonical config home directory, or nil."

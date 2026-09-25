@@ -52,9 +52,8 @@
 Each entry is (NAME . CODEX-HOME).  When non-nil,
 `agent-codex-start-or-switch' uses the persisted account
 selection and sets `CODEX_HOME' accordingly so each account
-maintains its own credentials while sharing the standard Codex
-configuration, hooks, skills, sessions, and history from
-`~/.codex/'.
+maintains its own credentials, configuration, and installed plugins
+while sharing hooks, skills, sessions, and history from `~/.codex/'.
 
 Use `agent-codex-select-account' to change the active account.
 The selection persists in `agent-codex-account-file'.
@@ -125,16 +124,16 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (declare-function codex-prompt-input "codex" (&optional buffer))
 
 (defconst agent-codex--shared-config-items
-  '("config.toml" "hooks.json" "AGENTS.md" "rules"
-    "skills" "programmatic-skills" "plugins" "vendor_imports"
+  '("hooks.json" "AGENTS.md" "rules"
+    "skills" "programmatic-skills" "vendor_imports"
     "history.jsonl" "sessions" "session_index.jsonl"
     "archived_sessions" "memories" "shell_snapshots"
     ".codex-global-state.json")
   "Files and directories symlinked from `~/.codex/' into each account home.
-These items are shared across accounts so hooks, skills, project
-trust, memories, session history, and other user-facing Codex
-state remain available regardless of which account is active.
-Only account credentials such as `auth.json' remain account-local.")
+These items are shared across accounts so hooks, skills, memories,
+session history, and other user-facing Codex state remain available
+regardless of which account is active.  Credentials and writable
+`config.toml' settings and installed plugins remain account-local.")
 
 (defvar agent-codex--toml-cache (make-hash-table :test #'equal)
   "Map from config file path to (MTIME . VALUES) for TOML reads.
@@ -232,17 +231,98 @@ without computing new hashes, so modified canonical hooks remain
 untrusted."
   (when-let* ((home (agent-account-home 'codex account))
               (canonical (agent-account--canonical-home 'codex)))
+    (agent-codex--ensure-local-config home canonical)
+    (agent-codex--ensure-local-plugins home canonical)
     (agent-codex--sync-hook-trust
      (expand-file-name "config.toml" canonical)
      (expand-file-name "hooks.json" canonical)
-     (expand-file-name "hooks.json" home))))
+     (expand-file-name "hooks.json" home)
+     (expand-file-name "config.toml" home))))
 
-(defun agent-codex--sync-hook-trust (config source-hooks target-hooks)
+(defun agent-codex--ensure-local-config (home canonical)
+  "Keep HOME config writable independently of CANONICAL.
+Seed a missing config from CANONICAL once.  Materialize an existing
+symlink with its current contents, preserving regular local configs.
+Leave the canonical home itself unchanged."
+  (unless (file-equal-p home canonical)
+    (let ((config (expand-file-name "config.toml" home)))
+      (when (or (file-symlink-p config) (not (file-exists-p config)))
+        (let ((source (if (file-symlink-p config)
+                          config
+                        (expand-file-name "config.toml" canonical)))
+              (temporary (make-temp-file
+                          (expand-file-name ".agent-config-" home))))
+          (unwind-protect
+              (progn
+                (copy-file source temporary t)
+                (agent-codex--rebase-config-home temporary canonical home)
+                (rename-file temporary config t))
+            (when (file-exists-p temporary)
+              (delete-file temporary))))))))
+
+(defun agent-codex--rebase-config-home (config canonical home)
+  "Rebase CANONICAL path references in copied CONFIG to HOME.
+Match complete path prefixes only, leaving other account homes intact."
+  (with-temp-buffer
+    (insert-file-contents config)
+    (goto-char (point-min))
+    (let ((pattern (concat (regexp-quote (directory-file-name canonical))
+                           "\\([/\"':]\\|$\\)")))
+      (while (re-search-forward pattern nil t)
+        (replace-match (concat (directory-file-name home) (match-string 1))
+                       t t)))
+    (write-region (point-min) (point-max) config nil 'silent)))
+
+(defun agent-codex--ensure-local-plugins (home canonical)
+  "Keep HOME plugins within HOME's trusted filesystem boundary.
+Copy missing plugins from CANONICAL once, or materialize an existing
+symlink.  Preserve existing directories and the canonical home itself."
+  (unless (file-equal-p home canonical)
+    (let* ((target (expand-file-name "plugins" home))
+           (link (file-symlink-p target))
+           (source (if link target (expand-file-name "plugins" canonical))))
+      (when (and (or link (not (file-exists-p target)))
+                 (file-directory-p source))
+        (let* ((temporary (make-temp-file
+                           (expand-file-name ".agent-plugins-" home) t))
+               (staged (expand-file-name "plugins" temporary))
+               (original (expand-file-name "original" temporary)))
+          (unwind-protect
+              (progn
+                (copy-directory (file-truename source) staged nil t)
+                (agent-codex--rebase-plugin-links
+                 staged (file-truename source) target)
+                (when link (rename-file target original))
+                (condition-case err
+                    (rename-file staged target)
+                  (error
+                   (when link (rename-file original target))
+                   (signal (car err) (cdr err)))))
+            (delete-directory temporary t t)))))))
+
+(defun agent-codex--rebase-plugin-links (directory source target)
+  "Rebase copied DIRECTORY links within SOURCE to TARGET.
+Leave relative links and links outside SOURCE unchanged."
+  (dolist (file (directory-files directory t directory-files-no-dot-files-regexp))
+    (if-let* ((link (file-symlink-p file)))
+        (when (file-name-absolute-p link)
+          (let ((resolved (file-truename link)))
+            (when (or (equal resolved (directory-file-name source))
+                      (string-prefix-p (file-name-as-directory source) resolved))
+              (make-symbolic-link
+               (concat (directory-file-name target)
+                       (substring resolved (length (directory-file-name source))))
+               file t))))
+      (when (file-directory-p file)
+        (agent-codex--rebase-plugin-links file source target)))))
+
+(defun agent-codex--sync-hook-trust
+    (config source-hooks target-hooks &optional target-config)
   "Copy hook trust in CONFIG from SOURCE-HOOKS to TARGET-HOOKS.
 Require SOURCE-HOOKS and TARGET-HOOKS to resolve to the same file.
 Only already-persisted state is copied; this function never trusts
 the current contents of a changed hook.  Return non-nil when CONFIG
-changed."
+changed.  When TARGET-CONFIG is non-nil, write there instead of CONFIG."
   (unless (and (file-exists-p source-hooks)
                (file-exists-p target-hooks)
                (file-equal-p source-hooks target-hooks))
@@ -250,7 +330,8 @@ changed."
   (let ((blocks (agent-codex--hook-state-blocks config source-hooks)))
     (unless blocks
       (error "Canonical Codex hooks have no persisted trust state"))
-    (agent-codex--write-hook-state-blocks config target-hooks blocks)))
+    (agent-codex--write-hook-state-blocks
+     (or target-config config) target-hooks blocks)))
 
 (defun agent-codex--hook-state-blocks (config hooks-file)
   "Return CONFIG hook-state blocks keyed by suffix for HOOKS-FILE.

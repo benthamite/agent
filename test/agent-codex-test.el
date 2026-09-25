@@ -100,6 +100,92 @@
            :type 'error))
       (delete-directory dir t))))
 
+(ert-deftest agent-codex-test-account-config-writes-stay-local ()
+  "Sync accounts without propagating writable configuration changes."
+  (let* ((dir (make-temp-file "codex-account-config" t))
+         (canonical (expand-file-name ".codex" dir))
+         (home (expand-file-name "work" dir))
+         (other (expand-file-name "other" dir))
+         (config (expand-file-name "config.toml" home))
+         (canonical-config (expand-file-name "config.toml" canonical))
+         (plugin (expand-file-name "plugins/browser/service.mjs" home))
+         (canonical-plugin
+          (expand-file-name "plugins/browser/service.mjs" canonical))
+         (source-config (expand-file-name "defaults.toml" dir))
+         (process-environment (cons (format "HOME=%s" dir)
+                                    process-environment))
+         (agent-codex-accounts `(("work" . ,home) ("other" . ,other)
+                                 ("personal" . ,canonical))))
+    (unwind-protect
+        (progn
+          (make-directory canonical t)
+          (make-directory home t)
+          (with-temp-file (expand-file-name "hooks.json" canonical)
+            (insert "{\"hooks\":{}}\n"))
+          (with-temp-file source-config
+            (insert "model = \"initial\"\n")
+            (insert (format "[mcp_servers.node_repl.env]\nCODEX_HOME = %S\n"
+                            canonical))
+            (insert (format "SERVICE = %S\n" canonical-plugin))
+            (insert (format "OTHER_HOME = %S\n" (concat canonical "-other")))
+            (insert (format
+                     "[hooks.state.\"%s:pre_tool_use:0:0\"]\n"
+                     (expand-file-name "hooks.json" canonical)))
+            (insert "trusted_hash = \"sha256:known\"\n"))
+          (make-directory (file-name-directory canonical-plugin) t)
+          (with-temp-file canonical-plugin (insert "original plugin"))
+          (make-symbolic-link (file-name-directory canonical-plugin)
+                              (expand-file-name "plugins/latest" canonical))
+          (make-symbolic-link (expand-file-name "plugins" canonical)
+                              (expand-file-name "plugins" home))
+          (make-symbolic-link source-config canonical-config)
+          (make-symbolic-link canonical-config config)
+          (agent-account-sync 'codex "work")
+          (agent-account-sync 'codex "other")
+          (should-not (file-symlink-p config))
+          (should-not (file-equal-p config canonical-config))
+          (should (equal home (agent-codex--toml-get
+                               config "CODEX_HOME" "mcp_servers.node_repl.env")))
+          (should (equal plugin (agent-codex--toml-get
+                                 config "SERVICE" "mcp_servers.node_repl.env")))
+          (should (equal (concat canonical "-other")
+                         (agent-codex--toml-get
+                          config "OTHER_HOME" "mcp_servers.node_repl.env")))
+          (should (file-in-directory-p (file-truename plugin) home))
+          (should (file-in-directory-p
+                   (file-truename (expand-file-name "plugins/latest/service.mjs"
+                                                  home))
+                   home))
+          (with-temp-file plugin (insert "updated plugin"))
+          (agent-codex--toml-set config "model" "work-only")
+          (agent-account-sync 'codex "work")
+          (agent-account-sync 'codex "other")
+          (agent-account-sync 'codex "personal")
+          (should (file-symlink-p canonical-config))
+          (should (equal "updated plugin"
+                         (with-temp-buffer
+                           (insert-file-contents plugin) (buffer-string))))
+          (should (equal "original plugin"
+                         (with-temp-buffer
+                           (insert-file-contents canonical-plugin)
+                           (buffer-string))))
+          (should (file-in-directory-p
+                   (file-truename (expand-file-name
+                                   "plugins/browser/service.mjs" other))
+                   other))
+          (should (equal "work-only"
+                         (agent-codex--toml-get config "model")))
+          (should (equal "initial"
+                         (agent-codex--toml-get canonical-config "model")))
+          (should (equal "initial"
+                         (agent-codex--toml-get
+                          (expand-file-name "config.toml" other) "model")))
+          (should (agent-codex--hook-state-blocks
+                   config (expand-file-name "hooks.json" home)))
+          (should-not (agent-codex--hook-state-blocks
+                       canonical-config (expand-file-name "hooks.json" home))))
+      (delete-directory dir t))))
+
 ;;;; TOML helpers
 
 (ert-deftest agent-codex-test-toml-roundtrip ()
