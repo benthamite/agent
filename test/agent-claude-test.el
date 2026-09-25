@@ -1104,6 +1104,33 @@ notification would double-report the same interruption."
       (delete-file settings)
       (delete-file wrapper))))
 
+(ert-deftest agent-claude-test-source-directory-follows-build-symlink ()
+  "Resolve a compiled build file to the checkout its source links to."
+  (let* ((checkout (file-truename (make-temp-file "agent-src" t)))
+         (build (make-temp-file "agent-build" t)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "agent-claude.el" checkout))
+          (make-symbolic-link (expand-file-name "agent-claude.el" checkout)
+                              (expand-file-name "agent-claude.el" build))
+          (with-temp-file (expand-file-name "agent-claude.elc" build))
+          (should (equal (agent-claude--source-directory
+                          (expand-file-name "agent-claude.elc" build))
+                         (file-name-as-directory checkout))))
+      (delete-directory checkout t)
+      (delete-directory build t))))
+
+(ert-deftest agent-claude-test-bundled-helpers-exist ()
+  "Find every bundled helper the setup commands install."
+  (dolist (file (list agent-claude-statusline-script
+                      (expand-file-name "fire-and-forget.sh"
+                                        agent-claude--hooks-directory)
+                      (expand-file-name "notify-emacs-notification.sh"
+                                        agent-claude--hooks-directory)
+                      (expand-file-name "notify-emacs-state.sh"
+                                        agent-claude--hooks-directory)))
+    (should (file-executable-p file))))
+
 (ert-deftest agent-claude-test-ensure-state-hook-config-adds-each-event ()
   "Write one state hook per forwarded event, and only once."
   (let ((settings (make-temp-file "hooks-test" nil ".json")))

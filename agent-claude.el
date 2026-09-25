@@ -122,12 +122,22 @@ Written by `agent-claude-select-account', read at session start."
   :type '(choice (const :tag "Unavailable" nil) file)
   :group 'agent-claude)
 
+(defun agent-claude--source-directory (file)
+  "Return the directory of the source checkout that FILE was built from.
+FILE is a loaded Lisp file, compiled or not.  The directory is resolved
+through FILE's `.el' sibling, because a package manager such as Elpaca
+loads byte-compiled files from a build directory that holds only
+symlinks to the Lisp sources; the bundled `etc/' and `hooks/'
+directories exist only in the checkout."
+  (file-name-directory
+   (file-truename (concat (file-name-sans-extension file) ".el"))))
+
+(defconst agent-claude--package-directory
+  (agent-claude--source-directory (or load-file-name buffer-file-name))
+  "Absolute path to the source checkout holding this library.")
+
 (defconst agent-claude--hooks-directory
-  (file-truename
-   (expand-file-name "hooks/"
-                     (file-name-directory
-                      (file-truename
-                       (or load-file-name buffer-file-name)))))
+  (expand-file-name "hooks/" agent-claude--package-directory)
   "Absolute path to the bundled Claude hook helper directory.")
 
 (defcustom agent-claude-status-directory
@@ -138,9 +148,7 @@ Written by `agent-claude-select-account', read at session start."
 
 (defcustom agent-claude-statusline-script
   (expand-file-name "etc/claude-code-statusline.sh"
-                    (file-name-directory
-                     (file-truename
-                      (or load-file-name buffer-file-name))))
+                    agent-claude--package-directory)
   "Absolute path to the bundled Claude Code statusline script."
   :type 'file
   :group 'agent-claude)
