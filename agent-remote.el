@@ -32,10 +32,11 @@
 ;; drives the session buffers themselves, it reaches Claude and Codex
 ;; sessions under every account alike.
 ;;
-;; The server listens only on `agent-remote-host', which defaults to
-;; this machine's Tailscale address, so only devices on the tailnet can
-;; connect.  Two checks keep web pages open in a browser on this
-;; machine from driving it: every request must name the server's own
+;; The server closes every connection that does not come from
+;; `agent-remote-allowed-networks', by default the range Tailscale
+;; assigns to tailnet devices, so only devices on the tailnet can use
+;; it.  Two checks keep web pages open in a browser on this machine
+;; from driving it: every request must name the server's own
 ;; address in its Host header, which defeats DNS rebinding, and every
 ;; request that changes anything must carry the `X-Agent-Remote'
 ;; header, which a cross-origin page cannot send without a preflight
@@ -59,11 +60,26 @@
   :group 'agent)
 
 (defcustom agent-remote-host nil
-  "Address the remote-control server listens on.
+  "Address the phone uses to reach the remote-control server.
 When nil, use this machine's Tailscale IPv4 address as reported by
-`agent-remote-tailscale-program'.  Only set this to an address that
-untrusted devices cannot reach."
+`agent-remote-tailscale-program'.  Requests must name this address in
+their Host header."
   :type '(choice (const :tag "Tailscale address" nil) string)
+  :group 'agent-remote)
+
+(defcustom agent-remote-listen-address "0.0.0.0"
+  "Local address the remote-control server binds to.
+The default binds every IPv4 interface because the macOS Tailscale app
+does not deliver connections to a socket bound to the Tailscale address
+alone.  `agent-remote-allowed-networks' restricts who may connect."
+  :type 'string
+  :group 'agent-remote)
+
+(defcustom agent-remote-allowed-networks '("100.64.0.0/10")
+  "IPv4 networks, in CIDR notation, whose connections the server accepts.
+The default is the range Tailscale assigns to tailnet devices.
+Connections from any other address are closed without a response."
+  :type '(repeat string)
   :group 'agent-remote)
 
 (defcustom agent-remote-port 8787
@@ -133,13 +149,14 @@ When enabled, listen on `agent-remote-host' and `agent-remote-port'."
           (make-network-process
            :name "agent-remote"
            :server t
-           :host host
+           :host agent-remote-listen-address
            :service agent-remote-port
            :family 'ipv4
            :coding 'binary
            :noquery t
            :filter #'agent-remote--filter
-           :sentinel #'agent-remote--sentinel))
+           :sentinel #'agent-remote--sentinel
+           :log #'agent-remote--log))
     (let ((authority (format "%s:%d" host (process-contact agent-remote--server
                                                           :service))))
       (process-put agent-remote--server :authority authority)
@@ -173,6 +190,36 @@ Signal an error when Tailscale is unavailable or not connected."
     address))
 
 ;;;; HTTP transport
+
+(defun agent-remote--log (_server connection _message)
+  "Close CONNECTION unless it comes from `agent-remote-allowed-networks'."
+  (unless (agent-remote--peer-allowed-p (process-contact connection :remote))
+    (delete-process connection)))
+
+(defun agent-remote--peer-allowed-p (address)
+  "Return non-nil when ADDRESS lies in `agent-remote-allowed-networks'.
+ADDRESS is an IPv4 address vector as returned by `process-contact',
+whose final element is the port."
+  (and (vectorp address)
+       (= (length address) 5)
+       (seq-some (lambda (network)
+                   (agent-remote--address-in-network-p address network))
+                 agent-remote-allowed-networks)))
+
+(defun agent-remote--address-in-network-p (address network)
+  "Return non-nil when IPv4 vector ADDRESS lies in CIDR string NETWORK."
+  (pcase-let* ((`(,base ,bits) (split-string network "/"))
+               (prefix (string-to-number bits))
+               (mask (logand #xffffffff (ash #xffffffff (- 32 prefix)))))
+    (= (logand (agent-remote--address-number address) mask)
+       (logand (agent-remote--address-number
+                (vconcat (mapcar #'string-to-number (split-string base "\\."))))
+               mask))))
+
+(defun agent-remote--address-number (address)
+  "Return the first four octets of vector ADDRESS as one integer."
+  (+ (ash (aref address 0) 24) (ash (aref address 1) 16)
+     (ash (aref address 2) 8) (aref address 3)))
 
 (defun agent-remote--sentinel (proc _event)
   "Delete connection PROC once it has closed."

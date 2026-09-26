@@ -14,6 +14,8 @@
   "Run BODY with the remote server listening on a free loopback port."
   (declare (indent 0))
   `(let ((agent-remote-host "127.0.0.1")
+         (agent-remote-listen-address "127.0.0.1")
+         (agent-remote-allowed-networks '("127.0.0.0/8"))
          (agent-remote-port t)
          (agent-remote--server nil))
      (unwind-protect
@@ -110,6 +112,32 @@ HOST overrides the Host header, which defaults to the server's own."
   (let ((agent-remote-host nil)
         (agent-remote-tailscale-program "/nonexistent/tailscale"))
     (should-error (agent-remote--host) :type 'user-error)))
+
+;;;; Peer filtering
+
+(ert-deftest agent-remote-test-address-in-network ()
+  "CIDR matching honours the prefix length."
+  (should (agent-remote--address-in-network-p [100 99 24 38 5000]
+                                              "100.64.0.0/10"))
+  (should (agent-remote--address-in-network-p [100 127 255 255 1]
+                                              "100.64.0.0/10"))
+  (should-not (agent-remote--address-in-network-p [100 128 0 1 1]
+                                                  "100.64.0.0/10"))
+  (should-not (agent-remote--address-in-network-p [192 168 68 104 1]
+                                                  "100.64.0.0/10")))
+
+(ert-deftest agent-remote-test-peer-must-be-ipv4-address ()
+  "Anything but an IPv4 address vector is refused."
+  (let ((agent-remote-allowed-networks '("0.0.0.0/0")))
+    (should (agent-remote--peer-allowed-p [10 0 0 1 80]))
+    (should-not (agent-remote--peer-allowed-p nil))
+    (should-not (agent-remote--peer-allowed-p [0 0 0 0 0 0 0 1 80]))))
+
+(ert-deftest agent-remote-test-disallowed-peer-gets-no-response ()
+  "A connection from outside the allowed networks is closed unanswered."
+  (agent-remote-test--with-server
+    (let ((agent-remote-allowed-networks '("100.64.0.0/10")))
+      (should (equal (agent-remote-test--http "GET" "/api/sessions") "")))))
 
 ;;;; Security checks over a live connection
 
