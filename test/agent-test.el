@@ -580,6 +580,81 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
     (should (eq (plist-get (nthcdr 3 (agent--session-suffix-spec b "s")) :face)
                 'agent-unknown))))
 
+;;;; Tab bar
+
+(ert-deftest agent-test-tab-bar-colors-sessions-like-the-switcher ()
+  "List sessions in switcher order, each in its switcher face."
+  (agent-test--with-two-sessions
+    (with-current-buffer b
+      (setq-local agent--session-state 'awaiting-input))
+    (agent-toggle-snooze a)
+    (let ((items (agent-tab-bar-format-sessions)))
+      (should (equal (mapcar (lambda (item) (get-text-property 1 'face (nth 2 item)))
+                             items)
+                     '(agent-tab-bar-key agent-tab-bar-key)))
+      (should (equal (mapcar (lambda (item) (get-text-property 3 'face (nth 2 item)))
+                             items)
+                     '(agent-waiting agent-snoozed)))
+      (should (equal (mapcar (lambda (item) (substring-no-properties (nth 2 item)))
+                             items)
+                     (list (format " s %s " (agent-display-name b))
+                           (format " a %s " (agent-display-name a))))))))
+
+(ert-deftest agent-test-tab-bar-item-switches-to-its-session ()
+  "Switch to a session's buffer when its tab-bar item is invoked."
+  (agent-test--with-two-sessions
+    (let (switched)
+      (cl-letf (((symbol-function 'switch-to-buffer)
+                 (lambda (buffer) (setq switched buffer))))
+        (call-interactively (nth 3 (car (agent-tab-bar-format-sessions)))))
+      (should (eq switched a)))))
+
+(ert-deftest agent-test-tab-bar-refresh-redraws-only-on-change ()
+  "Re-render the tab bar only when a session's face changed."
+  (agent-test--with-two-sessions
+    (let ((redraws 0))
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&rest _) (setq redraws (1+ redraws)))))
+        (agent-tab-bar-format-sessions)
+        (agent--tab-bar-refresh)
+        (should (= redraws 0))
+        (with-current-buffer a
+          (setq-local agent--session-state 'awaiting-input))
+        (agent--tab-bar-refresh)
+        (should (= redraws 1))))))
+
+(ert-deftest agent-test-tab-bar-mode-places-segment-before-right-alignment ()
+  "Insert the segment before right-aligned entries and remove it again."
+  (let ((tab-bar-format '(tab-bar-format-global tab-bar-format-align-right
+                                                 tab-bar-format-spofy))
+        (agent-tab-bar-mode nil))
+    (unwind-protect
+        (progn
+          (agent-tab-bar-mode 1)
+          (should (equal tab-bar-format
+                         '(tab-bar-format-global agent-tab-bar-format-sessions
+                                                 tab-bar-format-align-right
+                                                 tab-bar-format-spofy)))
+          (agent-tab-bar-mode -1)
+          (should (equal tab-bar-format
+                         '(tab-bar-format-global tab-bar-format-align-right
+                                                 tab-bar-format-spofy))))
+      (agent-tab-bar-mode -1))))
+
+(ert-deftest agent-test-tab-bar-mode-adds-and-removes-its-own-alignment ()
+  "Add right alignment after the segment when none exists, then drop it."
+  (let ((tab-bar-format '(tab-bar-format-global))
+        (agent-tab-bar-mode nil))
+    (unwind-protect
+        (progn
+          (agent-tab-bar-mode 1)
+          (should (equal tab-bar-format
+                         '(tab-bar-format-global agent-tab-bar-format-sessions
+                                                 tab-bar-format-align-right)))
+          (agent-tab-bar-mode -1)
+          (should (equal tab-bar-format '(tab-bar-format-global))))
+      (agent-tab-bar-mode -1))))
+
 (ert-deftest agent-test-jump-to-waiting-skips-snoozed-sessions ()
   "Skip a snoozed session even when it started waiting most recently."
   (agent-test--with-two-sessions

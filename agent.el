@@ -694,6 +694,14 @@ annotation."
                  (natnum :tag "Columns"))
   :group 'agent)
 
+(defcustom agent-tab-bar-refresh-interval 1
+  "Seconds between checks for session changes by `agent-tab-bar-mode'.
+Some states, such as background work, are read off the terminal and
+announce no event, so the tab bar is re-rendered whenever a check
+finds that a session changed name, state, or snooze status."
+  :type 'number
+  :group 'agent)
+
 ;;;; Faces
 
 (defface agent-waiting
@@ -740,6 +748,13 @@ that a session's name stays the prominent part of its entry.
 Transient adds a suffix's own face behind the faces a string already
 carries, so annotations stay dim even next to a name colored by
 `agent-waiting'."
+  :group 'agent)
+
+(defface agent-tab-bar-key
+  '((t :inherit transient-key))
+  "Face for session keys in the tab bar shown by `agent-tab-bar-mode'.
+Inherits the face of keys in the session switcher, so that a session
+reads in the tab bar as it does in the menu."
   :group 'agent)
 
 ;;;; State variables
@@ -1088,31 +1103,38 @@ are only known once every session has been measured."
      (apply #'vector (agent--session-suffix-specs name-pad account-pad)))))
 
 (defun agent--session-suffix-specs (&optional name-pad account-pad)
-  "Return the switcher's suffix specs, active sessions first.
+  "Return the switcher's suffix specs, in `agent--ordered-session-keys' order.
 NAME-PAD and ACCOUNT-PAD are the widths to pad the name and account
-columns to; nil pads nothing.  Within each group the specs are sorted
-by home-row key.  One flat list rather than one list per account, so
-that a session is found by the key it always answers to instead of by
-the account it happens to run under.  Snoozed sessions come after
-every active one, so the sessions worth toggling between sit together
-at the top; a snoozed session keeps its key, so moving it does not
-change how it is reached."
+columns to; nil pads nothing."
   (let ((agent--session-detail-widths
-         (agent--session-detail-widths (or name-pad 0) (or account-pad 0)))
-        active snoozed)
+         (agent--session-detail-widths (or name-pad 0) (or account-pad 0))))
+    (mapcar (lambda (entry)
+              (agent--session-suffix-spec
+               (cdr entry) (car entry) name-pad account-pad))
+            (agent--ordered-session-keys))))
+
+(defun agent--ordered-session-keys ()
+  "Return (KEY . BUFFER) for each live session, active sessions first.
+Within each group the entries are sorted by home-row key.  One flat
+list rather than one list per account, so that a session is found by
+the key it always answers to instead of by the account it happens to
+run under.  Snoozed sessions come after every active one, so the
+sessions worth toggling between sit together at the start; a snoozed
+session keeps its key, so moving it does not change how it is
+reached."
+  (let (active snoozed)
     (maphash (lambda (buf key)
                (when (buffer-live-p buf)
-                 (let ((spec (agent--session-suffix-spec
-                              buf key name-pad account-pad)))
-                   (if (agent-session-snoozed-p buf)
-                       (push spec snoozed)
-                     (push spec active)))))
+                 (if (agent-session-snoozed-p buf)
+                     (push (cons key buf) snoozed)
+                   (push (cons key buf) active))))
              agent--session-keys)
     (append (agent--sort-specs-by-key active)
             (agent--sort-specs-by-key snoozed))))
 
 (defun agent--sort-specs-by-key (specs)
-  "Return SPECS sorted by the position of their key in the key pool."
+  "Return SPECS sorted by the position of their key in the key pool.
+Each spec is a list or cons cell whose car is its key."
   (sort specs (lambda (a b)
                 (< (agent--session-key-index (car a))
                    (agent--session-key-index (car b))))))
@@ -1469,12 +1491,17 @@ nothing."
          (state (agent-session-display-state buf backend))
          (cmd (make-symbol (format "ai-switch-%s" key)))
          (spec (list key label cmd)))
-    (when-let* ((face (if (agent-session-snoozed-p buf)
-                          'agent-snoozed
-                        (agent--session-state-face state))))
+    (when-let* ((face (agent--session-face buf state)))
       (setq spec (append spec (list :face face))))
     (fset cmd (lambda () (interactive) (switch-to-buffer buf)))
     spec))
+
+(defun agent--session-face (buffer state)
+  "Return the face for session BUFFER in display STATE, or nil for none.
+A snoozed session takes `agent-snoozed' in place of any state face."
+  (if (agent-session-snoozed-p buffer)
+      'agent-snoozed
+    (agent--session-state-face state)))
 
 (defun agent--session-state-face (state)
   "Return the session-switcher face for display STATE, or nil for none."
@@ -1540,6 +1567,107 @@ Sessions with reported background work are distinguished from idle ones."
   (when-let* ((struct (and backend (agent-backend backend)))
               (fn (agent-backend-background-tasks-p struct)))
     (funcall fn buffer)))
+
+;;;; Tab bar
+
+(defvar agent--tab-bar-timer nil
+  "Timer that re-renders the tab bar when a session changes.")
+
+(defvar agent--tab-bar-signature nil
+  "What the sessions segment of the tab bar last showed.
+Compared by `agent--tab-bar-refresh' against the current sessions, so
+that the tab bar is re-rendered only when something visible changed.")
+
+(defvar agent--tab-bar-added-align-right nil
+  "Non-nil when `agent-tab-bar-mode' added `tab-bar-format-align-right'.")
+
+;;;###autoload
+(define-minor-mode agent-tab-bar-mode
+  "Show every AI session in the tab bar, colored by its state.
+Sessions appear in the order and with the faces of
+`agent-select-session': `agent-waiting' for a session waiting for
+input, `agent-waiting-with-background' for one waiting while
+background work runs, `agent-unknown' for one never observed,
+`agent-snoozed' for a snoozed one, and no state face for a busy one.
+Clicking a session switches to it.  The segment is inserted into
+`tab-bar-format' before any right-aligned entries."
+  :global t
+  :group 'agent
+  (if agent-tab-bar-mode
+      (progn
+        (agent--tab-bar-insert-format)
+        (setq agent--tab-bar-timer
+              (run-with-timer agent-tab-bar-refresh-interval
+                              agent-tab-bar-refresh-interval
+                              #'agent--tab-bar-refresh)))
+    (when agent--tab-bar-timer
+      (cancel-timer agent--tab-bar-timer)
+      (setq agent--tab-bar-timer nil))
+    (agent--tab-bar-remove-format))
+  (setq agent--tab-bar-signature nil)
+  (force-mode-line-update t))
+
+(defun agent--tab-bar-insert-format ()
+  "Insert `agent-tab-bar-format-sessions' before right-aligned entries.
+When `tab-bar-format' has no `tab-bar-format-align-right', add one
+after the segment, so that the entries it is pushed against stay on
+the right."
+  (unless (memq 'agent-tab-bar-format-sessions tab-bar-format)
+    (let* ((tail (memq 'tab-bar-format-align-right tab-bar-format))
+           (head (take (- (length tab-bar-format) (length tail))
+                       tab-bar-format)))
+      (unless tail
+        (setq agent--tab-bar-added-align-right t
+              tail '(tab-bar-format-align-right)))
+      (setq tab-bar-format
+            (append head '(agent-tab-bar-format-sessions) tail)))))
+
+(defun agent--tab-bar-remove-format ()
+  "Remove the sessions segment, and any alignment it added, from the tab bar."
+  (setq tab-bar-format (delq 'agent-tab-bar-format-sessions
+                             (copy-sequence tab-bar-format)))
+  (when agent--tab-bar-added-align-right
+    (setq tab-bar-format (delq 'tab-bar-format-align-right tab-bar-format)
+          agent--tab-bar-added-align-right nil)))
+
+(defun agent--tab-bar-sessions ()
+  "Return (KEY BUFFER NAME FACE) for each session, in switcher order.
+KEY is the session's switcher key, and FACE its switcher face, or nil
+when it has none."
+  (mapcar (lambda (entry)
+            (let ((buf (cdr entry)))
+              (list (car entry)
+                    buf
+                    (agent-display-name buf)
+                    (agent--session-face
+                     buf (agent-session-display-state buf)))))
+          (agent--ordered-session-keys)))
+
+(defun agent-tab-bar-format-sessions ()
+  "Return tab-bar items for every AI session, colored by state.
+Each item shows the session's switcher key, in `agent-tab-bar-key',
+before its name.  For use in `tab-bar-format'; see
+`agent-tab-bar-mode'."
+  (let ((sessions (agent--tab-bar-sessions)))
+    (setq agent--tab-bar-signature sessions)
+    (seq-map-indexed
+     (lambda (session index)
+       (pcase-let ((`(,key ,buf ,name ,face) session))
+         (list (intern (format "agent-session-%d" index))
+               'menu-item
+               (concat " "
+                       (propertize key 'face 'agent-tab-bar-key)
+                       " "
+                       (propertize name 'face face)
+                       " ")
+               (lambda () (interactive) (switch-to-buffer buf))
+               :help (format "Switch to %s" name))))
+     sessions)))
+
+(defun agent--tab-bar-refresh ()
+  "Re-render the tab bar if any session changed since it was last shown."
+  (unless (equal (agent--tab-bar-sessions) agent--tab-bar-signature)
+    (force-mode-line-update t)))
 
 ;;;; Snoozing
 
