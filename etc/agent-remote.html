@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Agents</title>
+<style>
+  :root {
+    --bg: #111418; --panel: #1b2027; --panel-2: #232a33; --text: #e6e9ee;
+    --muted: #8b95a3; --line: #2c3440; --accent: #4c8dff;
+    --waiting: #f0a732; --busy: #4c8dff; --bg-waiting: #b58a3c; --unknown: #6b7480;
+    --error: #ff6b6b;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  button { font: inherit; color: inherit; border: 0; cursor: pointer; }
+  .view { display: none; height: 100%; flex-direction: column; }
+  .view.active { display: flex; }
+  header { display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+    background: var(--panel); border-bottom: 1px solid var(--line); min-height: 56px; }
+  header h1 { font-size: 18px; margin: 0; flex: 1; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .status { font-size: 13px; color: var(--muted); }
+  .status.error { color: var(--error); }
+  #list { flex: 1; overflow-y: auto; padding: 12px; display: flex;
+    flex-direction: column; gap: 10px; }
+  .card { display: flex; align-items: center; gap: 12px; width: 100%;
+    text-align: left; background: var(--panel); border-radius: 14px;
+    padding: 16px 14px; border-left: 6px solid var(--unknown); min-height: 72px; }
+  .card:active { background: var(--panel-2); }
+  .card.waiting { border-left-color: var(--waiting); }
+  .card.background-waiting { border-left-color: var(--bg-waiting); }
+  .card.busy { border-left-color: var(--busy); }
+  .card .main { flex: 1; min-width: 0; }
+  .card .name { font-size: 17px; font-weight: 600; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .card .meta { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .badge { font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .04em; padding: 4px 8px; border-radius: 8px;
+    background: var(--panel-2); color: var(--muted); white-space: nowrap; }
+  .badge.waiting { background: var(--waiting); color: #1a1200; }
+  .badge.background-waiting { background: var(--bg-waiting); color: #1a1200; }
+  .badge.busy { background: var(--busy); color: #fff; }
+  .empty { color: var(--muted); text-align: center; margin-top: 40px; }
+  .back { background: var(--panel-2); border-radius: 10px; padding: 8px 12px;
+    font-size: 18px; }
+  #output { flex: 1; overflow: auto; margin: 0; padding: 10px 12px;
+    font: 12px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word; background: var(--bg); }
+  #output.nowrap { white-space: pre; word-break: normal; }
+  .keys { display: flex; gap: 6px; padding: 8px 10px 0; overflow-x: auto;
+    background: var(--panel); border-top: 1px solid var(--line); }
+  .key { flex: 0 0 auto; min-width: 48px; height: 44px; padding: 0 12px;
+    border-radius: 10px; background: var(--panel-2); font-size: 16px; }
+  .key:active { background: var(--line); }
+  .compose { display: flex; gap: 8px; padding: 8px 10px 10px;
+    background: var(--panel); align-items: flex-end;
+    padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  textarea { flex: 1; resize: none; min-height: 44px; max-height: 40vh;
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 12px; padding: 10px 12px; font: inherit; }
+  textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .send { height: 44px; padding: 0 18px; border-radius: 12px;
+    background: var(--accent); color: #fff; font-weight: 600; }
+  .send:disabled { opacity: .5; }
+  .toggle { background: var(--panel-2); border-radius: 10px; padding: 8px 10px;
+    font-size: 13px; }
+</style>
+</head>
+<body>
+<section id="list-view" class="view active">
+  <header>
+    <h1>Sessions</h1>
+    <span id="list-status" class="status"></span>
+  </header>
+  <div id="list"></div>
+</section>
+
+<section id="session-view" class="view">
+  <header>
+    <button class="back" id="back" aria-label="Back">‹</button>
+    <h1 id="session-title"></h1>
+    <span id="session-badge" class="badge"></span>
+    <button class="toggle" id="wrap">Wrap</button>
+  </header>
+  <pre id="output"></pre>
+  <div class="keys" id="keys"></div>
+  <div class="compose">
+    <textarea id="text" rows="1" placeholder="Reply…"></textarea>
+    <button class="send" id="send">Send</button>
+  </div>
+</section>
+
+<script>
+"use strict";
+const KEYS = [["esc", "Esc"], ["1", "1"], ["2", "2"], ["3", "3"],
+              ["up", "↑"], ["down", "↓"], ["enter", "⏎"], ["tab", "Tab"],
+              ["shift-tab", "⇧Tab"], ["y", "y"], ["n", "n"], ["ctrl-c", "^C"]];
+const STATE_LABEL = { "waiting": "waiting", "background-waiting": "bg work",
+                      "busy": "busy", "unknown": "?" };
+const STATE_ORDER = { "waiting": 0, "background-waiting": 1, "unknown": 2, "busy": 3 };
+let current = null;
+let timer = null;
+
+const $ = (id) => document.getElementById(id);
+
+async function api(path, body) {
+  const options = body === undefined ? {} : {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Agent-Remote": "1" },
+    body: JSON.stringify(body)
+  };
+  const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+function age(changed) {
+  if (!changed) return "";
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - changed));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h";
+  return Math.floor(s / 86400) + "d";
+}
+
+function setStatus(id, text, isError) {
+  const el = $(id);
+  el.textContent = text;
+  el.classList.toggle("error", !!isError);
+}
+
+async function refreshList() {
+  try {
+    const { sessions } = await api("/api/sessions");
+    sessions.sort((a, b) =>
+      (STATE_ORDER[a.state] ?? 9) - (STATE_ORDER[b.state] ?? 9) ||
+      (b.changed || 0) - (a.changed || 0));
+    const list = $("list");
+    list.replaceChildren();
+    if (!sessions.length) {
+      list.innerHTML = '<p class="empty">No sessions running.</p>';
+    }
+    for (const s of sessions) list.appendChild(card(s));
+    setStatus("list-status", "");
+  } catch (e) {
+    setStatus("list-status", "Offline", true);
+  }
+}
+
+function card(s) {
+  const button = document.createElement("button");
+  button.className = "card " + s.state;
+  const main = document.createElement("div");
+  main.className = "main";
+  const name = document.createElement("div");
+  name.className = "name";
+  name.textContent = s.name;
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = [s.backend, s.account, age(s.changed), s.snoozed ? "snoozed" : ""]
+    .filter(Boolean).join(" · ");
+  main.append(name, meta);
+  const badge = document.createElement("span");
+  badge.className = "badge " + s.state;
+  badge.textContent = STATE_LABEL[s.state] || s.state;
+  button.append(main, badge);
+  button.addEventListener("click", () => openSession(s));
+  return button;
+}
+
+function show(viewId) {
+  for (const v of document.querySelectorAll(".view"))
+    v.classList.toggle("active", v.id === viewId);
+}
+
+function openSession(s) {
+  current = s.id;
+  $("session-title").textContent = s.name;
+  $("output").textContent = "";
+  show("session-view");
+  history.pushState({ session: s.id }, "");
+  refreshSession(true);
+  schedule();
+}
+
+function closeSession() {
+  current = null;
+  show("list-view");
+  refreshList();
+  schedule();
+}
+
+async function refreshSession(forceBottom) {
+  if (!current) return;
+  const id = current;
+  try {
+    const data = await api("/api/output?id=" + encodeURIComponent(id));
+    if (id !== current) return;
+    const out = $("output");
+    const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
+    if (out.textContent !== data.output) out.textContent = data.output;
+    if (forceBottom || atBottom) out.scrollTop = out.scrollHeight;
+    const badge = $("session-badge");
+    badge.className = "badge " + data.state;
+    badge.textContent = STATE_LABEL[data.state] || data.state;
+  } catch (e) {
+    const badge = $("session-badge");
+    badge.className = "badge";
+    badge.textContent = "offline";
+  }
+}
+
+function schedule() {
+  clearInterval(timer);
+  if (document.hidden) return;
+  timer = current ? setInterval(() => refreshSession(false), 1500)
+                  : setInterval(refreshList, 3000);
+}
+
+async function sendKey(key) {
+  if (!current) return;
+  try {
+    await api("/api/key", { id: current, key });
+    setTimeout(() => refreshSession(true), 300);
+  } catch (e) { alertError(e); }
+}
+
+async function sendText() {
+  const area = $("text");
+  const text = area.value;
+  if (!current || !text.trim()) return;
+  $("send").disabled = true;
+  try {
+    await api("/api/send", { id: current, text });
+    area.value = "";
+    autosize();
+    setTimeout(() => refreshSession(true), 400);
+  } catch (e) {
+    alertError(e);
+  } finally {
+    $("send").disabled = false;
+  }
+}
+
+function alertError(e) {
+  const badge = $("session-badge");
+  badge.className = "badge";
+  badge.textContent = "error";
+  $("output").textContent += "\n\n[agent-remote] " + e.message;
+}
+
+function autosize() {
+  const area = $("text");
+  area.style.height = "auto";
+  area.style.height = area.scrollHeight + "px";
+}
+
+for (const [key, label] of KEYS) {
+  const b = document.createElement("button");
+  b.className = "key";
+  b.textContent = label;
+  b.addEventListener("click", () => sendKey(key));
+  $("keys").appendChild(b);
+}
+$("send").addEventListener("click", sendText);
+$("text").addEventListener("input", autosize);
+$("back").addEventListener("click", () => history.back());
+$("wrap").addEventListener("click", () => $("output").classList.toggle("nowrap"));
+window.addEventListener("popstate", () => { if (current) closeSession(); });
+document.addEventListener("visibilitychange", () => {
+  schedule();
+  if (!document.hidden) current ? refreshSession(false) : refreshList();
+});
+refreshList();
+schedule();
+</script>
+</body>
+</html>

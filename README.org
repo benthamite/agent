@@ -638,6 +638,22 @@ Return up to ~agent-claude-submit-retries~ times while the command is still
 sitting there unsubmitted, since Claude Code occasionally swallows the first
 one; the prompt marker's trailing space is a no-break space under =eat=.
 
+** Phone remote control
+:PROPERTIES:
+:CUSTOM_ID: h:phone-remote-control
+:END:
+
+#+findex: agent-remote-mode
+#+vindex: agent-remote-host
+#+vindex: agent-remote-port
+#+vindex: agent-remote-tailscale-program
+#+vindex: agent-remote-output-lines
+The global minor mode ~agent-remote-mode~, in =agent-remote.el=, serves a touch-friendly control page so a phone can watch and unblock sessions. The page lists every live session with its state, backend, account and time in that state, waiting sessions first. Tapping a session shows the last ~agent-remote-output-lines~ lines of its buffer, refreshed every 1.5 seconds. A text box submits a reply through ~agent-submit~, and a row of keys sends single keystrokes to the session's terminal: escape, digits, arrows, return, tab, shift-tab, =y=, =n= and =C-c=. An escape sent to a Claude session goes through ~claude-code-send-escape~, so an interrupted turn is detected as it would be from Emacs. Because the page drives the session buffers themselves, it reaches Claude and Codex sessions under every account. Keys need a terminal session; a session without an EAT terminal accepts only text.
+
+The server listens on ~agent-remote-host~ and ~agent-remote-port~ (default 8787). When ~agent-remote-host~ is nil, the address is this machine's Tailscale IPv4 address, obtained from ~agent-remote-tailscale-program~; if Tailscale is missing or disconnected, enabling the mode signals an error rather than listening elsewhere. Only devices on the tailnet can therefore connect. Two checks keep web pages in a browser on the same machine from using the server: every request must name the server's own address in its =Host= header, which defeats DNS rebinding, and every request that sends input must carry an =X-Agent-Remote= header, which a cross-origin page cannot add without a preflight the server never approves. There is no further authentication, so do not point ~agent-remote-host~ at an address untrusted devices can reach.
+
+The page is =etc/agent-remote.html=, served from the source checkout.
+
 ** Orchestration run view
 :PROPERTIES:
 :CUSTOM_ID: h:orchestration-run-view
