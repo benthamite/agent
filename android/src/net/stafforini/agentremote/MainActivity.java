@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
@@ -16,6 +18,7 @@ import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
@@ -29,8 +32,18 @@ import android.window.OnBackInvokedDispatcher;
 public class MainActivity extends Activity {
   private static final Uri BASE = Uri.parse(BuildConfig.BASE_URL);
 
+  /**
+   * How long an explicit load may take before it counts as failed.  An
+   * unreachable Tailscale peer drops packets rather than refusing them,
+   * so without this the WebView waits minutes for TCP to give up.
+   */
+  private static final long LOAD_TIMEOUT_MS = 15_000;
+
   private WebView web;
   private View errorView;
+  private View loadingView;
+  private final Handler handler = new Handler(Looper.getMainLooper());
+  private final Runnable loadTimeout = this::onLoadTimeout;
   private String failedUrl;
   private boolean backCallbackRegistered;
   private final OnBackInvokedCallback goBack = () -> web.goBack();
@@ -67,11 +80,61 @@ public class MainActivity extends Activity {
     errorView.setVisibility(View.GONE);
     root.addView(errorView);
 
+    loadingView = buildLoadingView();
+    loadingView.setVisibility(View.GONE);
+    root.addView(loadingView);
+
     setContentView(root);
 
     if (state == null || web.restoreState(state) == null) {
-      web.loadUrl(BuildConfig.BASE_URL);
+      load(BuildConfig.BASE_URL);
     }
+  }
+
+  private View buildLoadingView() {
+    LinearLayout box = new LinearLayout(this);
+    box.setOrientation(LinearLayout.VERTICAL);
+    box.setGravity(Gravity.CENTER);
+    box.addView(new ProgressBar(this));
+    TextView msg = new TextView(this);
+    msg.setGravity(Gravity.CENTER);
+    msg.setTextSize(18);
+    msg.setText("Connecting to " + BuildConfig.BASE_URL);
+    box.addView(msg);
+    return box;
+  }
+
+  /** Load URL behind the connecting screen, failing after a timeout. */
+  private void load(String url) {
+    failedUrl = null;
+    errorView.setVisibility(View.GONE);
+    web.setVisibility(View.INVISIBLE);
+    loadingView.setVisibility(View.VISIBLE);
+    handler.removeCallbacks(loadTimeout);
+    handler.postDelayed(loadTimeout, LOAD_TIMEOUT_MS);
+    web.loadUrl(url);
+  }
+
+  private void showPage() {
+    handler.removeCallbacks(loadTimeout);
+    loadingView.setVisibility(View.GONE);
+    errorView.setVisibility(View.GONE);
+    web.setVisibility(View.VISIBLE);
+  }
+
+  private void showError(String url) {
+    handler.removeCallbacks(loadTimeout);
+    failedUrl = url;
+    loadingView.setVisibility(View.GONE);
+    web.setVisibility(View.INVISIBLE);
+    errorView.setVisibility(View.VISIBLE);
+  }
+
+  private void onLoadTimeout() {
+    String url = web.getUrl();
+    showError(url != null && sameOrigin(Uri.parse(url))
+        ? url : BuildConfig.BASE_URL);
+    web.stopLoading();
   }
 
   private View buildErrorView() {
@@ -100,11 +163,7 @@ public class MainActivity extends Activity {
   }
 
   private void retry() {
-    String url = failedUrl != null ? failedUrl : BuildConfig.BASE_URL;
-    failedUrl = null;
-    errorView.setVisibility(View.GONE);
-    web.setVisibility(View.VISIBLE);
-    web.loadUrl(url);
+    load(failedUrl != null ? failedUrl : BuildConfig.BASE_URL);
   }
 
   @Override
@@ -130,6 +189,7 @@ public class MainActivity extends Activity {
 
   @Override
   protected void onDestroy() {
+    handler.removeCallbacks(loadTimeout);
     web.destroy();
     super.onDestroy();
   }
@@ -175,9 +235,16 @@ public class MainActivity extends Activity {
     public void onReceivedError(WebView view, WebResourceRequest req,
                                 WebResourceError err) {
       if (req.isForMainFrame()) {
-        failedUrl = req.getUrl().toString();
-        web.setVisibility(View.INVISIBLE);
-        errorView.setVisibility(View.VISIBLE);
+        showError(req.getUrl().toString());
+      }
+    }
+
+    @Override
+    public void onPageCommitVisible(WebView view, String url) {
+      // Called for the page that replaced an error or connecting
+      // screen; a timed-out load was stopped and never commits.
+      if (failedUrl == null) {
+        showPage();
       }
     }
 
