@@ -66,6 +66,28 @@
   .send:disabled { opacity: .5; }
   .toggle { background: var(--panel-2); border-radius: 10px; padding: 8px 10px;
     font-size: 13px; }
+  .sheet { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none;
+    align-items: flex-end; }
+  .sheet.open { display: flex; }
+  .sheet .panel { width: 100%; max-height: 80vh; overflow-y: auto;
+    background: var(--panel); border-radius: 16px 16px 0 0; padding: 14px;
+    padding-bottom: max(14px, env(safe-area-inset-bottom));
+    display: flex; flex-direction: column; gap: 8px; }
+  .sheet h2 { font-size: 16px; margin: 0 0 4px; }
+  .sheet .note { font-size: 13px; color: var(--muted); margin: 0; }
+  .choice { display: flex; align-items: center; gap: 10px; width: 100%;
+    text-align: left; background: var(--panel-2); border-radius: 12px;
+    padding: 12px; min-height: 56px; border: 2px solid transparent; }
+  .choice.picked { border-color: var(--accent); }
+  .choice:disabled { opacity: .45; }
+  .choice .main { flex: 1; min-width: 0; }
+  .choice .meta { font-size: 13px; color: var(--muted); }
+  .choice .meta.limited { color: var(--error); }
+  .sheet .actions { display: flex; gap: 8px; margin-top: 4px; }
+  .sheet .actions button { flex: 1; height: 48px; border-radius: 12px;
+    background: var(--panel-2); font-weight: 600; }
+  .sheet .actions .go { background: var(--accent); color: #fff; }
+  .sheet .actions .go:disabled { opacity: .5; }
 </style>
 </head>
 <body>
@@ -83,6 +105,7 @@
     <h1 id="session-title"></h1>
     <span id="session-badge" class="badge"></span>
     <button class="toggle" id="wrap">Wrap</button>
+    <button class="toggle" id="restart">Restart</button>
   </header>
   <pre id="output"></pre>
   <div class="keys" id="keys"></div>
@@ -91,6 +114,18 @@
     <button class="send" id="send">Send</button>
   </div>
 </section>
+
+<div class="sheet" id="restart-sheet">
+  <div class="panel">
+    <h2>Restart with account</h2>
+    <p class="note" id="restart-note"></p>
+    <div id="choices"></div>
+    <div class="actions">
+      <button id="restart-cancel">Cancel</button>
+      <button class="go" id="restart-go" disabled>Restart</button>
+    </div>
+  </div>
+</div>
 
 <script>
 "use strict";
@@ -187,6 +222,7 @@ function openSession(s) {
 }
 
 function closeSession() {
+  closeRestart();
   current = null;
   show("list-view");
   refreshList();
@@ -245,6 +281,82 @@ async function sendText() {
   }
 }
 
+let picked = null;
+
+function pct(v) { return v == null ? "–" : Math.round(v) + "%"; }
+
+function choiceMeta(c, sessionAccount, selected) {
+  const tags = [];
+  if (c.name === sessionAccount) tags.push("this session");
+  if (c.name === selected) tags.push("selected");
+  if (c.pool) return [...tags, "pool: " + c.members.join(", ")].join(" · ");
+  if (!c.loggedIn) tags.push("logged out");
+  else if (c.limited) tags.push("at limit");
+  tags.push("week " + pct(c.weekly) + ", session " + pct(c.session) +
+            (c.stale ? " (stale)" : ""));
+  return tags.join(" · ");
+}
+
+async function openRestart() {
+  if (!current) return;
+  picked = null;
+  $("restart-go").disabled = true;
+  $("restart-go").textContent = "Restart";
+  $("choices").replaceChildren();
+  $("restart-note").textContent = "Loading…";
+  $("restart-sheet").classList.add("open");
+  try {
+    const data = await api("/api/accounts?id=" + encodeURIComponent(current));
+    $("restart-note").textContent =
+      "The chosen account also becomes the default for new sessions.";
+    for (const c of data.choices) {
+      const b = document.createElement("button");
+      b.className = "choice";
+      b.disabled = !c.pool && !c.loggedIn;
+      const main = document.createElement("div");
+      main.className = "main";
+      const name = document.createElement("div");
+      name.textContent = c.name;
+      const meta = document.createElement("div");
+      meta.className = "meta" + (c.limited || (!c.pool && !c.loggedIn) ? " limited" : "");
+      meta.textContent = choiceMeta(c, data.account, data.selected);
+      main.append(name, meta);
+      b.append(main);
+      b.addEventListener("click", () => {
+        picked = c.name;
+        for (const other of $("choices").children)
+          other.classList.toggle("picked", other === b);
+        $("restart-go").disabled = false;
+        $("restart-go").textContent = "Restart with " + c.name;
+      });
+      $("choices").appendChild(b);
+    }
+  } catch (e) {
+    $("restart-note").textContent = "Error: " + e.message;
+  }
+}
+
+function closeRestart() {
+  $("restart-sheet").classList.remove("open");
+}
+
+async function doRestart() {
+  if (!current || !picked) return;
+  $("restart-go").disabled = true;
+  $("restart-go").textContent = "Restarting…";
+  try {
+    const data = await api("/api/restart", { id: current, account: picked });
+    closeRestart();
+    current = data.id;
+    $("output").textContent = "";
+    setTimeout(() => refreshSession(true), 1500);
+  } catch (e) {
+    $("restart-note").textContent = "Error: " + e.message;
+    $("restart-go").textContent = "Restart with " + picked;
+    $("restart-go").disabled = false;
+  }
+}
+
 function alertError(e) {
   const badge = $("session-badge");
   badge.className = "badge";
@@ -269,6 +381,12 @@ $("send").addEventListener("click", sendText);
 $("text").addEventListener("input", autosize);
 $("back").addEventListener("click", () => history.back());
 $("wrap").addEventListener("click", () => $("output").classList.toggle("nowrap"));
+$("restart").addEventListener("click", openRestart);
+$("restart-cancel").addEventListener("click", closeRestart);
+$("restart-go").addEventListener("click", doRestart);
+$("restart-sheet").addEventListener("click", (e) => {
+  if (e.target === $("restart-sheet")) closeRestart();
+});
 window.addEventListener("popstate", () => { if (current) closeSession(); });
 document.addEventListener("visibilitychange", () => {
   schedule();

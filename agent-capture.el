@@ -107,12 +107,16 @@ already been inserted."
 (defun agent-capture-confirm-no-pending (backend buffer action)
   "Confirm ACTION for BACKEND session BUFFER when captures are pending.
 Return non-nil when ACTION may proceed."
-  (let ((count (length (agent-capture--prompts backend buffer))))
+  (let ((count (agent-capture-pending-count backend buffer)))
     (or (zerop count)
         (yes-or-no-p
          (format "%s has %d captured prompt%s.  %s anyway? "
                  (agent-display-name buffer) count
                  (if (= count 1) "" "s") action)))))
+
+(defun agent-capture-pending-count (backend buffer)
+  "Return the number of prompts captured for BACKEND session BUFFER."
+  (length (agent-capture--prompts backend buffer)))
 
 (defun agent-capture--file (backend buffer)
   "Return the Org capture file for BACKEND session BUFFER."

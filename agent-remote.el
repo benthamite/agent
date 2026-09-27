@@ -28,7 +28,8 @@
 ;; AI sessions.  `agent-remote-mode' serves a touch-friendly page and a
 ;; JSON API on the machine's Tailscale address: the page lists every
 ;; session with its state and account, shows a session's recent
-;; output, and sends typed replies and single keys to it.  Because it
+;; output, sends typed replies and single keys to it, and restarts it
+;; under another account when it has run out of usage.  Because it
 ;; drives the session buffers themselves, it reaches Claude and Codex
 ;; sessions under every account alike.
 ;;
@@ -297,6 +298,8 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
           (agent-remote--json (list :sessions (agent-remote--sessions))))
          ((and (equal method "GET") (equal path "/api/output"))
           (agent-remote--json (agent-remote--output request)))
+         ((and (equal method "GET") (equal path "/api/accounts"))
+          (agent-remote--json (agent-remote--accounts request)))
          ((not (equal method "POST"))
           (agent-remote--error "405 Method Not Allowed" "Method not allowed"))
          ((not (assoc "x-agent-remote" (plist-get request :headers)))
@@ -305,6 +308,8 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
           (agent-remote--json (agent-remote--send request)))
          ((equal path "/api/key")
           (agent-remote--json (agent-remote--key request)))
+         ((equal path "/api/restart")
+          (agent-remote--json (agent-remote--restart request)))
          (t (agent-remote--error "404 Not Found" "Not found"))))
     (user-error (agent-remote--error "400 Bad Request" (cadr err)))
     (error (agent-remote--error "500 Internal Server Error"
@@ -409,6 +414,44 @@ so the session notices when the escape interrupts a running turn."
         (claude-code-send-escape)
       (eat-term-send-string eat-terminal
                             (cdr (assoc key agent-remote--keys))))))
+
+(defun agent-remote--accounts (request)
+  "Return the accounts the session named by REQUEST can restart under.
+The result lists the backend's pools and accounts in the order
+`agent-account-select' offers them, with each account's latest usage."
+  (let* ((buffer (agent-remote--session-buffer
+                  (agent-remote--query-param request "id")))
+         (backend (agent--detect-backend buffer)))
+    (list :account (agent--session-account-name buffer)
+          :selected (agent-account-current backend)
+          :choices (vconcat
+                    (mapcar (lambda (name)
+                              (agent-remote--account-choice backend name))
+                            (agent-account-selection-names backend))))))
+
+(defun agent-remote--account-choice (backend name)
+  "Return a plist describing BACKEND's account or pool NAME for the phone."
+  (if (agent-account-pool-p backend name)
+      (list :name name :pool t
+            :members (vconcat (agent-account-pool-members backend name)))
+    (let ((usage (agent-usage-get backend name)))
+      (list :name name :pool :false
+            :weekly (plist-get usage :weekly-pct)
+            :session (plist-get usage :session-pct)
+            :stale (if (and usage (not (agent-usage-fresh-p usage))) t :false)
+            :limited (if (agent-account--limited-p backend name) t :false)
+            :loggedIn (if (agent-account-logged-in-p backend name) t :false)))))
+
+(defun agent-remote--restart (request)
+  "Restart the session named in REQUEST's JSON body under its account.
+Return the name of the new session buffer, which the phone follows."
+  (let* ((args (agent-remote--json-body request))
+         (buffer (agent-remote--session-buffer (alist-get 'id args)))
+         (account (alist-get 'account args)))
+    (unless (stringp account)
+      (user-error "No account given"))
+    (list :ok t
+          :id (buffer-name (agent-restart-with-account buffer account)))))
 
 (defun agent-remote--json-body (request)
   "Return REQUEST's body parsed as a JSON object, as an alist."

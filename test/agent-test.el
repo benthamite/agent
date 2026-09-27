@@ -1781,6 +1781,99 @@ and globally persisting -- an account the session never had."
             (should (equal captured '(:resume-id "sid-123")))))
       (delete-directory agent-prompt-capture-directory t))))
 
+;;;; Restart with account
+
+(defmacro agent-test--with-restartable-session (&rest body)
+  "Run BODY in a session of backend `one' whose account is \"e2\".
+Backend `one' has accounts e1 and e2 in pool p and personal outside it.
+Inside BODY, `killed' and `resumed' record the kill and the resumed
+session's account and id, and `synced' the synced selections."
+  (declare (indent 0))
+  `(let ((agent-backends nil)
+         (agent-account--current (make-hash-table :test #'eq))
+         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+         killed resumed synced)
+     (unwind-protect
+         (with-temp-buffer
+           (setq-local agent--session
+                       (agent-session-create :backend 'one :account "e2"
+                                             :directory "~/repo/"
+                                             :instance "test"
+                                             :id "sid-123"))
+           (apply #'agent-register-backend
+            'one
+            (agent-test--backend
+             :accounts '(("e1" :home "/tmp/e1" :pool "p")
+                         ("e2" :home "/tmp/e2" :pool "p")
+                         ("personal" :home "/tmp/personal"))
+             :session-identity (lambda (_buffer) "sid-123")))
+           (puthash 'one "e2" agent-account--current)
+           (cl-letf (((symbol-function 'agent-account--save) #'ignore)
+                     ((symbol-function 'agent-account-sync-selection)
+                      (lambda (_backend selection) (push selection synced)))
+                     ((symbol-function 'completing-read)
+                      (lambda (&rest _) (ert-fail "Unexpected prompt")))
+                     ((symbol-function 'yes-or-no-p)
+                      (lambda (&rest _) (ert-fail "Unexpected prompt")))
+                     ((symbol-function 'agent--force-kill-buffer)
+                      (lambda (_buffer) (setq killed t)))
+                     ((symbol-function 'agent-start-session)
+                      (lambda (session &rest options)
+                        (setq resumed
+                              (list (agent-session-account session)
+                                    (plist-get options :resume-id)))
+                        'new-buffer)))
+             ,@body))
+       (delete-directory agent-prompt-capture-directory t))))
+
+(ert-deftest agent-test-restart-with-account-selects-and-resumes ()
+  "Restarting with an account selects it and resumes the session under it."
+  (agent-test--with-restartable-session
+    (should (eq (agent-restart-with-account (current-buffer) "personal")
+                'new-buffer))
+    (should killed)
+    (should (equal resumed '("personal" "sid-123")))
+    (should (equal (agent-account-current 'one) "personal"))
+    (should (equal synced '("personal")))))
+
+(ert-deftest agent-test-restart-with-account-routes-pool ()
+  "Restarting with a pool selects the pool and resumes under a member."
+  (agent-test--with-restartable-session
+    (cl-letf (((symbol-function 'agent-account-route) (lambda (&rest _) "e1")))
+      (agent-restart-with-account (current-buffer) "p"))
+    (should (equal resumed '("e1" "sid-123")))
+    (should (equal (agent-account-current 'one) "p"))))
+
+(ert-deftest agent-test-restart-with-account-rejects-unknown-account ()
+  "An unknown account leaves the session and the selection untouched."
+  (agent-test--with-restartable-session
+    (should-error (agent-restart-with-account (current-buffer) "nope")
+                  :type 'user-error)
+    (should-not killed)
+    (should (equal (agent-account-current 'one) "e2"))))
+
+(ert-deftest agent-test-restart-with-account-logged-out-keeps-session ()
+  "A logged-out account leaves the session and the selection untouched."
+  (agent-test--with-restartable-session
+    (cl-letf (((symbol-function 'agent-account-logged-in-p)
+               (lambda (_backend account) (not (equal account "personal")))))
+      (should-error (agent-restart-with-account (current-buffer) "personal")
+                    :type 'user-error))
+    (should-not killed)
+    (should-not synced)
+    (should (equal (agent-account-current 'one) "e2"))))
+
+(ert-deftest agent-test-restart-with-account-refuses-captured-prompts ()
+  "Pending captured prompts refuse the restart instead of prompting."
+  (agent-test--with-restartable-session
+    (let ((file (agent-capture--file 'one (current-buffer))))
+      (make-directory (file-name-directory file) t)
+      (with-temp-file file
+        (insert "* Prompt A\n\nAlpha\n")))
+    (should-error (agent-restart-with-account (current-buffer) "personal")
+                  :type 'user-error)
+    (should-not killed)))
+
 (ert-deftest agent-test-handoff-carries-source-session ()
   "Start the handoff session with the source buffer's account and directory."
   (let* ((agent-backends nil)

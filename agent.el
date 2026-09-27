@@ -833,6 +833,8 @@ hours; an indefinite snooze arms no timer.")
                   (&optional existing))
 (declare-function agent-capture-confirm-no-pending "agent-capture"
                   (backend buffer action))
+(declare-function agent-capture-pending-count "agent-capture"
+                  (backend buffer))
 (declare-function consult--read "consult" (table &rest options))
 
 ;;;; Theme sync
@@ -3625,21 +3627,58 @@ again according to current usage, without prompting."
          (backend (agent-session-backend session))
          (buffer (current-buffer)))
     (when (agent--confirm-no-captured-prompts backend buffer "Restart")
-      (let* ((struct (agent-backend backend))
-             (identity-fn (and struct (agent-backend-session-identity struct)))
-             (session-id (or (and identity-fn (funcall identity-fn buffer))
-                             (user-error "Current session has no session id")))
-             (extra-options
-              (when-let* ((fn (and struct
-                                   (agent-backend-restart-options struct))))
-                (funcall fn buffer)))
-             (account (agent-restart--account
-                       backend (agent-session-account session))))
-        (agent-check-session-start backend account)
-        (setf (agent-session-account session) account)
-        (agent--force-kill-buffer buffer)
-        (apply #'agent-start-session session
-               :resume-id session-id extra-options)))))
+      (agent--restart-session
+       buffer (lambda ()
+                (agent-restart--account
+                 backend (agent-session-account session)))))))
+
+(defun agent-restart-with-account (buffer selection)
+  "Restart session BUFFER under the account or pool SELECTION.
+Equivalent to selecting SELECTION with `agent-account-select' and then
+choosing it when `agent-restart' asks which account to use, so the
+selection also becomes the default for new sessions.  A pool is routed
+to one of its members.  Never prompts: refuse instead when BUFFER has
+captured prompts, which the account change would orphan.  Return the
+new session buffer."
+  (let* ((session (or (agent-session buffer)
+                      (user-error "Not an AI session buffer: %s" buffer)))
+         (backend (agent-session-backend session)))
+    (unless (member selection (agent-account-selection-names backend))
+      (user-error "No %s account or pool named `%s'" backend selection))
+    (when (and (require 'agent-capture nil t)
+               (> (agent-capture-pending-count backend buffer) 0))
+      (user-error "%s has captured prompts; restart it from Emacs"
+                  (agent-display-name buffer)))
+    (agent--restart-session
+     buffer (lambda ()
+              (let ((account (agent-restart--ensure-account
+                              backend
+                              (agent-account--route-selection
+                               backend selection))))
+                (agent-check-session-start backend account)
+                (agent-account-set backend selection)
+                (agent-account-sync-selection backend selection)
+                account)))))
+
+(defun agent--restart-session (buffer account-fn)
+  "Kill session BUFFER and resume it; return the new session buffer.
+ACCOUNT-FN is called with no arguments once BUFFER is known to be
+restartable, and returns the account to resume under."
+  (let* ((session (agent-session buffer))
+         (backend (agent-session-backend session))
+         (struct (agent-backend backend))
+         (identity-fn (and struct (agent-backend-session-identity struct)))
+         (session-id (or (and identity-fn (funcall identity-fn buffer))
+                         (user-error "Current session has no session id")))
+         (extra-options
+          (when-let* ((fn (and struct (agent-backend-restart-options struct))))
+            (funcall fn buffer)))
+         (account (funcall account-fn)))
+    (agent-check-session-start backend account)
+    (setf (agent-session-account session) account)
+    (agent--force-kill-buffer buffer)
+    (apply #'agent-start-session session
+           :resume-id session-id extra-options)))
 
 (defun agent-restart--account (backend session-account)
   "Return the account to restart a BACKEND session with.

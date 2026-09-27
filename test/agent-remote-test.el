@@ -276,6 +276,51 @@ HOST overrides the Host header, which defaults to the server's own."
                        '("X-Agent-Remote: 1"))))
         (should (= (agent-remote-test--status response) 400))))))
 
+(ert-deftest agent-remote-test-accounts-lists-choices-with-usage ()
+  "The accounts endpoint lists pools and accounts with their usage."
+  (agent-remote-test--with-session buffer
+    (cl-letf (((symbol-function 'agent-account-current) (lambda (_) "p"))
+              ((symbol-function 'agent-account-selection-names)
+               (lambda (_) '("p" "e1")))
+              ((symbol-function 'agent-account-pool-p)
+               (lambda (_ name) (equal name "p")))
+              ((symbol-function 'agent-account-pool-members)
+               (lambda (&rest _) '("e1")))
+              ((symbol-function 'agent-usage-get)
+               (lambda (&rest _) (list :weekly-pct 100.0 :session-pct 20.0
+                                       :fetched-at (float-time))))
+              ((symbol-function 'agent-account-logged-in-p) (lambda (&rest _) t)))
+      (agent-remote-test--with-server
+        (let* ((data (agent-remote-test--json
+                      (agent-remote-test--http
+                       "GET" (concat "/api/accounts?id="
+                                     (url-hexify-string (buffer-name buffer))))))
+               (choices (alist-get 'choices data)))
+          (should (equal (alist-get 'account data) "personal"))
+          (should (equal (alist-get 'selected data) "p"))
+          (should (equal (mapcar (lambda (c) (alist-get 'name c)) choices)
+                         '("p" "e1")))
+          (should (equal (alist-get 'members (car choices)) '("e1")))
+          (should (eq (alist-get 'limited (cadr choices)) t))
+          (should (equal (alist-get 'weekly (cadr choices)) 100.0)))))))
+
+(ert-deftest agent-remote-test-restart-uses-chosen-account ()
+  "The restart endpoint restarts the session with the chosen account."
+  (agent-remote-test--with-session buffer
+    (let (called)
+      (cl-letf (((symbol-function 'agent-restart-with-account)
+                 (lambda (buf account) (setq called (list buf account)) buf)))
+        (agent-remote-test--with-server
+          (let ((response (agent-remote-test--http
+                           "POST" "/api/restart"
+                           (json-serialize (list :id (buffer-name buffer)
+                                                 :account "work"))
+                           '("X-Agent-Remote: 1"))))
+            (should (= (agent-remote-test--status response) 200))
+            (should (equal (alist-get 'id (agent-remote-test--json response))
+                           (buffer-name buffer)))
+            (should (equal called (list buffer "work")))))))))
+
 (ert-deftest agent-remote-test-connections-are-cleaned-up ()
   "Closed client connections do not accumulate as processes."
   (agent-remote-test--with-server
