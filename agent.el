@@ -488,6 +488,7 @@ session releases its resources exactly once."
     (setq agent--session session)
     (setq agent--backend (agent-session-backend session)))
   (agent--install-session-teardown buffer)
+  (agent--schedule-session-registry-save)
   session)
 
 (defcustom agent-session-id-functions nil
@@ -551,6 +552,7 @@ variables."
       (unless (equal (agent-session-id session) id)
         (setf (agent-session-id session) id)
         (with-current-buffer buffer (setq agent--session-published-status nil))
+        (agent--schedule-session-registry-save)
         (run-hook-with-args 'agent-session-id-functions buffer)))))
 
 (defun agent-session-buffers ()
@@ -917,6 +919,7 @@ first call has any effect."
              (agent--report-leak "teardown function" "%S signaled: %S" fn err))))
         (setq agent--teardown-functions nil)
         (remhash buffer agent--session-keys)
+        (agent--schedule-session-registry-save)
         (agent--refresh-display-names-deferred)))))
 
 (defun agent--report-leak (kind format &rest args)
@@ -3723,6 +3726,173 @@ transcript from account-scoped history browsers."
     (user-error "Account `%s' is not configured" account))
   account)
 
+;;;; Session registry across Emacs restarts
+
+(defcustom agent-session-registry-file
+  (locate-user-emacs-file "agent-sessions.eld")
+  "File recording the live sessions of every running Emacs.
+Each Emacs rewrites its own record whenever a session starts, learns its
+id, or ends, so the file stays current even when Emacs dies without
+running its exit hooks.  `agent-restore-sessions' reads it to resume the
+sessions of the last Emacs that died."
+  :type 'file
+  :group 'agent)
+
+(defvar agent--session-registry-timer nil
+  "Timer that saves the session registry after sessions change.")
+
+;;;###autoload
+(defun agent-restore-sessions ()
+  "Resume the sessions that were live when the last Emacs died.
+Whether that Emacs quit, crashed, or went down with the machine, its
+sessions are the ones last recorded in `agent-session-registry-file'.
+Each is resumed with its backend, account, directory, instance, and
+session id; sessions already live in this Emacs are skipped.  Sessions
+that fail to resume stay recorded, so the command can be run again."
+  (interactive)
+  (let* ((previous (plist-get (agent--save-session-registry) :previous))
+         (pending (seq-remove (lambda (entry)
+                                (agent--buffer-for-session-id
+                                 (plist-get entry :id)))
+                              (plist-get previous :sessions))))
+    (unless pending
+      (user-error "No sessions to restore"))
+    (when (y-or-n-p (format "Resume %d session%s last recorded %s? "
+                            (length pending)
+                            (if (cdr pending) "s" "")
+                            (format-time-string
+                             "%F %R" (plist-get previous :saved))))
+      (let ((failed (agent--restore-session-entries pending)))
+        (agent--write-session-registry
+         (plist-put (agent--save-session-registry) :previous
+                    (and failed (list :saved (plist-get previous :saved)
+                                      :sessions (mapcar #'car failed)))))
+        (if failed
+            (message "Resumed %d of %d sessions; failed: %s"
+                     (- (length pending) (length failed)) (length pending)
+                     (mapconcat #'cdr failed "; "))
+          (message "Resumed %d session%s" (length pending)
+                   (if (cdr pending) "s" "")))))))
+
+(defun agent--restore-session-entries (entries)
+  "Resume each registry entry in ENTRIES.
+Return a list of (ENTRY . ERROR-MESSAGE) for the entries that failed."
+  (let (failed)
+    (dolist (entry entries)
+      (condition-case err
+          (apply #'agent-start-session
+                 (agent-session-create
+                  :backend (plist-get entry :backend)
+                  :account (plist-get entry :account)
+                  :directory (plist-get entry :directory)
+                  :instance (plist-get entry :instance))
+                 :resume-id (plist-get entry :id)
+                 (plist-get entry :options))
+        (error
+         (push (cons entry (format "%s: %s" (plist-get entry :directory)
+                                   (error-message-string err)))
+               failed))))
+    (nreverse failed)))
+
+(defun agent--schedule-session-registry-save ()
+  "Save the session registry shortly, coalescing bursts of changes.
+Batch Emacs never records its sessions, so test and script runs cannot
+displace the sessions of the Emacs that died last."
+  (unless (or noninteractive agent--session-registry-timer)
+    (setq agent--session-registry-timer
+          (run-with-timer 1 nil #'agent--save-session-registry))))
+
+(defun agent--save-session-registry ()
+  "Record this Emacs's live sessions in `agent-session-registry-file'.
+Return the registry written."
+  (setq agent--session-registry-timer nil)
+  (agent--write-session-registry
+   (agent--session-registry-update (agent--read-session-registry)
+                                   (agent--emacs-instance)
+                                   (agent--session-registry-entries)
+                                   (float-time))))
+
+(defun agent--session-registry-update (registry self entries now)
+  "Return REGISTRY with SELF's live sessions set to ENTRIES as of NOW.
+SELF is a plist with the `:pid' and `:start' of this Emacs.  The
+sessions of every other recorded Emacs that is no longer running become
+the registry's `:previous' sessions, replacing the earlier ones, unless
+none of them had sessions."
+  (let (live dead-sessions dead-saved)
+    (dolist (instance (plist-get registry :instances))
+      (cond
+       ((agent--same-emacs-instance-p instance self))
+       ((agent--emacs-instance-live-p instance) (push instance live))
+       (t (setq dead-sessions (append dead-sessions
+                                      (plist-get instance :sessions))
+                dead-saved (max (or dead-saved 0)
+                                (plist-get instance :saved))))))
+    (list :previous (if dead-sessions
+                        (list :saved dead-saved :sessions dead-sessions)
+                      (plist-get registry :previous))
+          :instances (cons (append self (list :saved now :sessions entries))
+                           (nreverse live)))))
+
+(defun agent--emacs-instance ()
+  "Return a plist identifying this Emacs process by `:pid' and `:start'."
+  (list :pid (emacs-pid)
+        :start (alist-get 'start (process-attributes (emacs-pid)))))
+
+(defun agent--same-emacs-instance-p (a b)
+  "Return non-nil when instance plists A and B name the same process."
+  (and (equal (plist-get a :pid) (plist-get b :pid))
+       (equal (plist-get a :start) (plist-get b :start))))
+
+(defun agent--emacs-instance-live-p (instance)
+  "Return non-nil when the Emacs process INSTANCE describes is running.
+Compare the process start time too, because a reboot reuses pids."
+  (when-let* ((start (plist-get instance :start))
+              (attributes (process-attributes (plist-get instance :pid)))
+              (actual (alist-get 'start attributes)))
+    (time-equal-p actual start)))
+
+(defun agent--session-registry-entries ()
+  "Return registry entries for this Emacs's resumable live sessions."
+  (delq nil (mapcar #'agent--session-registry-entry
+                    (agent-session-buffers))))
+
+(defun agent--session-registry-entry (buffer)
+  "Return the registry entry for session BUFFER, or nil.
+A session is recorded only while it is live and its native id is known,
+because only then can it be resumed."
+  (when-let* (((not (buffer-local-value 'agent--teardown-done buffer)))
+              (session (agent-session buffer))
+              (id (agent-session-id session)))
+    (list :backend (agent-session-backend session)
+          :account (agent-session-account session)
+          :directory (agent-session-directory session)
+          :instance (agent-session-instance session)
+          :id id
+          :options (when-let* ((struct (agent-backend
+                                        (agent-session-backend session)))
+                               (fn (agent-backend-restart-options struct)))
+                     (funcall fn buffer)))))
+
+(defun agent--read-session-registry ()
+  "Return the registry stored in `agent-session-registry-file', or nil."
+  (when (file-exists-p agent-session-registry-file)
+    (with-temp-buffer
+      (insert-file-contents agent-session-registry-file)
+      (read (current-buffer)))))
+
+(defun agent--write-session-registry (registry)
+  "Atomically write REGISTRY to `agent-session-registry-file'; return it."
+  (let ((temp (make-temp-file (expand-file-name
+                               "agent-sessions-"
+                               (file-name-directory
+                                agent-session-registry-file)))))
+    (with-temp-file temp
+      (let ((print-length nil)
+            (print-level nil))
+        (prin1 registry (current-buffer))))
+    (rename-file temp agent-session-registry-file t))
+  registry)
+
 ;;;; Transient boolean infix class
 
 (eval-and-compile
@@ -4139,6 +4309,7 @@ when it is not installed."
   [["Sessions"
     ("n" "new session" agent-start-new-session)
     ("r" "resume session" agent-resume)
+    ("O" "restore sessions" agent-restore-sessions)
     ("s" "select session" agent-select-session)
     ("w" "jump to waiting" agent-jump-to-waiting)
     ("l" "open log" agent-history)]

@@ -3700,13 +3700,14 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
 (ert-deftest agent-test-menu-binds-the-unified-commands ()
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
-    (dolist (key '("l" "r" "R" "s" "b n" "b s" "a l" "a u" "n" "X" "-a" "-c" "-w"
+    (dolist (key '("l" "r" "O" "R" "s" "b n" "b s" "a l" "a u" "n" "X" "-a" "-c" "-w"
                    "t ." "t r" "t a" "t c" "t o" "p c" "p i" "p b"))
       (should (member key keys)))
     (dolist (key '("H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
                    "." "e" "N" "B" "L" "u" "a" "c" "o" "p" "i" "b"))
       (should-not (member key keys))))
   (dolist (binding '(("r" . agent-resume)
+                     ("O" . agent-restore-sessions)
                      ("R" . agent-restart)
                      ("s" . agent-select-session)))
     (should (eq (plist-get (cdr (transient-get-suffix 'agent-menu (car binding)))
@@ -4630,6 +4631,104 @@ is itself a kind of `error' and nothing here should special-case it."
               ((symbol-function 'transient--show) #'ignore))
       (transient-infix-set obj (transient-infix-read obj)))
     (should (equal selected '(claude-code . "epoch")))))
+
+;;;; Session registry
+
+(ert-deftest agent-test-session-registry-promotes-dead-instances ()
+  "Sessions of dead Emacs instances become the previous sessions."
+  (let* ((self '(:pid 1 :start (0 1)))
+         (live '(:pid 2 :start (0 2) :saved 5.0 :sessions ((:id "live"))))
+         (dead-a '(:pid 3 :start (0 3) :saved 7.0 :sessions ((:id "a"))))
+         (dead-b '(:pid 4 :start (0 4) :saved 9.0 :sessions ((:id "b"))))
+         (registry (list :previous '(:saved 1.0 :sessions ((:id "old")))
+                         :instances (list '(:pid 1 :start (0 1) :saved 3.0
+                                                 :sessions ((:id "stale")))
+                                          live dead-a dead-b))))
+    (cl-letf (((symbol-function 'agent--emacs-instance-live-p)
+               (lambda (instance) (eq instance live))))
+      (let ((updated (agent--session-registry-update
+                      registry self '((:id "mine")) 10.0)))
+        (should (equal (plist-get updated :previous)
+                       '(:saved 9.0 :sessions ((:id "a") (:id "b")))))
+        (should (equal (plist-get updated :instances)
+                       (list '(:pid 1 :start (0 1) :saved 10.0
+                                    :sessions ((:id "mine")))
+                             live)))))))
+
+(ert-deftest agent-test-session-registry-keeps-previous-over-empty-dead ()
+  "A dead instance without sessions leaves the previous sessions alone."
+  (let ((registry '(:previous (:saved 1.0 :sessions ((:id "old")))
+                              :instances ((:pid 3 :start (0 3) :saved 7.0
+                                                :sessions nil)))))
+    (cl-letf (((symbol-function 'agent--emacs-instance-live-p) #'ignore))
+      (should (equal (plist-get (agent--session-registry-update
+                                 registry '(:pid 1 :start (0 1)) nil 10.0)
+                                :previous)
+                     '(:saved 1.0 :sessions ((:id "old"))))))))
+
+(ert-deftest agent-test-emacs-instance-live-p-checks-start-time ()
+  "A reused pid with a different start time is not the recorded Emacs."
+  (let ((self (agent--emacs-instance)))
+    (should (agent--emacs-instance-live-p self))
+    (should-not (agent--emacs-instance-live-p
+                 (list :pid (emacs-pid) :start '(0 1))))))
+
+(ert-deftest agent-test-session-registry-entry-records-resume-state ()
+  "Entries carry the identity and restart options of live sessions only."
+  (let ((agent-backends nil))
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buf))
+                :restart-options (lambda (_buffer) '(:terminal-backend eat))))
+        (agent--set-session buf (agent-session-create
+                                 :backend 'one :account "acct"
+                                 :directory "~/repo/project/"
+                                 :instance "default"))
+        (should-not (agent--session-registry-entry buf))
+        (setf (agent-session-id (agent-session buf)) "sid-1")
+        (should (equal (agent--session-registry-entry buf)
+                       '(:backend one :account "acct"
+                                  :directory "~/repo/project/"
+                                  :instance "default" :id "sid-1"
+                                  :options (:terminal-backend eat))))
+        (setq agent--teardown-done t)
+        (should-not (agent--session-registry-entry buf))))))
+
+(ert-deftest agent-test-restore-sessions-resumes-previous ()
+  "Restore resumes previous sessions and keeps only the failures recorded."
+  (let* ((agent-session-registry-file (make-temp-file "agent-sessions"))
+         (ok '(:backend one :account "a" :directory "~/ok/" :instance nil
+                        :id "sid-ok" :options (:x 1)))
+         (bad '(:backend one :account "a" :directory "~/bad/" :instance nil
+                         :id "sid-bad" :options nil))
+         (live '(:backend one :account "a" :directory "~/live/" :instance nil
+                          :id "sid-live" :options nil))
+         started)
+    (unwind-protect
+        (progn
+          (agent--write-session-registry
+           (list :previous (list :saved 100.0 :sessions (list ok bad live))
+                 :instances nil))
+          (cl-letf (((symbol-function 'agent--session-registry-entries)
+                     #'ignore)
+                    ((symbol-function 'agent--buffer-for-session-id)
+                     (lambda (id) (equal id "sid-live")))
+                    ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                    ((symbol-function 'agent-start-session)
+                     (lambda (session &rest options)
+                       (when (equal (agent-session-directory session) "~/bad/")
+                         (error "Boom"))
+                       (push (cons (agent-session-account session) options)
+                             started))))
+            (agent-restore-sessions))
+          (should (equal started '(("a" :resume-id "sid-ok" :x 1))))
+          (should (equal (plist-get (agent--read-session-registry) :previous)
+                         (list :saved 100.0 :sessions (list bad)))))
+      (delete-file agent-session-registry-file))))
 
 (provide 'agent-test)
 ;;; agent-test.el ends here
