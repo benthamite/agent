@@ -15,6 +15,14 @@ case $type in
 esac
 buf=${CLAUDE_BUFFER_NAME:-}
 [ -n "$buf" ] || exit 0
+# Emacs mirrors each session's state to a file keyed like the statusline
+# file.  An `activity' event for a session Emacs already marks busy changes
+# nothing, so skip the emacsclient call; a missing or unreadable file sends.
+if [ "$type" = activity ] && [ -n "${AGENT_SESSION_UUID:-}" ]; then
+  state_dir=${AGENT_CLAUDE_STATUS_DIR:-${TMPDIR:-/tmp}/claude-code-status}
+  key=$(printf '%s' "$AGENT_SESSION_UUID" | shasum -a 256 | awk '{print $1}')
+  [ "$(cat "$state_dir/$key.state" 2>/dev/null)" = busy ] && exit 0
+fi
 sent=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')
 # Escape backslashes and double-quotes so the value is safe inside an Elisp string.
 buf=${buf//\\/\\\\}

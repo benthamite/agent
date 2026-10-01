@@ -146,6 +146,15 @@ directories exist only in the checkout."
   :type 'directory
   :group 'agent-claude)
 
+(defcustom agent-claude-settings-package-directory nil
+  "Agent checkout directory written into Claude Code settings, or nil.
+Nil writes the loaded checkout, `agent-claude--package-directory'.  Set
+it to a path through a symlink that follows the active configuration, so
+the hook and statusline commands in settings keep working after the
+loaded checkout changes."
+  :type '(choice (const :tag "Loaded checkout" nil) directory)
+  :group 'agent-claude)
+
 (defcustom agent-claude-statusline-script
   (expand-file-name "etc/claude-code-statusline.sh"
                     agent-claude--package-directory)
@@ -872,10 +881,39 @@ buffer name for sessions started before the UUID existed."
    agent-claude-status-directory))
 
 (defun agent-claude--cleanup-status-file ()
-  "Delete the status file for the current buffer."
-  (let ((file (agent-claude--status-file)))
-    (when (file-exists-p file)
+  "Delete the status and state files for the current buffer."
+  (dolist (file (list (agent-claude--status-file)
+                      (agent-claude--state-file (current-buffer))))
+    (when (and file (file-exists-p file))
       (delete-file file))))
+
+(defun agent-claude--state-file (buffer)
+  "Return the file mirroring BUFFER's lifecycle state for its hooks, or nil.
+The file is keyed like the status file, by the per-process UUID, so a
+restarted session never reads a dead process's state.  Sessions without
+the UUID have no state file."
+  (when-let* ((uuid (buffer-local-value 'agent-claude--status-uuid buffer)))
+    (expand-file-name (concat (secure-hash 'sha256 uuid) ".state")
+                      agent-claude-status-directory)))
+
+(defun agent-claude--record-state (buffer state)
+  "Mirror STATE of Claude session BUFFER to its state file.
+`notify-emacs-state.sh' reads the file and skips an `activity' event
+for a session already marked busy, which Emacs would ignore anyway.
+If the write fails, delete the file so the hook falls back to sending."
+  (when-let* (((agent-claude--publisher-token buffer))
+              (file (agent-claude--state-file buffer)))
+    (condition-case err
+        (progn
+          (make-directory (file-name-directory file) t)
+          (write-region (if (eq state 'busy) "busy" "waiting")
+                        nil file nil 'silent))
+      (error
+       (ignore-errors (delete-file file))
+       (message "agent-claude: cannot record session state: %s"
+                (error-message-string err))))))
+
+(add-hook 'agent-session-state-change-functions #'agent-claude--record-state)
 
 (defconst agent-claude--status-file-max-age (* 7 24 60 60)
   "Seconds after which an unclaimed status file is considered stale.")
@@ -883,7 +921,8 @@ buffer name for sessions started before the UUID existed."
 (defun agent-claude--sweep-stale-status-files ()
   "Delete status files older than `agent-claude--status-file-max-age'."
   (when (file-directory-p agent-claude-status-directory)
-    (dolist (file (directory-files agent-claude-status-directory t "\\.json\\'"))
+    (dolist (file (directory-files agent-claude-status-directory t
+                                   "\\.\\(?:json\\|state\\)\\'"))
       (when-let* ((mtime (file-attribute-modification-time
                           (file-attributes file))))
         (when (> (float-time (time-subtract (current-time) mtime))
@@ -1788,7 +1827,8 @@ FILE defaults to `agent-claude-settings-file'.  See
 
 (defun agent-claude--statusline-entry ()
   "Return the JSON object for the Claude Code statusline command."
-  (agent-claude--require-executable agent-claude-statusline-script)
+  (agent-claude--require-executable
+   (agent-claude--settings-path agent-claude-statusline-script))
   (let ((entry (make-hash-table :test #'equal)))
     (puthash "type" "command" entry)
     (puthash "command" (agent-claude--statusline-command) entry)
@@ -1801,7 +1841,20 @@ FILE defaults to `agent-claude-settings-file'.  See
           (shell-quote-argument
            (directory-file-name
             (expand-file-name agent-claude-status-directory)))
-          (shell-quote-argument agent-claude-statusline-script)))
+          (shell-quote-argument
+           (agent-claude--settings-path agent-claude-statusline-script))))
+
+(defun agent-claude--settings-path (file)
+  "Return FILE as written into Claude Code settings.
+A FILE inside the loaded checkout is re-rooted under
+`agent-claude-settings-package-directory' when that is set."
+  (let ((directory agent-claude-settings-package-directory))
+    (if (and directory
+             (file-in-directory-p file agent-claude--package-directory))
+        (expand-file-name
+         (file-relative-name file agent-claude--package-directory)
+         directory)
+      file)))
 
 (defun agent-claude--ensure-stop-hook (settings)
   "Ensure SETTINGS has the agent Stop hook."
@@ -1825,10 +1878,49 @@ FILE defaults to `agent-claude-settings-file'.  See
 `StopFailure' ends a turn on an API error, which fires no Stop hook.")
 
 (defun agent-claude--ensure-state-hooks (settings)
-  "Ensure SETTINGS has every hook in `agent-claude--state-hook-events'."
+  "Ensure SETTINGS has every hook in `agent-claude--state-hook-events'.
+Remove any other `notify-emacs-state.sh' command under the same hook
+first, such as one pointing at a previously loaded checkout, so each
+hook forwards its event exactly once."
   (pcase-dolist (`(,name . ,type) agent-claude--state-hook-events)
-    (agent-claude--ensure-hook
-     settings name (agent-claude--state-hook-command type) 5)))
+    (let ((command (agent-claude--state-hook-command type)))
+      (agent-claude--remove-hook-commands
+       settings name
+       (lambda (candidate)
+         (and (not (equal candidate command))
+              (string-match-p "/notify-emacs-state\\.sh " candidate))))
+      (agent-claude--ensure-hook settings name command 5))))
+
+(defun agent-claude--remove-hook-commands (settings name predicate)
+  "Remove from SETTINGS hook NAME every command satisfying PREDICATE.
+Drop an entry left with no commands."
+  (let* ((hooks (agent-claude--ensure-hooks settings))
+         (entries (agent-claude--json-list (gethash name hooks)))
+         (kept (delq nil (mapcar (lambda (entry)
+                                   (agent-claude--prune-hook-entry
+                                    entry predicate))
+                                 entries))))
+    (unless (and (= (length kept) (length entries))
+                 (cl-every #'eq kept entries))
+      (puthash name (vconcat kept) hooks))))
+
+(defun agent-claude--prune-hook-entry (entry predicate)
+  "Return ENTRY without commands satisfying PREDICATE, or nil if none remain.
+Return ENTRY itself when nothing is removed."
+  (if (not (hash-table-p entry))
+      entry
+    (let* ((commands (agent-claude--json-list (gethash "hooks" entry)))
+           (kept (cl-remove-if
+                  (lambda (hook)
+                    (and (hash-table-p hook)
+                         (stringp (gethash "command" hook))
+                         (funcall predicate (gethash "command" hook))))
+                  commands)))
+      (cond ((= (length kept) (length commands)) entry)
+            ((null kept) nil)
+            (t (let ((copy (copy-hash-table entry)))
+                 (puthash "hooks" (vconcat kept) copy)
+                 copy))))))
 
 (defun agent-claude--ensure-hook (settings name command timeout)
   "Ensure SETTINGS hook NAME includes COMMAND with optional TIMEOUT."
@@ -1910,16 +2002,23 @@ TIMEOUT, when non-nil, is written as the hook command timeout."
             (shell-quote-argument notification))))
 
 (defun agent-claude--state-hook-command (type)
-  "Return the command string for a hook that sends session event TYPE."
+  "Return the command string for a hook that sends session event TYPE.
+The command names the status directory, where the hook reads the state
+file that `agent-claude--record-state' writes."
   (let ((fire-and-forget
-         (expand-file-name "fire-and-forget.sh"
-                           agent-claude--hooks-directory))
+         (agent-claude--settings-path
+          (expand-file-name "fire-and-forget.sh"
+                            agent-claude--hooks-directory)))
         (state
-         (expand-file-name "notify-emacs-state.sh"
-                           agent-claude--hooks-directory)))
+         (agent-claude--settings-path
+          (expand-file-name "notify-emacs-state.sh"
+                            agent-claude--hooks-directory))))
     (agent-claude--require-executable fire-and-forget)
     (agent-claude--require-executable state)
-    (format "%s %s %s"
+    (format "AGENT_CLAUDE_STATUS_DIR=%s %s %s %s"
+            (shell-quote-argument
+             (directory-file-name
+              (expand-file-name agent-claude-status-directory)))
             (shell-quote-argument fire-and-forget)
             (shell-quote-argument state)
             type)))

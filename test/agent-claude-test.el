@@ -1151,6 +1151,42 @@ notification would double-report the same interruption."
                                         0))))))))
       (delete-file settings))))
 
+(ert-deftest agent-claude-test-ensure-state-hooks-replaces-other-checkouts ()
+  "Replace a state hook from another checkout and keep unrelated commands."
+  (let* ((settings (make-hash-table :test #'equal))
+         (stale "/old/agent/hooks/fire-and-forget.sh /old/agent/hooks/notify-emacs-state.sh activity")
+         (other (make-hash-table :test #'equal))
+         (entry (make-hash-table :test #'equal))
+         (hooks (make-hash-table :test #'equal)))
+    (puthash "command" "other-tool --flag" other)
+    (puthash "matcher" "" entry)
+    (puthash "hooks" (vector (agent-claude--hook-command stale 5) other) entry)
+    (puthash "PreToolUse" (vector entry) hooks)
+    (puthash "hooks" hooks settings)
+    (agent-claude--ensure-state-hooks settings)
+    (let ((commands (mapcan (lambda (entry)
+                              (mapcar (lambda (hook) (gethash "command" hook))
+                                      (append (gethash "hooks" entry) nil)))
+                            (append (gethash "PreToolUse" hooks) nil))))
+      (should (member "other-tool --flag" commands))
+      (should-not (member stale commands))
+      (should (equal (seq-filter (lambda (command)
+                                   (string-match-p "notify-emacs-state" command))
+                                 commands)
+                     (list (agent-claude--state-hook-command "activity")))))))
+
+(ert-deftest agent-claude-test-settings-path-follows-configured-directory ()
+  "Re-root bundled helpers under the configured settings directory."
+  (let ((helper (expand-file-name "hooks/notify-emacs-state.sh"
+                                  agent-claude--package-directory)))
+    (let ((agent-claude-settings-package-directory nil))
+      (should (equal (agent-claude--settings-path helper) helper)))
+    (let ((agent-claude-settings-package-directory "/stable/agent/"))
+      (should (equal (agent-claude--settings-path helper)
+                     "/stable/agent/hooks/notify-emacs-state.sh"))
+      (should (equal (agent-claude--settings-path "/elsewhere/tool.sh")
+                     "/elsewhere/tool.sh")))))
+
 (ert-deftest agent-claude-test-state-hook-script-forwards-event ()
   "Forward TYPE, the buffer name, and a send time to emacsclient."
   (let* ((bin (make-temp-file "agent-bin" t))
@@ -1160,7 +1196,9 @@ notification would double-report the same interruption."
          (process-environment
           (append (list (concat "PATH=" bin ":" (getenv "PATH"))
                         "CLAUDE_BUFFER_NAME=*claude:\"q\"*")
-                  process-environment)))
+                  (seq-remove (lambda (var)
+                                (string-prefix-p "AGENT_SESSION_UUID=" var))
+                              process-environment))))
     (unwind-protect
         (progn
           (with-temp-file (expand-file-name "emacsclient" bin)
@@ -1200,6 +1238,75 @@ notification would double-report the same interruption."
           (call-process script nil nil nil "activity")
           (should-not (file-exists-p log)))
       (delete-directory bin t))))
+
+;;;; Session state file
+
+(defun agent-claude-test--state-hook-sends-p (status-dir uuid)
+  "Return non-nil when the state hook calls emacsclient for an activity event.
+Run the hook as session UUID with state files in STATUS-DIR."
+  (let* ((bin (make-temp-file "agent-bin" t))
+         (log (expand-file-name "called" bin))
+         (process-environment
+          (append (list (concat "PATH=" bin ":" (getenv "PATH"))
+                        "CLAUDE_BUFFER_NAME=*claude:~/repo/:default*"
+                        (concat "AGENT_SESSION_UUID=" uuid)
+                        (concat "AGENT_CLAUDE_STATUS_DIR=" status-dir))
+                  process-environment)))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "emacsclient" bin)
+            (insert "#!/bin/sh\ntouch " log "\n"))
+          (set-file-modes (expand-file-name "emacsclient" bin) #o755)
+          (with-temp-buffer
+            (insert "{}")
+            (call-process-region (point-min) (point-max)
+                                 (expand-file-name "notify-emacs-state.sh"
+                                                   agent-claude--hooks-directory)
+                                 nil nil nil "activity"))
+          (file-exists-p log))
+      (delete-directory bin t))))
+
+(ert-deftest agent-claude-test-state-hook-skips-only-busy-sessions ()
+  "Skip emacsclient while Emacs records the session busy, and only then."
+  (let ((agent-claude-status-directory
+         (file-name-as-directory (make-temp-file "agent-status" t))))
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local agent-claude--status-uuid "uuid-state")
+          (cl-letf (((symbol-function 'agent-claude--publisher-token)
+                     (lambda (_) "uuid-state")))
+            (should (agent-claude-test--state-hook-sends-p
+                     agent-claude-status-directory "uuid-state"))
+            (agent-claude--record-state (current-buffer) 'busy)
+            (should-not (agent-claude-test--state-hook-sends-p
+                         agent-claude-status-directory "uuid-state"))
+            (should (agent-claude-test--state-hook-sends-p
+                     agent-claude-status-directory "uuid-other"))
+            (agent-claude--record-state (current-buffer) 'awaiting-input)
+            (should (agent-claude-test--state-hook-sends-p
+                     agent-claude-status-directory "uuid-state"))
+            (agent-claude--record-state (current-buffer) 'busy)
+            (agent-claude--cleanup-status-file)
+            (should (agent-claude-test--state-hook-sends-p
+                     agent-claude-status-directory "uuid-state"))))
+      (delete-directory agent-claude-status-directory t))))
+
+(ert-deftest agent-claude-test-state-change-records-state-file ()
+  "A lifecycle transition rewrites the session's state file."
+  (let ((agent-claude-status-directory
+         (file-name-as-directory (make-temp-file "agent-status" t))))
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local agent-claude--status-uuid "uuid-transition")
+          (cl-letf (((symbol-function 'agent-claude--publisher-token)
+                     (lambda (_) "uuid-transition")))
+            (agent--session-set-state (current-buffer) 'busy)
+            (let ((file (agent-claude--state-file (current-buffer))))
+              (should (equal (with-temp-buffer
+                               (insert-file-contents file)
+                               (buffer-string))
+                             "busy")))))
+      (delete-directory agent-claude-status-directory t))))
 
 ;;;; Interrupt detection
 

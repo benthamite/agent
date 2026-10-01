@@ -507,6 +507,10 @@ must read cached data without I/O or other side effects."
   :type 'hook
   :group 'agent)
 
+(defvar agent-session-state-change-functions nil
+  "Abnormal hook run after a session's lifecycle state changes.
+Each function receives the session buffer and its new state symbol.")
+
 (defvar agent-session-status-token-functions nil
   "Hook returning a backend's publisher process token for a session buffer.")
 
@@ -1887,7 +1891,8 @@ ready alert fires only for `idle-prompt' events."
   (with-current-buffer buffer
     (unless (eq agent--session-state state)
       (setq agent--session-state state)
-      (setq agent--session-state-changed-at (float-time)))))
+      (setq agent--session-state-changed-at (float-time))
+      (run-hook-with-args 'agent-session-state-change-functions buffer state))))
 
 (defun agent--session-notify-ready (buffer)
   "Fire the ready alert for session BUFFER, unless it is snoozed.
