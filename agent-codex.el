@@ -471,7 +471,7 @@ normalized usage plist, or nil on any error."
                       (json-parse-buffer :object-type 'plist
                                          :null-object nil
                                          :false-object nil))
-                   (json-parse-error nil))))
+                   (json-error nil))))
     (kill-buffer)))
 
 (defun agent-codex--normalize-usage (data)

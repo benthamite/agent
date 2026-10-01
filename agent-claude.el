@@ -835,7 +835,7 @@ Returns a plist, or nil if the file is missing or malformed."
              (insert-file-contents file)
              (buffer-string))
            :object-type 'plist)
-        (json-parse-error nil)))))
+        (json-error nil)))))
 
 (defvar agent-claude--pending-status-uuid nil
   "Status UUID for the Claude process currently being started.
@@ -1016,7 +1016,7 @@ the normalized usage plist, or nil on any error, including a 429."
                    (condition-case nil
                        (agent-claude--normalize-usage
                         (json-parse-buffer :object-type 'plist))
-                     (json-parse-error nil)))))
+                     (json-error nil)))))
     (kill-buffer)))
 
 (defun agent-claude--normalize-usage (data)

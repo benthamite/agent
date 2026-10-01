@@ -557,6 +557,20 @@ the main transcript, as in a session whose teammate waits on a shell."
     (should (equal captured-account "work"))
     (should (equal captured-resume-id "0c5e1c5e-claude-session"))))
 
+(ert-deftest agent-claude-test-parse-status-file-tolerates-partial-write ()
+  "A status file caught empty or mid-write parses as nil instead of signaling.
+An error escaping the status poll leaves its timer marked triggered
+when `debug-on-error' is set, and Emacs never runs it again."
+  (let ((agent-claude-status-directory (make-temp-file "claude-status" t)))
+    (unwind-protect
+        (with-temp-buffer
+          (setq agent-claude--status-uuid "partial-write")
+          (dolist (contents '("" "{\"session_id\":"))
+            (with-temp-file (agent-claude--status-file)
+              (insert contents))
+            (should-not (agent-claude--parse-status-file))))
+      (delete-directory agent-claude-status-directory t))))
+
 (ert-deftest agent-claude-test-status-file-name-avoids-sanitizer-collisions ()
   "Distinct buffer names get distinct status files in the UUID-less fallback."
   (let (file-a file-b)
