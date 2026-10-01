@@ -489,6 +489,22 @@ the main transcript, as in a session whose teammate waits on a shell."
           (should-not (agent-claude--live-background-tasks (current-buffer))))
       (delete-directory dir t))))
 
+(ert-deftest agent-claude-test-background-user-command-moved-to-background ()
+  "A user `!' command the CLI moved to the background counts until notified."
+  (let ((launch (format "{\"type\":\"user\",\"isSidechain\":false,\"timestamp\":\"2026-10-01T12:30:00.000Z\",\"message\":{\"role\":\"user\",\"content\":%s}}"
+                        (json-encode "<bash-stdout>Command did not complete within its 120s timeout and was moved to the background (ID: bipbs3e18). Output is being written to: /tmp/x.output</bash-stdout><bash-stderr></bash-stderr>"))))
+    (should (equal (agent-claude-test--live-tasks (list launch)) '("bipbs3e18")))
+    (should-not (agent-claude-test--live-tasks
+                 (list launch
+                       (agent-claude-test--notification-line
+                        "<task-id>bipbs3e18</task-id>\n<status>completed</status>"))))))
+
+(ert-deftest agent-claude-test-background-ignores-ordinary-user-command-output ()
+  "Ordinary `!' command output, even one mentioning a background, is no task."
+  (should-not (agent-claude-test--live-tasks
+               (list (format "{\"type\":\"user\",\"timestamp\":\"2026-10-01T12:30:00.000Z\",\"message\":{\"role\":\"user\",\"content\":%s}}"
+                             (json-encode "<bash-stdout>see: moved to the background docs</bash-stdout>"))))))
+
 (ert-deftest agent-claude-test-background-first-read-skips-partial-line ()
   "A first read from inside a large transcript skips the line it starts in."
   (let* ((late (agent-claude-test--bash-launch "late"))

@@ -1332,7 +1332,9 @@ counts agents across every session on the machine."
 ;; - a tool result whose `toolUseResult' carries `backgroundTaskId'
 ;;   (Bash run in or moved to the background), `status' "async_launched"
 ;;   with `agentId' (a background agent), `taskId' with `persistent'
-;;   (Monitor), or `taskId' with `workflowName' (Workflow) starts one;
+;;   (Monitor), or `taskId' with `workflowName' (Workflow) starts one, as
+;;   does a user `!' command the CLI moved to the background, whose only
+;;   record is the <bash-stdout> text of the user's own message;
 ;; - a queued <task-notification> naming the task with a <status>, or a
 ;;   Monitor expiry event, ends it, as does a TaskStop result, whose
 ;;   `toolUseResult' carries `task_id' and `task_type';
@@ -1346,7 +1348,8 @@ counts agents across every session on the machine."
 (defconst agent-claude--transcript-task-marker-regexp
   (regexp-opt '("\"backgroundTaskId\":\"" "\"async_launched\""
                 "\"persistent\":" "\"workflowName\":" "\"task_type\":"
-                "<task-notification>" "\"status\":\"completed\""))
+                "<task-notification>" "\"status\":\"completed\""
+                "<bash-stdout>"))
   "Regexp matching transcript lines that may start or end a background task.
 Lines without a match are skipped unparsed.")
 
@@ -1490,6 +1493,8 @@ is skipped."
     (when-let* ((result (plist-get entry :toolUseResult))
                 ((plistp result)))
       (agent-claude--record-tool-result scan entry result))
+    (when-let* ((id (agent-claude--backgrounded-user-command-id entry)))
+      (agent-claude--record-launch scan entry id))
     (dolist (text (agent-claude--queued-texts entry))
       (agent-claude--record-task-notifications scan text))))
 
@@ -1497,18 +1502,36 @@ is skipped."
   "Record in SCAN the task that tool RESULT in transcript ENTRY starts or ends."
   (let ((ended (plist-get scan :ended)))
     (if-let* ((id (agent-claude--launched-task-id result)))
-        (when (string< (plist-get scan :since)
-                       (or (plist-get entry :timestamp) ""))
-          (puthash id (or (and (plist-get entry :isSidechain)
-                               (plist-get entry :agentId))
-                          t)
-                   (plist-get scan :launched)))
+        (agent-claude--record-launch scan entry id)
       (cond
        ((and (plist-get result :task_type) (plist-get result :task_id))
         (puthash (plist-get result :task_id) t ended))
        ((and (equal (plist-get result :status) "completed")
              (plist-get result :agentId))
         (puthash (plist-get result :agentId) t ended))))))
+
+(defun agent-claude--record-launch (scan entry id)
+  "Record in SCAN that transcript ENTRY started task ID.
+A task started before the CLI process began is ignored: it died with
+the earlier process.  The task belongs to the subagent whose sidechain
+holds ENTRY, or to the main agent."
+  (when (string< (plist-get scan :since)
+                 (or (plist-get entry :timestamp) ""))
+    (puthash id (or (and (plist-get entry :isSidechain)
+                         (plist-get entry :agentId))
+                    t)
+             (plist-get scan :launched))))
+
+(defun agent-claude--backgrounded-user-command-id (entry)
+  "Return the task id of a user `!' command that transcript ENTRY backgrounds.
+The CLI moves a `!' command past its timeout to the background and
+reports that only as the <bash-stdout> text of the user message."
+  (let ((content (plist-get (plist-get entry :message) :content)))
+    (when (and (equal (plist-get entry :type) "user")
+               (stringp content)
+               (string-match "\\`<bash-stdout>[^<]*?moved to the background (ID: \\([a-z0-9]+\\))"
+                             content))
+      (match-string 1 content))))
 
 (defun agent-claude--launched-task-id (result)
   "Return the id of the background task tool RESULT starts, or nil."
