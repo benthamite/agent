@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 import runpy
+from types import SimpleNamespace
 import unittest
 
 helper = runpy.run_path(str(Path(__file__).resolve().parents[1] / "bin" / "agent-status"))
@@ -43,6 +44,28 @@ class StatusPublisherTests(unittest.TestCase):
         encoded = re.search(r'base64-decode-string "([A-Za-z0-9+/=]+)"', expr)[1]
         self.assertEqual(json.loads(base64.b64decode(encoded)), request)
         self.assertNotIn("injected", expr)
+
+
+    def test_retries_refused_connections_then_succeeds(self):
+        refused = SimpleNamespace(returncode=1, stdout="", stderr="emacsclient: can't connect to /tmp/server: Connection refused")
+        answers = [refused, refused, SimpleNamespace(returncode=0, stdout="t\n", stderr="")]
+        delays = []
+        helper["publish"](["emacsclient"], run=lambda *a, **k: answers.pop(0), sleep=delays.append)
+        self.assertEqual(delays, [0.5, 1])
+
+    def test_gives_up_after_repeated_refusals(self):
+        refused = SimpleNamespace(returncode=1, stdout="", stderr='emacsclient: error accessing socket "/tmp/server"')
+        delays = []
+        with self.assertRaises(ValueError):
+            helper["publish"](["emacsclient"], run=lambda *a, **k: refused, sleep=delays.append)
+        self.assertEqual(delays, [0.5, 1, 2, 4])
+
+    def test_rejection_is_not_retried(self):
+        rejected = SimpleNamespace(returncode=1, stdout="", stderr="*ERROR*: No live agent session named x")
+        delays = []
+        with self.assertRaises(ValueError):
+            helper["publish"](["emacsclient"], run=lambda *a, **k: rejected, sleep=delays.append)
+        self.assertEqual(delays, [])
 
 
 if __name__ == "__main__":

@@ -6,6 +6,10 @@ import json
 import os
 import subprocess
 import sys
+import time
+
+RETRY_DELAYS = (0.5, 1, 2, 4)
+TRANSPORT_ERRORS = ("can't connect", "error accessing socket")
 
 
 def request_payload(text, backend, environ):
@@ -43,6 +47,20 @@ def expression(payload):
     )
 
 
+def publish(command, run=subprocess.run, sleep=time.sleep):
+    """Run COMMAND, retrying while a briefly stalled Emacs refuses connections.
+A stalled server overflows its short connection queue, so later clients are
+refused outright; a request Emacs accepted but did not answer is not retried."""
+    for delay in (*RETRY_DELAYS, None):
+        result = run(command, capture_output=True, text=True, timeout=10)
+        if not result.returncode and result.stdout.strip() == "t":
+            return
+        error = result.stderr.strip() or result.stdout.strip() or "Emacs rejected status"
+        if delay is None or not any(marker in error for marker in TRANSPORT_ERRORS):
+            raise ValueError(error)
+        sleep(delay)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("text", help="Factual current state, up to 160 characters; empty clears")
@@ -55,9 +73,7 @@ def main():
         if args.socket_name:
             command.extend(["--socket-name", args.socket_name])
         command.extend(["--eval", expression(payload)])
-        result = subprocess.run(command, capture_output=True, text=True, timeout=10)
-        if result.returncode or result.stdout.strip() != "t":
-            raise ValueError(result.stderr.strip() or result.stdout.strip() or "Emacs rejected status")
+        publish(command)
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         print(f"agent-status: {error}", file=sys.stderr)
         return 1

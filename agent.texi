@@ -468,9 +468,10 @@ menu is open.
 The state description is explicitly authored by the working agent, for
 example “Testing pagination fix” or “Waiting for your decision about bindings”.
 It is not extracted from the chat and requires no separate summarizer.
-Until an agent publishes an update, the column is blank. A new turn or a
-changed native session identity clears the previous description; a completed
-turn retains its final update. Publication does not alter the state color or
+Until an agent publishes an update, the column is blank. A prompt submitted
+from Emacs or a changed native session identity clears the previous
+description. A turn that starts without one, such as a reply to a
+background-task notification, keeps it, as does a completed turn. Publication does not alter the state color or
 its age, and a claim of completion remains the agent's report.
 
 The executable @samp{bin/agent-status} accepts a status string of at most 160
@@ -482,7 +483,9 @@ A registered identity resolver is authoritative even when it returns no id;
 only backends without one use their recorded identity. Claude requires @samp{AGENT_SESSION_UUID} to match its process token,
 so an old process cannot update a replacement session with the same name. The helper
 rejects absent or mismatched sessions, passes text as encoded JSON rather
-than executable Lisp, and reports failures. @samp{--socket-name} (or
+than executable Lisp, and reports failures. When a briefly stalled Emacs
+refuses the connection, the helper retries for about eight seconds before
+reporting the failure. @samp{--socket-name} (or
 @samp{EMACS_SOCKET_NAME}) selects a non-default Emacs server. Only the main agent
 should publish status: subagents can inherit their parent's buffer variable.
 

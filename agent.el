@@ -1837,16 +1837,23 @@ This function is the single owner of
 calls to it and never set session state directly.  A `submit'
 event delivered while BUFFER is already busy is ignored, because
 backend submission hooks can fire multiple times per submission
-and on submissions that start no turn."
+and on submissions that start no turn.
+
+A `submit' or `user-submit' clears the agent's published status, since
+a prompt sent from Emacs gives the agent new work.  An `activity' event
+keeps it: a turn started by a background notification usually continues
+the work the status already describes."
   (when (buffer-live-p buffer)
     (pcase event
       ((or 'stop 'idle-prompt 'blocked)
        (agent--session-event-awaiting-input buffer event))
       ((or 'submit 'activity)
        (unless (eq (buffer-local-value 'agent--session-state buffer) 'busy)
+         (when (eq event 'submit)
+           (agent--session-clear-published-status buffer))
          (agent--session-set-state buffer 'busy)))
       ('user-submit
-       (with-current-buffer buffer (setq agent--session-published-status nil))
+       (agent--session-clear-published-status buffer)
        (agent--before-exit-cancel-for-user buffer)
        (agent-session-event buffer 'submit))
       ('exit-request
@@ -1870,12 +1877,15 @@ ready alert fires only for `idle-prompt' events."
     (agent--scroll-to-bottom buffer)
     (agent--refresh-display-names-deferred)))
 
+(defun agent--session-clear-published-status (buffer)
+  "Clear the status the agent in BUFFER last published."
+  (with-current-buffer buffer
+    (setq agent--session-published-status nil)))
+
 (defun agent--session-set-state (buffer state)
   "Set BUFFER's session state to STATE and record the transition time."
   (with-current-buffer buffer
     (unless (eq agent--session-state state)
-      (when (eq state 'busy)
-        (setq agent--session-published-status nil))
       (setq agent--session-state state)
       (setq agent--session-state-changed-at (float-time)))))
 
