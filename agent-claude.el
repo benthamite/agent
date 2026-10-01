@@ -775,6 +775,8 @@ switches as soon as the status line reports them."
         (agent-claude--detect-branch data)
         (agent--note-session-id buffer (plist-get data :session_id))
         (agent-claude--detect-turn-start data buffer)
+        (agent-claude--scan-background-tasks
+         buffer (plist-get data :transcript_path))
         (setq agent-claude--status-data data)
         (setq agent-claude--status-polled-at (float-time))))))
 
@@ -1299,34 +1301,262 @@ the spinner takes a moment to appear after a submission."
                             agent-claude--turn-in-progress-regexp
                             limit t))))))))))
 
-(defconst agent-claude--background-tasks-regexp
-  "· *[0-9]+ +\\(shells?\\|monitors?\\|agents?\\)"
-  "Regexp matching the background-task count in Claude's status line.
-Claude Code renders \"· N shells\", \"· N monitors\", or \"· N agents\"
-near the footer.  The fleet indicator \"· ← N agents\" counts agents
-across every session, so the arrow form is deliberately not matched when background Bash processes, monitors, or Task
-agents are running.")
-
 (defconst agent-claude--remote-control-active-regexp
   "Remote Control active"
   "Regexp matching Claude's active Remote Control task UI.")
 
 (defun agent-claude--has-background-tasks-p (&optional buffer)
   "Return non-nil when Claude session BUFFER has active background tasks.
-Scans the tail of the terminal buffer for Claude Code's status
-indicators, e.g. \"· 3 shells\", \"· 5 monitors\", or \"Remote
-Control active\"."
+Background work is a task that `agent-claude--scan-background-tasks'
+found running in the session's transcripts, or an active Remote Control
+task UI on the screen, which the transcripts do not record.  The
+footer's task counts are not consulted: its \"← N agents\" indicator
+counts agents across every session on the machine."
   (let ((buf (or buffer (current-buffer))))
     (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (save-excursion
-          (goto-char (point-max))
-          (let ((limit (max (point-min) (- (point-max) 800))))
-            (or (re-search-backward agent-claude--background-tasks-regexp
-                                    limit t)
-                (re-search-backward
-                 agent-claude--remote-control-active-regexp
-                 limit t))))))))
+      (or (agent-claude--live-background-tasks buf)
+          (with-current-buffer buf
+            (save-excursion
+              (goto-char (point-max))
+              (re-search-backward
+               agent-claude--remote-control-active-regexp
+               (max (point-min) (- (point-max) 800)) t)))))))
+
+;;;;; Background tasks from transcripts
+
+;; Claude Code reports background tasks through no hook or statusline
+;; field, and no hook fires when a background shell exits.  The session
+;; transcript records both ends of every task, including tasks started
+;; by subagents and teammates, whose lines go to sidechain transcripts:
+;;
+;; - a tool result whose `toolUseResult' carries `backgroundTaskId'
+;;   (Bash run in or moved to the background), `status' "async_launched"
+;;   with `agentId' (a background agent), `taskId' with `persistent'
+;;   (Monitor), or `taskId' with `workflowName' (Workflow) starts one;
+;; - a queued <task-notification> naming the task with a <status>, or a
+;;   Monitor expiry event, ends it, as does a TaskStop result, whose
+;;   `toolUseResult' carries `task_id' and `task_type';
+;; - a task started in a subagent's sidechain ends with that subagent,
+;;   whose own end is a notification or a `toolUseResult' with `status'
+;;   "completed" and its `agentId'.
+;;
+;; The format is internal to Claude Code; agent-claude-test.el pins
+;; every shape the scanner depends on.
+
+(defconst agent-claude--transcript-task-marker-regexp
+  (regexp-opt '("\"backgroundTaskId\":\"" "\"async_launched\""
+                "\"persistent\":" "\"workflowName\":" "\"task_type\":"
+                "<task-notification>" "\"status\":\"completed\""))
+  "Regexp matching transcript lines that may start or end a background task.
+Lines without a match are skipped unparsed.")
+
+(defconst agent-claude--transcript-initial-read-limit (* 8 1024 1024)
+  "Bytes read from the end of a transcript file the first time it is scanned.
+Only tasks started since the CLI process began count, and a resumed
+session's transcript can hold hundreds of megabytes of earlier history.")
+
+(defvar-local agent-claude--background-scan nil
+  "Incremental scan state of this session's transcripts, or nil.
+A plist with :transcript, the main transcript path; :since-time, the CLI
+process start as a Lisp timestamp, and :since, the same as an ISO 8601
+UTC string; :offsets, a hash table mapping each file to the bytes
+consumed from it; :launched, a hash table mapping each task id started
+since :since to the id of the subagent that started it, or t for the
+main agent; and :ended, a hash table of ended task and subagent ids.")
+
+(defun agent-claude--live-background-tasks (buffer)
+  "Return the ids of the background tasks running in Claude session BUFFER."
+  (when-let* ((scan (buffer-local-value 'agent-claude--background-scan buffer)))
+    (let ((ended (plist-get scan :ended))
+          live)
+      (maphash (lambda (id owner)
+                 (unless (or (gethash id ended)
+                             (and (stringp owner) (gethash owner ended)))
+                   (push id live)))
+               (plist-get scan :launched))
+      live)))
+
+(defun agent-claude--scan-background-tasks (buffer transcript)
+  "Update the background tasks of BUFFER from TRANSCRIPT and its sidechains.
+TRANSCRIPT is the main transcript path the statusline reports.  Each
+file is read from where the previous scan stopped, and a file that has
+not grown is not read, so a quiet poll costs one directory listing.  A
+new transcript path, as after `/clear', starts a fresh scan."
+  (when (and transcript (buffer-live-p buffer))
+    (with-current-buffer buffer
+      (unless (equal (plist-get agent-claude--background-scan :transcript)
+                     transcript)
+        (setq agent-claude--background-scan
+              (agent-claude--new-background-scan
+               transcript (agent-claude--process-start-time buffer))))
+      (when-let* ((scan agent-claude--background-scan)
+                  (since (plist-get scan :since-time)))
+        (condition-case err
+            (pcase-dolist (`(,file . ,attributes)
+                           (agent-claude--transcript-files transcript since))
+              (agent-claude--scan-transcript-file scan file attributes))
+          (error
+           (message "agent-claude: cannot scan %s for background tasks: %s"
+                    transcript (error-message-string err))))))))
+
+(defun agent-claude--new-background-scan (transcript since)
+  "Return an empty scan state for TRANSCRIPT counting tasks started at SINCE.
+SINCE is a Lisp timestamp, or nil when the start time is unknown.  See
+`agent-claude--background-scan'."
+  (list :transcript transcript
+        :since-time since
+        :since (and since (format-time-string "%FT%T.%3NZ" since t))
+        :offsets (make-hash-table :test #'equal)
+        :launched (make-hash-table :test #'equal)
+        :ended (make-hash-table :test #'equal)))
+
+(defun agent-claude--process-start-time (buffer)
+  "Return when the CLI process of BUFFER started, as a Lisp timestamp.
+Return nil when the process or its start time is unavailable."
+  (when-let* ((proc (get-buffer-process buffer))
+              (pid (process-id proc)))
+    (alist-get 'start (process-attributes pid))))
+
+(defun agent-claude--transcript-files (transcript since)
+  "Return (FILE . ATTRIBUTES) for TRANSCRIPT and its sidechains.
+Sidechains are the subagent and teammate transcripts in the session's
+subagents directory.  One modified before SINCE, a Lisp timestamp,
+cannot hold a task started since then and is left out: a long session
+accumulates thousands of them."
+  (let ((dir (expand-file-name "subagents"
+                               (file-name-sans-extension transcript)))
+        (main (file-attributes transcript)))
+    (append
+     (and main (list (cons transcript main)))
+     (and (file-directory-p dir)
+          (seq-filter
+           (lambda (entry)
+             (not (time-less-p (file-attribute-modification-time (cdr entry))
+                               since)))
+           (directory-files-and-attributes
+            dir t "\\`agent-.*\\.jsonl\\'" t))))))
+
+(defun agent-claude--scan-transcript-file (scan file attributes)
+  "Record in SCAN the task events FILE gained since it was last scanned.
+ATTRIBUTES are the file's attributes.  A file seen for the first time
+is read from at most `agent-claude--transcript-initial-read-limit'
+bytes before its end, and the partial line such a read begins with is
+skipped.  Only complete lines are consumed; a line still being written
+is read on the next scan."
+  (let* ((offsets (plist-get scan :offsets))
+         (size (file-attribute-size attributes))
+         (seen (gethash file offsets))
+         (offset (or seen
+                     (max 0 (- size agent-claude--transcript-initial-read-limit)))))
+    (puthash file
+             (if (> size offset)
+                 (+ offset (agent-claude--scan-transcript-bytes
+                            scan file offset size
+                            (and (not seen) (> offset 0))))
+               offset)
+             offsets)))
+
+(defun agent-claude--scan-transcript-bytes (scan file start end mid-line)
+  "Record in SCAN the task events in bytes START to END of FILE.
+Return the number of bytes consumed, which stops after the last
+complete line.  MID-LINE non-nil means START falls inside a line, which
+is skipped."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file nil start end)
+    (goto-char (point-max))
+    (if (not (search-backward "\n" nil t))
+        0
+      (let ((limit (1+ (point))))
+        (goto-char (point-min))
+        (when mid-line
+          (search-forward "\n" limit 'move))
+        (while (re-search-forward agent-claude--transcript-task-marker-regexp
+                                  limit t)
+          (agent-claude--record-transcript-line
+           scan (decode-coding-string
+                 (buffer-substring (line-beginning-position)
+                                   (line-end-position))
+                 'utf-8))
+          (forward-line 1))
+        (1- limit)))))
+
+(defun agent-claude--record-transcript-line (scan line)
+  "Record in SCAN the task started or ended by transcript LINE."
+  (when-let* ((entry (ignore-errors
+                       (json-parse-string line :object-type 'plist
+                                          :null-object nil
+                                          :false-object nil))))
+    (when-let* ((result (plist-get entry :toolUseResult))
+                ((plistp result)))
+      (agent-claude--record-tool-result scan entry result))
+    (dolist (text (agent-claude--queued-texts entry))
+      (agent-claude--record-task-notifications scan text))))
+
+(defun agent-claude--record-tool-result (scan entry result)
+  "Record in SCAN the task that tool RESULT in transcript ENTRY starts or ends."
+  (let ((ended (plist-get scan :ended)))
+    (if-let* ((id (agent-claude--launched-task-id result)))
+        (when (string< (plist-get scan :since)
+                       (or (plist-get entry :timestamp) ""))
+          (puthash id (or (and (plist-get entry :isSidechain)
+                               (plist-get entry :agentId))
+                          t)
+                   (plist-get scan :launched)))
+      (cond
+       ((and (plist-get result :task_type) (plist-get result :task_id))
+        (puthash (plist-get result :task_id) t ended))
+       ((and (equal (plist-get result :status) "completed")
+             (plist-get result :agentId))
+        (puthash (plist-get result :agentId) t ended))))))
+
+(defun agent-claude--launched-task-id (result)
+  "Return the id of the background task tool RESULT starts, or nil."
+  (let ((bash (plist-get result :backgroundTaskId)))
+    (cond
+     ((and (stringp bash) (not (string-empty-p bash))) bash)
+     ((equal (plist-get result :status) "async_launched")
+      (plist-get result :agentId))
+     ((and (plist-get result :taskId)
+           (or (plist-member result :persistent)
+               (plist-member result :workflowName)))
+      (plist-get result :taskId)))))
+
+(defun agent-claude--queued-texts (entry)
+  "Return the queued prompt texts carried by transcript ENTRY.
+Task notifications reach the session as queued prompts: a
+`queue-operation' enqueue and, once delivered, a `queued_command'
+attachment."
+  (let ((attachment (plist-get entry :attachment)))
+    (delq nil
+          (list (and (equal (plist-get entry :type) "queue-operation")
+                     (equal (plist-get entry :operation) "enqueue")
+                     (plist-get entry :content))
+                (and (plistp attachment)
+                     (equal (plist-get attachment :type) "queued_command")
+                     (plist-get attachment :prompt))))))
+
+(defun agent-claude--record-task-notifications (scan text)
+  "Record in SCAN every task that a <task-notification> in TEXT ends.
+A notification with a <status> ends each task it names.  One without is
+a Monitor event, which ends the Monitor only when it reports expiry."
+  (when (stringp text)
+    (let ((start 0))
+      (while (string-match "<task-notification>\\(\\(?:.\\|\n\\)*?\\)</task-notification>"
+                           text start)
+        (let ((body (match-string 1 text)))
+          (setq start (match-end 0))
+          (when (or (string-search "<status>" body)
+                    (string-match-p "<event>[[:space:]]*\\[Monitor expired"
+                                    body))
+            (agent-claude--record-ended-ids scan body)))))))
+
+(defun agent-claude--record-ended-ids (scan body)
+  "Mark ended in SCAN every task id named by notification BODY."
+  (let ((start 0))
+    (while (string-match "<task-id>\\([^<]+\\)</task-id>" body start)
+      (puthash (match-string 1 body) t (plist-get scan :ended))
+      (setq start (match-end 0)))))
 
 (defun agent-claude--handle-session-state (message)
   "Handle a turn-state event from the Claude Code CLI.

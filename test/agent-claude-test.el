@@ -327,17 +327,189 @@ notification would double-report the same interruption."
 
 ;;;; Background task detection
 
-(ert-deftest agent-claude-test-has-background-tasks-detects-agents ()
-  "Detect a per-session running-agent count as background work."
-  (with-temp-buffer
-    (insert "\u23f5\u23f5 auto mode on \u00b7 2 agents\n")
-    (should (agent-claude--has-background-tasks-p (current-buffer)))))
+(defconst agent-claude-test--since "2026-10-01T12:00:00.000Z"
+  "Process start used by the transcript fixtures.")
 
-(ert-deftest agent-claude-test-has-background-tasks-ignores-fleet-count ()
-  "The cross-session fleet indicator \"\u2190 N agents\" is not this session's work."
+(defun agent-claude-test--result-line (result &optional timestamp agent)
+  "Return a transcript tool-result line with toolUseResult RESULT.
+RESULT is a JSON object string.  TIMESTAMP defaults to one after
+`agent-claude-test--since'.  AGENT non-nil makes it a sidechain line of
+that subagent."
+  (format "{\"type\":\"user\",\"isSidechain\":%s,%s\"timestamp\":\"%s\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"ok\"}]},\"toolUseResult\":%s}"
+          (if agent "true" "false")
+          (if agent (format "\"agentId\":\"%s\"," agent) "")
+          (or timestamp "2026-10-01T12:30:00.000Z")
+          result))
+
+(defun agent-claude-test--notification-line (body)
+  "Return a queue enqueue line carrying a task notification with BODY."
+  (format "{\"type\":\"queue-operation\",\"operation\":\"enqueue\",\"timestamp\":\"2026-10-01T12:40:00.000Z\",\"content\":%s}"
+          (json-encode (concat "<task-notification>\n" body
+                               "\n</task-notification>"))))
+
+(defun agent-claude-test--bash-launch (id &optional timestamp agent)
+  "Return a line launching background shell ID at TIMESTAMP by AGENT."
+  (agent-claude-test--result-line
+   (format "{\"stdout\":\"\",\"stderr\":\"\",\"interrupted\":false,\"backgroundTaskId\":\"%s\"}" id)
+   timestamp agent))
+
+(defun agent-claude-test--write-lines (file lines)
+  "Write LINES to FILE, one per line, creating its directory."
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file
+    (dolist (line lines)
+      (insert line "\n"))))
+
+(defun agent-claude-test--live-tasks (main &optional sidechains)
+  "Return the sorted live task ids of a session with transcript lines MAIN.
+SIDECHAINS is an alist of (AGENT-ID . LINES) for subagent transcripts."
+  (let* ((dir (make-temp-file "claude-transcripts" t))
+         (transcript (expand-file-name "session.jsonl" dir)))
+    (unwind-protect
+        (progn
+          (agent-claude-test--write-lines transcript main)
+          (pcase-dolist (`(,agent . ,lines) sidechains)
+            (agent-claude-test--write-lines
+             (expand-file-name (format "session/subagents/agent-%s.jsonl" agent)
+                               dir)
+             lines))
+          (agent-claude-test--scan-and-list transcript))
+      (delete-directory dir t))))
+
+(defun agent-claude-test--scan-and-list (transcript)
+  "Scan TRANSCRIPT in a fresh session buffer and return its sorted live tasks."
   (with-temp-buffer
-    (insert "\u23f5\u23f5 auto mode on (shift+tab to cycle) \u00b7 \u2190 2 agents\n")
+    (setq agent-claude--background-scan
+          (agent-claude--new-background-scan
+           transcript (date-to-time agent-claude-test--since)))
+    (cl-letf (((symbol-function 'agent-claude--process-start-time)
+               (lambda (_) (error "Process start must not be re-read"))))
+      (agent-claude--scan-background-tasks (current-buffer) transcript))
+    (sort (agent-claude--live-background-tasks (current-buffer)) #'string<)))
+
+(ert-deftest agent-claude-test-background-shell-runs-until-notified ()
+  "A background shell counts until a notification with a status ends it."
+  (should (equal (agent-claude-test--live-tasks
+                  (list (agent-claude-test--bash-launch "b1")
+                        (agent-claude-test--bash-launch "b2")
+                        (agent-claude-test--notification-line
+                         "<task-id>b1</task-id>\n<status>completed</status>")))
+                 '("b2"))))
+
+(ert-deftest agent-claude-test-background-tasks-before-process-start-ignored ()
+  "A task started before the CLI process began died with the old process."
+  (should-not (agent-claude-test--live-tasks
+               (list (agent-claude-test--bash-launch
+                      "old" "2026-10-01T11:00:00.000Z")))))
+
+(ert-deftest agent-claude-test-background-async-agent-runs-until-notified ()
+  "A background agent counts until its notification arrives."
+  (let ((launch (agent-claude-test--result-line
+                 "{\"isAsync\":true,\"status\":\"async_launched\",\"agentId\":\"a1\"}")))
+    (should (equal (agent-claude-test--live-tasks (list launch)) '("a1")))
+    (should-not (agent-claude-test--live-tasks
+                 (list launch
+                       (agent-claude-test--notification-line
+                        "<task-id>a1</task-id>\n<status>failed</status>"))))))
+
+(ert-deftest agent-claude-test-background-task-stop-ends-task ()
+  "A TaskStop result ends the task it names."
+  (should-not (agent-claude-test--live-tasks
+               (list (agent-claude-test--bash-launch "b1")
+                     (agent-claude-test--result-line
+                      "{\"message\":\"Successfully stopped task: b1\",\"task_id\":\"b1\",\"task_type\":\"local_bash\"}")))))
+
+(ert-deftest agent-claude-test-background-multi-task-notification ()
+  "A notification naming several tasks with a status ends all of them."
+  (should-not (agent-claude-test--live-tasks
+               (list (agent-claude-test--bash-launch "b1")
+                     (agent-claude-test--bash-launch "b2")
+                     (agent-claude-test--notification-line
+                      "<task-id>b1</task-id>\n<task-id>b2</task-id>\n<status>stopped</status>")))))
+
+(ert-deftest agent-claude-test-background-monitor-ends-only-on-expiry ()
+  "A Monitor event keeps the Monitor running; its expiry ends it."
+  (let ((launch (agent-claude-test--result-line
+                 "{\"taskId\":\"m1\",\"timeoutMs\":1800000,\"persistent\":false}"))
+        (event (agent-claude-test--notification-line
+                "<task-id>m1</task-id>\n<summary>Monitor event</summary>\n<event>line 1</event>"))
+        (expiry (agent-claude-test--notification-line
+                 "<task-id>m1</task-id>\n<summary>Monitor event</summary>\n<event>[Monitor expired after 30m with no events delivered]</event>")))
+    (should (equal (agent-claude-test--live-tasks (list launch event)) '("m1")))
+    (should-not (agent-claude-test--live-tasks (list launch event expiry)))))
+
+(ert-deftest agent-claude-test-background-teammate-shell-counts ()
+  "A shell a teammate moved to the background counts for the lead session.
+The launch is in the teammate's sidechain and the notification reaches
+the main transcript, as in a session whose teammate waits on a shell."
+  (let ((sidechain (list (cons "aport-a1-e71b" (list (agent-claude-test--bash-launch
+                                                       "blr" nil "aport-a1-e71b"))))))
+    (should (equal (agent-claude-test--live-tasks nil sidechain) '("blr")))
+    (should-not (agent-claude-test--live-tasks
+                 (list (agent-claude-test--notification-line
+                        "<task-id>blr</task-id>\n<status>completed</status>"))
+                 sidechain))))
+
+(ert-deftest agent-claude-test-background-task-ends-with-its-subagent ()
+  "A task started by a foreground subagent ends when that subagent completes."
+  (should-not (agent-claude-test--live-tasks
+               (list (agent-claude-test--result-line
+                      "{\"status\":\"completed\",\"agentId\":\"a396\",\"content\":[]}"))
+               (list (cons "a396" (list (agent-claude-test--bash-launch
+                                         "b1" nil "a396")))))))
+
+(ert-deftest agent-claude-test-background-ignores-quoted-markers ()
+  "Marker text inside an ordinary message neither starts nor ends a task."
+  (should-not (agent-claude-test--live-tasks
+               (list "{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T12:30:00.000Z\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"\\\"backgroundTaskId\\\":\\\"bq\\\" <task-notification>\"}]}}"))))
+
+(ert-deftest agent-claude-test-background-scan-is-incremental ()
+  "A rescan reads only appended complete lines, finishing a partial one."
+  (let* ((dir (make-temp-file "claude-transcripts" t))
+         (transcript (expand-file-name "session.jsonl" dir))
+         (launch (agent-claude-test--bash-launch "b1")))
+    (unwind-protect
+        (with-temp-buffer
+          (setq agent-claude--background-scan
+                (agent-claude--new-background-scan
+                 transcript (date-to-time agent-claude-test--since)))
+          (agent-claude-test--write-lines transcript nil)
+          (write-region (substring launch 0 40) nil transcript)
+          (agent-claude--scan-background-tasks (current-buffer) transcript)
+          (should-not (agent-claude--live-background-tasks (current-buffer)))
+          (write-region (concat (substring launch 40) "\n") nil transcript t)
+          (agent-claude--scan-background-tasks (current-buffer) transcript)
+          (should (equal (agent-claude--live-background-tasks (current-buffer))
+                         '("b1")))
+          (write-region (concat (agent-claude-test--notification-line
+                                 "<task-id>b1</task-id>\n<status>killed</status>")
+                                "\n")
+                        nil transcript t)
+          (agent-claude--scan-background-tasks (current-buffer) transcript)
+          (should-not (agent-claude--live-background-tasks (current-buffer))))
+      (delete-directory dir t))))
+
+(ert-deftest agent-claude-test-background-first-read-skips-partial-line ()
+  "A first read from inside a large transcript skips the line it starts in."
+  (let* ((late (agent-claude-test--bash-launch "late"))
+         (agent-claude--transcript-initial-read-limit (+ (length late) 10)))
+    (should (equal (agent-claude-test--live-tasks
+                    (list (agent-claude-test--bash-launch "early") late))
+                   '("late")))))
+
+(ert-deftest agent-claude-test-has-background-tasks-ignores-footer-counts ()
+  "Footer task counts are not evidence; the fleet count spans all sessions."
+  (with-temp-buffer
+    (insert "⏵⏵ auto mode on · 1 shell · ← 2 agents\n")
     (should-not (agent-claude--has-background-tasks-p (current-buffer)))))
+
+(ert-deftest agent-claude-test-has-background-tasks-detects-scanned-task ()
+  "A running task from the transcripts is background work."
+  (with-temp-buffer
+    (setq agent-claude--background-scan
+          (agent-claude--new-background-scan "x.jsonl" (current-time)))
+    (puthash "b1" t (plist-get agent-claude--background-scan :launched))
+    (should (agent-claude--has-background-tasks-p (current-buffer)))))
 
 (ert-deftest agent-claude-test-has-background-tasks-detects-remote-control ()
   "Detect Claude's active Remote Control task UI as background work."
