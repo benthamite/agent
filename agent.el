@@ -3409,12 +3409,14 @@ when the thing carries a working directory, as an absolute path,
 be asked, `:text' when it carries only text for a project to be chosen
 from, `:payload' for what to send, `:submit' for whether to submit it,
 and an optional `:after' thunk run once the payload is delivered, in the
-buffer the command was invoked from.  The continuation is called rather
-than returned to because extraction can require network round-trips,
-and it may therefore run in another buffer than the one the thing was
-read from.  An extractor that has to work for its directory leaves it
-out when `agent--context-wants-directory' says the directory would be
-discarded.")
+buffer the command was invoked from.  A context that names an existing
+session instead carries `:resume-id', `:backend' and `:directory', and
+that session is shown or resumed with no payload.  The continuation is
+called rather than returned to because extraction can require network
+round-trips, and it may therefore run in another buffer than the one
+the thing was read from.  An extractor that has to work for its
+directory leaves it out when `agent--context-wants-directory' says the
+directory would be discarded.")
 
 (defun agent--extractor-at-point ()
   "Return the extractor for the thing at point, or nil when there is none."
@@ -3447,11 +3449,33 @@ it for; see `agent--context-wants-directory' and
 
 (defun agent--deliver-context (context existing origin target)
   "Deliver CONTEXT to a session, choosing a running one when EXISTING.
-ORIGIN is the buffer the command was invoked from.  TARGET is the cons
-of backend and account resolved there."
-  (if existing
-      (agent--deliver-to context (agent--read-session-buffer) origin)
-    (agent--deliver-to-new-session context origin target)))
+A context naming a session to resume reopens that session whatever
+EXISTING says.  ORIGIN is the buffer the command was invoked from.
+TARGET is the cons of backend and account resolved there."
+  (cond
+   ((plist-get context :resume-id) (agent--resume-context-session context))
+   (existing (agent--deliver-to context (agent--read-session-buffer) origin))
+   (t (agent--deliver-to-new-session context origin target))))
+
+(defun agent--resume-context-session (context)
+  "Show the session CONTEXT names, resuming it when it has no buffer.
+CONTEXT carries `:resume-id', `:backend' and `:directory'.  The instance
+name is derived from the session id, as for a resumed branch, so a
+directory that already has a session never stops to ask for one.
+Return the session buffer."
+  (let* ((session-id (plist-get context :resume-id))
+         (buffer (or (agent--buffer-for-session-id session-id)
+                     (agent-start-session
+                      (agent-session-create
+                       :backend (plist-get context :backend)
+                       :directory (file-name-as-directory
+                                   (expand-file-name
+                                    (plist-get context :directory)))
+                       :instance (format "resume-%s"
+                                         (substring session-id 0 8)))
+                      :resume-id session-id))))
+    (pop-to-buffer buffer)
+    buffer))
 
 (defun agent--deliver-to-new-session (context origin target)
   "Start a session for CONTEXT using TARGET and deliver it there.

@@ -35,6 +35,7 @@
 ;;; Code:
 
 (require 'json)
+(require 'seq)
 (require 'subr-x)
 (require 'url)
 
@@ -164,10 +165,13 @@ under `~/.claude/projects/<encoded-cwd>/'."
     (unless (file-exists-p dst)
       (make-symbolic-link src dst))))
 
+(defvar agent-claude-cli-projects-directory "~/.claude/projects/"
+  "Directory under which Claude Code stores per-project transcripts.")
+
 (defun agent-claude-cli-project-dir (cwd)
   "Return the `~/.claude/projects/' directory Claude Code derives from CWD."
   (expand-file-name (agent-claude-cli-encode-project-cwd cwd)
-                    "~/.claude/projects/"))
+                    agent-claude-cli-projects-directory))
 
 (defun agent-claude-cli-encode-project-cwd (path)
   "Encode PATH the way Claude Code names dirs under `~/.claude/projects/'."
@@ -309,6 +313,46 @@ plist.  Only reads the first line of each file (fast)."
         (when (and header (plist-get header :session-id))
           (puthash (plist-get header :session-id) header table))))
     table))
+
+;; CLI convention: transcript lines after the first few carry the
+;; session's working directory as a string `cwd'.  A session's JSONL
+;; may also appear in other project dirs as a symlink created by
+;; `agent-claude-cli-link-session-into-project'.
+;; Last verified against Claude Code 2.1.172 on 2026-10-02.
+
+(defconst agent-claude-cli-cwd-scan-bytes 262144
+  "Bytes read from the start of a transcript when looking for its `cwd'.")
+
+(defun agent-claude-cli-session-directory (session-id)
+  "Return the working directory SESSION-ID was started in, or nil.
+Look for the transcript under `agent-claude-cli-projects-directory',
+preferring the original file to any symlink of it, and read the first
+`cwd' it records."
+  (when-let* ((file (agent-claude-cli--session-file session-id)))
+    (agent-claude-cli--transcript-cwd file)))
+
+(defun agent-claude-cli--session-file (session-id)
+  "Return the transcript file for SESSION-ID, or nil when there is none.
+An original file is preferred to a symlink of it."
+  (let ((files (file-expand-wildcards
+                (expand-file-name (concat "*/" session-id ".jsonl")
+                                  agent-claude-cli-projects-directory))))
+    (or (seq-find (lambda (file) (not (file-symlink-p file))) files)
+        (car files))))
+
+(defun agent-claude-cli--transcript-cwd (file)
+  "Return the first `cwd' string recorded in transcript FILE, or nil."
+  (with-temp-buffer
+    (let ((coding-system-for-read 'utf-8))
+      (insert-file-contents file nil 0 agent-claude-cli-cwd-scan-bytes))
+    (goto-char (point-min))
+    (let (cwd)
+      (while (and (not cwd) (not (eobp)))
+        (let ((json (agent-claude-cli--parse-jsonl-line)))
+          (when (stringp (plist-get json :cwd))
+            (setq cwd (plist-get json :cwd))))
+        (forward-line 1))
+      cwd)))
 
 ;;;; .claude.json merge engine
 

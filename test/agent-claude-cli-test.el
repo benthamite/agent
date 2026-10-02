@@ -23,6 +23,42 @@
   (should (equal (agent-claude-cli-encode-project-cwd "/a/b c/d")
                  "-a-b-c-d")))
 
+;;;; Session directory
+
+(ert-deftest agent-claude-cli-test-session-directory-reads-transcript-cwd ()
+  "Return the first string `cwd' recorded in the session's transcript."
+  (let* ((root (make-temp-file "agent-projects-" t))
+         (agent-claude-cli-projects-directory (file-name-as-directory root))
+         (id "11111111-2222-3333-4444-555555555555")
+         (project (expand-file-name "-work-proj" root)))
+    (unwind-protect
+        (progn
+          (make-directory project)
+          (with-temp-file (expand-file-name (concat id ".jsonl") project)
+            (insert "{\"type\":\"mode\",\"cwd\":null}\n"
+                    "{\"type\":\"user\",\"cwd\":\"/work/proj\"}\n"))
+          (should (equal (agent-claude-cli-session-directory id)
+                         "/work/proj"))
+          (should-not (agent-claude-cli-session-directory
+                       "99999999-2222-3333-4444-555555555555")))
+      (delete-directory root t))))
+
+(ert-deftest agent-claude-cli-test-session-file-prefers-original ()
+  "Prefer the original transcript to a symlink of it in another project."
+  (let* ((root (make-temp-file "agent-projects-" t))
+         (agent-claude-cli-projects-directory (file-name-as-directory root))
+         (id "11111111-2222-3333-4444-555555555555")
+         (original (expand-file-name (concat "-b/" id ".jsonl") root))
+         (link (expand-file-name (concat "-a/" id ".jsonl") root)))
+    (unwind-protect
+        (progn
+          (make-directory (file-name-directory original))
+          (make-directory (file-name-directory link))
+          (with-temp-file original (insert "{}\n"))
+          (make-symbolic-link original link)
+          (should (equal (agent-claude-cli--session-file id) original)))
+      (delete-directory root t))))
+
 ;;;; Keychain
 
 (ert-deftest agent-claude-cli-test-keychain-service-for-config-dir ()

@@ -3750,6 +3750,45 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
     (let ((slack-current-buffer 'room))
       (should (eq (agent--extractor-at-point) 'agent-slack-context)))))
 
+(ert-deftest agent-test-resume-context-shows-a-live-session ()
+  "A resume context whose session has a buffer shows that buffer."
+  (with-temp-buffer
+    (let ((buffer (current-buffer))
+          shown)
+      (cl-letf (((symbol-function 'agent--buffer-for-session-id)
+                 (lambda (id) (and (equal id "abc") buffer)))
+                ((symbol-function 'agent-start-session)
+                 (lambda (&rest _) (error "Should not start a session")))
+                ((symbol-function 'pop-to-buffer)
+                 (lambda (b &rest _) (setq shown b))))
+        (should (eq (agent--deliver-context
+                     '(:resume-id "abc" :backend claude-code :directory "/w/")
+                     t nil nil)
+                    buffer))
+        (should (eq shown buffer))))))
+
+(ert-deftest agent-test-resume-context-resumes-a-closed-session ()
+  "A resume context with no live buffer resumes the session in its directory."
+  (with-temp-buffer
+    (let ((buffer (current-buffer))
+          started)
+      (cl-letf (((symbol-function 'agent--buffer-for-session-id) #'ignore)
+                ((symbol-function 'agent-start-session)
+                 (lambda (session &rest options)
+                   (setq started (list session options))
+                   buffer))
+                ((symbol-function 'pop-to-buffer) #'ignore))
+        (should (eq (agent--deliver-context
+                     '(:resume-id "0e4735ae-23ff" :backend claude-code
+                       :directory "/w/proj")
+                     nil nil nil)
+                    buffer))
+        (let ((session (car started)))
+          (should (eq (agent-session-backend session) 'claude-code))
+          (should (equal (agent-session-directory session) "/w/proj/"))
+          (should (equal (agent-session-instance session) "resume-0e4735ae"))
+          (should (equal (cadr started) '(:resume-id "0e4735ae-23ff"))))))))
+
 (ert-deftest agent-test-extractor-at-point-finds-a-forge-topic ()
   "Route a topic in a Magit-derived buffer to the Forge router."
   (with-temp-buffer
