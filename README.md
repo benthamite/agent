@@ -55,4 +55,4 @@ Handoffs keep the source directory by default, but can carry an existing target 
 
 ## Documentation
 
-For a comprehensive description of all user options, commands, and functions, see the [manual](README.org).
+For a comprehensive description of all user options, commands, and functions, see the [manual](https://stafforini.com/notes/agent/).
