@@ -51,6 +51,7 @@
 (autoload 'agent-act-on-email "agent-mu4e" nil t)
 (autoload 'agent-setup-snippet-keys "agent-snippet" nil t)
 (autoload 'agent-slack-context "agent-slack")
+(autoload 'agent-slack-resume-context "agent-slack")
 (autoload 'agent-forge-context "agent-forge")
 (autoload 'agent-mu4e-context "agent-mu4e")
 (autoload 'agent-todo-context "agent-todo")
@@ -3383,8 +3384,8 @@ capped at `agent--debug-backtrace-size-limit'."
 Start a new session for it, or with prefix argument EXISTING send it to
 a running session chosen by completion.  The thing is the first entry
 in `agent-at-point-things' whose predicate matches: a backtrace, a
-Slack message, a Forge notification or topic, an email, or an org
-TODO."
+Slack message naming a session to resume, a Slack message, a Forge
+notification or topic, an email, or an org TODO."
   (interactive "P")
   (agent--act-on-context
    (or (agent--extractor-at-point)
@@ -3393,6 +3394,7 @@ TODO."
 
 (defvar agent-at-point-things
   '((agent--backtrace-at-point-p . agent--backtrace-context)
+    (agent--slack-resume-at-point-p . agent-slack-resume-context)
     (agent--slack-message-at-point-p . agent-slack-context)
     (agent--forge-topic-at-point-p . agent-forge-context)
     (agent--mu4e-message-at-point-p . agent-mu4e-context)
@@ -3418,6 +3420,8 @@ the thing was read from.  An extractor that has to work for its
 directory leaves it out when `agent--context-wants-directory' says the
 directory would be discarded.")
 
+(put 'agent-slack-resume-context 'agent-names-session t)
+
 (defun agent--extractor-at-point ()
   "Return the extractor for the thing at point, or nil when there is none."
   (cdr (seq-find (lambda (thing) (funcall (car thing)))
@@ -3433,10 +3437,15 @@ delivery: by the time the continuation runs, the user may have moved or
 selected another account.  A running session brings its own directory, so
 extraction is told not to resolve one, and told which account to resolve
 it for; see `agent--context-wants-directory' and
-`agent--context-account'."
+`agent--context-account'.  An extractor whose symbol has the
+`agent-names-session' property answers with an existing session, so no
+backend or account is resolved for it and nothing is prompted for."
   (let* ((origin (current-buffer))
-         (target (unless existing (agent--resolve-backend-account)))
-         (agent--context-wants-directory (not existing))
+         (names-session (and (symbolp extractor)
+                             (get extractor 'agent-names-session)))
+         (target (unless (or existing names-session)
+                   (agent--resolve-backend-account)))
+         (agent--context-wants-directory (not (or existing names-session)))
          (agent--context-account (cdr target)))
     (funcall extractor
              (lambda (context)
@@ -3550,6 +3559,36 @@ act on."
 (defun agent--backtrace-at-point-p ()
   "Return non-nil in a backtrace buffer."
   (string-match-p "\\*Backtrace\\*" (buffer-name)))
+
+(defconst agent-resume-command-regexp
+  (rx "claude" (+ space) "--resume" (+ space)
+      (group (= 8 hex) "-" (= 4 hex) "-" (= 4 hex) "-" (= 4 hex) "-"
+             (= 12 hex)))
+  "Regexp matching a Claude Code resume command; group 1 is the session id.")
+
+(defun agent--resume-session-id (text)
+  "Return the session id of the first Claude Code resume command in TEXT."
+  (when (and text (string-match agent-resume-command-regexp text))
+    (match-string 1 text)))
+
+(defun agent--slack-resume-at-point-p ()
+  "Return non-nil when the Slack message at point has a resume command.
+Reads only the buffer: the message is the run of text carrying the same
+`ts' property as point, which is how `slack' marks a rendered message."
+  (and (bound-and-true-p slack-current-buffer)
+       (agent--resume-session-id (agent--slack-message-text-at-point))))
+
+(defun agent--slack-message-text-at-point ()
+  "Return the rendered text of the Slack message at point, or nil."
+  (when-let* ((ts (or (get-text-property (point) 'ts)
+                      (get-text-property (line-beginning-position) 'ts))))
+    (let ((beg (point)) (end (point)))
+      (while (and (> beg (point-min))
+                  (equal (get-text-property (1- beg) 'ts) ts))
+        (setq beg (1- beg)))
+      (while (and (< end (point-max)) (equal (get-text-property end 'ts) ts))
+        (setq end (1+ end)))
+      (buffer-substring-no-properties beg end))))
 
 (defun agent--slack-message-at-point-p ()
   "Return non-nil in a Slack message buffer.

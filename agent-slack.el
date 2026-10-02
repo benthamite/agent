@@ -34,10 +34,10 @@
 ;; from `agent-act-on-forge-notification': the project has to be chosen
 ;; from the text, out of the candidates `agent-project' collects.
 ;;
-;; The exception is a message that carries a resume command for a Claude
-;; Code session, such as an alert reply posted for a background session
-;; that needs input.  Its context names that session instead, and the
-;; core reopens it rather than starting a new one.
+;; A message that carries a Claude Code resume command, such as an alert
+;; reply posted for a background session that needs input, is a separate
+;; thing at point: `agent-slack-resume-context' answers with a context
+;; naming that session, and the core reopens it instead of starting one.
 
 ;;; Code:
 
@@ -75,42 +75,45 @@ starting one in a project chosen from the message text."
 (defun agent-slack-context (callback)
   "Call CALLBACK with the context for the Slack message at point.
 The context is unanchored: a message names no directory, so its text
-picks the project.  A message carrying a Claude Code resume command
-instead answers with a context naming that session; see
-`agent-slack--resume-context'."
+picks the project."
   (agent-slack--with-message-context
    (lambda (context)
-     (let ((text (plist-get context :text)))
-       (funcall callback
-                (if-let* ((session-id (agent-slack--resume-session-id text)))
-                    (agent-slack--resume-context session-id)
-                  (list :text text
-                        :payload (plist-get context :url)
-                        :submit nil)))))))
+     (funcall callback (list :text (plist-get context :text)
+                             :payload (plist-get context :url)
+                             :submit nil)))))
 
-(defconst agent-slack--resume-regexp
-  (rx "claude" (+ space) "--resume" (+ space)
-      (group (= 8 hex) "-" (= 4 hex) "-" (= 4 hex) "-" (= 4 hex) "-"
-             (= 12 hex)))
-  "Regexp matching a Claude Code resume command; group 1 is the session id.")
-
-(defun agent-slack--resume-session-id (text)
-  "Return the session id of the first Claude Code resume command in TEXT."
-  (when (and text (string-match agent-slack--resume-regexp text))
-    (match-string 1 text)))
-
-(defun agent-slack--resume-context (session-id)
-  "Return the context that reopens Claude Code session SESSION-ID.
-The session's directory is read from its transcript, so the session
-resumes where it ran."
-  (list :resume-id session-id
-        :backend 'claude-code
-        :directory (or (agent-claude-cli-session-directory session-id)
-                       (user-error "No transcript found for session %s"
-                                   session-id))))
+(defun agent-slack-resume-context (callback)
+  "Call CALLBACK with the context reopening the session the message names.
+The message at point carries a Claude Code resume command, which
+`agent--slack-resume-at-point-p' checked.  The session's directory is
+read from its transcript, so it resumes where it ran.  No permalink is
+fetched: the message is not delivered anywhere, only read."
+  (let ((session-id (agent--resume-session-id
+                     (plist-get (agent-slack--message-at-point) :text))))
+    (unless session-id
+      (user-error "No Claude Code resume command in this message"))
+    (funcall callback
+             (list :resume-id session-id
+                   :backend 'claude-code
+                   :directory (or (agent-claude-cli-session-directory session-id)
+                                  (user-error "No transcript found for session %s"
+                                              session-id))))))
 
 (defun agent-slack--with-message-context (callback)
   "Call CALLBACK with the Slack message context at point."
+  (let* ((message (agent-slack--message-at-point))
+         (team (plist-get message :team))
+         (room (plist-get message :room))
+         (ts (plist-get message :ts)))
+    (agent-slack--message-url
+     team room ts
+     (lambda (url)
+       (funcall callback
+                (list :text (plist-get message :text) :url url :ts ts
+                      :room-id (agent--slot-value room 'id)))))))
+
+(defun agent-slack--message-at-point ()
+  "Return the Slack message at point as (:ts :team :room :text)."
   (unless (require 'slack nil t)
     (user-error "Package `slack' is required"))
   (let* ((ts (agent-slack--message-ts-at-point))
@@ -120,12 +123,7 @@ resumes where it ran."
          (text (agent-slack--message-text message team)))
     (unless (and team room ts text)
       (user-error "No Slack message at point"))
-    (agent-slack--message-url
-     team room ts
-     (lambda (url)
-       (funcall callback
-                (list :text text :url url :ts ts
-                      :room-id (agent--slot-value room 'id)))))))
+    (list :ts ts :team team :room room :text text)))
 
 (defun agent-slack--message-ts-at-point ()
   "Return the Slack message timestamp at point."

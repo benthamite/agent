@@ -3750,6 +3750,43 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
     (let ((slack-current-buffer 'room))
       (should (eq (agent--extractor-at-point) 'agent-slack-context)))))
 
+(ert-deftest agent-test-resume-session-id-is-parsed ()
+  "Find the session id in a Claude Code resume command."
+  (should (equal (agent--resume-session-id
+                  "x\nResume: `claude --resume 0e4735ae-23ff-4f00-8dc9-bd349a863723`")
+                 "0e4735ae-23ff-4f00-8dc9-bd349a863723"))
+  (should-not (agent--resume-session-id "session 0e4735ae-23ff-4f00-8dc9-bd349a863723"))
+  (should-not (agent--resume-session-id nil)))
+
+(ert-deftest agent-test-extractor-at-point-finds-a-resume-message ()
+  "A Slack message with a resume command routes to the resume extractor."
+  (with-temp-buffer
+    (let ((slack-current-buffer 'room))
+      (insert (propertize "first message\n" 'ts "1.0"))
+      (insert (propertize "Needs you\nResume: `claude --resume 0e4735ae-23ff-4f00-8dc9-bd349a863723`\n" 'ts "2.0"))
+      (goto-char (point-min))
+      (should (eq (agent--extractor-at-point) 'agent-slack-context))
+      (search-forward "Needs you")
+      (should (eq (agent--extractor-at-point) 'agent-slack-resume-context)))))
+
+(ert-deftest agent-test-session-naming-extractor-prompts-for-nothing ()
+  "Acting on a thing that names a session resolves no backend."
+  (let (delivered)
+    (cl-letf (((symbol-function 'agent--resolve-backend-account)
+               (lambda () (error "Should not resolve a backend")))
+              ((symbol-function 'agent--deliver-context)
+               (lambda (context existing _origin target)
+                 (setq delivered (list context existing target)))))
+      (should-error (agent--act-on-context
+                     (lambda (callback) (funcall callback '(:resume-id "abc")))
+                     nil))
+      (should-not delivered)
+      (put 'agent-test--naming-extractor 'agent-names-session t)
+      (fset 'agent-test--naming-extractor
+            (lambda (callback) (funcall callback '(:resume-id "abc"))))
+      (agent--act-on-context 'agent-test--naming-extractor nil)
+      (should (equal delivered '((:resume-id "abc") nil nil))))))
+
 (ert-deftest agent-test-resume-context-shows-a-live-session ()
   "A resume context whose session has a buffer shows that buffer."
   (with-temp-buffer

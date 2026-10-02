@@ -538,11 +538,13 @@ sources and ranked by that text (@ref{Project sources}).
 A message that contains a Claude Code resume command, @samp{claude --resume} followed
 by a session id, is handled differently: it names a session, not a task. Such a
 message is typically an alert reply posted for a background session that has
-stopped to ask for a decision. The command switches to that session's buffer
-when one is live, and otherwise resumes the session in a new buffer in the
-directory its transcript records, so the conversation continues where it
-stopped. The prefix argument makes no difference here. A resume command whose
-transcript cannot be found signals an error rather than starting a new session.
+stopped to ask for a decision. It is a thing at point of its own, checked before
+an ordinary Slack message, so @code{agent-act-on-thing-at-point} asks for no backend
+and no project: the command switches to that session's buffer when one is live,
+and otherwise resumes the session in a new buffer in the directory its
+transcript records, so the conversation continues where it stopped. The prefix
+argument makes no difference here. A resume command whose transcript cannot be
+found signals an error rather than starting a new session.
 
 The command @code{agent-act-on-forge-notification} is the Forge counterpart of
 @code{agent-act-on-slack-message}. Called on a notification in
