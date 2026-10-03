@@ -3631,17 +3631,28 @@ never calls into `mu4e'."
 (defun agent-setup-kill-on-exit ()
   "Arrange for the buffer to be killed when the session process exits.
 Consults the backend's `before-kill-check' slot, which may veto or
-prompt before the buffer is killed."
+prompt before the buffer is killed.  A process that exits with a
+non-zero code keeps its buffer, because the buffer holds the error that
+explains the failure; a process ended by a signal is killed as usual."
   (interactive)
   (when-let* ((session (agent-session))
               (backend (agent-session-backend session))
-              ((get-buffer-process (current-buffer))))
+              (process (get-buffer-process (current-buffer))))
     (agent--add-process-exit-hook
      (current-buffer)
      (lambda (buffer)
-       (when (and (buffer-live-p buffer)
-                  (agent--before-kill-allowed-p backend buffer))
-         (ignore-errors (kill-buffer buffer)))))))
+       (when (buffer-live-p buffer)
+         (if (agent--failed-exit-p process)
+             (message "%s exited with code %d; its buffer is kept to show why"
+                      (buffer-name buffer) (process-exit-status process))
+           (when (agent--before-kill-allowed-p backend buffer)
+             (ignore-errors (kill-buffer buffer)))))))))
+
+(defun agent--failed-exit-p (process)
+  "Return non-nil when PROCESS exited on its own with a non-zero code."
+  (and (processp process)
+       (eq (process-status process) 'exit)
+       (/= 0 (process-exit-status process))))
 
 (defun agent--before-kill-allowed-p (backend buffer)
   "Return non-nil when killing session BUFFER is allowed by BACKEND.

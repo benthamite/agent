@@ -1415,6 +1415,41 @@ observation."
         (funcall hook-fn buf)
         (should (buffer-live-p buf))))))
 
+(ert-deftest agent-test-setup-kill-on-exit-keeps-a-failed-session ()
+  "Keep the buffer of a session whose process exits with an error code."
+  (agent-test--kill-on-exit-after '("false")
+    (lambda (buf) (should (buffer-live-p buf)))))
+
+(ert-deftest agent-test-setup-kill-on-exit-kills-a-finished-session ()
+  "Kill the buffer of a session whose process exits successfully."
+  (agent-test--kill-on-exit-after '("true")
+    (lambda (buf) (should-not (buffer-live-p buf)))))
+
+(defun agent-test--kill-on-exit-after (command check)
+  "Run COMMAND as a session process with kill-on-exit, then call CHECK.
+CHECK receives the session buffer once the process has exited and its
+sentinel has run."
+  (let ((agent-backends nil)
+        (buf (generate-new-buffer "*one:~/repo/project/:default*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (apply #'agent-register-backend
+                 'one
+                 (agent-test--backend
+                  :buffer-p (lambda (candidate) (eq candidate buf))))
+          (let ((proc (make-process :name "agent-kill-on-exit-test" :buffer buf
+                                    :command command :connection-type 'pipe
+                                    :sentinel #'ignore))
+                (inhibit-message t))
+            (agent-setup-kill-on-exit)
+            (while (process-live-p proc)
+              (accept-process-output proc 0.1))
+            (sit-for 0.2)
+            (funcall check buf)))
+      (when (buffer-live-p buf)
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer buf))))))
+
 (ert-deftest agent-test-exit-runs-before-exit-functions ()
   "Abort exit when a before-exit function returns nil."
   (let ((agent-backends nil)
