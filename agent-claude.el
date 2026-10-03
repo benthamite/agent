@@ -114,14 +114,6 @@ Written by `agent-claude-select-account', read at session start."
   :type 'file
   :group 'agent-claude)
 
-(defcustom agent-claude-hook-wrapper
-  (when-let* ((library (locate-library "claude-code")))
-    (expand-file-name "bin/claude-code-hook-wrapper"
-                      (file-name-directory library)))
-  "Absolute path to the claude-code hook wrapper script."
-  :type '(choice (const :tag "Unavailable" nil) file)
-  :group 'agent-claude)
-
 (defun agent-claude--source-directory (file)
   "Return the directory of the source checkout that FILE was built from.
 FILE is a loaded Lisp file, compiled or not.  The directory is resolved
@@ -131,6 +123,16 @@ symlinks to the Lisp sources; the bundled `etc/' and `hooks/'
 directories exist only in the checkout."
   (file-name-directory
    (file-truename (concat (file-name-sans-extension file) ".el"))))
+
+(defcustom agent-claude-hook-wrapper
+  (when-let* ((library (locate-library "claude-code")))
+    (expand-file-name "bin/claude-code-hook-wrapper"
+                      (agent-claude--source-directory library)))
+  "Absolute path to the claude-code hook wrapper script.
+The default is resolved in the `claude-code' source checkout, since a
+build directory such as Elpaca's holds only its Lisp files."
+  :type '(choice (const :tag "Unavailable" nil) file)
+  :group 'agent-claude)
 
 (defconst agent-claude--package-directory
   (agent-claude--source-directory (or load-file-name buffer-file-name))
