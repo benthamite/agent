@@ -507,6 +507,34 @@ when `debug-on-error' is set, and Emacs never runs it again."
     (should (= (length entries) 1))
     (should (string-prefix-p "AGENT_SESSION_UUID=" (car entries)))))
 
+;;;; Server environment
+
+(ert-deftest agent-claude-test-server-env-names-the-running-socket ()
+  "The env hook points emacsclient at this Emacs's server socket."
+  (require 'server)
+  (let ((server-process t)
+        (server-use-tcp nil)
+        (server-name "agent-test")
+        (server-socket-dir "/tmp/emacs501/"))
+    (should (equal (agent-claude--server-env "buf" "/tmp/")
+                   '("EMACS_SOCKET_NAME=/tmp/emacs501/agent-test")))))
+
+(ert-deftest agent-claude-test-server-env-names-the-tcp-server-file ()
+  "A TCP server is named through its server file."
+  (require 'server)
+  (let ((server-process t)
+        (server-use-tcp t)
+        (server-name "agent-test")
+        (server-auth-dir "/tmp/auth/"))
+    (should (equal (agent-claude--server-env "buf" "/tmp/")
+                   '("EMACS_SERVER_FILE=/tmp/auth/agent-test")))))
+
+(ert-deftest agent-claude-test-server-env-without-server ()
+  "Add nothing when this Emacs runs no server."
+  (require 'server)
+  (let ((server-process nil))
+    (should-not (agent-claude--server-env "buf" "/tmp/"))))
+
 ;;;; Theme sync
 
 (defun agent-claude-test--json-theme (file)

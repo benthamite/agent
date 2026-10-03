@@ -859,6 +859,25 @@ per CLI process.")
   (setq agent-claude--pending-status-uuid (agent-claude--generate-uuid))
   (list (format "AGENT_SESSION_UUID=%s" agent-claude--pending-status-uuid)))
 
+(defvar server-process)
+(defvar server-name)
+(defvar server-use-tcp)
+(defvar server-auth-dir)
+(defvar server-socket-dir)
+
+(defun agent-claude--server-env (_buffer-name _dir)
+  "Return the environment entry naming this Emacs's server, or nil.
+The bundled hooks call emacsclient without naming a server, so on their
+own they reach whichever Emacs owns the default socket.  Naming this
+Emacs's server keeps their events in the Emacs that started the session
+when several Emacs instances run servers."
+  (when (bound-and-true-p server-process)
+    (if server-use-tcp
+        (list (concat "EMACS_SERVER_FILE="
+                      (expand-file-name server-name server-auth-dir)))
+      (list (concat "EMACS_SOCKET_NAME="
+                    (expand-file-name server-name server-socket-dir))))))
+
 (defun agent-claude--capture-status-uuid ()
   "Store the pending status UUID buffer-locally at session start."
   (when (claude-code--buffer-p (current-buffer))
@@ -2329,6 +2348,8 @@ symmetrically and restores `claude-code-notification-function'."
   (add-hook 'claude-code-process-environment-functions
             #'agent-claude--status-uuid-env)
   (add-hook 'claude-code-process-environment-functions
+            #'agent-claude--server-env)
+  (add-hook 'claude-code-process-environment-functions
             #'agent-claude--sync-theme-before-start)
   (advice-add 'claude-code--eat-send-return :before
               #'agent-claude--note-user-submission)
@@ -2369,6 +2390,8 @@ symmetrically and restores `claude-code-notification-function'."
                #'agent-claude-account-env)
   (remove-hook 'claude-code-process-environment-functions
                #'agent-claude--status-uuid-env)
+  (remove-hook 'claude-code-process-environment-functions
+               #'agent-claude--server-env)
   (remove-hook 'claude-code-process-environment-functions
                #'agent-claude--sync-theme-before-start)
   (advice-remove 'claude-code--eat-send-return #'agent-claude--note-user-submission)
