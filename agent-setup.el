@@ -38,9 +38,10 @@
 (defvar claude-code-program)
 (defvar codex-program)
 (defvar agent-claude-settings-file)
-(declare-function agent-claude-setup-config "agent-claude")
-(declare-function agent-claude--read-json-object "agent-claude" (file))
-(declare-function agent-claude--agent-statusline-p "agent-claude" (statusline))
+(defvar agent-claude-use-session-settings)
+(declare-function agent-claude--session-settings-file "agent-claude" (&optional base))
+(declare-function agent-claude-global-config-entries "agent-claude" (&optional file))
+(declare-function agent-claude-remove-global-config "agent-claude" (&optional file))
 
 (defconst agent-setup-buffer-name "*agent-setup*"
   "Name of the buffer `agent-setup' reports in.")
@@ -55,18 +56,21 @@
 (defun agent-setup ()
   "Check what agent needs, offer to fix it, and report the result.
 Start the Emacs server, which the Claude Code hooks report session state
-through, and add agent's status line and hooks to Claude Code's
-settings, asking before each.  Missing programs are reported with
+through, and check the settings agent passes to each Claude session.
+Offer to remove agent entries that earlier versions wrote into Claude
+Code's global settings, since sessions would receive those events twice.
+Ask before each change.  Missing programs are reported with
 instructions, since installing them is left to the user."
   (interactive)
   (agent-setup--report
-   (list (agent-setup--check-program
-          'claude (agent-setup--program 'claude-code-program "claude"))
-         (agent-setup--check-program
-          'codex (agent-setup--program 'codex-program "codex"))
-         (agent-setup--check-program 'emacsclient "emacsclient")
-         (agent-setup--check-server)
-         (agent-setup--check-claude-settings))))
+   (append
+    (list (agent-setup--check-program
+           'claude (agent-setup--program 'claude-code-program "claude"))
+          (agent-setup--check-program
+           'codex (agent-setup--program 'codex-program "codex"))
+          (agent-setup--check-program 'emacsclient "emacsclient")
+          (agent-setup--check-server))
+    (agent-setup--check-claude-settings))))
 
 (defun agent-setup--program (variable default)
   "Return the value of VARIABLE when it is bound, else DEFAULT."
@@ -92,43 +96,45 @@ report their state? "))
           :hint "Run M-x server-start, or add (server-start) to your init file")))
 
 (defun agent-setup--check-claude-settings ()
-  "Return the Claude settings check result, updating the settings if needed.
-Settings that already carry agent's status line are refreshed without
-asking, because the update rewrites only entries agent owns."
+  "Return the check results for Claude Code's status line and hooks."
   (if (not (require 'agent-claude nil t))
-      (list :ok nil :label "agent-claude could not be loaded"
-            :hint "Install the claude-code and consult packages")
-    (let* ((file agent-claude-settings-file)
-           (before (agent-setup--claude-statusline-state file)))
-      (when (or (eq before 'agent)
-                (y-or-n-p (format "Add agent's status line and hooks to %s? "
-                                  (abbreviate-file-name file))))
-        (agent-claude-setup-config))
-      (agent-setup--claude-settings-result
-       file before (agent-setup--claude-statusline-state file)))))
+      (list (list :ok nil :label "agent-claude could not be loaded"
+                  :hint "Install the claude-code and consult packages"))
+    (list (agent-setup--check-session-settings)
+          (agent-setup--check-global-settings))))
 
-(defun agent-setup--claude-statusline-state (file)
-  "Return who owns the status line in Claude settings FILE.
-The value is `agent', `other', or nil when FILE sets no status line."
-  (when-let* ((statusline (gethash "statusLine"
-                                   (agent-claude--read-json-object file))))
-    (if (agent-claude--agent-statusline-p statusline) 'agent 'other)))
+(defun agent-setup--check-session-settings ()
+  "Return the check result for the settings agent passes to Claude sessions."
+  (if (not agent-claude-use-session-settings)
+      (list :ok nil :label "agent-claude-use-session-settings is off"
+            :hint "Without it, run M-x agent-claude-setup-config to install the hooks globally")
+    (condition-case err
+        (list :ok t
+              :label (format "Claude Code hooks passed to each session (%s)"
+                             (abbreviate-file-name
+                              (agent-claude--session-settings-file))))
+      (error
+       (list :ok nil :label "Claude Code session settings could not be written"
+             :hint (error-message-string err))))))
 
-(defun agent-setup--claude-settings-result (file before after)
-  "Return the check result for Claude settings FILE.
-BEFORE and AFTER are the status-line states, as returned by
-`agent-setup--claude-statusline-state', before and after setup ran."
-  (let ((name (abbreviate-file-name file)))
-    (cond ((eq after 'agent)
-           (list :ok t :label (format "Claude Code hooks installed in %s" name)))
-          ((eq before 'other)
-           (list :ok nil :label "Claude Code uses another status line"
-                 :hint (format "Remove the statusLine entry from %s and rerun \
-M-x agent-setup; without agent's status line, session status is approximate"
-                               name)))
+(defun agent-setup--check-global-settings ()
+  "Return the check result for agent entries left in global Claude settings.
+Offer to remove them, since sessions would otherwise receive each event
+twice."
+  (let* ((file agent-claude-settings-file)
+         (name (abbreviate-file-name file))
+         (count (length (agent-claude-global-config-entries file))))
+    (cond ((or (zerop count) (not agent-claude-use-session-settings))
+           (list :ok t :label (format "%s left alone" name)))
+          ((y-or-n-p (format "Remove %d agent entries from %s?  Agent now \
+passes them to each session itself " count name))
+           (agent-claude-remove-global-config file)
+           (list :ok t :label (format "Removed %d agent entries from %s"
+                                      count name)))
           (t
-           (list :ok nil :label "Claude Code hooks not installed"
-                 :hint "Rerun M-x agent-setup and accept the settings change")))))
+           (list :ok nil
+                 :label (format "%d agent entries remain in %s" count name)
+                 :hint "Sessions receive those events twice; run M-x agent-claude-remove-global-config")))))
 
 (defun agent-setup--report (checks)
   "Show CHECKS in `agent-setup-buffer-name' and return the buffer.

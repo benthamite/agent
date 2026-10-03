@@ -507,6 +507,173 @@ when `debug-on-error' is set, and Emacs never runs it again."
     (should (= (length entries) 1))
     (should (string-prefix-p "AGENT_SESSION_UUID=" (car entries)))))
 
+;;;; Session settings
+
+(defmacro agent-claude-test--with-session-dir (&rest body)
+  "Run BODY with session settings written to a temporary directory."
+  (declare (indent 0))
+  `(let* ((dir (make-temp-file "agent-claude-session" t))
+          (agent-claude-session-settings-directory dir))
+     (unwind-protect (progn ,@body)
+       (delete-directory dir t))))
+
+(defun agent-claude-test--hook-commands (settings event)
+  "Return the commands SETTINGS runs for hook EVENT."
+  (mapcan (lambda (group)
+            (mapcar (lambda (hook) (gethash "command" hook))
+                    (agent-claude--json-list (gethash "hooks" group))))
+          (agent-claude--json-list (gethash event (gethash "hooks" settings)))))
+
+(defun agent-claude-test--start-switches (extra &optional program-switches)
+  "Return what `claude-code--start' receives for EXTRA and PROGRAM-SWITCHES.
+The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
+  (let ((claude-code-program-switches program-switches)
+        (agent-claude-use-session-settings t))
+    (agent-claude--start-with-session-settings
+     (lambda (_arg extra-switches &rest _)
+       (cons claude-code-program-switches extra-switches))
+     nil extra)))
+
+(ert-deftest agent-claude-test-session-settings-carry-every-hook ()
+  "The session settings hold the status line and every hook agent needs."
+  (let ((settings (agent-claude--session-settings)))
+    (should (agent-claude--agent-statusline-p (gethash "statusLine" settings)))
+    (dolist (event '("Stop" "Notification" "UserPromptSubmit" "PreToolUse"
+                     "PostToolUse" "PostToolUseFailure" "SubagentStart"
+                     "StopFailure" "SubagentStop"))
+      (should (agent-claude-test--hook-commands settings event)))
+    (should (seq-some (lambda (command)
+                        (string-match-p "claude-code-hook-wrapper stop" command))
+                      (agent-claude-test--hook-commands settings "Stop")))))
+
+(ert-deftest agent-claude-test-session-settings-ignore-package-override ()
+  "Session settings name the loaded checkout even when an override is set."
+  (let* ((agent-claude-settings-package-directory "/nonexistent/agent/")
+         (json (json-serialize (agent-claude--session-settings))))
+    (should-not (string-match-p "/nonexistent/" json))
+    (should (string-match-p (regexp-quote agent-claude--package-directory) json))))
+
+(ert-deftest agent-claude-test-session-settings-keep-a-foreign-status-line ()
+  "A status line the user passes is kept; agent's hooks are still added."
+  (let* ((base (json-parse-string
+                "{\"statusLine\": {\"type\": \"command\", \"command\": \"mine\"}}"))
+         (settings (agent-claude--session-settings base)))
+    (should (equal (gethash "command" (gethash "statusLine" settings)) "mine"))
+    (should (agent-claude-test--hook-commands settings "Stop"))
+    (should-not (gethash "hooks" base))))
+
+(ert-deftest agent-claude-test-start-adds-one-settings-switch ()
+  "A session started without `--settings' gets exactly one, pointing at agent's file."
+  (agent-claude-test--with-session-dir
+    (pcase-let ((`(,program . ,extra)
+                 (agent-claude-test--start-switches '("--resume"))))
+      (should (equal program nil))
+      (should (equal (seq-take extra 2) '("--resume" "--settings")))
+      (should (= (seq-count (lambda (s) (equal s "--settings")) extra) 1))
+      (should (file-exists-p (nth 2 extra)))
+      (should (equal (nth 2 extra)
+                     (cadr (cdr (agent-claude-test--start-switches nil))))))))
+
+(ert-deftest agent-claude-test-start-merges-inline-user-settings ()
+  "Inline JSON the caller passes is merged, not overridden."
+  (agent-claude-test--with-session-dir
+    (pcase-let* ((user "{\"hooks\": {\"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"user-stop\"}]}]}}")
+                 (`(,_ . ,extra)
+                  (agent-claude-test--start-switches (list "--settings" user))))
+      (should (= (seq-count (lambda (s) (equal s "--settings")) extra) 1))
+      (let ((settings (agent-claude--read-json-object (cadr (member "--settings" extra)))))
+        (should (member "user-stop" (agent-claude-test--hook-commands settings "Stop")))
+        (should (agent-claude--agent-statusline-p (gethash "statusLine" settings)))))))
+
+(ert-deftest agent-claude-test-start-merges-program-switch-settings-file ()
+  "A settings file in `claude-code-program-switches' moves into agent's file."
+  (agent-claude-test--with-session-dir
+    (let ((user-file (expand-file-name "user.json" agent-claude-session-settings-directory)))
+      (with-temp-file user-file
+        (insert "{\"env\": {\"FOO\": \"1\"}}"))
+      (pcase-let ((`(,program . ,extra)
+                   (agent-claude-test--start-switches
+                    nil (list "--chrome" (concat "--settings=" user-file)))))
+        (should (equal program '("--chrome")))
+        (let ((settings (agent-claude--read-json-object (cadr (member "--settings" extra)))))
+          (should (equal (gethash "FOO" (gethash "env" settings)) "1")))))))
+
+(ert-deftest agent-claude-test-start-without-session-settings ()
+  "With the option off, the switches pass through unchanged."
+  (let ((agent-claude-use-session-settings nil)
+        (claude-code-program-switches '("--settings" "x")))
+    (should (equal (agent-claude--start-with-session-settings
+                    (lambda (_arg extra &rest _) (cons claude-code-program-switches extra))
+                    nil '("--resume"))
+                   '(("--settings" "x") "--resume")))))
+
+(ert-deftest agent-claude-test-session-settings-files-coexist ()
+  "Different settings produce different files, and neither is overwritten."
+  (agent-claude-test--with-session-dir
+    (let ((plain (agent-claude--session-settings-file))
+          (merged (agent-claude--session-settings-file
+                   (json-parse-string "{\"env\": {\"A\": \"1\"}}"))))
+      (should-not (equal plain merged))
+      (should (file-exists-p plain))
+      (should (file-exists-p merged))
+      (should (= (file-modes plain) #o600))
+      (should (equal (agent-claude--session-settings-file) plain)))))
+
+(ert-deftest agent-claude-test-mode-installs-and-removes-start-advice ()
+  "The start advice exists only while the mode is on."
+  (let ((was agent-claude-mode))
+    (unwind-protect
+        (progn
+          (agent-claude-mode 1)
+          (should (advice-member-p #'agent-claude--start-with-session-settings
+                                   'claude-code--start))
+          (agent-claude-mode -1)
+          (should-not (advice-member-p #'agent-claude--start-with-session-settings
+                                       'claude-code--start)))
+      (agent-claude-mode (if was 1 -1)))))
+
+;;;; Global settings cleanup
+
+(defconst agent-claude-test--global-settings
+  (concat
+   "{\"statusLine\": {\"type\": \"command\", \"command\": \"AGENT_CLAUDE_STATUS_DIR=/t /old/elpaca/sources/agent/etc/claude-code-statusline.sh\"},"
+   " \"hooks\": {"
+   "\"Stop\": ["
+   "{\"matcher\": \"\", \"hooks\": [{\"type\": \"command\", \"command\": \"/old/elpaca/sources/claude-code/bin/claude-code-hook-wrapper stop\"}]},"
+   "{\"hooks\": [{\"type\": \"command\", \"command\": \"/x/bin/claude-code-hook-wrapper stop\"}, {\"type\": \"command\", \"command\": \"mine\"}]},"
+   "{\"hooks\": [{\"type\": \"command\", \"command\": \"/old/My\\\\ Drive/agent/hooks/record-background-tasks.sh\"}, {\"type\": \"command\", \"command\": \"keep-me\"}]}],"
+   "\"Notification\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"/old/agent/hooks/fire-and-forget.sh /old/agent/hooks/notify-emacs-notification.sh\"}]},"
+   "{\"hooks\": [{\"type\": \"command\", \"command\": \"/dotfiles/claude/hooks/fire-and-forget.sh /dotfiles/claude/hooks/notify-emacs-notification.sh\"}]}]}}")
+  "Global settings mixing agent entries from an old checkout with the user's.")
+
+(ert-deftest agent-claude-test-remove-global-config-keeps-foreign-entries ()
+  "Remove agent's entries from any checkout path, keeping everything else."
+  (let ((file (make-temp-file "agent-claude-global" nil ".json")))
+    (unwind-protect
+        (progn
+          (with-temp-file file (insert agent-claude-test--global-settings))
+          (should (= (length (agent-claude-global-config-entries file)) 4))
+          (should (= (agent-claude-remove-global-config file) 4))
+          (let ((settings (agent-claude--read-json-object file)))
+            (should-not (gethash "statusLine" settings))
+            (should (equal (agent-claude-test--hook-commands settings "Stop")
+                           '("/x/bin/claude-code-hook-wrapper stop" "mine" "keep-me")))
+            (should (equal (agent-claude-test--hook-commands settings "Notification")
+                           '("/dotfiles/claude/hooks/fire-and-forget.sh /dotfiles/claude/hooks/notify-emacs-notification.sh"))))
+          (should-not (agent-claude-global-config-entries file)))
+      (delete-file file))))
+
+(ert-deftest agent-claude-test-remove-global-config-keeps-a-foreign-status-line ()
+  "A status line agent did not write survives."
+  (let ((file (make-temp-file "agent-claude-global" nil ".json")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "{\"statusLine\": {\"type\": \"command\", \"command\": \"mine\"}}"))
+          (should (= (agent-claude-remove-global-config file) 0))
+          (should (gethash "statusLine" (agent-claude--read-json-object file))))
+      (delete-file file))))
+
 ;;;; Server environment
 
 (ert-deftest agent-claude-test-server-env-names-the-running-socket ()

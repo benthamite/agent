@@ -114,6 +114,20 @@ Written by `agent-claude-select-account', read at session start."
   :type 'file
   :group 'agent-claude)
 
+(defcustom agent-claude-use-session-settings t
+  "When non-nil, pass agent's status line and hooks to each Claude session.
+They go in a file named by a `--settings' switch added to every session
+started through `claude-code', so Claude Code sessions started outside
+Emacs, and the user's own settings files, are left alone."
+  :type 'boolean
+  :group 'agent-claude)
+
+(defcustom agent-claude-session-settings-directory
+  (expand-file-name "agent/" user-emacs-directory)
+  "Directory holding the settings files passed to Claude sessions."
+  :type 'directory
+  :group 'agent-claude)
+
 (defun agent-claude--source-directory (file)
   "Return the directory of the source checkout that FILE was built from.
 FILE is a loaded Lisp file, compiled or not.  The directory is resolved
@@ -1827,11 +1841,218 @@ Return non-nil when PATH was written."
   (agent-sync-theme-now)
   nil)
 
+;;;;; Session settings
+
+(defun agent-claude--start-with-session-settings (start arg extra-switches &rest rest)
+  "Call START with ARG, EXTRA-SWITCHES and REST, adding agent's settings.
+START is `claude-code--start'.  Agent's status line and hooks reach the
+session through a single `--settings' switch.  Claude Code honors only
+the last `--settings', so one the user already passes, in
+`claude-code-program-switches' or EXTRA-SWITCHES, is removed and its
+settings are merged into the file passed instead."
+  (if (not agent-claude-use-session-settings)
+      (apply start arg extra-switches rest)
+    (let* ((user-value (or (agent-claude--settings-switch-value extra-switches)
+                           (agent-claude--settings-switch-value
+                            claude-code-program-switches)))
+           (file (agent-claude--session-settings-file
+                  (and user-value
+                       (agent-claude--read-settings-value user-value))))
+           (claude-code-program-switches
+            (agent-claude--remove-settings-switch claude-code-program-switches)))
+      (apply start arg
+             (append (agent-claude--remove-settings-switch extra-switches)
+                     (list "--settings" file))
+             rest))))
+
+(defun agent-claude--settings-switch-value (switches)
+  "Return the value of the last `--settings' switch in SWITCHES, or nil."
+  (let (value)
+    (while switches
+      (let ((switch (pop switches)))
+        (cond ((equal switch "--settings") (setq value (pop switches)))
+              ((string-prefix-p "--settings=" switch)
+               (setq value (substring switch (length "--settings=")))))))
+    value))
+
+(defun agent-claude--remove-settings-switch (switches)
+  "Return SWITCHES without any `--settings' switch and its value."
+  (let (kept)
+    (while switches
+      (let ((switch (pop switches)))
+        (cond ((equal switch "--settings") (pop switches))
+              ((string-prefix-p "--settings=" switch))
+              (t (push switch kept)))))
+    (nreverse kept)))
+
+(defun agent-claude--read-settings-value (value)
+  "Return the settings object a `--settings' VALUE names.
+VALUE is inline JSON when it starts with `{', else a file name."
+  (if (string-prefix-p "{" (string-trim-left value))
+      (let ((data (json-parse-string value)))
+        (unless (hash-table-p data)
+          (user-error "The --settings value is not a JSON object"))
+        data)
+    (let ((file (expand-file-name value)))
+      (unless (file-readable-p file)
+        (user-error "Settings file passed with --settings not found: %s" file))
+      (agent-claude--read-json-object file))))
+
+(defun agent-claude--session-settings-file (&optional base)
+  "Return a file holding agent's session settings merged into BASE.
+BASE is a settings object, or nil for none.  The file is named after a
+hash of its contents and never rewritten, so Emacs instances that share
+`agent-claude-session-settings-directory' but load different checkouts
+each pass their own."
+  (let* ((json (json-serialize (agent-claude--session-settings base)))
+         (file (expand-file-name
+                (format "claude-session-settings-%s.json"
+                        (substring (secure-hash 'sha1 json) 0 12))
+                agent-claude-session-settings-directory)))
+    (unless (file-exists-p file)
+      (agent-claude--write-private-file file json))
+    file))
+
+(defun agent-claude--session-settings (&optional base)
+  "Return BASE with agent's status line and hooks added.
+BASE is a settings object, copied rather than modified; nil starts from
+an empty one.  Commands always name the checkout loaded in this Emacs:
+`agent-claude-settings-package-directory' applies only to settings
+written by `agent-claude-setup-config'.  A status line BASE already
+sets is kept unless agent owns it."
+  (let ((settings (if base
+                      (json-parse-string (json-serialize base))
+                    (make-hash-table :test #'equal)))
+        (agent-claude-settings-package-directory nil))
+    (agent-claude--ensure-statusline settings)
+    (agent-claude--ensure-stop-hook settings)
+    (agent-claude--ensure-notification-hook settings)
+    (agent-claude--ensure-state-hooks settings)
+    (agent-claude--ensure-background-hooks settings)
+    settings))
+
+(defun agent-claude--write-private-file (file contents)
+  "Write CONTENTS to FILE readable only by the user, replacing it atomically."
+  (make-directory (file-name-directory file) t)
+  (let ((temporary (make-temp-file (expand-file-name ".tmp-" (file-name-directory file)))))
+    (with-file-modes #o600
+      (write-region contents nil temporary nil 'silent))
+    (set-file-modes temporary #o600)
+    (rename-file temporary file t)))
+
+(defun agent-claude--delete-stale-session-settings ()
+  "Delete session settings files unused for a week.
+A file another running Emacs still passes to new sessions is rewritten
+by that Emacs when it next needs it, since files are only ever created."
+  (when (file-directory-p agent-claude-session-settings-directory)
+    (dolist (file (directory-files agent-claude-session-settings-directory t
+                                   "\\`claude-session-settings-[0-9a-f]+\\.json\\'"))
+      (when (time-less-p (file-attribute-modification-time (file-attributes file))
+                         (time-subtract nil (days-to-time 7)))
+        (delete-file file)))))
+
+;;;;; Global settings
+
+(defun agent-claude-remove-global-config (&optional file)
+  "Remove agent's status line and hooks from Claude Code settings FILE.
+FILE defaults to `agent-claude-settings-file'.  Agent now passes them
+to each session it starts, so copies left in FILE by earlier versions
+or by `agent-claude-setup-config' make every event arrive twice.  Only
+entries agent wrote are removed; see `agent-claude--agent-command-p'.
+Return the number of entries removed."
+  (interactive)
+  (let* ((file (or file agent-claude-settings-file))
+         (count (length (agent-claude-global-config-entries file))))
+    (when (> count 0)
+      (agent-claude--update-settings file #'agent-claude--remove-agent-entries))
+    (when (called-interactively-p 'interactive)
+      (message "agent-claude: removed %d entries from %s" count file))
+    count))
+
+(defun agent-claude-global-config-entries (&optional file)
+  "Return descriptions of the agent-owned entries in settings FILE.
+FILE defaults to `agent-claude-settings-file'.  Each description is a
+string naming the setting and its command."
+  (let* ((settings (agent-claude--read-json-object
+                    (or file agent-claude-settings-file)))
+         (statusline (gethash "statusLine" settings))
+         (hooks (gethash "hooks" settings))
+         entries)
+    (when (agent-claude--agent-statusline-p statusline)
+      (push (format "statusLine: %s" (gethash "command" statusline)) entries))
+    (when (hash-table-p hooks)
+      (maphash
+       (lambda (name groups)
+         (dolist (group (agent-claude--json-list groups))
+           (dolist (command (agent-claude--agent-group-commands group))
+             (push (format "%s: %s" name command) entries))))
+       hooks))
+    (nreverse entries)))
+
+(defun agent-claude--remove-agent-entries (settings)
+  "Remove agent-owned status line and hook commands from SETTINGS."
+  (when (agent-claude--agent-statusline-p (gethash "statusLine" settings))
+    (remhash "statusLine" settings))
+  (let ((hooks (gethash "hooks" settings)))
+    (when (hash-table-p hooks)
+      (let (names)
+        (maphash (lambda (name _) (push name names)) hooks)
+        (dolist (name names)
+          (let ((kept (delq nil (mapcar #'agent-claude--without-agent-commands
+                                        (agent-claude--json-list
+                                         (gethash name hooks))))))
+            (if kept
+                (puthash name (vconcat kept) hooks)
+              (remhash name hooks))))))))
+
+(defun agent-claude--without-agent-commands (group)
+  "Return hook GROUP without agent-owned commands, or nil if none remain."
+  (let ((owned (agent-claude--agent-group-commands group)))
+    (if (null owned)
+        group
+      (agent-claude--prune-hook-entry
+       group (lambda (command) (member command owned))))))
+
+(defun agent-claude--agent-group-commands (group)
+  "Return the commands in hook GROUP that agent wrote.
+A bundled helper of an agent checkout identifies agent's commands.  The
+`claude-code-hook-wrapper' Stop command is generic, so it counts only
+in the exact form `agent-claude--stop-hook-command' writes, alone in
+its group."
+  (let ((commands (and (hash-table-p group)
+                       (seq-filter #'stringp
+                                   (mapcar (lambda (hook)
+                                             (and (hash-table-p hook)
+                                                  (gethash "command" hook)))
+                                           (agent-claude--json-list
+                                            (gethash "hooks" group)))))))
+    (seq-filter (lambda (command)
+                  (or (agent-claude--agent-command-p command)
+                      (and (= (length commands) 1)
+                           (agent-claude--agent-stop-wrapper-command-p command))))
+                commands)))
+
+(defun agent-claude--agent-command-p (command)
+  "Return non-nil when hook COMMAND runs a helper bundled with agent."
+  (string-match-p
+   (concat "/agent[^/]*/hooks/"
+           "\\(?:fire-and-forget\\|notify-emacs-state\\|notify-emacs-notification"
+           "\\|record-background-tasks\\)\\.sh\\b")
+   command))
+
+(defun agent-claude--agent-stop-wrapper-command-p (command)
+  "Return non-nil when COMMAND is the Stop hook agent writes."
+  (string-match-p
+   "\\`\\(?:[^ \\]\\|\\\\.\\)*/bin/claude-code-hook-wrapper stop\\'"
+   command))
+
 ;;;;; Setup
 
 ;;;###autoload
 (defun agent-claude-setup-config ()
-  "Ensure Claude Code settings contain agent statusline and hooks."
+  "Ensure Claude Code settings contain agent statusline and hooks.
+Agent passes these to every session it starts, so this is needed only
+to have them in Claude Code sessions started outside Emacs."
   (interactive)
   (agent-claude-ensure-statusline-config)
   (agent-claude-ensure-stop-hook-config)
@@ -2334,6 +2555,9 @@ symmetrically and restores `claude-code-notification-function'."
 (defun agent-claude--mode-enable ()
   "Install Claude backend hooks, advice, and timers."
   (agent-claude--sweep-stale-status-files)
+  (agent-claude--delete-stale-session-settings)
+  (advice-add 'claude-code--start :around
+              #'agent-claude--start-with-session-settings)
   (setq agent-claude--saved-notification-function
         claude-code-notification-function)
   (setq claude-code-notification-function #'claude-code-default-notification)
@@ -2396,6 +2620,7 @@ symmetrically and restores `claude-code-notification-function'."
                #'agent-claude--server-env)
   (remove-hook 'claude-code-process-environment-functions
                #'agent-claude--sync-theme-before-start)
+  (advice-remove 'claude-code--start #'agent-claude--start-with-session-settings)
   (advice-remove 'claude-code--eat-send-return #'agent-claude--note-user-submission)
   (advice-remove 'claude-code--vterm-send-return #'agent-claude--note-user-submission)
   (advice-remove 'claude-code--do-send-command #'agent-claude--note-submission)
