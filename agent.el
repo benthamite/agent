@@ -703,8 +703,8 @@ annotation."
 
 (defcustom agent-tab-bar-refresh-interval 1
   "Seconds between checks for session changes by `agent-tab-bar-mode'.
-Some states, such as background work, are read off the terminal and
-announce no event, so the tab bar is re-rendered whenever a check
+Some states, such as background work, are read from files or the
+terminal and announce no event, so the tab bar is re-rendered whenever a check
 finds that a session changed name, state, or snooze status."
   :type 'number
   :group 'agent)
