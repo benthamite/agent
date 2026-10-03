@@ -92,20 +92,31 @@
 
 ;;;; Customization
 
-(defcustom agent-project-sources '(("" . ("~/repos/*")))
+(defcustom agent-project-sources
+  '(("" . (project-known
+           "~/repos/*" "~/code/*" "~/src/*" "~/projects/*" "~/Developer/*")))
   "Candidate project sources per account, as an alist of (REGEXP . SOURCES).
 REGEXP is matched against the account name of the backend that will run
 the session; the first matching entry wins, so \"\" is a catch-all that
 also covers a backend with no account selected.
 
-Each source in SOURCES is either a registry file, whose name ends in
-\".json\", or a path pattern.  A wildcard is `*', `?' or a `[...]'
+Each source in SOURCES is the symbol `project-known', a registry file,
+whose name ends in \".json\", or a path pattern.  `project-known' stands
+for the local projects Emacs remembers, as listed by
+`project-known-project-roots'.  A wildcard is `*', `?' or a `[...]'
 character class, and a pattern containing one is expanded a single
 level per wildcard component, so \"*\" reaches the children of a
 directory and \"*/*\" its grandchildren, keeping only git repositories
 and worktrees.  A pattern without a wildcard names exactly one
-directory and is kept whether or not it is a repository."
-  :type '(alist :key-type regexp :value-type (repeat string))
+directory and is kept whether or not it is a repository.
+
+The default offers the projects Emacs remembers plus the repositories
+under the directories where code is commonly kept; a directory that does
+not exist contributes nothing."
+  :type '(alist :key-type regexp
+                :value-type (repeat (choice (const :tag "Projects Emacs remembers"
+                                                   project-known)
+                                            string)))
   :group 'agent)
 
 (defun agent-project--warn-retired-registry-file ()
@@ -180,11 +191,24 @@ ACCOUNT may be nil, which matches a catch-all entry."
 
 (defun agent-project--candidates-from-source (source)
   "Return the candidates contributed by SOURCE.
-A SOURCE naming a JSON file is a registry; anything else is a path
+The symbol `project-known' stands for the projects Emacs remembers, a
+SOURCE naming a JSON file is a registry, and anything else is a path
 pattern."
-  (if (string-suffix-p ".json" source)
-      (agent-project--candidates-from-registry (expand-file-name source))
-    (agent-project--candidates-from-pattern source)))
+  (cond ((eq source 'project-known)
+         (agent-project--candidates-from-known-projects))
+        ((string-suffix-p ".json" source)
+         (agent-project--candidates-from-registry (expand-file-name source)))
+        (t (agent-project--candidates-from-pattern source))))
+
+(defun agent-project--candidates-from-known-projects ()
+  "Return a candidate for each local project Emacs remembers.
+Remote roots and roots that no longer exist are passed over."
+  (require 'project)
+  (mapcar #'agent-project--directory-candidate
+          (seq-filter (lambda (root)
+                        (and (not (file-remote-p root))
+                             (file-directory-p root)))
+                      (project-known-project-roots))))
 
 (defun agent-project--candidates-from-registry (file)
   "Return the candidates recorded in registry FILE.

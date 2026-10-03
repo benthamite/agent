@@ -67,6 +67,20 @@ whether that directory is a git repository."
                            (expand-file-name "[ab]lpha" root)))))
       (should (equal labels '("alpha"))))))
 
+(ert-deftest agent-project-test-known-projects-source ()
+  "Offer the existing local projects Emacs remembers."
+  (agent-project-test--with-tree root '(("alpha" . t) ("beta" . nil))
+    (let ((agent-project-sources '(("" . (project-known)))))
+      (cl-letf (((symbol-function 'project-known-project-roots)
+                 (lambda ()
+                   (list (expand-file-name "alpha/" root)
+                         (expand-file-name "beta/" root)
+                         (expand-file-name "gone/" root)
+                         "/ssh:host:/srv/remote/"))))
+        (should (equal (mapcar (lambda (c) (plist-get c :label))
+                               (agent-project-candidates nil))
+                       '("alpha" "beta")))))))
+
 (ert-deftest agent-project-test-malformed-pattern-spares-the-others ()
   "Drop a pattern that will not compile, keeping the other sources."
   (agent-project-test--with-tree root '(("alpha" . t))
