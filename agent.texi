@@ -66,6 +66,7 @@ User options
 
 Commands
 
+* First-run setup::
 * Shared commands::
 * Phone remote control::
 * Orchestration run view::
@@ -126,6 +127,8 @@ The package is split into a small backend-agnostic core and focused modules:
 @tab Codex backend: integrates @samp{codex.el} with theme sync, @samp{codex exec} execution, @samp{config.toml} helpers, modeline helpers, and @code{agent-codex-mode}
 @item @samp{agent-chief.el}
 @tab Inspectable chief-of-staff loop: Emacs owns timers, state, context collection, and notifications, while Claude Code or Codex provides one-shot judgment on each tick
+@item @samp{agent-setup.el}
+@tab First-run checks: finds the agent CLIs and @samp{emacsclient}, starts the Emacs server and installs Claude Code's hooks after asking, and reports what is left
 @end multitable
 
 The main workflow is to load @samp{agent.el}, require the backend modules you use, and enable their minor modes (see @ref{Backend minor modes}); loading a backend module installs nothing by itself. Once the Claude and Codex modules are active, @samp{M-x agent-menu} and @samp{M-x agent-select-session} operate across both tools. Sessions are listed with their account in a column of its own, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
@@ -385,6 +388,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @chapter Commands
 
 @menu
+* First-run setup::
 * Shared commands::
 * Phone remote control::
 * Orchestration run view::
@@ -394,6 +398,12 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 * Claude Code commands::
 * Codex commands::
 @end menu
+
+@node First-run setup
+@section First-run setup
+
+@findex agent-setup
+@code{agent-setup} checks what the package needs outside Emacs and reports the result in the @samp{*agent-setup*} buffer. It looks for the @samp{claude} and @samp{codex} programs (@code{claude-code-program} and @code{codex-program}) and for @samp{emacsclient} on the @samp{exec-path}, and gives install instructions for any that are missing; it installs nothing itself. It offers to start the Emacs server when none is running, because the Claude Code hooks report session state through @samp{emacsclient}. It then offers to run @code{agent-claude-setup-config}, which adds the package's status line and hooks to @code{agent-claude-settings-file} (@ref{Claude Code commands}). Settings that already carry the package's status line are refreshed without asking, since that update rewrites only entries the package owns. A status line the package does not own is kept and reported, because session status is then approximate. Run the command again after fixing anything it marks as missing.
 
 @node Shared commands
 @section Shared commands

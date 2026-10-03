@@ -44,6 +44,7 @@ The package is split into a small backend-agnostic core and focused modules:
 | =agent-claude-cli.el= | Quarantined undocumented Claude CLI conventions: Keychain credential naming, the usage API endpoint, the =~/.claude/projects/= directory encoding, transcript JSONL parsing, and the =.claude.json= merge engine            |
 | =agent-codex.el=     | Codex backend: integrates =codex.el= with theme sync, =codex exec= execution, =config.toml= helpers, modeline helpers, and ~agent-codex-mode~                                                                               |
 | =agent-chief.el=     | Inspectable chief-of-staff loop: Emacs owns timers, state, context collection, and notifications, while Claude Code or Codex provides one-shot judgment on each tick                                                        |
+| =agent-setup.el=     | First-run checks: finds the agent CLIs and =emacsclient=, starts the Emacs server and installs Claude Code's hooks after asking, and reports what is left |
 
 The main workflow is to load =agent.el=, require the backend modules you use, and enable their minor modes (see [[#h:minor-modes][Backend minor modes]]); loading a backend module installs nothing by itself. Once the Claude and Codex modules are active, =M-x agent-menu= and =M-x agent-select-session= operate across both tools. Sessions are listed with their account in a column of its own, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
 
@@ -311,6 +312,14 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 :PROPERTIES:
 :CUSTOM_ID: h:commands
 :END:
+
+** First-run setup
+:PROPERTIES:
+:CUSTOM_ID: h:setup
+:END:
+
+#+findex: agent-setup
+~agent-setup~ checks what the package needs outside Emacs and reports the result in the =*agent-setup*= buffer. It looks for the =claude= and =codex= programs (~claude-code-program~ and ~codex-program~) and for =emacsclient= on the =exec-path=, and gives install instructions for any that are missing; it installs nothing itself. It offers to start the Emacs server when none is running, because the Claude Code hooks report session state through =emacsclient=. It then offers to run ~agent-claude-setup-config~, which adds the package's status line and hooks to ~agent-claude-settings-file~ ([[#h:claude-commands][Claude Code commands]]). Settings that already carry the package's status line are refreshed without asking, since that update rewrites only entries the package owns. A status line the package does not own is kept and reported, because session status is then approximate. Run the command again after fixing anything it marks as missing.
 
 ** Shared commands
 :PROPERTIES:

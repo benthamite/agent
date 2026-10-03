@@ -50,6 +50,7 @@
 (autoload 'agent-act-on-forge-notification "agent-forge" nil t)
 (autoload 'agent-act-on-email "agent-mu4e" nil t)
 (autoload 'agent-setup-snippet-keys "agent-snippet" nil t)
+(autoload 'agent-setup "agent-setup" nil t)
 (autoload 'agent-slack-context "agent-slack")
 (autoload 'agent-slack-resume-context "agent-slack")
 (autoload 'agent-forge-context "agent-forge")
