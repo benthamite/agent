@@ -140,12 +140,20 @@ let timer = null;
 
 const $ = (id) => document.getElementById(id);
 
+// An unreachable Tailscale peer drops packets rather than refusing them,
+// so without a deadline a poll hangs for minutes and the page never
+// reports that it is offline.  Only reads get one: a timed-out POST
+// such as a restart may still have taken effect.
+const POLL_TIMEOUT_MS = 8000;
+
 async function api(path, body) {
-  const options = body === undefined ? {} : {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Agent-Remote": "1" },
-    body: JSON.stringify(body)
-  };
+  const options = body === undefined
+    ? { signal: AbortSignal.timeout(POLL_TIMEOUT_MS) }
+    : {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Agent-Remote": "1" },
+        body: JSON.stringify(body)
+      };
   const response = await fetch(path, options);
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || response.statusText);
