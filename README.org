@@ -293,7 +293,7 @@ The =gptel= classifier requests used by backtrace debugging and project ranking 
 #+vindex: agent-chief-system-prompt
 The optional =agent-chief= module runs a periodic, auditable chief-of-staff workflow. Emacs owns the schedule, explicit state, and notifications. In the default =session= mode, the selected backend is an ordinary long-lived Claude Code or Codex session that receives heartbeat prompts and remains available for normal conversation.
 
-~agent-chief-backend~ selects =codex= or =claude-code=. ~agent-chief-mode~ defaults to =session=; set it to =stateless= to use the older one-shot JSON-decision path. ~agent-chief-interval~ controls the timer interval in seconds. ~agent-chief-directory~ is the working directory for chief sessions and one-shot calls; by default it uses =/Users/pablostafforini/My Drive/Epoch/= when that directory exists, falling back to ~user-emacs-directory~ otherwise. ~agent-chief-session-instance-name~ defaults to =chief= and is used as the instance name for the dedicated interactive session.
+~agent-chief-backend~ selects =codex= or =claude-code=. ~agent-chief-mode~ defaults to =session=; set it to =stateless= to use the older one-shot JSON-decision path. ~agent-chief-interval~ controls the timer interval in seconds. ~agent-chief-directory~ is the working directory for chief sessions and one-shot calls; it defaults to ~user-emacs-directory~. ~agent-chief-session-instance-name~ defaults to =chief= and is used as the instance name for the dedicated interactive session.
 
 ~agent-chief-state-file~ is an Org file used as the durable, inspectable state store; =agent-chief= never writes opaque memory. Day plans and manual notes are appended there and, when a chief session is live, submitted into that session as conversational context.
 
@@ -584,7 +584,7 @@ confirm its closeout result before the chain can continue. For example:
 #+begin_src emacs-lisp
 (setq agent-before-exit-skill-names
       '("session-learning-capture"
-        ("update-log" :directories ("~/My Drive/Epoch")
+        ("update-log" :directories ("~/work")
                       :args "--auto" :receipt t)))
 #+end_src
 

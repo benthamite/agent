@@ -290,8 +290,8 @@
 (ert-deftest agent-test-session-name-handles-directory-without-trailing-slash ()
   "Extract the project name when the buffer directory lacks a trailing slash."
   (should (equal (agent--session-name
-                  "*codex:~/My Drive/Epoch/projects/ai-access-management:default*")
-                 "ai-access-management")))
+                  "*codex:~/work/projects/access-management:default*")
+                 "access-management")))
 
 (ert-deftest agent-test-session-name-standard ()
   "Extract the project name from a standard session buffer name."
@@ -306,7 +306,7 @@
 (ert-deftest agent-test-session-name-deep-path ()
   "Extract the project name from a deeply nested path."
   (should (equal (agent--session-name
-                  "*claude:~/My Drive/repos/org/subdir/:main*")
+                  "*claude:~/Documents/repos/org/subdir/:main*")
                  "subdir")))
 
 (ert-deftest agent-test-session-name-non-matching ()

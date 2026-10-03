@@ -60,7 +60,7 @@
              '(:notify t
                :title "Focus"
                :message "Start the planned review."
-               :state_update "Pablo should start with review.")))
+               :state_update "Start with review.")))
           (should (equal calls '(("Focus" "Start the planned review."))))
           (should (zerop (nth 7 (file-attributes agent-chief-state-file)))))
       (when (file-exists-p agent-chief-state-file)
@@ -76,11 +76,11 @@
            '(:notify :false
              :title ""
              :message ""
-             :state_update "Pablo should start with review."))
+             :state_update "Start with review."))
           (with-temp-buffer
             (insert-file-contents agent-chief-state-file)
             (should (string-match-p "Model state update" (buffer-string)))
-            (should (string-match-p "Pablo should start" (buffer-string)))))
+            (should (string-match-p "Start with review" (buffer-string)))))
       (when (file-exists-p agent-chief-state-file)
         (delete-file agent-chief-state-file)))))
 
@@ -94,12 +94,6 @@
     (let ((prompt (agent-chief--build-prompt)))
       (should (string-match-p "Calendar: write block at 10" prompt))
       (should (string-match-p "state file is empty or missing" prompt)))))
-
-(ert-deftest agent-chief-test-directory-prefers-epoch-when-present ()
-  "Default chief sessions should not start in the Emacs profile."
-  (when (file-directory-p "/Users/pablostafforini/My Drive/Epoch/")
-    (should (equal (file-name-as-directory agent-chief-directory)
-                   "/Users/pablostafforini/My Drive/Epoch/"))))
 
 (ert-deftest agent-chief-test-state-context-labels-old-plans-historical ()
   "Tell the model not to treat stale plan headings as active obligations."

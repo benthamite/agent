@@ -67,11 +67,7 @@ non-interactive backend call and parses a JSON decision."
   :type 'integer
   :group 'agent-chief)
 
-(defcustom agent-chief-directory
-  (let ((epoch-directory "/Users/pablostafforini/My Drive/Epoch/"))
-    (if (file-directory-p epoch-directory)
-        epoch-directory
-      user-emacs-directory))
+(defcustom agent-chief-directory user-emacs-directory
   "Working directory used for chief-of-staff agent sessions."
   :type 'directory
   :group 'agent-chief)
@@ -126,9 +122,9 @@ enter the state file through `agent-chief-set-day-plan' and
 
 (defconst agent-chief--default-system-prompt
   (concat
-   "You are Pablo's chief-of-staff agent. Your job is to help him follow "
-   "the plan he deliberately gives you. Be selective: contact him only "
-   "when a timely nudge would help him stay on track, avoid missing a "
+   "You are the user's chief-of-staff agent. Your job is to help them follow "
+   "the plan they deliberately give you. Be selective: contact them only "
+   "when a timely nudge would help them stay on track, avoid missing a "
    "commitment, or recover from drift. Never invent obligations. Never "
    "claim to have checked a source that was not included in the prompt.")
   "Default standing instruction for chief-of-staff sessions and ticks.")
@@ -403,7 +399,7 @@ the buffer name."
           (format "[Chief-of-staff heartbeat: %s]"
                   (format-time-string "%Y-%m-%d %A %H:%M:%S %Z"))
           "Review the current day plan and explicit state."
-          "If Pablo should be nudged now, respond with `Nudge: ` followed by one concise message."
+          "If the user should be nudged now, respond with `Nudge: ` followed by one concise message."
           "If no nudge is warranted, respond exactly `No nudge.`"
           "Do not invent obligations; use only the supplied state."
           (agent-chief--state-context)
@@ -464,7 +460,7 @@ contract."
    "Return exactly this JSON shape:\n"
    "{\"notify\":true|false,"
    "\"title\":\"short notification title\","
-   "\"message\":\"concise message to Pablo\","
+   "\"message\":\"concise message to the user\","
    "\"state_update\":\"optional durable note or empty string\"}\n"
    "Use notify=false when no contact is warranted. Keep message under 700 "
    "characters. Leave state_update empty unless explicitly asked to draft "
