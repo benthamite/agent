@@ -463,8 +463,19 @@ normalized usage plist, or a failure from `agent-usage-failure'."
   (unwind-protect
       (funcall callback
                (agent-usage-response-result
-                status #'agent-codex--normalize-usage))
+                status #'agent-codex--normalize-usage
+                #'agent-codex--explain-usage-status))
     (kill-buffer)))
+
+(defun agent-codex--explain-usage-status (code)
+  "Return a reason for usage HTTP status CODE that needs action, or nil.
+The Codex CLI renews an account's access token only when it runs with
+that account's home, so an idle account's token eventually expires."
+  (when (eql code 401)
+    (if (equal (agent-usage-http-header "x-openai-ide-error-code")
+               "token_expired")
+        "token expired; run Codex as this account to renew it"
+      "token rejected (HTTP 401); run Codex as this account to renew it")))
 
 (defun agent-codex--normalize-usage (data)
   "Return the normalized usage plist for the endpoint response DATA.

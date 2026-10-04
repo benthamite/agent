@@ -2024,5 +2024,21 @@ session that never restarts would otherwise keep every one of them."
       (should-not called)
       (should (stringp (plist-get (car reported) :error))))))
 
+(ert-deftest agent-codex-test-handle-usage-response-reports-expired-token ()
+  "Report an expired access token as needing a Codex run."
+  (let ((buffer (generate-new-buffer " *codex usage*"))
+        result)
+    (with-current-buffer buffer
+      (insert "HTTP/1.1 401 Unauthorized\n"
+              "x-openai-ide-error-code: token_expired\n\n{}")
+      (setq-local url-http-end-of-headers (point))
+      (setq-local url-http-response-status 401)
+      (agent-codex--handle-usage-response
+       '(:error (error http 401)) "epoch3"
+       (lambda (usage) (setq result usage))))
+    (should (equal (plist-get result :error)
+                   "token expired; run Codex as this account to renew it"))
+    (should-not (buffer-live-p buffer))))
+
 (provide 'agent-codex-test)
 ;;; agent-codex-test.el ends here
