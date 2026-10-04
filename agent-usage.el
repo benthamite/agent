@@ -27,7 +27,9 @@
 ;; Backend-agnostic store and poller for per-account usage.  Each
 ;; backend that can report usage declares a `:usage-fetch' slot: a
 ;; function called with an account name and a callback, which it
-;; invokes with a normalized usage plist or nil.  The plist holds
+;; invokes with a normalized usage plist, or with a failure built by
+;; `agent-usage-failure' that says why no reading came back.  The
+;; usage plist holds
 ;; `:session-pct' and `:weekly-pct' (percent of the short and long
 ;; windows used), `:session-reset' and `:weekly-reset' (window reset
 ;; times as float seconds), `:limited' (non-nil when the backend
@@ -36,6 +38,11 @@
 ;; One timer polls every account that has a live session plus every
 ;; member of every pool, so routing has data for idle members too.
 ;; Results are cached on disk so a fresh Emacs can route immediately.
+;;
+;; A failed fetch leaves the last reading in place and adds `:error'
+;; (the reason), `:error-at', `:backoff' and `:retry-at' to it.  The
+;; account is not fetched again before `:retry-at', which honours the
+;; server's `Retry-After' and otherwise backs off per account.
 
 ;;; Code:
 
@@ -45,6 +52,8 @@
 (require 'tabulated-list)
 
 (defvar agent-backends)
+(defvar url-http-end-of-headers)
+(defvar url-http-response-status)
 (declare-function agent-backend "agent" (name))
 (declare-function agent-backend-find-all-buffers "agent" (struct))
 (declare-function agent-backend-usage-fetch "agent" (struct))
@@ -62,14 +71,15 @@
   :group 'agent)
 
 (defcustom agent-usage-interval 300
-  "Base interval in seconds between usage polls.
-After a failed or rate-limited poll the interval doubles up to
-`agent-usage-max-interval'; it resets on success."
+  "Interval in seconds between usage polls."
   :type 'integer
   :group 'agent-usage)
 
 (defcustom agent-usage-max-interval 900
-  "Maximum interval in seconds between usage polls after backoff."
+  "Longest wait in seconds before refetching an account that keeps failing.
+Each consecutive failure doubles the account's wait, starting from
+`agent-usage-interval'.  A wait the server asks for with
+`Retry-After' is honoured in full, even when longer."
   :type 'integer
   :group 'agent-usage)
 
@@ -95,8 +105,11 @@ Nil until `agent-usage--table' loads the cache.")
 (defvar agent-usage--timer nil
   "Timer for periodic usage polling.")
 
-(defvar agent-usage--current-interval nil
-  "Current polling interval in seconds, possibly increased by backoff.")
+(defconst agent-usage--retry-slack 30
+  "Seconds before an account's `:retry-at' at which it may be fetched again.
+A repeating timer can fire slightly before the retry time computed
+from the previous poll; without slack such a poll would skip the
+account and double its wait.")
 
 ;;;; Store
 
@@ -150,22 +163,134 @@ NOW defaults to the current time."
 
 ;;;; Fetching
 
+(defun agent-usage-failure (reason &optional retry-after)
+  "Return a failed fetch result giving REASON, a short string.
+RETRY-AFTER, when non-nil, is the number of seconds the server asked
+the client to wait before trying again."
+  (list :error reason :retry-after retry-after))
+
 (defun agent-usage-fetch (backend account &optional callback)
   "Fetch usage for BACKEND's ACCOUNT and record the result.
-Calls the backend's `:usage-fetch' slot.  CALLBACK, when non-nil, is
-called with the recorded plist, or with nil when the fetch failed.
-Returns nil without fetching when BACKEND declares no fetcher."
+Calls the backend's `:usage-fetch' slot, unless an earlier failure set
+a retry time for ACCOUNT that has not come yet.  CALLBACK, when
+non-nil, is called with the recorded plist, or with nil when the fetch
+failed or was deferred.  Returns nil without fetching when BACKEND
+declares no fetcher."
   (when-let* ((fetch (agent-usage--fetcher backend)))
-    (funcall fetch account
-             (lambda (usage)
-               (let ((stored (when usage
-                               (agent-usage-record backend account usage))))
-                 (if stored
-                     (agent-usage--reset-interval)
-                   (agent-usage-backoff))
-                 (when callback
-                   (funcall callback stored)))))
+    (if (agent-usage--deferred-p (agent-usage-get backend account))
+        (when callback
+          (funcall callback nil))
+      (let ((started (float-time)))
+        (funcall fetch account
+                 (lambda (result)
+                   (let ((stored
+                          (if (and result (not (plist-get result :error)))
+                              (agent-usage--record-success backend account result)
+                            (agent-usage--record-failure
+                             backend account result started)
+                            nil)))
+                     (when callback
+                       (funcall callback stored)))))))
     t))
+
+(defun agent-usage--deferred-p (usage &optional now)
+  "Return non-nil when USAGE's account must not be fetched before NOW.
+NOW defaults to the current time."
+  (when-let* ((retry-at (plist-get usage :retry-at)))
+    (< (or now (float-time)) (- retry-at agent-usage--retry-slack))))
+
+(defun agent-usage--record-success (backend account usage)
+  "Record USAGE for BACKEND's ACCOUNT, announcing recovery from an error.
+Returns the stored plist."
+  (when-let* ((old-error (plist-get (agent-usage-get backend account) :error)))
+    (message "%s usage for %s works again (was: %s)"
+             backend (or account "default") old-error))
+  (agent-usage-record backend account usage))
+
+(defun agent-usage--record-failure (backend account failure started)
+  "Record FAILURE on BACKEND's ACCOUNT, keeping its last reading.
+FAILURE is a plist from `agent-usage-failure', or nil when the fetcher
+gave no reason.  STARTED is when the fetch began; the retry time counts
+from it.  Announces the failure when its reason differs from the
+previous one."
+  (let* ((old (agent-usage-get backend account))
+         (reason (or (plist-get failure :error) "fetch failed"))
+         (backoff (if-let* ((previous (plist-get old :backoff)))
+                      (min agent-usage-max-interval (* 2 previous))
+                    agent-usage-interval))
+         (wait (or (plist-get failure :retry-after) backoff))
+         (entry (copy-sequence old)))
+    (unless (equal reason (plist-get old :error))
+      (message "%s usage for %s failed: %s; retrying in %s"
+               backend (or account "default") reason
+               (agent-usage--duration wait)))
+    (setq entry (plist-put entry :error reason))
+    (setq entry (plist-put entry :error-at (float-time)))
+    (setq entry (plist-put entry :backoff backoff))
+    (setq entry (plist-put entry :retry-at (+ started wait)))
+    (puthash (cons backend account) entry (agent-usage--table))
+    (agent-usage--save-cache)))
+
+(defun agent-usage--duration (seconds)
+  "Return SECONDS as a short human-readable duration."
+  (cond
+   ((< seconds 60) (format "%ds" seconds))
+   ((< seconds 3600) (format "%dm" (/ seconds 60)))
+   ((< seconds 86400) (format "%dh" (/ seconds 3600)))
+   (t (format "%dd" (/ seconds 86400)))))
+
+;;;;; HTTP responses
+
+(defun agent-usage-response-result (status normalize &optional explain)
+  "Return the fetch result for the `url-retrieve' response in this buffer.
+STATUS is the plist `url-retrieve' passed to its callback.  On success
+return NORMALIZE applied to the JSON body, parsed as a plist with JSON
+null and false read as nil.  Otherwise return a failure from
+`agent-usage-failure'.  EXPLAIN, when non-nil, is called in the
+response buffer with the HTTP status code and may return a reason
+string for it; a nil return falls back to the generic reason."
+  (let ((code (and (boundp 'url-http-response-status)
+                   url-http-response-status)))
+    (cond
+     ((plist-get status :error)
+      (agent-usage-failure
+       (or (and explain (numberp code) (funcall explain code))
+           (agent-usage--http-reason code (plist-get status :error)))
+       (agent-usage--retry-after)))
+     ((not (and (boundp 'url-http-end-of-headers) url-http-end-of-headers))
+      (agent-usage-failure "empty response"))
+     (t
+      (goto-char url-http-end-of-headers)
+      (condition-case nil
+          (funcall normalize (json-parse-buffer :object-type 'plist
+                                                :null-object nil
+                                                :false-object nil))
+        (json-error (agent-usage-failure "unparseable response")))))))
+
+(defun agent-usage--http-reason (code err)
+  "Return a reason for HTTP status CODE, or for ERR when CODE is unknown."
+  (cond
+   ((eql code 429) "rate-limited (HTTP 429)")
+   ((numberp code) (format "HTTP %d" code))
+   (t (error-message-string err))))
+
+(defun agent-usage-http-header (name)
+  "Return the value of response header NAME in this buffer, or nil."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((case-fold-search t)
+          (end (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)))
+      (when (re-search-forward
+             (concat "^" (regexp-quote name) ":[ \t]*\\([^\r\n]*\\)")
+             end t)
+        (string-trim (match-string 1))))))
+
+(defun agent-usage--retry-after ()
+  "Return the response's `Retry-After' in seconds, or nil.
+Only the delay-seconds form is read; an HTTP date yields nil."
+  (when-let* ((value (agent-usage-http-header "Retry-After"))
+              ((string-match-p "\\`[0-9]+\\'" value)))
+    (string-to-number value)))
 
 (defun agent-usage--fetcher (backend)
   "Return BACKEND's usage fetch function, or nil."
@@ -221,7 +346,6 @@ Polls immediately, then every `agent-usage-interval' seconds.  Does
 nothing if the timer is already running."
   (interactive)
   (unless agent-usage--timer
-    (setq agent-usage--current-interval agent-usage-interval)
     (agent-usage--poll)
     (setq agent-usage--timer
           (run-with-timer agent-usage-interval agent-usage-interval
@@ -232,8 +356,7 @@ nothing if the timer is already running."
   (interactive)
   (when agent-usage--timer
     (cancel-timer agent-usage--timer)
-    (setq agent-usage--timer nil
-          agent-usage--current-interval nil)))
+    (setq agent-usage--timer nil)))
 
 (defun agent-usage-maybe-stop-polling (&optional buffer)
   "Stop polling when no backend has a live session other than BUFFER."
@@ -241,27 +364,6 @@ nothing if the timer is already running."
                      (cl-remove buffer (agent-usage--live-buffers (car entry))))
                    agent-backends)
     (agent-usage-stop-polling)))
-
-(defun agent-usage-backoff ()
-  "Double the polling interval, capped at `agent-usage-max-interval'."
-  (when agent-usage--timer
-    (agent-usage--reschedule
-     (min (* 2 (or agent-usage--current-interval agent-usage-interval))
-          agent-usage-max-interval))))
-
-(defun agent-usage--reset-interval ()
-  "Reset the polling interval to the base value after a success."
-  (when (and agent-usage--timer
-             agent-usage--current-interval
-             (> agent-usage--current-interval agent-usage-interval))
-    (agent-usage--reschedule agent-usage-interval)))
-
-(defun agent-usage--reschedule (interval)
-  "Restart the poll timer with INTERVAL seconds between polls."
-  (setq agent-usage--current-interval interval)
-  (cancel-timer agent-usage--timer)
-  (setq agent-usage--timer
-        (run-with-timer interval interval #'agent-usage--poll)))
 
 ;;;; Usage buffer
 
@@ -281,7 +383,8 @@ nothing if the timer is already running."
   (setq tabulated-list-format
         [("Backend" 12 t) ("Account" 12 t) ("Pool" 10 t)
          ("Session" 8 nil :right-align t) ("Weekly" 8 nil :right-align t)
-         ("Weekly reset" 18 nil) ("Limited" 8 nil) ("Age" 8 nil)])
+         ("Weekly reset" 18 nil) ("Limited" 8 nil) ("Age" 8 nil)
+         ("Status" 0 nil)])
   (setq tabulated-list-padding 1)
   (tabulated-list-init-header))
 
@@ -345,35 +448,72 @@ Without configured or tracked accounts, include the default account."
       (list nil)))
 
 (defun agent-usage--entry (backend account)
-  "Return the tabulated-list entry for BACKEND's ACCOUNT."
-  (let ((usage (agent-usage-get backend account)))
+  "Return the tabulated-list entry for BACKEND's ACCOUNT.
+A reading older than `agent-usage-stale-after' is shown in the
+`shadow' face with its age in the `warning' face.  A window whose
+reset time has passed shows no percentage or reset, since the reading
+no longer describes the current window."
+  (let* ((usage (agent-usage-get backend account))
+         (stale (and (plist-get usage :fetched-at)
+                     (not (agent-usage-fresh-p usage))))
+         (data-face (and stale 'shadow)))
     (list (cons backend account)
           (vector (symbol-name backend)
                   (or account "default")
                   (or (agent-account-pool backend account) "")
-                  (agent-usage--pct (plist-get usage :session-pct))
-                  (agent-usage--pct (plist-get usage :weekly-pct))
-                  (agent-usage--reset (plist-get usage :weekly-reset))
-                  (if (plist-get usage :limited) "yes" "")
-                  (agent-usage--age usage)))))
+                  (agent-usage--face
+                   (agent-usage--window-pct usage :session-pct :session-reset)
+                   data-face)
+                  (agent-usage--face
+                   (agent-usage--window-pct usage :weekly-pct :weekly-reset)
+                   data-face)
+                  (agent-usage--face
+                   (agent-usage--reset (plist-get usage :weekly-reset))
+                   data-face)
+                  (agent-usage--face (if (plist-get usage :limited) "yes" "")
+                                     data-face)
+                  (agent-usage--face (agent-usage--age usage)
+                                     (and stale 'warning))
+                  (agent-usage--status usage)))))
+
+(defun agent-usage--face (string face)
+  "Return STRING in FACE, or STRING unchanged when FACE is nil."
+  (if face (propertize string 'face face) string))
+
+(defun agent-usage--window-pct (usage pct-key reset-key)
+  "Return USAGE's PCT-KEY as a percentage unless RESET-KEY has passed."
+  (let ((reset (plist-get usage reset-key)))
+    (if (and (numberp reset) (< reset (float-time)))
+        "-"
+      (agent-usage--pct (plist-get usage pct-key)))))
 
 (defun agent-usage--pct (value)
   "Return VALUE as a percentage string, or a dash when unknown."
   (if (numberp value) (format "%.0f%%" value) "-"))
 
 (defun agent-usage--reset (seconds)
-  "Return float SECONDS as a local timestamp, or an empty string."
-  (if (numberp seconds) (format-time-string "%a %d %b %H:%M" seconds) ""))
+  "Return future SECONDS as a local timestamp, or an empty string."
+  (if (and (numberp seconds) (>= seconds (float-time)))
+      (format-time-string "%a %d %b %H:%M" seconds)
+    ""))
+
+(defun agent-usage--status (usage)
+  "Return USAGE's last fetch error and next retry time, or an empty string."
+  (if-let* ((reason (plist-get usage :error)))
+      (propertize
+       (if-let* ((retry-at (plist-get usage :retry-at))
+                 ((> retry-at (float-time))))
+           (format "%s; retry %s" reason
+                   (format-time-string "%H:%M" retry-at))
+         reason)
+       'face 'error)
+    ""))
 
 (defun agent-usage--age (usage)
   "Return how long ago USAGE was fetched, or a dash when never."
   (if-let* ((at (plist-get usage :fetched-at)))
       (let ((seconds (- (float-time) at)))
-        (cond
-         ((< seconds 60) "now")
-         ((< seconds 3600) (format "%dm" (/ seconds 60)))
-         ((< seconds 86400) (format "%dh" (/ seconds 3600)))
-         (t (format "%dd" (/ seconds 86400)))))
+        (if (< seconds 60) "now" (agent-usage--duration seconds)))
     "-"))
 
 ;;;; Normalization helpers

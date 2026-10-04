@@ -421,9 +421,9 @@ on 2026-08-22.")
 (defun agent-codex--usage-fetch (account callback)
   "Fetch usage for ACCOUNT and call CALLBACK with a normalized plist.
 Reads the OAuth tokens from ACCOUNT's `auth.json' and queries
-`agent-codex--usage-endpoint'.  CALLBACK receives nil when the
-account has no usable tokens or the request fails.  This is the
-Codex backend's `:usage-fetch' slot."
+`agent-codex--usage-endpoint'.  CALLBACK receives a failure from
+`agent-usage-failure' when the account has no usable tokens or the
+request fails.  This is the Codex backend's `:usage-fetch' slot."
   (if-let* ((auth (agent-codex--usage-auth account)))
       (let ((url-http-attempt-keepalives nil)
             (url-request-method "GET")
@@ -435,10 +435,9 @@ Codex backend's `:usage-fetch' slot."
                           #'agent-codex--handle-usage-response
                           (list account callback) t t)
           (error
-           (message "agent-codex usage poll failed for %s: %s"
-                    account (error-message-string err))
-           (funcall callback nil))))
-    (funcall callback nil)))
+           (funcall callback
+                    (agent-usage-failure (error-message-string err))))))
+    (funcall callback (agent-usage-failure "no tokens in auth.json"))))
 
 (defun agent-codex--usage-auth (account)
   "Return (ACCESS-TOKEN . ACCOUNT-ID) from ACCOUNT's `auth.json', or nil."
@@ -460,18 +459,11 @@ Codex backend's `:usage-fetch' slot."
 (defun agent-codex--handle-usage-response (status _account callback)
   "Handle the async usage response and report to CALLBACK.
 STATUS is the plist passed by `url-retrieve'.  CALLBACK receives the
-normalized usage plist, or nil on any error."
+normalized usage plist, or a failure from `agent-usage-failure'."
   (unwind-protect
       (funcall callback
-               (when (and (null (plist-get status :error))
-                          url-http-end-of-headers)
-                 (goto-char url-http-end-of-headers)
-                 (condition-case nil
-                     (agent-codex--normalize-usage
-                      (json-parse-buffer :object-type 'plist
-                                         :null-object nil
-                                         :false-object nil))
-                   (json-error nil))))
+               (agent-usage-response-result
+                status #'agent-codex--normalize-usage))
     (kill-buffer)))
 
 (defun agent-codex--normalize-usage (data)

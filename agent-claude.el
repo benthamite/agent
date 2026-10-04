@@ -1005,13 +1005,13 @@ If the write fails, delete the file so the hook falls back to sending."
 (defun agent-claude--usage-fetch (account callback)
   "Fetch usage for ACCOUNT and call CALLBACK with a normalized plist.
 Reads the OAuth token from the macOS Keychain and queries the
-undocumented `api/oauth/usage' endpoint.  CALLBACK receives nil when
-the account has no OAuth token or the request fails.  This is the
-Claude backend's `:usage-fetch' slot."
+undocumented `api/oauth/usage' endpoint.  CALLBACK receives a failure
+from `agent-usage-failure' when the account has no OAuth token or the
+request fails.  This is the Claude backend's `:usage-fetch' slot."
   (if-let* ((token (agent-claude-cli-oauth-token
                     (agent-claude--account-config-dir account))))
       (agent-claude--fetch-usage-with-token account token callback t)
-    (funcall callback nil)))
+    (funcall callback (agent-usage-failure "no OAuth token in the Keychain"))))
 
 (defun agent-claude--fetch-usage-for-account (account)
   "Fetch usage for ACCOUNT into the shared usage store."
@@ -1047,10 +1047,7 @@ otherwise CALLBACK is told the fetch failed."
   (agent-claude--delete-error-process err)
   (if (and retry (agent-claude--url-process-write-error-p err))
       (agent-claude--fetch-usage-with-token account token callback nil)
-    (message "agent-claude usage poll failed for %s: %s"
-             (or account "default")
-             (error-message-string err))
-    (funcall callback nil)))
+    (funcall callback (agent-usage-failure (error-message-string err)))))
 
 (defun agent-claude--url-process-write-error-p (err)
   "Return non-nil if ERR is a URL process write failure."
@@ -1075,18 +1072,19 @@ otherwise CALLBACK is told the fetch failed."
 
 (defun agent-claude--handle-usage-response (status _account callback)
   "Handle the async usage API response and report to CALLBACK.
-STATUS is the plist passed by `url-retrieve'.  CALLBACK receives
-the normalized usage plist, or nil on any error, including a 429."
+STATUS is the plist passed by `url-retrieve'.  CALLBACK receives the
+normalized usage plist, or a failure from `agent-usage-failure'."
   (unwind-protect
       (funcall callback
-               (let ((err (plist-get status :error)))
-                 (when (and (null err) url-http-end-of-headers)
-                   (goto-char url-http-end-of-headers)
-                   (condition-case nil
-                       (agent-claude--normalize-usage
-                        (json-parse-buffer :object-type 'plist))
-                     (json-error nil)))))
+               (agent-usage-response-result
+                status #'agent-claude--normalize-usage
+                #'agent-claude--explain-usage-status))
     (kill-buffer)))
+
+(defun agent-claude--explain-usage-status (code)
+  "Return a reason for usage HTTP status CODE that needs action, or nil."
+  (when (eql code 401)
+    "token rejected (HTTP 401); start Claude Code as this account to renew it"))
 
 (defun agent-claude--normalize-usage (data)
   "Return the normalized usage plist for the endpoint response DATA.

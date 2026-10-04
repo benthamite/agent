@@ -2022,7 +2022,7 @@ session that never restarts would otherwise keep every one of them."
                (lambda (&rest _args) (setq called t))))
       (agent-codex--usage-fetch "acct" (lambda (u) (setq reported (list u))))
       (should-not called)
-      (should (equal reported '(nil))))))
+      (should (stringp (plist-get (car reported) :error))))))
 
 (provide 'agent-codex-test)
 ;;; agent-codex-test.el ends here

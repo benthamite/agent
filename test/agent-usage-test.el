@@ -15,8 +15,7 @@
   (declare (indent 0))
   `(let ((agent-usage--data (make-hash-table :test #'equal))
          (agent-usage-cache-file (make-temp-file "agent-usage"))
-         (agent-usage--timer nil)
-         (agent-usage--current-interval nil))
+         (agent-usage--timer nil))
      (unwind-protect
          (progn ,@body)
        (when agent-usage--timer
@@ -67,35 +66,96 @@
 
 ;;;; Fetching
 
-(ert-deftest agent-usage-test-fetch-records-and-resets-interval ()
-  "Record a successful fetch and reset the poll interval."
+(ert-deftest agent-usage-test-fetch-records-success ()
+  "Record a successful fetch, clearing an earlier error."
   (agent-usage-test--with-store
     (agent-usage-test--with-backend
         (list :usage-fetch (lambda (_account callback)
                              (funcall callback '(:weekly-pct 1.0))))
-      (let (reset)
-        (cl-letf (((symbol-function 'agent-usage--reset-interval)
-                   (lambda () (setq reset t))))
-          (should (agent-usage-fetch 'stub "a"))
-          (should reset)
-          (should (equal (plist-get (agent-usage-get 'stub "a") :weekly-pct)
-                         1.0)))))))
+      (puthash '(stub . "a") '(:error "HTTP 500" :backoff 300)
+               (agent-usage--table))
+      (should (agent-usage-fetch 'stub "a"))
+      (let ((usage (agent-usage-get 'stub "a")))
+        (should (equal (plist-get usage :weekly-pct) 1.0))
+        (should-not (plist-get usage :error))
+        (should-not (plist-get usage :retry-at))))))
 
-(ert-deftest agent-usage-test-fetch-failure-backs-off-and-keeps-old ()
-  "Back off on a failed fetch and keep the previous reading."
+(ert-deftest agent-usage-test-fetch-failure-keeps-reading-and-records-error ()
+  "Keep the previous reading and record why the fetch failed."
   (agent-usage-test--with-store
     (agent-usage-test--with-backend
         (list :usage-fetch (lambda (_account callback)
-                             (funcall callback nil)))
-      (agent-usage-record 'stub "a" '(:weekly-pct 1.0))
-      (let (backed reported)
-        (cl-letf (((symbol-function 'agent-usage-backoff)
-                   (lambda () (setq backed t))))
-          (agent-usage-fetch 'stub "a" (lambda (u) (setq reported (list u))))
-          (should backed)
-          (should (equal reported '(nil)))
-          (should (equal (plist-get (agent-usage-get 'stub "a") :weekly-pct)
-                         1.0)))))))
+                             (funcall callback
+                                      (agent-usage-failure "HTTP 500"))))
+      (let ((agent-usage-interval 100)
+            (fetched-at (plist-get (agent-usage-record
+                                    'stub "a" '(:weekly-pct 1.0))
+                                   :fetched-at))
+            reported)
+        (agent-usage-fetch 'stub "a" (lambda (u) (setq reported (list u))))
+        (should (equal reported '(nil)))
+        (let ((usage (agent-usage-get 'stub "a")))
+          (should (equal (plist-get usage :weekly-pct) 1.0))
+          (should (= (plist-get usage :fetched-at) fetched-at))
+          (should (equal (plist-get usage :error) "HTTP 500"))
+          (should (= (plist-get usage :backoff) 100)))))))
+
+(ert-deftest agent-usage-test-failure-backoff-is-per-account-and-capped ()
+  "Double one account's wait on each failure up to the maximum."
+  (agent-usage-test--with-store
+    (let ((agent-usage-interval 100)
+          (agent-usage-max-interval 300))
+      (dolist (expected '(100 200 300 300))
+        (agent-usage--record-failure 'stub "a" nil 1000.0)
+        (should (= (plist-get (agent-usage-get 'stub "a") :backoff) expected))
+        (should (= (plist-get (agent-usage-get 'stub "a") :retry-at)
+                   (+ 1000.0 expected))))
+      (should-not (agent-usage-get 'stub "b")))))
+
+(ert-deftest agent-usage-test-retry-after-overrides-backoff ()
+  "Wait as long as the server's Retry-After, even beyond the maximum."
+  (agent-usage-test--with-store
+    (let ((agent-usage-max-interval 300))
+      (agent-usage--record-failure
+       'stub "a" (agent-usage-failure "rate-limited (HTTP 429)" 3329) 1000.0)
+      (should (= (plist-get (agent-usage-get 'stub "a") :retry-at) 4329.0)))))
+
+(ert-deftest agent-usage-test-fetch-skips-account-until-retry-time ()
+  "Do not fetch an account before its retry time, but do afterwards."
+  (agent-usage-test--with-store
+    (let ((calls 0) reported)
+      (agent-usage-test--with-backend
+          (list :usage-fetch (lambda (_account callback)
+                               (cl-incf calls)
+                               (funcall callback '(:weekly-pct 1.0))))
+        (puthash '(stub . "a") (list :retry-at (+ (float-time) 3600))
+                 (agent-usage--table))
+        (should (agent-usage-fetch 'stub "a" (lambda (u) (push u reported))))
+        (should (= calls 0))
+        (should (equal reported '(nil)))
+        (puthash '(stub . "a") (list :retry-at (+ (float-time) 10))
+                 (agent-usage--table))
+        (agent-usage-fetch 'stub "a")
+        (should (= calls 1))))))
+
+(ert-deftest agent-usage-test-response-result-reads-retry-after ()
+  "Turn an HTTP 429 response into a failure carrying Retry-After."
+  (with-temp-buffer
+    (insert "HTTP/1.1 429 Too Many Requests\nretry-after: 3329\n\n{}")
+    (setq-local url-http-end-of-headers (point))
+    (setq-local url-http-response-status 429)
+    (should (equal (agent-usage-response-result
+                    '(:error (error http 429)) #'identity)
+                   '(:error "rate-limited (HTTP 429)" :retry-after 3329)))))
+
+(ert-deftest agent-usage-test-response-result-normalizes-body ()
+  "Pass a successful response's JSON body to the normalizer."
+  (with-temp-buffer
+    (insert "HTTP/1.1 200 OK\n\n{\"a\":1}")
+    (goto-char (point-min))
+    (search-forward "\n\n")
+    (setq-local url-http-end-of-headers (point))
+    (should (equal (agent-usage-response-result nil #'identity) '(:a 1)))))
 
 (ert-deftest agent-usage-test-fetch-without-fetcher-is-noop ()
   "Return nil for a backend that declares no usage fetcher."
@@ -131,22 +191,6 @@
                   :find-all-buffers (lambda () (list buf)))
           (should (equal (agent-usage--tracked-accounts 'stub) '(nil))))
       (kill-buffer buf))))
-
-(ert-deftest agent-usage-test-backoff-doubles-and-caps ()
-  "Double the interval on backoff up to the maximum, then reset."
-  (agent-usage-test--with-store
-    (let ((agent-usage-interval 100)
-          (agent-usage-max-interval 300))
-      (cl-letf (((symbol-function 'agent-usage--poll) #'ignore))
-        (agent-usage-start-polling)
-        (agent-usage-backoff)
-        (should (= agent-usage--current-interval 200))
-        (agent-usage-backoff)
-        (should (= agent-usage--current-interval 300))
-        (agent-usage--reset-interval)
-        (should (= agent-usage--current-interval 100))
-        (agent-usage-stop-polling)
-        (should-not agent-usage--timer)))))
 
 (ert-deftest agent-usage-test-maybe-stop-considers-all-backends ()
   "Keep polling while any backend other than the torn-down one is live."
@@ -229,6 +273,28 @@
         (should (equal (aref row 3) "-"))
         (should (equal (aref row 6) ""))
         (should (equal (aref row 7) "-"))))))
+
+(ert-deftest agent-usage-test-entry-marks-stale-reading-and-error ()
+  "Fade a stale reading, drop windows that have reset, and show the error."
+  (agent-usage-test--with-store
+    (agent-usage-test--with-backend (list)
+      (let ((now (float-time)))
+        (puthash '(stub . "a")
+                 (list :session-pct 0.0 :session-reset (+ now 3600)
+                       :weekly-pct 97.0 :weekly-reset (- now 3600)
+                       :fetched-at (- now 86400)
+                       :error "rate-limited (HTTP 429)"
+                       :retry-at (+ now 1800))
+                 (agent-usage--table))
+        (let ((row (cadr (agent-usage--entry 'stub "a"))))
+          (should (equal (aref row 3) "0%"))
+          (should (eq (get-text-property 0 'face (aref row 3)) 'shadow))
+          (should (equal (aref row 4) "-"))
+          (should (equal (aref row 5) ""))
+          (should (equal (aref row 7) "1d"))
+          (should (eq (get-text-property 0 'face (aref row 7)) 'warning))
+          (should (string-prefix-p "rate-limited (HTTP 429); retry "
+                                   (aref row 8))))))))
 
 (ert-deftest agent-usage-test-age-buckets ()
   "Format ages in minutes, hours, and days."

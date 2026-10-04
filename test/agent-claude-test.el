@@ -1024,7 +1024,7 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
           (agent-claude--usage-fetch
            "personal" (lambda (usage) (setq reported (list usage))))
           (should (= calls 2))
-          (should (equal reported '(nil))))
+          (should (stringp (plist-get (car reported) :error))))
       (when (process-live-p proc)
         (delete-process proc)))))
 
@@ -1042,7 +1042,7 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
       (agent-claude--usage-fetch
        "personal" (lambda (usage) (push usage reported)))
       (should (= calls 1))
-      (should (equal reported '(nil))))))
+      (should (stringp (plist-get (car reported) :error))))))
 
 (ert-deftest agent-claude-test-fetch-usage-reports-dns-failure-on-retry ()
   "Report DNS failure on the stale-process retry without a third attempt."
@@ -1062,7 +1062,7 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
            "personal" (lambda (usage) (push usage reported)))
           (should (= calls 2))
           (should-not (process-live-p proc))
-          (should (equal reported '(nil))))
+          (should (stringp (plist-get (car reported) :error))))
       (when (process-live-p proc)
         (delete-process proc)))))
 
@@ -1089,7 +1089,7 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
       (agent-claude--usage-fetch
        "personal" (lambda (usage) (setq reported (list usage))))
       (should-not called)
-      (should (equal reported '(nil))))))
+      (should (stringp (plist-get (car reported) :error))))))
 
 (ert-deftest agent-claude-test-normalize-usage ()
   "Normalize the usage endpoint's windows into the shared plist shape."

@@ -199,11 +199,12 @@ logged-out accounts), `:login-args' (arguments appended to
 `:program' to run the backend's login flow; see
 `agent-account-login'), and `:usage-fetch' (function called with
 an account name and a callback that receives a normalized usage
-plist or nil; see `agent-usage').  The `:accounts', `:account-file',
-`:shared-config-items', `:canonical-home', `:credential-file',
-and `:login-args' values may each be a literal value, a function
-returning one, or a symbol naming a variable, resolved at read
-time by `agent-account--backend-value'."
+plist or a failure from `agent-usage-failure'; see `agent-usage').
+The `:accounts', `:account-file', `:shared-config-items',
+`:canonical-home', `:credential-file', and `:login-args' values
+may each be a literal value, a function returning one, or a symbol
+naming a variable, resolved at read time by
+`agent-account--backend-value'."
   (agent--validate-backend name slots)
   (setf (alist-get name agent-backends)
         (apply #'agent-backend--create :name name slots)))
