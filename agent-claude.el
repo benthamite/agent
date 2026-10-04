@@ -1584,6 +1584,16 @@ Also starts status and usage polling if not already active."
     (when (require 'doom-modeline-core nil t)
       (doom-modeline-set-modeline 'ai-session))))
 
+(defun agent-claude--reapply-modelines ()
+  "Set the `ai-session' modeline again in every Claude session buffer.
+Turning `doom-modeline-mode' on sets the `main' modeline in every
+buffer, and a theme load turns it on again once it has been toggled
+interactively."
+  (when (bound-and-true-p doom-modeline-mode)
+    (dolist (buf (claude-code--find-all-claude-buffers))
+      (with-current-buffer buf
+        (doom-modeline-set-modeline 'ai-session)))))
+
 ;;;;; Parameterized session start
 
 (cl-defun agent-claude--start-session (session &key initial-prompt resume-id
@@ -2669,6 +2679,7 @@ symmetrically and restores `claude-code-notification-function'."
   (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
   (dolist (fn agent-claude--start-hook-functions)
     (add-hook 'claude-code-start-hook fn))
+  (add-hook 'doom-modeline-mode-hook #'agent-claude--reapply-modelines)
   (agent-scroll-keys-global-mode 1)
   (agent-setup-scroll-keys-in-existing-buffers)
   (add-hook 'claude-code-process-environment-functions
@@ -2714,6 +2725,7 @@ symmetrically and restores `claude-code-notification-function'."
     (agent-scroll-keys-global-mode -1))
   (dolist (fn agent-claude--start-hook-functions)
     (remove-hook 'claude-code-start-hook fn))
+  (remove-hook 'doom-modeline-mode-hook #'agent-claude--reapply-modelines)
   (remove-hook 'claude-code-process-environment-functions
                #'agent-claude-account-env)
   (remove-hook 'claude-code-process-environment-functions

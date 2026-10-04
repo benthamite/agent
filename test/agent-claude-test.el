@@ -2072,6 +2072,27 @@ Run the hook as session UUID with state files in STATUS-DIR."
       (kill-buffer buf-a)
       (kill-buffer buf-b))))
 
+;;;; Modeline
+
+(ert-deftest agent-claude-test-modeline-survives-doom-modeline-enable ()
+  "Turning `doom-modeline-mode' on keeps the session's `ai-session' modeline."
+  (skip-unless (require 'doom-modeline nil t))
+  (doom-modeline-def-modeline 'ai-session '(bar) '(time))
+  (let ((buf (generate-new-buffer "*claude:agent-test-modeline*"))
+        (doom-modeline-mode-hook nil)
+        (was-on doom-modeline-mode))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-code--find-all-claude-buffers)
+                   (lambda () (list buf))))
+          (add-hook 'doom-modeline-mode-hook #'agent-claude--reapply-modelines)
+          (with-current-buffer buf
+            (doom-modeline-set-modeline 'ai-session))
+          (doom-modeline-mode 1)
+          (should (equal (buffer-local-value 'mode-line-format buf)
+                         '("%e" (:eval (doom-modeline-format--ai-session))))))
+      (unless was-on (doom-modeline-mode -1))
+      (kill-buffer buf))))
+
 ;;;; Monet leak reaping
 
 (ert-deftest agent-claude-test-monet-close-server-kills-live-process ()

@@ -698,6 +698,16 @@ read cache for FILE."
     (when (require 'doom-modeline-core nil t)
       (doom-modeline-set-modeline 'ai-session))))
 
+(defun agent-codex--reapply-modelines ()
+  "Set the `ai-session' modeline again in every Codex session buffer.
+Turning `doom-modeline-mode' on sets the `main' modeline in every
+buffer, and a theme load turns it on again once it has been toggled
+interactively."
+  (when (bound-and-true-p doom-modeline-mode)
+    (dolist (buf (codex--find-all-codex-buffers))
+      (with-current-buffer buf
+        (doom-modeline-set-modeline 'ai-session)))))
+
 (defun agent-codex--record-start-time ()
   "Record the current Codex session start time."
   (when (codex--buffer-p (current-buffer))
@@ -1473,6 +1483,7 @@ removes them symmetrically and restores
   (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
   (dolist (fn agent-codex--start-hook-functions)
     (add-hook 'codex-start-hook fn))
+  (add-hook 'doom-modeline-mode-hook #'agent-codex--reapply-modelines)
   (agent-scroll-keys-global-mode 1)
   (agent-setup-scroll-keys-in-existing-buffers)
   (add-hook 'codex-process-environment-functions
@@ -1495,6 +1506,7 @@ removes them symmetrically and restores
     (agent-scroll-keys-global-mode -1))
   (dolist (fn agent-codex--start-hook-functions)
     (remove-hook 'codex-start-hook fn))
+  (remove-hook 'doom-modeline-mode-hook #'agent-codex--reapply-modelines)
   (remove-hook 'codex-process-environment-functions
                #'agent-codex-account-env)
   (remove-hook 'codex-process-environment-functions
