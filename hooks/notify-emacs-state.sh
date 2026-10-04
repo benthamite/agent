@@ -26,7 +26,12 @@ if [ "$type" = activity ] && [ -n "${AGENT_SESSION_UUID:-}" ]; then
   [ "$(cat "$state_dir/$key.state" 2>/dev/null)" = busy ] && exit 0
 fi
 sent=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')
+# A hook that fires inside a subagent carries its agent_id; Emacs ignores
+# a subagent's activity while the session waits on anything else.  The
+# id is a UUID-like token, so it needs no escaping.
+agent=$(printf '%s' "$payload" | perl -MJSON::PP -0777 -ne \
+  'my $d = eval { decode_json($_) }; my $a = ref $d eq "HASH" ? $d->{agent_id} : undef; print $a if defined $a && !ref $a && $a =~ /\A[\w-]+\z/')
 # Escape backslashes and double-quotes so the value is safe inside an Elisp string.
 buf=${buf//\\/\\\\}
 buf=${buf//\"/\\\"}
-emacsclient --eval "(claude-code-handle-hook '${type} \"${buf}\" \"${sent}\")" >/dev/null 2>&1 || true
+emacsclient --eval "(claude-code-handle-hook '${type} \"${buf}\" \"${sent}\" \"${agent}\")" >/dev/null 2>&1 || true

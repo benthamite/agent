@@ -1249,6 +1249,16 @@ the style configured in `agent-alert-style'."
   (claude-code-default-notification title message)
   (agent--alert-route title message))
 
+(defun agent-claude--payload-agent-id (json-str)
+  "Return the `agent_id' in hook payload JSON-STR, or nil.
+Claude Code adds the field only to hooks that fire inside a subagent."
+  (when json-str
+    (condition-case nil
+        (let ((id (alist-get 'agent_id
+                             (json-parse-string json-str :object-type 'alist))))
+          (and (stringp id) (not (string-empty-p id)) id))
+      (error nil))))
+
 (defun agent-claude--notification-type (json-str)
   "Extract the notification type from JSON-STR.
 Return a string like \"idle_prompt\" or \"permission_prompt\", or
@@ -1285,7 +1295,9 @@ alerts for permission_prompt and elicitation_dialog notifications.
 Permission and elicitation dialogs also mark the session as blocked on
 the user.  Claude reaches them from inside a turn, with a tool call
 still in flight, so nothing else reports them as waiting even though
-they proceed only once the user answers."
+they proceed only once the user answers.  Who raised the dialog, the
+main thread or a subagent, is recorded in `agent-claude--blocking-agent'
+so that only that thread's next tool hook ends the wait."
   (when (eq (plist-get message :type) 'notification)
     (when-let* ((buf (get-buffer (plist-get message :buffer-name)))
                 ((not (agent-claude--foreign-hook-p
@@ -1298,12 +1310,12 @@ they proceed only once the user answers."
           ("idle_prompt"
            (agent-session-event buf 'idle-prompt))
           ("permission_prompt"
-           (agent-session-event buf 'blocked)
+           (agent-claude--block-on-dialog buf (plist-get message :json-data))
            (agent-claude-notify
             (format "%s needs approval" label)
             (format "%s: permission request pending" name)))
           ("elicitation_dialog"
-           (agent-session-event buf 'blocked)
+           (agent-claude--block-on-dialog buf (plist-get message :json-data))
            (agent-claude-notify
             (format "%s needs input" label)
             (format "%s: waiting for your input" name)))
@@ -1465,6 +1477,29 @@ so its id is left out.  Signal an error when PAYLOAD lacks the
                            id)))
                   (plist-get payload :background_tasks)))))
 
+(defvar-local agent-claude--blocking-agent nil
+  "Who raised the dialog this session is blocked on, or nil.
+The `agent_id' of the subagent whose permission or input dialog is
+pending, or `main' for the main thread.  Cleared whenever the session
+state changes, since the dialog has then been answered or abandoned.")
+
+(defun agent-claude--block-on-dialog (buffer json-data)
+  "Mark BUFFER blocked on the dialog whose Notification payload is JSON-DATA.
+Record which thread raised it in `agent-claude--blocking-agent'."
+  (agent-session-event buffer 'blocked)
+  (with-current-buffer buffer
+    (setq agent-claude--blocking-agent
+          (or (agent-claude--payload-agent-id json-data) 'main))))
+
+(defun agent-claude--clear-blocking-agent (buffer _state)
+  "Forget BUFFER's pending dialog when its session state changes."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq agent-claude--blocking-agent nil))))
+
+(add-hook 'agent-session-state-change-functions
+          #'agent-claude--clear-blocking-agent)
+
 (defun agent-claude--handle-session-state (message)
   "Handle a turn-state event from the Claude Code CLI.
 MESSAGE is a plist with :type, :buffer-name, :json-data, and :args.
@@ -1475,12 +1510,28 @@ busy whoever started the turn: the user, remote control, or a resumed
 background task.  Tool hooks also return a session to busy once the
 user answers a permission dialog.  An event sent before the session
 last started waiting is stale and ignored; see
-`agent-claude--stale-hook-event-p'."
+`agent-claude--stale-hook-event-p'.  So is a subagent's event while the
+session waits for anything but that subagent's dialog; see
+`agent-claude--subagent-hook-event-p'."
   (when-let* ((event (memq (plist-get message :type) '(activity blocked)))
               (buf (get-buffer (plist-get message :buffer-name)))
-              ((not (agent-claude--stale-hook-event-p buf message))))
+              ((not (agent-claude--stale-hook-event-p buf message)))
+              ((not (agent-claude--subagent-hook-event-p buf message))))
     (agent-session-event buf (car event)))
   nil)
+
+(defun agent-claude--subagent-hook-event-p (buffer message)
+  "Return non-nil when hook MESSAGE is a subagent's and cannot end BUFFER's wait.
+The second of MESSAGE's :args, when non-empty, is the `agent_id' of the
+subagent the hook fired in.  A background subagent keeps calling tools
+after the main turn ends or while the main thread waits at a dialog, so
+its hooks say nothing about whether the session needs the user.  Only
+the subagent whose dialog the session is blocked on resumes it."
+  (when-let* ((agent (cadr (plist-get message :args)))
+              ((not (string-empty-p agent))))
+    (and (eq (buffer-local-value 'agent--session-state buffer) 'awaiting-input)
+         (not (equal agent (buffer-local-value 'agent-claude--blocking-agent
+                                               buffer))))))
 
 (defun agent-claude--stale-hook-event-p (buffer message)
   "Return non-nil when hook MESSAGE was sent before BUFFER last began waiting.

@@ -173,6 +173,72 @@ not start, such as one resumed after a background task finishes."
           (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))
       (kill-buffer buf))))
 
+(ert-deftest agent-claude-test-subagent-activity-leaves-waiting-session ()
+  "Ignore a background subagent's tool hooks while the session waits.
+The main turn has ended, or the main thread waits at a dialog, so the
+subagent's work says nothing about whether the session needs the user."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq-local agent--session-state 'awaiting-input))
+          (agent-claude--handle-session-state
+           (list :type 'activity :buffer-name (buffer-name buf)
+                 :args '("200.5" "sub-1")))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input))
+          (agent-claude--handle-session-state
+           (list :type 'activity :buffer-name (buffer-name buf)
+                 :args '("200.5" "")))
+          (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-subagent-dialog-resumes-on-its-own-activity ()
+  "End a wait at a subagent's dialog only on that subagent's tool hook."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude-notify) #'ignore))
+          (with-current-buffer buf (setq-local agent--session-state 'busy))
+          (agent-claude--handle-notification
+           (list :type 'notification
+                 :buffer-name (buffer-name buf)
+                 :json-data (concat "{\"notification_type\":\"permission_prompt\","
+                                    "\"agent_id\":\"sub-1\"}")))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input))
+          (should (equal (buffer-local-value 'agent-claude--blocking-agent buf)
+                         "sub-1"))
+          (agent-claude--handle-session-state
+           (list :type 'activity :buffer-name (buffer-name buf)
+                 :args '("9999999999" "sub-2")))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input))
+          (agent-claude--handle-session-state
+           (list :type 'activity :buffer-name (buffer-name buf)
+                 :args '("9999999999" "sub-1")))
+          (should (eq (buffer-local-value 'agent--session-state buf) 'busy))
+          (should-not (buffer-local-value 'agent-claude--blocking-agent buf)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-main-dialog-ignores-subagent-activity ()
+  "Keep a session blocked on a main-thread dialog while a subagent works."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude-notify) #'ignore))
+          (with-current-buffer buf (setq-local agent--session-state 'busy))
+          (agent-claude--handle-notification
+           (list :type 'notification
+                 :buffer-name (buffer-name buf)
+                 :json-data "{\"notification_type\":\"permission_prompt\"}"))
+          (should (eq (buffer-local-value 'agent-claude--blocking-agent buf)
+                      'main))
+          (agent-claude--handle-session-state
+           (list :type 'activity :buffer-name (buffer-name buf)
+                 :args '("9999999999" "sub-1")))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input)))
+      (kill-buffer buf))))
+
 (ert-deftest agent-claude-test-blocked-hook-event-marks-session-waiting ()
   "Mark sessions blocked when the CLI reports they cannot proceed alone."
   (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*")))
@@ -1602,7 +1668,37 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
             (should (equal (nth 1 (cadr form)) 'activity))
             (should (equal (nth 2 form) "*claude:\"q\"*"))
             (should (< (abs (- (string-to-number (nth 3 form)) (float-time)))
-                       60))))
+                       60))
+            (should (equal (nth 4 form) ""))))
+      (delete-directory bin t))))
+
+(ert-deftest agent-claude-test-state-hook-script-forwards-agent-id ()
+  "Forward the agent_id of a hook that fired inside a subagent."
+  (let* ((bin (make-temp-file "agent-bin" t))
+         (log (expand-file-name "args" bin))
+         (script (expand-file-name "notify-emacs-state.sh"
+                                   agent-claude--hooks-directory))
+         (process-environment
+          (append (list (concat "PATH=" bin ":" (getenv "PATH"))
+                        "CLAUDE_BUFFER_NAME=*claude:~/repo/:default*")
+                  (seq-remove (lambda (var)
+                                (string-prefix-p "AGENT_SESSION_UUID=" var))
+                              process-environment))))
+    (unwind-protect
+        (progn
+          (with-temp-file (expand-file-name "emacsclient" bin)
+            (insert "#!/bin/sh\nprintf '%s\\n' \"$@\" > " log "\n"))
+          (set-file-modes (expand-file-name "emacsclient" bin) #o755)
+          (with-temp-buffer
+            (insert "{\"session_id\":\"s\",\"agent_id\":\"a-1\","
+                    "\"tool_input\":{\"agent_id\":\"nested\"}}")
+            (call-process-region (point-min) (point-max) script
+                                 nil nil nil "activity"))
+          (let ((form (car (read-from-string
+                            (cadr (with-temp-buffer
+                                    (insert-file-contents log)
+                                    (split-string (buffer-string) "\n" t)))))))
+            (should (equal (nth 4 form) "a-1"))))
       (delete-directory bin t))))
 
 (ert-deftest agent-claude-test-state-hook-script-skips-non-emacs-sessions ()
