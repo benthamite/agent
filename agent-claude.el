@@ -1047,7 +1047,7 @@ otherwise CALLBACK is told the fetch failed."
   (agent-claude--delete-error-process err)
   (if (and retry (agent-claude--url-process-write-error-p err))
       (agent-claude--fetch-usage-with-token account token callback nil)
-    (funcall callback (agent-usage-failure (error-message-string err)))))
+    (funcall callback (agent-usage-network-failure))))
 
 (defun agent-claude--url-process-write-error-p (err)
   "Return non-nil if ERR is a URL process write failure."
@@ -1084,7 +1084,7 @@ normalized usage plist, or a failure from `agent-usage-failure'."
 (defun agent-claude--explain-usage-status (code)
   "Return a reason for usage HTTP status CODE that needs action, or nil."
   (when (eql code 401)
-    "token rejected (HTTP 401); start Claude Code as this account to renew it"))
+    "token rejected: start Claude Code as this account"))
 
 (defun agent-claude--normalize-usage (data)
   "Return the normalized usage plist for the endpoint response DATA.

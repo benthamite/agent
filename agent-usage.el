@@ -40,9 +40,13 @@
 ;; Results are cached on disk so a fresh Emacs can route immediately.
 ;;
 ;; A failed fetch leaves the last reading in place and adds `:error'
-;; (the reason), `:error-at', `:backoff' and `:retry-at' to it.  The
-;; account is not fetched again before `:retry-at', which honours the
-;; server's `Retry-After' and otherwise backs off per account.
+;; (the reason) and `:error-at' to it.  A network failure, such as a
+;; dropped connection while the machine sleeps, says nothing about the
+;; account, so it is marked `:network' and retried at the next poll.
+;; Any other failure sets `:retry-at': the server's `Retry-After' when
+;; it sent one, marked `:retry-required', else a per-account backoff.
+;; The account is not polled again before `:retry-at'; a manual refresh
+;; overrides the backoff but not a wait the server asked for.
 
 ;;; Code:
 
@@ -169,15 +173,22 @@ RETRY-AFTER, when non-nil, is the number of seconds the server asked
 the client to wait before trying again."
   (list :error reason :retry-after retry-after))
 
-(defun agent-usage-fetch (backend account &optional callback)
+(defun agent-usage-network-failure ()
+  "Return the fetch result for a request that got no HTTP response.
+Such a failure reflects the connection, not the account, so it is
+retried at the next poll without backoff or an echo-area message."
+  (list :error "network error" :network t))
+
+(defun agent-usage-fetch (backend account &optional callback force)
   "Fetch usage for BACKEND's ACCOUNT and record the result.
 Calls the backend's `:usage-fetch' slot, unless an earlier failure set
-a retry time for ACCOUNT that has not come yet.  CALLBACK, when
-non-nil, is called with the recorded plist, or with nil when the fetch
-failed or was deferred.  Returns nil without fetching when BACKEND
-declares no fetcher."
+a retry time for ACCOUNT that has not come yet.  FORCE non-nil ignores
+a retry time set by backoff, but not one the server asked for.
+CALLBACK, when non-nil, is called with the recorded plist, or with nil
+when the fetch failed or was deferred.  Returns nil without fetching
+when BACKEND declares no fetcher."
   (when-let* ((fetch (agent-usage--fetcher backend)))
-    (if (agent-usage--deferred-p (agent-usage-get backend account))
+    (if (agent-usage--deferred-p (agent-usage-get backend account) nil force)
         (when callback
           (funcall callback nil))
       (let ((started (float-time)))
@@ -193,10 +204,12 @@ declares no fetcher."
                        (funcall callback stored)))))))
     t))
 
-(defun agent-usage--deferred-p (usage &optional now)
-  "Return non-nil when USAGE's account must not be fetched before NOW.
-NOW defaults to the current time."
-  (when-let* ((retry-at (plist-get usage :retry-at)))
+(defun agent-usage--deferred-p (usage &optional now force)
+  "Return non-nil when USAGE's account must not be fetched at NOW.
+NOW defaults to the current time.  FORCE non-nil ignores a retry time
+set by backoff, keeping only one the server asked for."
+  (when-let* ((retry-at (plist-get usage :retry-at))
+              ((or (not force) (plist-get usage :retry-required))))
     (< (or now (float-time)) (- retry-at agent-usage--retry-slack))))
 
 (defun agent-usage--record-success (backend account usage)
@@ -209,25 +222,39 @@ Returns the stored plist."
 
 (defun agent-usage--record-failure (backend account failure started)
   "Record FAILURE on BACKEND's ACCOUNT, keeping its last reading.
-FAILURE is a plist from `agent-usage-failure', or nil when the fetcher
-gave no reason.  STARTED is when the fetch began; the retry time counts
-from it.  Announces the failure when its reason differs from the
-previous one."
-  (let* ((old (agent-usage-get backend account))
-         (reason (or (plist-get failure :error) "fetch failed"))
-         (backoff (if-let* ((previous (plist-get old :backoff)))
-                      (min agent-usage-max-interval (* 2 previous))
-                    agent-usage-interval))
-         (wait (or (plist-get failure :retry-after) backoff))
-         (entry (copy-sequence old)))
-    (unless (equal reason (plist-get old :error))
-      (message "%s usage for %s failed: %s; retrying in %s"
-               backend (or account "default") reason
-               (agent-usage--duration wait)))
-    (setq entry (plist-put entry :error reason))
+FAILURE is a plist from `agent-usage-failure' or
+`agent-usage-network-failure', or nil when the fetcher gave no reason.
+STARTED is when the fetch began; the retry time counts from it.  A
+failure other than a network one is announced when its reason differs
+from the previous one."
+  (let ((old (agent-usage-get backend account))
+        (reason (or (plist-get failure :error) "fetch failed")))
+    (if (plist-get failure :network)
+        (agent-usage--put-failure backend account old
+                                  :error reason :network t
+                                  :backoff nil :retry-at nil
+                                  :retry-required nil)
+      (let* ((retry-after (plist-get failure :retry-after))
+             (backoff (if-let* ((previous (plist-get old :backoff)))
+                          (min agent-usage-max-interval (* 2 previous))
+                        agent-usage-interval))
+             (wait (or retry-after backoff)))
+        (unless (equal reason (plist-get old :error))
+          (message "%s usage for %s failed: %s; retrying in %s"
+                   backend (or account "default") reason
+                   (agent-usage--duration wait)))
+        (agent-usage--put-failure backend account old
+                                  :error reason :network nil
+                                  :backoff backoff
+                                  :retry-at (+ started wait)
+                                  :retry-required (and retry-after t))))))
+
+(defun agent-usage--put-failure (backend account old &rest properties)
+  "Store OLD with PROPERTIES and the current `:error-at' for BACKEND's ACCOUNT."
+  (let ((entry (copy-sequence old)))
     (setq entry (plist-put entry :error-at (float-time)))
-    (setq entry (plist-put entry :backoff backoff))
-    (setq entry (plist-put entry :retry-at (+ started wait)))
+    (while properties
+      (setq entry (plist-put entry (pop properties) (pop properties))))
     (puthash (cons backend account) entry (agent-usage--table))
     (agent-usage--save-cache)))
 
@@ -248,17 +275,20 @@ return NORMALIZE applied to the JSON body, parsed as a plist with JSON
 null and false read as nil.  Otherwise return a failure from
 `agent-usage-failure'.  EXPLAIN, when non-nil, is called in the
 response buffer with the HTTP status code and may return a reason
-string for it; a nil return falls back to the generic reason."
+string for it; a nil return falls back to the generic reason.  An
+error without an HTTP status, or a response without headers, means the
+request never got an answer and yields `agent-usage-network-failure'."
   (let ((code (and (boundp 'url-http-response-status)
                    url-http-response-status)))
     (cond
-     ((plist-get status :error)
+     ((and (plist-get status :error) (numberp code))
       (agent-usage-failure
-       (or (and explain (numberp code) (funcall explain code))
-           (agent-usage--http-reason code (plist-get status :error)))
+       (or (and explain (funcall explain code))
+           (agent-usage--http-reason code))
        (agent-usage--retry-after)))
-     ((not (and (boundp 'url-http-end-of-headers) url-http-end-of-headers))
-      (agent-usage-failure "empty response"))
+     ((or (plist-get status :error)
+          (not (and (boundp 'url-http-end-of-headers) url-http-end-of-headers)))
+      (agent-usage-network-failure))
      (t
       (goto-char url-http-end-of-headers)
       (condition-case nil
@@ -267,12 +297,9 @@ string for it; a nil return falls back to the generic reason."
                                                 :false-object nil))
         (json-error (agent-usage-failure "unparseable response")))))))
 
-(defun agent-usage--http-reason (code err)
-  "Return a reason for HTTP status CODE, or for ERR when CODE is unknown."
-  (cond
-   ((eql code 429) "rate-limited (HTTP 429)")
-   ((numberp code) (format "HTTP %d" code))
-   (t (error-message-string err))))
+(defun agent-usage--http-reason (code)
+  "Return a reason for HTTP status CODE."
+  (if (eql code 429) "rate-limited (HTTP 429)" (format "HTTP %d" code)))
 
 (defun agent-usage-http-header (name)
   "Return the value of response header NAME in this buffer, or nil."
@@ -410,7 +437,7 @@ re-renders as they arrive."
       (when (agent-usage--fetcher backend)
         (dolist (account (agent-usage--display-accounts backend))
           (cl-incf agent-usage--pending-refresh)
-          (agent-usage-fetch backend account #'agent-usage--refresh-done)))))
+          (agent-usage-fetch backend account #'agent-usage--refresh-done t)))))
   (message "Refreshing usage for %d account%s..."
            agent-usage--pending-refresh
            (if (= agent-usage--pending-refresh 1) "" "s")))
@@ -498,16 +525,23 @@ no longer describes the current window."
     ""))
 
 (defun agent-usage--status (usage)
-  "Return USAGE's last fetch error and next retry time, or an empty string."
-  (if-let* ((reason (plist-get usage :error)))
-      (propertize
-       (if-let* ((retry-at (plist-get usage :retry-at))
-                 ((> retry-at (float-time))))
-           (format "%s; retry %s" reason
-                   (format-time-string "%H:%M" retry-at))
-         reason)
-       'face 'error)
-    ""))
+  "Return USAGE's last fetch error and next retry time, or an empty string.
+A network error is shown in the `shadow' face with its time, since it
+says nothing about the account; any other error in the `error' face."
+  (cond
+   ((not (plist-get usage :error)) "")
+   ((plist-get usage :network)
+    (propertize (format "network error at %s"
+                        (format-time-string "%H:%M" (plist-get usage :error-at)))
+                'face 'shadow))
+   (t
+    (propertize
+     (if-let* ((retry-at (plist-get usage :retry-at))
+               ((> retry-at (float-time))))
+         (format "%s; retry %s" (plist-get usage :error)
+                 (format-time-string "%H:%M" retry-at))
+       (plist-get usage :error))
+     'face 'error))))
 
 (defun agent-usage--age (usage)
   "Return how long ago USAGE was fetched, or a dash when never."

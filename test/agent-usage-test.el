@@ -148,6 +148,50 @@
                     '(:error (error http 429)) #'identity)
                    '(:error "rate-limited (HTTP 429)" :retry-after 3329)))))
 
+(ert-deftest agent-usage-test-response-result-network-failure ()
+  "Treat a request that got no HTTP answer as a network failure."
+  (with-temp-buffer
+    (should (plist-get (agent-usage-response-result
+                        '(:error (error connection-failed "refused"))
+                        #'identity)
+                       :network))
+    (should (plist-get (agent-usage-response-result nil #'identity)
+                       :network))))
+
+(ert-deftest agent-usage-test-network-failure-retries-next-poll-quietly ()
+  "Record a network failure without backoff, retry time, or message."
+  (agent-usage-test--with-store
+    (let ((messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest args) (push args messages))))
+        (agent-usage--record-failure
+         'stub "a" (agent-usage-failure "HTTP 500") 1000.0)
+        (setq messages nil)
+        (agent-usage--record-failure
+         'stub "a" (agent-usage-network-failure) 2000.0))
+      (let ((usage (agent-usage-get 'stub "a")))
+        (should-not messages)
+        (should (plist-get usage :network))
+        (should-not (plist-get usage :retry-at))
+        (should-not (plist-get usage :backoff))
+        (should-not (agent-usage--deferred-p usage))
+        (should (string-prefix-p "network error at "
+                                 (agent-usage--status usage)))
+        (should (eq (get-text-property 0 'face (agent-usage--status usage))
+                    'shadow))))))
+
+(ert-deftest agent-usage-test-force-overrides-backoff-not-retry-after ()
+  "Let a manual refresh skip backoff but never a server-requested wait."
+  (agent-usage-test--with-store
+    (agent-usage--record-failure
+     'stub "a" (agent-usage-failure "HTTP 500") (float-time))
+    (agent-usage--record-failure
+     'stub "b" (agent-usage-failure "rate-limited (HTTP 429)" 3600)
+     (float-time))
+    (should (agent-usage--deferred-p (agent-usage-get 'stub "a")))
+    (should-not (agent-usage--deferred-p (agent-usage-get 'stub "a") nil t))
+    (should (agent-usage--deferred-p (agent-usage-get 'stub "b") nil t))))
+
 (ert-deftest agent-usage-test-response-result-normalizes-body ()
   "Pass a successful response's JSON body to the normalizer."
   (with-temp-buffer

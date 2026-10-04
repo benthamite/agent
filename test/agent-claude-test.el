@@ -1108,7 +1108,7 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
       (agent-claude--usage-fetch
        "personal" (lambda (usage) (push usage reported)))
       (should (= calls 1))
-      (should (stringp (plist-get (car reported) :error))))))
+      (should (plist-get (car reported) :network)))))
 
 (ert-deftest agent-claude-test-fetch-usage-reports-dns-failure-on-retry ()
   "Report DNS failure on the stale-process retry without a third attempt."

@@ -2037,7 +2037,7 @@ session that never restarts would otherwise keep every one of them."
        '(:error (error http 401)) "epoch3"
        (lambda (usage) (setq result usage))))
     (should (equal (plist-get result :error)
-                   "token expired; run Codex as this account to renew it"))
+                   "token expired: run Codex as this account"))
     (should-not (buffer-live-p buffer))))
 
 (provide 'agent-codex-test)

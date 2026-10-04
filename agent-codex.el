@@ -430,13 +430,12 @@ request fails.  This is the Codex backend's `:usage-fetch' slot."
             (url-request-extra-headers
              `(("Authorization" . ,(concat "Bearer " (car auth)))
                ("ChatGPT-Account-Id" . ,(cdr auth)))))
-        (condition-case err
+        (condition-case nil
             (url-retrieve agent-codex--usage-endpoint
                           #'agent-codex--handle-usage-response
                           (list account callback) t t)
           (error
-           (funcall callback
-                    (agent-usage-failure (error-message-string err))))))
+           (funcall callback (agent-usage-network-failure)))))
     (funcall callback (agent-usage-failure "no tokens in auth.json"))))
 
 (defun agent-codex--usage-auth (account)
@@ -474,8 +473,8 @@ that account's home, so an idle account's token eventually expires."
   (when (eql code 401)
     (if (equal (agent-usage-http-header "x-openai-ide-error-code")
                "token_expired")
-        "token expired; run Codex as this account to renew it"
-      "token rejected (HTTP 401); run Codex as this account to renew it")))
+        "token expired: run Codex as this account"
+      "token rejected: run Codex as this account")))
 
 (defun agent-codex--normalize-usage (data)
   "Return the normalized usage plist for the endpoint response DATA.
