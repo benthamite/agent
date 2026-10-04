@@ -790,6 +790,7 @@ switches as soon as the status line reports them."
       (when-let* ((data (agent-claude--parse-status-file)))
         (agent-claude--detect-branch data)
         (agent--note-session-id buffer (plist-get data :session_id))
+        (agent-claude--record-session-id buffer (plist-get data :session_id))
         (agent-claude--detect-turn-start data buffer)
         (setq agent-claude--status-data data)
         (setq agent-claude--status-polled-at (float-time))))))
@@ -916,10 +917,11 @@ buffer name for sessions started before the UUID existed."
    agent-claude-status-directory))
 
 (defun agent-claude--cleanup-status-file ()
-  "Delete the status, state, and tasks files for the current buffer."
+  "Delete the status, state, tasks, and session-id files for this buffer."
   (dolist (file (list (agent-claude--status-file)
                       (agent-claude--state-file (current-buffer))
-                      (agent-claude--tasks-file (current-buffer))))
+                      (agent-claude--tasks-file (current-buffer))
+                      (agent-claude--session-id-file (current-buffer))))
     (when (and file (file-exists-p file))
       (delete-file file))))
 
@@ -931,6 +933,39 @@ the UUID have no state file."
   (when-let* ((uuid (buffer-local-value 'agent-claude--status-uuid buffer)))
     (expand-file-name (concat (secure-hash 'sha256 uuid) ".state")
                       agent-claude-status-directory)))
+
+(defvar-local agent-claude--recorded-session-id nil
+  "Session id last written to this session's session-id file.")
+
+(defun agent-claude--session-id-file (buffer)
+  "Return the file naming the Claude session id BUFFER runs, or nil.
+Keyed like the state file.  The hook scripts drop a payload naming
+another session: a `claude -p' run from the session's shell inherits
+its environment, so its hooks would otherwise report as the session."
+  (when-let* ((uuid (buffer-local-value 'agent-claude--status-uuid buffer)))
+    (expand-file-name (concat (secure-hash 'sha256 uuid) ".sid")
+                      agent-claude-status-directory)))
+
+(defun agent-claude--record-session-id (buffer session-id)
+  "Write SESSION-ID, reported by BUFFER's status line, to its session-id file.
+Write only when it changed, as after `/clear'.  If the write fails,
+delete the file so the hooks accept every payload, as before the file
+existed."
+  (when-let* (((stringp session-id))
+              ((not (equal session-id (buffer-local-value
+                                       'agent-claude--recorded-session-id
+                                       buffer))))
+              (file (agent-claude--session-id-file buffer)))
+    (condition-case err
+        (progn
+          (make-directory (file-name-directory file) t)
+          (write-region session-id nil file nil 'silent)
+          (with-current-buffer buffer
+            (setq agent-claude--recorded-session-id session-id)))
+      (error
+       (ignore-errors (delete-file file))
+       (message "agent-claude: cannot record session id: %s"
+                (error-message-string err))))))
 
 (defun agent-claude--record-state (buffer state)
   "Mirror STATE of Claude session BUFFER to its state file.
@@ -958,7 +993,7 @@ If the write fails, delete the file so the hook falls back to sending."
   "Delete status files older than `agent-claude--status-file-max-age'."
   (when (file-directory-p agent-claude-status-directory)
     (dolist (file (directory-files agent-claude-status-directory t
-                                   "\\.\\(?:json\\|state\\)\\'"))
+                                   "\\.\\(?:json\\|state\\|sid\\)\\'"))
       (when-let* ((mtime (file-attribute-modification-time
                           (file-attributes file))))
         (when (> (float-time (time-subtract (current-time) mtime))
@@ -1254,7 +1289,9 @@ the user.  Claude reaches them from inside a turn, with a tool call
 still in flight, so nothing else reports them as waiting even though
 they proceed only once the user answers."
   (when (eq (plist-get message :type) 'notification)
-    (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
+    (when-let* ((buf (get-buffer (plist-get message :buffer-name)))
+                ((not (agent-claude--foreign-hook-p
+                       buf (plist-get message :json-data)))))
       (let ((name (agent--buffer-session-name buf))
             (label (agent-backend-label (agent-backend 'claude-code)))
             (ntype (agent-claude--notification-type
@@ -1464,9 +1501,25 @@ stop event; applying it then would strand the session as busy."
 MESSAGE is a plist with :type, :buffer-name, :json-data, and
 :args.  Translates the event into a `stop' session event."
   (when (eq (plist-get message :type) 'stop)
-    (when-let* ((buf (get-buffer (plist-get message :buffer-name))))
+    (when-let* ((buf (get-buffer (plist-get message :buffer-name)))
+                ((not (agent-claude--foreign-hook-p
+                       buf (plist-get message :json-data)))))
       (agent-session-event buf 'stop)))
   nil)
+
+(defun agent-claude--foreign-hook-p (buffer json-data)
+  "Return non-nil when hook payload JSON-DATA belongs to another session.
+A `claude -p' run from BUFFER's shell inherits its environment, so its
+hooks name BUFFER; its payload's `session_id' differs from the one
+BUFFER's status line reports.  A payload without a session id, or a
+session whose id is not yet known, is not foreign."
+  (when-let* ((expected (buffer-local-value
+                         'agent-claude--recorded-session-id buffer))
+              ((stringp json-data))
+              (payload (ignore-errors
+                         (json-parse-string json-data :object-type 'plist)))
+              (actual (plist-get payload :session_id)))
+    (not (equal actual expected))))
 
 ;;;;; Modeline
 

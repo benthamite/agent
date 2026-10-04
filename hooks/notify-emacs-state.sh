@@ -7,7 +7,7 @@
 # The send time travels with the event because fire-and-forget delivery
 # is unordered: Emacs discards an event sent before the session last
 # started waiting.
-cat >/dev/null
+payload=$(cat)
 type=$1
 case $type in
   activity|stop) ;;
@@ -15,6 +15,8 @@ case $type in
 esac
 buf=${CLAUDE_BUFFER_NAME:-}
 [ -n "$buf" ] || exit 0
+. "$(dirname "$0")/session-owner.sh"
+agent_hook_foreign_p "$payload" && exit 0
 # Emacs mirrors each session's state to a file keyed like the statusline
 # file.  An `activity' event for a session Emacs already marks busy changes
 # nothing, so skip the emacsclient call; a missing or unreadable file sends.

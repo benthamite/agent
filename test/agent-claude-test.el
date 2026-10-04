@@ -416,6 +416,84 @@ its shell kept running."
                    (list (file-name-nondirectory
                           (agent-claude--tasks-file (current-buffer))))))))
 
+(defun agent-claude-test--run-hook (script payload)
+  "Run hook SCRIPT on PAYLOAD as the current session's CLI would.
+Return the exit status."
+  (let ((process-environment
+         (append (list "AGENT_SESSION_UUID=test-uuid"
+                       (concat "AGENT_CLAUDE_STATUS_DIR="
+                               agent-claude-status-directory))
+                 process-environment)))
+    (with-temp-buffer
+      (insert payload)
+      (call-process-region (point-min) (point-max)
+                           (expand-file-name script
+                                             agent-claude--package-directory)
+                           nil nil nil))))
+
+(ert-deftest agent-claude-test-record-session-id-writes-on-change ()
+  "The status line's session id is written once per change."
+  (agent-claude-test--with-tasks-session
+    (let ((file (agent-claude--session-id-file (current-buffer))))
+      (agent-claude--record-session-id (current-buffer) "s1")
+      (should (equal (with-temp-buffer (insert-file-contents file)
+                                       (buffer-string))
+                     "s1"))
+      (delete-file file)
+      (agent-claude--record-session-id (current-buffer) "s1")
+      (should-not (file-exists-p file))
+      (agent-claude--record-session-id (current-buffer) "s2")
+      (should (file-exists-p file)))))
+
+(ert-deftest agent-claude-test-tasks-hook-drops-foreign-session ()
+  "A payload from another session, such as a child `claude -p', is dropped."
+  (agent-claude-test--with-tasks-session
+    (agent-claude--record-session-id (current-buffer) "parent")
+    (agent-claude-test--run-hook
+     "hooks/record-background-tasks.sh"
+     "{\"session_id\":\"child\",\"hook_event_name\":\"Stop\",\"background_tasks\":[]}")
+    (should-not (file-exists-p (agent-claude--tasks-file (current-buffer))))
+    (agent-claude-test--run-hook
+     "hooks/record-background-tasks.sh"
+     (replace-regexp-in-string "\"s\"" "\"parent\""
+                               agent-claude-test--stop-payload))
+    (should (equal (agent-claude--background-tasks (current-buffer))
+                   '("boi38yr6f")))))
+
+(ert-deftest agent-claude-test-session-owner-check ()
+  "Only a payload naming a different recorded session is foreign."
+  (agent-claude-test--with-tasks-session
+    (let ((check (lambda (payload)
+                   (let ((process-environment
+                          (append (list "AGENT_SESSION_UUID=test-uuid"
+                                        (concat "AGENT_CLAUDE_STATUS_DIR="
+                                                agent-claude-status-directory))
+                                  process-environment)))
+                     (zerop (call-process
+                             "bash" nil nil nil "-c"
+                             ". \"$1\"; agent_hook_foreign_p \"$2\"" "check"
+                             (expand-file-name "hooks/session-owner.sh"
+                                               agent-claude--package-directory)
+                             payload))))))
+      (should-not (funcall check "{\"session_id\":\"child\"}"))
+      (agent-claude--record-session-id (current-buffer) "parent")
+      (should (funcall check "{\"session_id\":\"child\"}"))
+      (should-not (funcall check "{\"session_id\":\"parent\"}"))
+      (should-not (funcall check "{\"hook_event_name\":\"Stop\"}")))))
+
+(ert-deftest agent-claude-test-stop-from-another-session-is-ignored ()
+  "A Stop whose payload names another session leaves the session busy."
+  (agent-claude-test--with-tasks-session
+    (agent-claude--record-session-id (current-buffer) "parent")
+    (let (events)
+      (cl-letf (((symbol-function 'agent-session-event)
+                 (lambda (_buffer event) (push event events))))
+        (dolist (id '("child" "parent"))
+          (agent-claude--handle-stop
+           (list :type 'stop :buffer-name (buffer-name)
+                 :json-data (format "{\"session_id\":\"%s\"}" id)))))
+      (should (equal events '(stop))))))
+
 (ert-deftest agent-claude-test-has-background-tasks-ignores-footer-counts ()
   "Footer task counts are not evidence; the fleet count spans all sessions."
   (with-temp-buffer

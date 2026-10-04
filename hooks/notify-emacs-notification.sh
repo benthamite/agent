@@ -5,6 +5,8 @@
 # Reads JSON from stdin and passes it as an additional emacsclient argument
 # so --handle-notification can determine the notification type.
 json_data=$(cat)
+. "$(dirname "$0")/session-owner.sh"
+agent_hook_foreign_p "$json_data" && exit 0
 buf=${CLAUDE_BUFFER_NAME:-}
 # Escape backslashes and double-quotes so the value is safe inside an Elisp string.
 buf=${buf//\\/\\\\}
