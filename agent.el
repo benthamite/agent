@@ -520,6 +520,9 @@ Each function receives the session buffer and its new state symbol.")
 (defvar-local agent--session-published-status nil
   "Concise current-state description explicitly published by this agent.")
 
+(defvar-local agent--session-published-status-stale nil
+  "Non-nil when a prompt was sent after the agent last published its status.")
+
 (defvar agent--session-switcher-timer nil
   "Timer refreshing state ages in the open session switcher.")
 
@@ -558,7 +561,9 @@ variables."
     (when-let* ((session (agent-session buffer)))
       (unless (equal (agent-session-id session) id)
         (setf (agent-session-id session) id)
-        (with-current-buffer buffer (setq agent--session-published-status nil))
+        (with-current-buffer buffer
+          (setq agent--session-published-status nil
+                agent--session-published-status-stale nil))
         (agent--schedule-session-registry-save)
         (run-hook-with-args 'agent-session-id-functions buffer)))))
 
@@ -757,6 +762,13 @@ that a session's name stays the prominent part of its entry.
 Transient adds a suffix's own face behind the faces a string already
 carries, so annotations stay dim even next to a name colored by
 `agent-waiting'."
+  :group 'agent)
+
+(defface agent-session-stale-status
+  '((t :inherit agent-session-annotation :slant italic))
+  "Face for a published status that predates the session's latest prompt.
+The agent has not described its current work since that prompt, so the
+status may describe the previous task."
   :group 'agent)
 
 (defface agent-tab-bar-key
@@ -1336,13 +1348,20 @@ not change the session's lifecycle state or its state-transition timestamp."
       (when session-id (agent--note-session-id buffer session-id))
       (with-current-buffer buffer
         (setq agent--session-published-status
-              (unless (string-empty-p status) status))))
+              (unless (string-empty-p status) status)
+              agent--session-published-status-stale nil)))
     (agent--refresh-session-switcher)
     t))
 
 (defun agent--session-published-status (buffer)
-  "Return BUFFER's explicitly published state description."
-  (buffer-local-value 'agent--session-published-status buffer))
+  "Return BUFFER's explicitly published state description.
+A status published before the latest prompt carries the face
+`agent-session-stale-status'."
+  (when-let* ((status (buffer-local-value 'agent--session-published-status
+                                          buffer)))
+    (if (buffer-local-value 'agent--session-published-status-stale buffer)
+        (propertize status 'face 'agent-session-stale-status)
+      status)))
 
 (defun agent--refresh-session-switcher ()
   "Refresh status text and ages when the session switcher is open."
@@ -1425,11 +1444,13 @@ not change the session's lifecycle state or its state-transition timestamp."
                                       (or (agent--session-state-summary buffer) ""))
                      for width in agent--session-detail-widths
                      when (> width 0)
-                     collect (propertize
-                              (agent--pad-to
-                               (truncate-string-to-width text width nil nil t)
-                               width)
-                              'face 'agent-session-annotation))
+                     collect (let ((cell (agent--pad-to
+                                          (truncate-string-to-width
+                                           text width nil nil t)
+                                          width)))
+                               (add-face-text-property
+                                0 (length cell) 'agent-session-annotation t cell)
+                               cell))
             " "))))
 
 (defun agent--session-label-prefix (buffer name-pad account-pad)
@@ -1846,10 +1867,13 @@ event delivered while BUFFER is already busy is ignored, because
 backend submission hooks can fire multiple times per submission
 and on submissions that start no turn.
 
-A `submit' or `user-submit' clears the agent's published status, since
-a prompt sent from Emacs gives the agent new work.  An `activity' event
-keeps it: a turn started by a background notification usually continues
-the work the status already describes."
+A `submit' or `user-submit' marks the agent's published status as
+stale, since a prompt sent from Emacs may give the agent new work; it
+stays visible, dimmed, until the agent publishes again, because most
+prompts start turns too short for the agent to publish in, and a
+cleared status would leave the session blank.  An `activity' event
+leaves it current: a turn started by a background notification usually
+continues the work the status already describes."
   (when (buffer-live-p buffer)
     (pcase event
       ((or 'stop 'idle-prompt 'blocked)
@@ -1857,10 +1881,10 @@ the work the status already describes."
       ((or 'submit 'activity)
        (unless (eq (buffer-local-value 'agent--session-state buffer) 'busy)
          (when (eq event 'submit)
-           (agent--session-clear-published-status buffer))
+           (agent--session-mark-published-status-stale buffer))
          (agent--session-set-state buffer 'busy)))
       ('user-submit
-       (agent--session-clear-published-status buffer)
+       (agent--session-mark-published-status-stale buffer)
        (agent--before-exit-cancel-for-user buffer)
        (agent-session-event buffer 'submit))
       ('exit-request
@@ -1884,10 +1908,10 @@ ready alert fires only for `idle-prompt' events."
     (agent--scroll-to-bottom buffer)
     (agent--refresh-display-names-deferred)))
 
-(defun agent--session-clear-published-status (buffer)
-  "Clear the status the agent in BUFFER last published."
+(defun agent--session-mark-published-status-stale (buffer)
+  "Mark the status the agent in BUFFER last published as stale."
   (with-current-buffer buffer
-    (setq agent--session-published-status nil)))
+    (setq agent--session-published-status-stale t)))
 
 (defun agent--session-set-state (buffer state)
   "Set BUFFER's session state to STATE and record the transition time."

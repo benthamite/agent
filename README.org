@@ -402,9 +402,14 @@ The state description is explicitly authored by the working agent, for
 example “Testing pagination fix” or “Waiting for your decision about bindings”.
 It is not extracted from the chat and requires no separate summarizer.
 Until an agent publishes an update, the column is blank. A prompt submitted
-from Emacs or a changed native session identity clears the previous
-description. A turn that starts without one, such as a reply to a
-background-task notification, keeps it, as does a completed turn. Publication does not alter the state color or
+from Emacs marks the previous description stale rather than clearing it:
+it stays in the column in the face ~agent-session-stale-status~ (italic by
+default) until the agent publishes again. Most prompts start turns too short
+for the agent to publish in, so clearing the description on each one left
+most sessions blank. A changed native session identity clears it, since it
+belongs to another conversation. A turn that starts without a prompt, such
+as a reply to a background-task notification, keeps it current, as does a
+completed turn. Publication does not alter the state color or
 its age, and a claim of completion remains the agent's report.
 
 The executable =bin/agent-status= accepts a status string of at most 160

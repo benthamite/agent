@@ -801,10 +801,10 @@ The buffer is bound to `buf' and holds session key \"a\"."
     (agent--session-set-state buf 'awaiting-input)
     (should (agent--session-state-summary buf))
     (agent-session-event buf 'submit)
-    (should-not (agent--session-state-summary buf))))
+    (should (equal (agent--session-state-summary buf) "Testing pagination fix"))))
 
 (ert-deftest agent-test-session-published-status-survives-activity-turns ()
-  "Keep the status through notification turns; clear it on submissions."
+  "Keep the status current through notification turns."
   (agent-test--with-session-buffer "*one:~/repo/project/:default*"
     (setq-local agent--session
                 (agent-session-create :backend 'one :id "session-1"))
@@ -815,9 +815,41 @@ The buffer is bound to `buf' and holds session key \"a\"."
     (should (equal (agent--session-state-summary buf) "Running overnight cases"))
     (agent-session-event buf 'blocked)
     (agent-session-event buf 'activity)
-    (should (equal (agent--session-state-summary buf) "Running overnight cases"))
-    (agent-session-event buf 'user-submit)
-    (should-not (agent--session-state-summary buf))))
+    (should-not (get-text-property
+                 0 'face (agent--session-state-summary buf)))))
+
+(ert-deftest agent-test-session-published-status-goes-stale-on-prompts ()
+  "Keep a status after a prompt, marked stale until the agent republishes.
+Most prompts start turns too short for the agent to publish in, so
+clearing the status there would leave the session blank."
+  (dolist (event '(submit user-submit))
+    (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+      (setq-local agent--session
+                  (agent-session-create :backend 'one :id "session-1"))
+      (agent-session-set-status (buffer-name buf) 'one "Fixing the parser")
+      (agent-session-event buf 'stop)
+      (agent-session-event buf event)
+      (let ((status (agent--session-state-summary buf)))
+        (should (equal status "Fixing the parser"))
+        (should (eq (get-text-property 0 'face status)
+                    'agent-session-stale-status)))
+      (agent-session-set-status (buffer-name buf) 'one "Testing the parser")
+      (let ((status (agent--session-state-summary buf)))
+        (should (equal status "Testing the parser"))
+        (should-not (get-text-property 0 'face status))))))
+
+(ert-deftest agent-test-session-detail-label-keeps-stale-face ()
+  "Render a stale status in its own face over the annotation face."
+  (let ((agent-session-state-summary-functions
+         (list (lambda (_) (propertize "Old work" 'face
+                                       'agent-session-stale-status))))
+        (agent--session-detail-widths '(0 0 10)))
+    (with-temp-buffer
+      (let* ((label (agent--session-detail-label (current-buffer) "name" nil))
+             (start (string-search "Old work" label)))
+        (should (equal (get-text-property start 'face label)
+                       '(agent-session-stale-status
+                         agent-session-annotation)))))))
 
 (ert-deftest agent-test-session-published-status-uses-native-identity ()
   "Accept startup identities and reject stale publishers despite cached ids."
