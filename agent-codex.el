@@ -32,6 +32,7 @@
 (eval-and-compile (require 'agent))
 (require 'agent-account)
 (require 'agent-usage)
+(require 'agent-util)
 (require 'cl-lib)
 (require 'json)
 (require 'subr-x)
@@ -1210,40 +1211,6 @@ modification time -- stops changing while the session runs."
        (equal (file-truename (file-name-as-directory a))
               (file-truename (file-name-as-directory b)))))
 
-(defconst agent-codex--first-line-chunk-size 32768
-  "Bytes read at a time when fetching a rollout's first line.
-Real `session_meta' records run to a few tens of kilobytes, so one
-read usually reaches the newline; a longer record costs another read
-rather than being truncated into unparseable JSON.")
-
-(defun agent-codex--read-first-line (file)
-  "Return the first line of FILE as a string, or nil when it is empty.
-The file is read a chunk at a time and stops at the first newline,
-because rollout transcripts run to megabytes but only their opening
-`session_meta' record matters here.  Chunks are read as bytes and
-decoded once, so a chunk boundary cannot split a character."
-  (with-temp-buffer
-    (set-buffer-multibyte nil)
-    (let ((start 0)
-          (line nil)
-          (exhausted nil))
-      (while (and (null line) (not exhausted))
-        (goto-char (point-max))
-        (let* ((end (+ start agent-codex--first-line-chunk-size))
-               (bytes (cadr (insert-file-contents-literally
-                             file nil start end))))
-          (setq start end
-                exhausted (< bytes agent-codex--first-line-chunk-size))
-          (goto-char (point-min))
-          (cond ((search-forward "\n" nil t)
-                 (setq line (buffer-substring-no-properties
-                             (point-min) (1- (point)))))
-                (exhausted
-                 (setq line (buffer-substring-no-properties
-                             (point-min) (point-max)))))))
-      (unless (or (null line) (string-empty-p line))
-        (decode-coding-string line 'utf-8)))))
-
 (defun agent-codex--read-session-header (file dir)
   "Return a header plist for rollout FILE when its session ran in DIR.
 Return nil for files from another directory, for subagent threads, and
@@ -1320,7 +1287,7 @@ FILE is skipped, rather than signalling, only when it is unreadable or
 malformed -- the two things a directory of transcripts written by
 another process can legitimately hand us."
   (condition-case nil
-      (when-let* ((line (agent-codex--read-first-line file)))
+      (when-let* ((line (agent-util-read-first-line file)))
         (json-parse-string line :object-type 'plist))
     ((json-error file-error end-of-file) nil)))
 

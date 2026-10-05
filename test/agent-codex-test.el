@@ -1812,7 +1812,7 @@ not a read and a JSON parse."
         (progn
           (agent-codex-test--write-rollout dir id `((cwd . ,dir)))
           (should (gethash id (agent-codex--scan-session-headers dir)))
-          (cl-letf (((symbol-function 'agent-codex--read-first-line)
+          (cl-letf (((symbol-function 'agent-util-read-first-line)
                      (lambda (&rest _)
                        (error "an unchanged rollout must not be re-read"))))
             (should (gethash id (agent-codex--scan-session-headers dir)))))

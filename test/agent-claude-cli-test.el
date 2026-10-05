@@ -232,7 +232,7 @@ known to be corrupt."
 
 (ert-deftest agent-claude-cli-test-read-session-header-long-first-line ()
   "Parse a first line longer than one read chunk, ending in multibyte text."
-  (let* ((padding (make-string agent-claude-cli--first-line-chunk-size ?x))
+  (let* ((padding (make-string agent-util--first-line-chunk-size ?x))
          (file (make-temp-file
                 "agent-claude-cli-test" nil ".jsonl"
                 (concat "{\"type\":\"queue-operation\",\"content\":\""
