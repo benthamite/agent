@@ -188,24 +188,51 @@ under `~/.claude/projects/<encoded-cwd>/'."
 ;; carries a `uuid' and a `timestamp'.
 ;; Last verified against Claude Code 2.1.172 on 2026-06-11.
 
+(defconst agent-claude-cli--first-line-chunk-size 65536
+  "Bytes read at a time when fetching a transcript's first line.
+A first line that embeds a long prompt can exceed one chunk; it then
+costs another read rather than being truncated into unparseable JSON.")
+
+(defun agent-claude-cli--read-first-line (file)
+  "Return the first line of FILE as a string, or nil when it is empty.
+The file is read a chunk at a time and stops at the first newline.
+Chunks are read as bytes and decoded once, so a chunk boundary cannot
+split a character."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (let ((start 0)
+          (line nil)
+          (exhausted nil))
+      (while (and (null line) (not exhausted))
+        (goto-char (point-max))
+        (let* ((end (+ start agent-claude-cli--first-line-chunk-size))
+               (bytes (cadr (insert-file-contents-literally
+                             file nil start end))))
+          (setq start end
+                exhausted (< bytes agent-claude-cli--first-line-chunk-size))
+          (goto-char (point-min))
+          (cond ((search-forward "\n" nil t)
+                 (setq line (buffer-substring-no-properties
+                             (point-min) (1- (point)))))
+                (exhausted
+                 (setq line (buffer-substring-no-properties
+                             (point-min) (point-max)))))))
+      (unless (or (null line) (string-empty-p line))
+        (decode-coding-string line 'utf-8)))))
+
 (defun agent-claude-cli-read-session-header (jsonl-file)
   "Read first line of JSONL-FILE and return a lightweight metadata plist.
 Returns (:session-id :forked-from :fork-uuid :file-path) or nil.
-This is fast (reads only first few KB) and is used for the initial
+This is fast (reads only the first line) and is used for the initial
 scan to build the branch tree."
   (condition-case nil
-      (with-temp-buffer
-        (let ((coding-system-for-read 'utf-8))
-          (insert-file-contents jsonl-file nil 0 65536))
-        (goto-char (point-min))
-        (let* ((line (buffer-substring-no-properties
-                      (point) (line-end-position)))
-               (json (json-parse-string line :object-type 'plist))
-               (forked (plist-get json :forkedFrom)))
-          (list :session-id (plist-get json :sessionId)
-                :forked-from (when forked (plist-get forked :sessionId))
-                :fork-uuid (when forked (plist-get forked :messageUuid))
-                :file-path jsonl-file)))
+      (let* ((line (agent-claude-cli--read-first-line jsonl-file))
+             (json (json-parse-string line :object-type 'plist))
+             (forked (plist-get json :forkedFrom)))
+        (list :session-id (plist-get json :sessionId)
+              :forked-from (when forked (plist-get forked :sessionId))
+              :fork-uuid (when forked (plist-get forked :messageUuid))
+              :file-path jsonl-file))
     (error
      (agent-claude-cli--warn-once
       (list 'session-header jsonl-file)

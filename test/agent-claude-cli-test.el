@@ -230,5 +230,20 @@ known to be corrupt."
           (should (equal (plist-get header :file-path) file)))
       (delete-file file))))
 
+(ert-deftest agent-claude-cli-test-read-session-header-long-first-line ()
+  "Parse a first line longer than one read chunk, ending in multibyte text."
+  (let* ((padding (make-string agent-claude-cli--first-line-chunk-size ?x))
+         (file (make-temp-file
+                "agent-claude-cli-test" nil ".jsonl"
+                (concat "{\"type\":\"queue-operation\",\"content\":\""
+                        padding "é\",\"sessionId\":\"s1\"}\n"
+                        "{\"type\":\"user\"}\n"))))
+    (unwind-protect
+        (should (equal (plist-get
+                        (agent-claude-cli-read-session-header file)
+                        :session-id)
+                       "s1"))
+      (delete-file file))))
+
 (provide 'agent-claude-cli-test)
 ;;; agent-claude-cli-test.el ends here
