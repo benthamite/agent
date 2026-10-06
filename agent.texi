@@ -119,6 +119,8 @@ The package is split into a small backend-agnostic core and focused modules:
 @tab Yasnippet TAB expansion and snippet insertion in eat-based session buffers
 @item @samp{agent-todo.el}
 @tab Org TODO workflows that work with any backend: batch processing of a list of entries and routing the entry at point to a session
+@item @samp{agent-util.el}
+@tab File helpers shared by the backends, such as reading a transcript's first line whatever its length; depends on no other module
 @item @samp{agent-claude.el}
 @tab Claude Code backend: integrates @samp{claude-code.el} with status and usage polling, hook setup, and @code{agent-claude-mode}
 @item @samp{agent-claude-cli.el}
@@ -483,9 +485,14 @@ The state description is explicitly authored by the working agent, for
 example “Testing pagination fix” or “Waiting for your decision about bindings”.
 It is not extracted from the chat and requires no separate summarizer.
 Until an agent publishes an update, the column is blank. A prompt submitted
-from Emacs or a changed native session identity clears the previous
-description. A turn that starts without one, such as a reply to a
-background-task notification, keeps it, as does a completed turn. Publication does not alter the state color or
+from Emacs marks the previous description stale rather than clearing it:
+it stays in the column in the face @code{agent-session-stale-status} (italic by
+default) until the agent publishes again. Most prompts start turns too short
+for the agent to publish in, so clearing the description on each one left
+most sessions blank. A changed native session identity clears it, since it
+belongs to another conversation. A turn that starts without a prompt, such
+as a reply to a background-task notification, keeps it current, as does a
+completed turn. Publication does not alter the state color or
 its age, and a claim of completion remains the agent's report.
 
 The executable @samp{bin/agent-status} accepts a status string of at most 160
@@ -816,7 +823,7 @@ A branch is a session forked from another one: it starts with the parent's whole
 
 @code{agent-resume}, bound to @samp{R}, resumes a past session of the current backend, or of a backend it asks for when no session buffer names one, and passes its prefix argument through to the backend, where it means the most recent session.
 
-Both backends supply the lineage these commands read, through the @code{:session-headers} slot, and each derives it from what its CLI already records. Claude Code writes one transcript per session inside a per-project directory, so the scan reads the first line of each transcript in the project the current session belongs to. Codex writes one rollout file per session, all under a single sessions directory, so the scan reads the @code{session_meta} record opening each rollout, keeps the ones whose recorded working directory matches, and takes the parent from @code{forked_from_id}. Because that directory holds every Codex session on the machine, the scan is bounded by a start timestamp when the caller only needs one session's descendants.
+Both backends supply the lineage these commands read, through the @code{:session-headers} slot, and each derives it from what its CLI already records. Claude Code writes one transcript per session inside a per-project directory, so the scan reads the first line of each transcript in the project the current session belongs to. That line is read whole however long it is, since a session started with a queued prompt records the entire prompt there. Codex writes one rollout file per session, all under a single sessions directory, so the scan reads the @code{session_meta} record opening each rollout, keeps the ones whose recorded working directory matches, and takes the parent from @code{forked_from_id}. Because that directory holds every Codex session on the machine, the scan is bounded by a start timestamp when the caller only needs one session's descendants.
 
 Codex records subagent threads with the same @code{forked_from_id} field, and those are deliberately left out of the tree. They are forks as far as the file format is concerned, but they are not branches of your conversation: they are threads the model spawned to do work on its own, and offering to switch into one would be offering something a user never chose to create.
 
