@@ -101,7 +101,10 @@ the session; the first matching entry wins, so \"\" is a catch-all that
 also covers a backend with no account selected.
 
 Each source in SOURCES is the symbol `project-known', a registry file,
-whose name ends in \".json\", or a path pattern.  `project-known' stands
+whose name ends in \".json\", a (FILE . ROOT) pair naming a registry
+FILE together with the directory ROOT its relative paths are expanded
+against, or a path pattern.  How a registry's root is chosen is
+described in `agent-project-registry-root'.  `project-known' stands
 for the local projects Emacs remembers, as listed by
 `project-known-project-roots'.  A wildcard is `*', `?' or a `[...]'
 character class, and a pattern containing one is expanded a single
@@ -116,6 +119,8 @@ not exist contributes nothing."
   :type '(alist :key-type regexp
                 :value-type (repeat (choice (const :tag "Projects Emacs remembers"
                                                    project-known)
+                                            (cons :tag "Registry with its root"
+                                                  file directory)
                                             string)))
   :group 'agent)
 
@@ -134,9 +139,17 @@ registry from routing with no message anywhere."
 (agent-project--warn-retired-registry-file)
 
 (defcustom agent-project-registry-root nil
-  "Directory that relative registry paths are expanded against.
+  "Fallback directory that relative registry paths are expanded against.
 Registry entries record project paths relative to the directory holding
-the projects; set this to that directory."
+the projects.  Each registry source finds that directory in this order:
+
+1. the ROOT of a (FILE . ROOT) source in `agent-project-sources';
+2. for a registry FILE at .../projects/shared/project-registry.json,
+   that \"projects\" directory, two levels above FILE;
+3. this option, when it is non-nil.
+
+A registry matching none of these can still be read as long as every
+path it records is absolute; a relative path signals an error."
   :type '(choice (const :tag "Unconfigured" nil) directory)
   :group 'agent)
 
@@ -196,6 +209,9 @@ SOURCE naming a JSON file is a registry, and anything else is a path
 pattern."
   (cond ((eq source 'project-known)
          (agent-project--candidates-from-known-projects))
+        ((consp source)
+         (agent-project--candidates-from-registry (expand-file-name (car source))
+                                                  (cdr source)))
         ((string-suffix-p ".json" source)
          (agent-project--candidates-from-registry (expand-file-name source)))
         (t (agent-project--candidates-from-pattern source))))
@@ -210,31 +226,54 @@ Remote roots and roots that no longer exist are passed over."
                              (file-directory-p root)))
                       (project-known-project-roots))))
 
-(defun agent-project--candidates-from-registry (file)
+(defun agent-project--candidates-from-registry (file &optional root)
   "Return the candidates recorded in registry FILE.
-A JSON null is read as nil, so an entry that records one where a string
-belongs falls back the same way an entry omitting the key does."
+ROOT is the directory FILE's relative paths are expanded against; when
+nil, it is chosen as `agent-project-registry-root' describes.  A JSON
+null is read as nil, so an entry that records one where a string belongs
+falls back the same way an entry omitting the key does."
   (unless (file-exists-p file)
     (user-error "Project registry not found: %s" file))
-  (with-temp-buffer
-    (insert-file-contents file)
-    (mapcar #'agent-project--candidate-from-registry-entry
-            (alist-get 'projects (json-parse-string (buffer-string)
-                                                    :object-type 'alist
-                                                    :array-type 'list
-                                                    :null-object nil)))))
+  (let ((root (agent-project--registry-root-for file root)))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (mapcar (lambda (entry)
+                (agent-project--candidate-from-registry-entry entry root))
+              (alist-get 'projects (json-parse-string (buffer-string)
+                                                      :object-type 'alist
+                                                      :array-type 'list
+                                                      :null-object nil))))))
 
-(defun agent-project--candidate-from-registry-entry (entry)
-  "Return a candidate plist for registry ENTRY."
+(defun agent-project--registry-root-for (file root)
+  "Return the root for registry FILE given its configured ROOT, or nil.
+ROOT wins when non-nil; otherwise the root is derived from where FILE
+lives, and failing that it is `agent-project-registry-root'."
+  (when-let* ((directory (or root
+                             (agent-project--registry-conventional-root file)
+                             agent-project-registry-root)))
+    (file-name-as-directory (expand-file-name directory))))
+
+(defun agent-project--registry-conventional-root (file)
+  "Return the projects directory of registry FILE, or nil.
+A registry kept at .../projects/shared/project-registry.json records
+its paths relative to that \"projects\" directory."
+  (when (string-match-p "/projects/shared/project-registry\\.json\\'" file)
+    (file-name-directory
+     (directory-file-name (file-name-directory file)))))
+
+(defun agent-project--candidate-from-registry-entry (entry root)
+  "Return a candidate plist for registry ENTRY whose paths are under ROOT.
+ROOT may be nil when no root is configured; an entry then resolves only
+if every path it records is absolute."
   (let ((doc (car (agent-project--string-list
                    (alist-get 'project_doc_paths entry))))
         (repo (car (agent-project--string-list
                     (alist-get 'repo_paths entry)))))
     (list :label (agent-project--registry-label entry)
-          :directory (agent-project--registry-directory doc repo)
+          :directory (agent-project--registry-directory doc repo root)
           :repository (and repo
                            (file-name-as-directory
-                            (agent-project--registry-path repo)))
+                            (agent-project--registry-path repo root)))
           :description (agent-project--registry-description entry))))
 
 (defun agent-project--registry-label (entry)
@@ -245,28 +284,30 @@ never reaches completion as the string \"nil\"."
       (format "%s - %s" (alist-get 'id entry) title)
     (format "%s" (alist-get 'id entry))))
 
-(defun agent-project--registry-directory (doc repo)
-  "Return the working directory for DOC and REPO paths.
+(defun agent-project--registry-directory (doc repo root)
+  "Return the working directory for DOC and REPO paths under ROOT.
 The doc folder wins when an entry records both, because it holds the
-project's instruction files.  An entry recording neither resolves to the
-registry root."
+project's instruction files.  An entry recording neither resolves to
+ROOT itself."
   (cond
-   (doc (file-name-directory (agent-project--registry-path doc)))
-   (repo (file-name-as-directory (agent-project--registry-path repo)))
+   (doc (file-name-directory (agent-project--registry-path doc root)))
+   (repo (file-name-as-directory (agent-project--registry-path repo root)))
    (t (file-name-as-directory
-       (expand-file-name (agent-project--registry-root))))))
+       (expand-file-name (agent-project--registry-root root))))))
 
-(defun agent-project--registry-path (path)
-  "Return PATH expanded against `agent-project-registry-root'."
+(defun agent-project--registry-path (path root)
+  "Return PATH expanded against the registry ROOT."
   (when path
     (expand-file-name path (unless (file-name-absolute-p path)
-                             (agent-project--registry-root)))))
+                             (agent-project--registry-root root)))))
 
-(defun agent-project--registry-root ()
-  "Return `agent-project-registry-root', or signal when it is unset."
-  (or agent-project-registry-root
+(defun agent-project--registry-root (root)
+  "Return the registry ROOT, or signal when it is nil."
+  (or root
       (user-error
-       "Set `agent-project-registry-root' to your projects directory")))
+       (concat "No root for a project registry; give it as (FILE . ROOT) "
+               "in `agent-project-sources' or set "
+               "`agent-project-registry-root'"))))
 
 (defun agent-project--registry-description (entry)
   "Return the text that ranking judges registry ENTRY by, or nil.

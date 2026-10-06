@@ -263,6 +263,104 @@ The root is normalized like every other candidate directory."
   (let ((agent-project-sources '(("" . ("/nonexistent/registry.json")))))
     (should-error (agent-project-candidates nil) :type 'user-error)))
 
+(defconst agent-project-test--relative-entry-json
+  "{\"projects\": [{\"id\": \"%s\", \"project_doc_paths\": [\"%s/%s.org\"]}]}"
+  "Format for a registry JSON with one entry recording a relative doc path.
+It takes the entry's id three times.")
+
+(defun agent-project-test--write-registry (file id)
+  "Write to FILE a registry whose one entry ID records a relative path."
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file
+    (insert (format agent-project-test--relative-entry-json id id id))))
+
+(defun agent-project-test--conventional-registry (base id)
+  "Write under BASE a conventionally placed registry for ID and return it.
+The registry sits at BASE/projects/shared/project-registry.json."
+  (let ((file (expand-file-name "projects/shared/project-registry.json" base)))
+    (agent-project-test--write-registry file id)
+    file))
+
+(defun agent-project-test--directory-of (label candidates)
+  "Return the directory of the candidate labelled LABEL in CANDIDATES."
+  (plist-get (seq-find (lambda (candidate)
+                         (equal (plist-get candidate :label) label))
+                       candidates)
+             :directory))
+
+(ert-deftest agent-project-test-single-registry-keeps-the-global-root ()
+  "Resolve a plain registry outside the conventional layout as before.
+Such a registry has no root of its own, so `agent-project-registry-root'
+still supplies it."
+  (agent-project-test--with-tree root '()
+    (let* ((file (expand-file-name "elsewhere/registry.json" root))
+           (agent-project-registry-root "/tmp/projects/")
+           (agent-project-sources (list (cons "" (list file)))))
+      (agent-project-test--write-registry file "alpha")
+      (should (equal (agent-project-test--directory-of
+                      "alpha" (agent-project-candidates nil))
+                     "/tmp/projects/alpha/")))))
+
+(ert-deftest agent-project-test-single-conventional-registry-is-unchanged ()
+  "Resolve a conventionally placed registry to the root it already had.
+A configuration naming PROJECTS/shared/project-registry.json and setting
+the global root to PROJECTS gets the same directories as before."
+  (agent-project-test--with-tree root '()
+    (let* ((file (agent-project-test--conventional-registry root "alpha"))
+           (projects (file-name-as-directory (expand-file-name "projects" root)))
+           (agent-project-registry-root projects)
+           (agent-project-sources (list (cons "" (list file)))))
+      (should (equal (agent-project-test--directory-of
+                      "alpha" (agent-project-candidates nil))
+                     (expand-file-name "alpha/" projects))))))
+
+(ert-deftest agent-project-test-registries-resolve-against-their-own-roots ()
+  "Resolve each registry against its own root, not the global one.
+One registry is conventionally placed and derives its root; the other
+names it explicitly as (FILE . ROOT).  The global root names neither."
+  (agent-project-test--with-tree root '()
+    (let* ((workspace (agent-project-test--conventional-registry
+                       (expand-file-name "workspace" root) "alpha"))
+           (personal (expand-file-name "personal/registry.json" root))
+           (personal-root (expand-file-name "personal/notes/" root))
+           (agent-project-registry-root "/elsewhere/")
+           (agent-project-sources
+            (list (cons "" (list workspace (cons personal personal-root)))))
+           (candidates (progn
+                         (agent-project-test--write-registry personal "beta")
+                         (agent-project-candidates nil))))
+      (should (equal (agent-project-test--directory-of "alpha" candidates)
+                     (expand-file-name "workspace/projects/alpha/" root)))
+      (should (equal (agent-project-test--directory-of "beta" candidates)
+                     (expand-file-name "beta/" personal-root))))))
+
+(ert-deftest agent-project-test-registry-without-a-root-signals ()
+  "Signal when a registry recording relative paths has no root at all."
+  (agent-project-test--with-tree root '()
+    (let* ((file (expand-file-name "elsewhere/registry.json" root))
+           (agent-project-registry-root nil)
+           (agent-project-sources (list (cons "" (list file)))))
+      (agent-project-test--write-registry file "alpha")
+      (should-error (agent-project-candidates nil) :type 'user-error))))
+
+(ert-deftest agent-project-test-registries-dedupe-by-true-path ()
+  "Keep one candidate when two registries resolve to the same true path.
+The second registry reaches the first one's projects directory through a
+symbolic link, so the two directories differ as strings."
+  (agent-project-test--with-tree root '()
+    (let* ((first (agent-project-test--conventional-registry
+                   (expand-file-name "a" root) "alpha"))
+           (projects (expand-file-name "a/projects" root))
+           (link (expand-file-name "link" root))
+           (second (expand-file-name "b/registry.json" root))
+           (agent-project-registry-root nil)
+           (agent-project-sources
+            (list (cons "" (list first (cons second link))))))
+      (make-directory (expand-file-name "alpha" projects) t)
+      (make-symbolic-link projects link)
+      (agent-project-test--write-registry second "alpha")
+      (should (= (length (agent-project-candidates nil)) 1)))))
+
 (ert-deftest agent-project-test-read-skips-ranking-without-descriptions ()
   "Complete directly when no candidate carries a description."
   (agent-project-test--with-tree root '(("alpha" . t))
