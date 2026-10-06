@@ -2,11 +2,13 @@
 # Forward a Claude Code turn-lifecycle hook to Emacs as a session event.
 # Usage: notify-emacs-state.sh TYPE, where TYPE is `activity' or `stop'.
 # Called by the UserPromptSubmit, PreToolUse, PostToolUse,
-# PostToolUseFailure, SubagentStart, and StopFailure hooks; intended to
-# run through fire-and-forget.sh so the CLI doesn't block on emacsclient.
+# PostToolUseFailure, SubagentStart, Stop, and StopFailure hooks; intended
+# to run through fire-and-forget.sh so the CLI doesn't block on emacsclient.
+# The emacsclient timeout keeps a stalled server from accumulating
+# background clients; an abandoned event may still reach Emacs later.
 # The send time travels with the event because fire-and-forget delivery
-# is unordered: Emacs discards an event sent before the session last
-# started waiting.
+# is unordered: Emacs discards an activity event sent before the session
+# last started waiting, and a stop sent before its current turn began.
 payload=$(cat)
 type=$1
 case $type in
@@ -34,4 +36,4 @@ agent=$(printf '%s' "$payload" | perl -MJSON::PP -0777 -ne \
 # Escape backslashes and double-quotes so the value is safe inside an Elisp string.
 buf=${buf//\\/\\\\}
 buf=${buf//\"/\\\"}
-emacsclient --eval "(claude-code-handle-hook '${type} \"${buf}\" \"${sent}\" \"${agent}\")" >/dev/null 2>&1 || true
+emacsclient --timeout=10 --eval "(claude-code-handle-hook '${type} \"${buf}\" \"${sent}\" \"${agent}\")" >/dev/null 2>&1 || true

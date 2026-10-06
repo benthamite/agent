@@ -173,6 +173,68 @@ not start, such as one resumed after a background task finishes."
           (should (eq (buffer-local-value 'agent--session-state buf) 'busy)))
       (kill-buffer buf))))
 
+;; While Emacs is stalled, a turn's stop can be delivered after the next
+;; turn has started.
+(ert-deftest agent-claude-test-stop-sent-before-turn-began-is-ignored ()
+  "Ignore a stop sent before the event that began the current turn."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*"))
+        (agent-alert-on-ready nil)
+        (now (float-time)))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq-local agent--session-state 'awaiting-input)
+            (setq-local agent--session-last-waiting-event-at (- now 100)))
+          (agent-claude--handle-session-state
+           (list :type 'activity :buffer-name (buffer-name buf)
+                 :args (list (number-to-string (- now 10)))))
+          (agent-claude--handle-stop
+           (list :type 'stop :buffer-name (buffer-name buf)
+                 :args (list (number-to-string (- now 20)))))
+          (should (eq (buffer-local-value 'agent--session-state buf) 'busy))
+          (agent-claude--handle-stop
+           (list :type 'stop :buffer-name (buffer-name buf)
+                 :args (list (number-to-string (- now 5)))))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-stop-before-emacs-submission-is-ignored ()
+  "Ignore a stop sent before Emacs applied the prompt that began the turn."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*"))
+        (agent-alert-on-ready nil)
+        (now (float-time)))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq-local agent--session-state 'busy)
+            (setq-local agent--session-state-changed-at now))
+          (agent-claude--handle-stop
+           (list :type 'stop :buffer-name (buffer-name buf)
+                 :args (list (number-to-string (- now 1)))))
+          (should (eq (buffer-local-value 'agent--session-state buf) 'busy))
+          (agent-claude--handle-stop
+           (list :type 'stop :buffer-name (buffer-name buf)
+                 :args (list (number-to-string (+ now 1)))))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input)))
+      (kill-buffer buf))))
+
+(ert-deftest agent-claude-test-stop-without-send-time-applies ()
+  "Apply a stop that carries no send time, as the old Stop hook sent."
+  (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*"))
+        (agent-alert-on-ready nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (setq-local agent--session-state 'busy)
+            (setq-local agent--session-state-changed-at (float-time)))
+          (agent-claude--handle-stop
+           (list :type 'stop :buffer-name (buffer-name buf)))
+          (should (eq (buffer-local-value 'agent--session-state buf)
+                      'awaiting-input)))
+      (kill-buffer buf))))
+
 (ert-deftest agent-claude-test-subagent-activity-leaves-waiting-session ()
   "Ignore a background subagent's tool hooks while the session waits.
 The main turn has ended, or the main thread waits at a dialog, so the
@@ -686,9 +748,35 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
                      "PostToolUse" "PostToolUseFailure" "SubagentStart"
                      "StopFailure" "SubagentStop"))
       (should (agent-claude-test--hook-commands settings event)))
-    (should (seq-some (lambda (command)
-                        (string-match-p "claude-code-hook-wrapper stop" command))
-                      (agent-claude-test--hook-commands settings "Stop")))))
+    (should (equal (agent-claude-test--hook-commands settings "Stop")
+                   (list (agent-claude--state-hook-command "stop")
+                         (agent-claude--background-hook-command))))))
+
+;; A Stop hook that waits on Emacs holds the turn open for as long as the
+;; server is stalled, up to Claude Code's ten-minute hook timeout.
+(ert-deftest agent-claude-test-stop-hook-runs-in-background ()
+  "The Stop hook goes through fire-and-forget.sh with a timeout."
+  (let* ((settings (agent-claude--session-settings))
+         (group (seq-find (lambda (group)
+                            (seq-some (lambda (hook)
+                                        (string-match-p
+                                         "/notify-emacs-state\\.sh stop\\'"
+                                         (gethash "command" hook)))
+                                      (gethash "hooks" group)))
+                          (gethash "Stop" (gethash "hooks" settings))))
+         (hook (aref (gethash "hooks" group) 0)))
+    (should (string-match-p "/fire-and-forget\\.sh " (gethash "command" hook)))
+    (should (equal (gethash "timeout" hook) 5))))
+
+(ert-deftest agent-claude-test-ensure-stop-hook-replaces-older-checkout ()
+  "Replace a Stop hook pointing at a previously loaded checkout."
+  (let ((settings (json-parse-string
+                   (concat "{\"hooks\": {\"Stop\": [{\"hooks\": [{\"type\": \"command\", "
+                           "\"command\": \"/old/agent/hooks/fire-and-forget.sh "
+                           "/old/agent/hooks/notify-emacs-state.sh stop\"}]}]}}"))))
+    (agent-claude--ensure-stop-hook settings)
+    (should (equal (agent-claude-test--hook-commands settings "Stop")
+                   (list (agent-claude--stop-hook-command))))))
 
 (ert-deftest agent-claude-test-session-settings-ignore-package-override ()
   "Session settings name the loaded checkout even when an override is set."
@@ -1525,10 +1613,9 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
 
 (ert-deftest agent-claude-test-ensure-hooks-config-valid-empty-json ()
   "Write Stop and Notification hooks into an empty settings object."
-  (let ((settings (make-temp-file "hooks-test" nil ".json"))
-        (wrapper (agent-claude-test--executable)))
+  (let ((settings (make-temp-file "hooks-test" nil ".json")))
     (unwind-protect
-        (let ((agent-claude-hook-wrapper wrapper))
+        (progn
           (with-temp-file settings (insert "{}"))
           (should (agent-claude-ensure-stop-hook-config settings))
           (should (agent-claude-ensure-notification-hook-config settings))
@@ -1537,8 +1624,7 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
             (should (hash-table-p hooks))
             (should (gethash "Stop" hooks))
             (should (gethash "Notification" hooks))))
-      (delete-file settings)
-      (delete-file wrapper))))
+      (delete-file settings))))
 
 (ert-deftest agent-claude-test-source-directory-follows-build-symlink ()
   "Resolve a compiled build file to the checkout its source links to."
@@ -1663,8 +1749,8 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
           (let* ((args (with-temp-buffer
                          (insert-file-contents log)
                          (split-string (buffer-string) "\n" t)))
-                 (form (car (read-from-string (cadr args)))))
-            (should (equal (car args) "--eval"))
+                 (form (car (read-from-string (nth 2 args)))))
+            (should (equal (seq-take args 2) '("--timeout=10" "--eval")))
             (should (equal (nth 1 (cadr form)) 'activity))
             (should (equal (nth 2 form) "*claude:\"q\"*"))
             (should (< (abs (- (string-to-number (nth 3 form)) (float-time)))
@@ -1695,7 +1781,7 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
             (call-process-region (point-min) (point-max) script
                                  nil nil nil "activity"))
           (let ((form (car (read-from-string
-                            (cadr (with-temp-buffer
+                            (nth 2 (with-temp-buffer
                                     (insert-file-contents log)
                                     (split-string (buffer-string) "\n" t)))))))
             (should (equal (nth 4 form) "a-1"))))

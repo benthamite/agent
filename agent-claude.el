@@ -148,6 +148,9 @@ build directory such as Elpaca's holds only its Lisp files."
   :type '(choice (const :tag "Unavailable" nil) file)
   :group 'agent-claude)
 
+(make-obsolete-variable 'agent-claude-hook-wrapper
+                        "the Stop hook no longer calls it." "0.2")
+
 (defconst agent-claude--package-directory
   (agent-claude--source-directory (or load-file-name buffer-file-name))
   "Absolute path to the source checkout holding this library.")
@@ -1517,8 +1520,27 @@ session waits for anything but that subagent's dialog; see
               (buf (get-buffer (plist-get message :buffer-name)))
               ((not (agent-claude--stale-hook-event-p buf message)))
               ((not (agent-claude--subagent-hook-event-p buf message))))
-    (agent-session-event buf (car event)))
+    (let ((was-busy (eq (buffer-local-value 'agent--session-state buf) 'busy)))
+      (agent-session-event buf (car event))
+      (unless was-busy
+        (agent-claude--record-busy-sent-at buf message))))
   nil)
+
+(defvar-local agent-claude--busy-sent-at nil
+  "Send time of the hook event that began the current busy period.
+A cons of the `agent--session-state-changed-at' value of that period
+and the event's send time, so a value left from an earlier period is
+recognizably stale.  Nil when no hook event began a busy period.")
+
+(defun agent-claude--record-busy-sent-at (buffer message)
+  "Record the send time of MESSAGE, which has just made BUFFER busy."
+  (with-current-buffer buffer
+    (when-let* (((eq agent--session-state 'busy))
+                (sent (car (plist-get message :args)))
+                ((stringp sent)))
+      (setq agent-claude--busy-sent-at
+            (cons agent--session-state-changed-at
+                  (string-to-number sent))))))
 
 (defun agent-claude--subagent-hook-event-p (buffer message)
   "Return non-nil when hook MESSAGE is a subagent's and cannot end BUFFER's wait.
@@ -1552,9 +1574,32 @@ MESSAGE is a plist with :type, :buffer-name, :json-data, and
   (when (eq (plist-get message :type) 'stop)
     (when-let* ((buf (get-buffer (plist-get message :buffer-name)))
                 ((not (agent-claude--foreign-hook-p
-                       buf (plist-get message :json-data)))))
+                       buf (plist-get message :json-data))))
+                ((not (agent-claude--stale-stop-p buf message))))
       (agent-session-event buf 'stop)))
   nil)
+
+(defun agent-claude--stale-stop-p (buffer message)
+  "Return non-nil when stop MESSAGE was sent before BUFFER's turn began.
+The first of MESSAGE's :args, when present, is the send time as a
+`float-time' string.  The Stop hook delivers its event in the
+background, so when Emacs is stalled a turn's stop can arrive after
+the next turn has started; applying it then would mark a working
+session as waiting.  The turn began when the event that made BUFFER
+busy was sent, or, for one without a send time such as a prompt sent
+from Emacs, when Emacs applied it."
+  (when-let* (((eq (buffer-local-value 'agent--session-state buffer) 'busy))
+              (sent (car (plist-get message :args)))
+              ((stringp sent)))
+    (< (string-to-number sent) (agent-claude--busy-since buffer))))
+
+(defun agent-claude--busy-since (buffer)
+  "Return the time BUFFER's current busy period began, as a float."
+  (let ((changed (buffer-local-value 'agent--session-state-changed-at buffer))
+        (record (buffer-local-value 'agent-claude--busy-sent-at buffer)))
+    (if (and record (equal (car record) changed))
+        (cdr record)
+      changed)))
 
 (defun agent-claude--foreign-hook-p (buffer json-data)
   "Return non-nil when hook payload JSON-DATA belongs to another session.
@@ -2128,9 +2173,9 @@ string naming the setting and its command."
 (defun agent-claude--agent-group-commands (group)
   "Return the commands in hook GROUP that agent wrote.
 A bundled helper of an agent checkout identifies agent's commands.  The
-`claude-code-hook-wrapper' Stop command is generic, so it counts only
-in the exact form `agent-claude--stop-hook-command' writes, alone in
-its group."
+`claude-code-hook-wrapper' Stop command earlier versions wrote is
+generic, so it counts only in the exact form they wrote, alone in its
+group."
   (let ((commands (and (hash-table-p group)
                        (seq-filter #'stringp
                                    (mapcar (lambda (hook)
@@ -2153,7 +2198,7 @@ its group."
    command))
 
 (defun agent-claude--agent-stop-wrapper-command-p (command)
-  "Return non-nil when COMMAND is the Stop hook agent writes."
+  "Return non-nil when COMMAND is the Stop hook earlier versions wrote."
   (string-match-p
    "\\`\\(?:[^ \\]\\|\\\\.\\)*/bin/claude-code-hook-wrapper stop\\'"
    command))
@@ -2288,9 +2333,17 @@ A FILE inside the loaded checkout is re-rooted under
       file)))
 
 (defun agent-claude--ensure-stop-hook (settings)
-  "Ensure SETTINGS has the agent Stop hook."
-  (agent-claude--ensure-hook
-   settings "Stop" (agent-claude--stop-hook-command) nil))
+  "Ensure SETTINGS has the agent Stop hook.
+Remove any other `notify-emacs-state.sh' command under the hook first,
+such as one pointing at a previously loaded checkout, so the hook
+forwards its event exactly once."
+  (let ((command (agent-claude--stop-hook-command)))
+    (agent-claude--remove-hook-commands
+     settings "Stop"
+     (lambda (candidate)
+       (and (not (equal candidate command))
+            (string-match-p "/notify-emacs-state\\.sh " candidate))))
+    (agent-claude--ensure-hook settings "Stop" command 5)))
 
 (defun agent-claude--ensure-notification-hook (settings)
   "Ensure SETTINGS has the agent Notification hook."
@@ -2426,13 +2479,10 @@ TIMEOUT, when non-nil, is written as the hook command timeout."
     hook))
 
 (defun agent-claude--stop-hook-command ()
-  "Return the command string for the Stop hook."
-  (format "%s stop"
-          (shell-quote-argument (agent-claude--hook-wrapper))))
-
-(defun agent-claude--hook-wrapper ()
-  "Return a verified path to `claude-code-hook-wrapper'."
-  (agent-claude--require-executable agent-claude-hook-wrapper))
+  "Return the command string for the Stop hook.
+The hook sends its event in the background, like the turn-lifecycle
+hooks, so a stalled Emacs server never holds up the end of a turn."
+  (agent-claude--state-hook-command "stop"))
 
 (defun agent-claude--notification-hook-command ()
   "Return the command string for the Notification hook in settings.json."
