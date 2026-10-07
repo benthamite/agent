@@ -450,6 +450,19 @@ answer selected instead of paying a model to guess at it."
         (agent-project-read nil "some text" "Project: " #'ignore))
       (should ranked))))
 
+(ert-deftest agent-project-test-rank-ignores-a-deleted-default-directory ()
+  "Send the ranking request from a directory that exists.
+A Slack callback runs in whatever buffer is current, and that buffer's
+directory may have been deleted, which makes spawning curl fail."
+  (skip-unless (require 'gptel nil t))
+  (let ((default-directory "/nonexistent/agent-project-test/")
+        (sent-from nil))
+    (cl-letf (((symbol-function 'gptel-request)
+               (lambda (&rest _) (setq sent-from default-directory))))
+      (agent-project--rank '((:label "alpha" :description "Alpha"))
+                           "some text" #'ignore))
+    (should (equal sent-from temporary-file-directory))))
+
 (ert-deftest agent-project-test-read-without-text-does-not-rank ()
   "Skip ranking when the thing carries no text to rank on."
   (agent-project-test--with-registry file nil

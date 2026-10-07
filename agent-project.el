@@ -469,10 +469,16 @@ description, so it counts as absent and no request is made."
   "Order CANDIDATES by relevance to TEXT and call CALLBACK with the list.
 A response that is neither text nor nil is an event sent before the
 answer, such as a reasoning block, and is waited out rather than taken
-for a failure, so the user is never prompted twice for one request."
+for a failure, so the user is never prompted twice for one request.
+
+Sends the request from `temporary-file-directory': callers such as a
+Slack callback run in whatever buffer is current, whose
+`default-directory' may name a deleted directory, and `make-process'
+signals `file-missing' when asked to spawn curl there."
   (unless (and (require 'gptel nil t) (fboundp 'gptel-request))
     (user-error "Package `gptel' is required for project ranking"))
-  (let ((gptel-backend (alist-get agent-project-ranking-backend
+  (let ((default-directory temporary-file-directory)
+        (gptel-backend (alist-get agent-project-ranking-backend
                                   gptel--known-backends nil nil #'string=))
         (gptel-model agent-project-ranking-model)
         (gptel-include-reasoning nil)
