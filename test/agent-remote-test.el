@@ -113,6 +113,28 @@ HOST overrides the Host header, which defaults to the server's own."
         (agent-remote-tailscale-program "/nonexistent/tailscale"))
     (should-error (agent-remote--host) :type 'user-error)))
 
+(ert-deftest agent-remote-test-starts-before-tailscale ()
+  "The server starts while Tailscale is down and serves once it is up."
+  (let ((address nil))
+    (cl-letf (((symbol-function 'agent-remote--tailscale-address)
+               (lambda ()
+                 (or address (user-error "Tailscale reported no address")))))
+      (agent-remote-test--with-server
+        (let ((agent-remote-host nil)
+              port)
+          (agent-remote--start)
+          (setq port (process-contact agent-remote--server :service))
+          (should (process-live-p agent-remote--server))
+          (should (= (agent-remote-test--status
+                      (agent-remote-test--http
+                       "GET" "/" nil nil (format "127.0.0.1:%d" port)))
+                     421))
+          (setq address "127.0.0.1")
+          (should (= (agent-remote-test--status
+                      (agent-remote-test--http
+                       "GET" "/" nil nil (format "127.0.0.1:%d" port)))
+                     200)))))))
+
 ;;;; Peer filtering
 
 (ert-deftest agent-remote-test-address-in-network ()

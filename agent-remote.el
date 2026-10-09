@@ -143,25 +143,39 @@ When enabled, listen on `agent-remote-host' and `agent-remote-port'."
     (agent-remote--stop)))
 
 (defun agent-remote--start ()
-  "Start the remote-control server, replacing any running one."
+  "Start the remote-control server, replacing any running one.
+The server starts even when Tailscale is disconnected; the address
+requests must name is looked up when the first request arrives."
   (agent-remote--stop)
-  (let ((host (agent-remote--host)))
-    (setq agent-remote--server
-          (make-network-process
-           :name "agent-remote"
-           :server t
-           :host agent-remote-listen-address
-           :service agent-remote-port
-           :family 'ipv4
-           :coding 'binary
-           :noquery t
-           :filter #'agent-remote--filter
-           :sentinel #'agent-remote--sentinel
-           :log #'agent-remote--log))
-    (let ((authority (format "%s:%d" host (process-contact agent-remote--server
-                                                          :service))))
-      (process-put agent-remote--server :authority authority)
-      (message "agent-remote: serving http://%s/" authority))))
+  (setq agent-remote--server
+        (make-network-process
+         :name "agent-remote"
+         :server t
+         :host agent-remote-listen-address
+         :service agent-remote-port
+         :family 'ipv4
+         :coding 'binary
+         :noquery t
+         :filter #'agent-remote--filter
+         :sentinel #'agent-remote--sentinel
+         :log #'agent-remote--log))
+  (let ((authority (ignore-error user-error (agent-remote--authority))))
+    (message "agent-remote: serving %s"
+             (if authority
+                 (format "http://%s/" authority)
+               (format "on port %d; Tailscale address not yet known"
+                       (process-contact agent-remote--server :service))))))
+
+(defun agent-remote--authority ()
+  "Return the host and port requests must name, as \"HOST:PORT\".
+Look the host up on first use and cache it on `agent-remote--server'.
+Signal a `user-error' when the host cannot be determined."
+  (or (process-get agent-remote--server :authority)
+      (let ((authority (format "%s:%d" (agent-remote--host)
+                               (process-contact agent-remote--server
+                                                :service))))
+        (process-put agent-remote--server :authority authority)
+        authority)))
 
 (defun agent-remote--stop ()
   "Stop the remote-control server if it is running."
@@ -233,7 +247,7 @@ whose final element is the port."
     (process-put proc :input input)
     (when-let* ((request (agent-remote--parse-request input)))
       (process-put proc :input nil)
-      (agent-remote--respond proc (agent-remote--dispatch proc request)))))
+      (agent-remote--respond proc (agent-remote--dispatch request)))))
 
 (defun agent-remote--parse-request (input)
   "Parse the raw HTTP request INPUT, or return nil if it is incomplete.
@@ -284,13 +298,13 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
 
 ;;;; Routing
 
-(defun agent-remote--dispatch (proc request)
-  "Return the response to REQUEST received on connection PROC."
+(defun agent-remote--dispatch (request)
+  "Return the response to REQUEST."
   (condition-case err
       (let ((method (plist-get request :method))
             (path (plist-get request :path)))
         (cond
-         ((not (agent-remote--authority-ok-p proc request))
+         ((not (agent-remote--authority-ok-p request))
           (agent-remote--error "421 Misdirected Request" "Wrong host"))
          ((and (equal method "GET") (equal path "/"))
           (list "200 OK" "text/html; charset=utf-8" (agent-remote--page)))
@@ -315,11 +329,9 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
     (error (agent-remote--error "500 Internal Server Error"
                                 (error-message-string err)))))
 
-(defun agent-remote--authority-ok-p (proc request)
-  "Return non-nil when REQUEST's Host header names the server on PROC.
-PROC is a connection process, which inherits the expected authority
-from its server's property list."
-  (let ((authority (process-get proc :authority)))
+(defun agent-remote--authority-ok-p (request)
+  "Return non-nil when REQUEST's Host header names this server."
+  (let ((authority (ignore-error user-error (agent-remote--authority))))
     (and authority
          (equal (cdr (assoc "host" (plist-get request :headers)))
                 authority))))
