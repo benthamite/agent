@@ -86,7 +86,11 @@ public class MainActivity extends Activity {
 
     setContentView(root);
 
-    if (state == null || web.restoreState(state) == null) {
+    // A restored WebView reloads its page itself; it still needs the
+    // connecting screen and timeout, or an unreachable host leaves it black.
+    if (state != null && web.restoreState(state) != null) {
+      showLoading();
+    } else {
       load(BuildConfig.BASE_URL);
     }
   }
@@ -106,13 +110,18 @@ public class MainActivity extends Activity {
 
   /** Load URL behind the connecting screen, failing after a timeout. */
   private void load(String url) {
+    showLoading();
+    web.loadUrl(url);
+  }
+
+  /** Show the connecting screen until a page commits or the timeout fires. */
+  private void showLoading() {
     failedUrl = null;
     errorView.setVisibility(View.GONE);
     web.setVisibility(View.INVISIBLE);
     loadingView.setVisibility(View.VISIBLE);
     handler.removeCallbacks(loadTimeout);
     handler.postDelayed(loadTimeout, LOAD_TIMEOUT_MS);
-    web.loadUrl(url);
   }
 
   private void showPage() {
