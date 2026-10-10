@@ -589,6 +589,114 @@ the routing memory is cleared and pool refreshes are stubbed out."
     (puthash 'stub "solo" agent-account--current)
     (should (equal (agent-account-resolve 'stub) "solo"))))
 
+;;;; Directory rules
+
+(defmacro agent-account-test--with-directories (names &rest body)
+  "Run BODY with NAMES bound to fresh directories under one temporary root.
+Each element of NAMES is (VAR RELATIVE-PATH); the directories are
+created and removed afterwards."
+  (declare (indent 1))
+  (let ((root (make-symbol "root")))
+    `(let* ((,root (file-name-as-directory (make-temp-file "agent-rules" t)))
+            ,@(mapcar (lambda (name)
+                        `(,(car name) (file-name-as-directory
+                                       (expand-file-name ,(cadr name) ,root))))
+                      names))
+       (unwind-protect
+           (progn
+             ,@(mapcar (lambda (name) `(make-directory ,(car name) t)) names)
+             ,@body)
+         (delete-directory ,root t)))))
+
+(ert-deftest agent-account-test-directory-rule-outranks-persisted-selection ()
+  "Use the rule's account for its directory and every directory below it."
+  (agent-account-test--with-directories ((work "work") (nested "work/repo/sub")
+                                         (other "other"))
+    (agent-account-test--with-backend
+        (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+      (puthash 'stub "personal" agent-account--current)
+      (let ((agent-account-directory-rules `((,work . "work"))))
+        (should (equal (agent-account-resolve 'stub nil work) "work"))
+        (should (equal (agent-account-resolve 'stub nil nested) "work"))
+        (should (equal (agent-account-resolve 'stub nil other) "personal"))
+        (should (equal (agent-account-resolve 'stub) "personal"))))))
+
+(ert-deftest agent-account-test-directory-rule-requires-component-boundary ()
+  "Do not match a sibling directory that merely shares a name prefix."
+  (agent-account-test--with-directories ((work "work") (sibling "work-other"))
+    (agent-account-test--with-backend
+        (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+      (puthash 'stub "personal" agent-account--current)
+      (let ((agent-account-directory-rules
+             `((,(directory-file-name work) . "work"))))
+        (should (equal (agent-account-resolve 'stub nil work) "work"))
+        (should (equal (agent-account-resolve 'stub nil sibling)
+                       "personal"))))))
+
+(ert-deftest agent-account-test-directory-rule-first-match-wins ()
+  "Apply the first rule covering the directory."
+  (agent-account-test--with-directories ((outer "outer") (inner "outer/inner"))
+    (agent-account-test--with-backend
+        (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+      (let ((agent-account-directory-rules `((,inner . "personal")
+                                             (,outer . "work"))))
+        (should (equal (agent-account-resolve 'stub nil inner) "personal"))
+        (should (equal (agent-account-resolve 'stub nil outer) "work"))))))
+
+(ert-deftest agent-account-test-directory-rule-resolves-links ()
+  "Match a directory reached through a symbolic link to the rule's directory."
+  (agent-account-test--with-directories ((work "work") (links "links"))
+    (let ((link (expand-file-name "alias" links)))
+      (make-symbolic-link (directory-file-name work) link)
+      (agent-account-test--with-backend
+          (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+        (puthash 'stub "personal" agent-account--current)
+        (let ((agent-account-directory-rules `((,link . "work"))))
+          (should (equal (agent-account-resolve 'stub nil work) "work")))
+        (let ((agent-account-directory-rules `((,work . "work"))))
+          (should (equal (agent-account-resolve 'stub nil link) "work")))))))
+
+(ert-deftest agent-account-test-directory-rule-per-backend ()
+  "Read the selection for the backend from a per-backend rule."
+  (agent-account-test--with-directories ((work "work"))
+    (agent-account-test--with-backend
+        (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+      (puthash 'stub "personal" agent-account--current)
+      (let ((agent-account-directory-rules
+             `((,work . ((stub . "work") (other . "elsewhere"))))))
+        (should (equal (agent-account-resolve 'stub nil work) "work")))
+      (let ((agent-account-directory-rules `((,work . ((other . "work"))))))
+        (should (equal (agent-account-resolve 'stub nil work) "personal"))))))
+
+(ert-deftest agent-account-test-directory-rule-routes-pool ()
+  "Route a rule naming a pool to one of its members."
+  (agent-account-test--with-directories ((work "work"))
+    (agent-account-test--with-usage '(("e1" :weekly-pct 80.0)
+                                      ("e2" :weekly-pct 10.0))
+      (agent-account-test--with-backend
+          (list :accounts agent-account-test--pooled)
+        (puthash 'stub "solo" agent-account--current)
+        (let ((agent-account-directory-rules `((,work . "epoch"))))
+          (should (equal (agent-account-resolve 'stub nil work) "e2")))))))
+
+(ert-deftest agent-account-test-directory-rule-yields-to-starting-binding ()
+  "Prefer the account of the session being started over a directory rule."
+  (agent-account-test--with-directories ((work "work"))
+    (agent-account-test--with-backend
+        (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+      (let ((agent-account-directory-rules `((,work . "work")))
+            (agent-account--starting '(stub . "personal")))
+        (should (equal (agent-account-resolve 'stub nil work) "personal"))))))
+
+(ert-deftest agent-account-test-directory-rule-rejects-unknown-selection ()
+  "Signal an error instead of falling back when a rule names no account."
+  (agent-account-test--with-directories ((work "work"))
+    (agent-account-test--with-backend
+        (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+      (puthash 'stub "personal" agent-account--current)
+      (let ((agent-account-directory-rules `((,work . "missing"))))
+        (should-error (agent-account-resolve 'stub nil work))))))
+
 (ert-deftest agent-account-test-sync-selection-syncs-every-member ()
   "Sync each member home when the selection is a pool."
   (agent-account-test--with-backend

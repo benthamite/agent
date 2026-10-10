@@ -1675,7 +1675,7 @@ sentinel has run."
             (cl-letf (((symbol-function 'agent--force-kill-buffer)
                        (lambda (_buffer) (setq killed t)))
                       ((symbol-function 'agent-restart--account)
-                       (lambda (_backend _account) nil))
+                       (lambda (_backend _account _directory) nil))
                       ((symbol-function 'agent-start-session)
                        (cl-function
                         (lambda (session &key initial-prompt resume-id)
@@ -1805,6 +1805,25 @@ and globally persisting -- an account the session never had."
       (should (equal (agent-restart--account 'one "personal") "personal"))
       (should (equal choices '("e1" "personal"))))))
 
+(ert-deftest agent-test-restart-account-uses-directory-rule ()
+  "A directory rule, not the persisted selection, decides the restart account."
+  (let* ((root (file-name-as-directory (make-temp-file "agent-test-rule" t)))
+         (agent-backends nil)
+         (agent-account--current (make-hash-table :test #'eq))
+         (agent-account-directory-rules `((,root . "work"))))
+    (unwind-protect
+        (progn
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :accounts '(("work" :home "/tmp/work")
+                        ("personal" :home "/tmp/personal"))))
+          (puthash 'one "personal" agent-account--current)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (&rest _) (ert-fail "Unexpected account prompt"))))
+            (should (equal (agent-restart--account 'one "work" root) "work"))))
+      (delete-directory root t))))
+
 (ert-deftest agent-test-restart-reroutes-with-session-identity ()
   "Rerouting changes the account while retaining the conversation identity."
   (let ((agent-backends nil)
@@ -1856,7 +1875,7 @@ and globally persisting -- an account the session never had."
               :session-identity (lambda (_buffer) "sid-123")))
             (cl-letf (((symbol-function 'agent--force-kill-buffer) #'ignore)
                       ((symbol-function 'agent-restart--account)
-                       (lambda (_backend _account) nil))
+                       (lambda (_backend _account _directory) nil))
                       ((symbol-function 'agent-start-session)
                        (lambda (_session &rest options)
                          (setq captured options))))
@@ -3383,6 +3402,59 @@ Naming the backend there instead would present a tool as an account."
     (should (equal captured-account "work"))
     (should (equal captured-starting '(one . "work")))
     (should (equal events '((one . "work"))))))
+
+(ert-deftest agent-test-start-session-applies-directory-rule ()
+  "Resolve an accountless session's account from its ambient directory."
+  (let* ((root (file-name-as-directory (make-temp-file "agent-test-rule" t)))
+         (agent-backends nil)
+         (agent-account--current (make-hash-table :test #'eq))
+         (agent-account-directory-rules `((,root . "work")))
+         captured)
+    (unwind-protect
+        (progn
+          (puthash 'one "personal" agent-account--current)
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :accounts '(("work" . "/tmp/agent-test-work/")
+                        ("personal" . "/tmp/agent-test-personal/"))
+            :ambient-directory (lambda () root)
+            :start-session (lambda (session &rest _)
+                             (setq captured
+                                   (list (agent-session-directory session)
+                                         (agent-session-account session)
+                                         agent-account--starting)))))
+          (cl-letf (((symbol-function 'agent-account-sync) #'ignore))
+            (agent-start-session (agent-session-create :backend 'one))
+            (should (equal captured `(,root "work" (one . "work"))))
+            (agent-start-session
+             (agent-session-create :backend 'one :account "personal"))
+            (should (equal (cdr captured) '("personal" (one . "personal"))))))
+      (delete-directory root t))))
+
+(ert-deftest agent-test-start-new-session-applies-directory-rule ()
+  "Start a new session under the account its ambient directory's rule names."
+  (let* ((root (file-name-as-directory (make-temp-file "agent-test-rule" t)))
+         (agent-backends nil)
+         (agent-account--current (make-hash-table :test #'eq))
+         (agent-account-directory-rules `((,root . "work")))
+         captured)
+    (unwind-protect
+        (progn
+          (puthash 'one "personal" agent-account--current)
+          (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :accounts '(("work" . "/tmp/agent-test-work/")
+                        ("personal" . "/tmp/agent-test-personal/"))
+            :ambient-directory (lambda () root)
+            :start-session (lambda (session &rest _)
+                             (setq captured (agent-session-account session)))))
+          (cl-letf (((symbol-function 'agent-account-sync) #'ignore))
+            (agent--start-new-session-for-backend 'one))
+          (should (equal captured "work"))
+          (should (equal (agent-account-current 'one) "personal")))
+      (delete-directory root t))))
 
 (ert-deftest agent-test-start-session-blocks-logged-out-account ()
   "Refuse to start a session for an account with missing credentials."

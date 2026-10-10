@@ -226,6 +226,7 @@ Source: lobehub/lobe-icons (MIT).")
 
 (agent-register-backend 'claude-code
   :buffer-p #'claude-code--buffer-p
+  :ambient-directory #'claude-code--directory
   :find-all-buffers #'claude-code--find-all-claude-buffers
   :find-buffers-for-dir #'claude-code--find-claude-buffers-for-directory
   :send-string #'agent-claude-send-command
@@ -406,12 +407,13 @@ subprocesses and makes the Anthropic SDK build an illegal empty
 error; see `process-environment'.  This mirrors the shell `claude' shim,
 which clears the same variables with `unset'.")
 
-(defun agent-claude-account-env (_buffer-name _dir)
-  "Return `CLAUDE_CONFIG_DIR' for the Claude session being started.
+(defun agent-claude-account-env (_buffer-name dir)
+  "Return `CLAUDE_CONFIG_DIR' for the Claude session being started in DIR.
 Resolves the account via `agent-account-resolve' (the in-flight
-start binding first, then the persisted selection) and never
-prompts or touches the filesystem."
-  (when-let* ((account (agent-account-resolve 'claude-code)))
+start binding first, then the rule for DIR in
+`agent-account-directory-rules', then the persisted selection) and
+never prompts or touches the filesystem."
+  (when-let* ((account (agent-account-resolve 'claude-code nil dir)))
     (append (agent-account-env 'claude-code account)
             agent-claude--account-auth-shadow-env)))
 
@@ -526,11 +528,9 @@ persisted active account."
   (agent-account-init 'claude-code account))
 
 (defun agent-claude--start-new ()
-  "Start a new Claude session using the current account."
+  "Start a new Claude session in the current buffer's project."
   (interactive)
-  (agent-start-session
-   (agent-session-create :backend 'claude-code
-                         :account (agent-account-resolve 'claude-code t))))
+  (agent--start-new-session-for-backend 'claude-code))
 
 ;;;###autoload
 (defun agent-claude-start-or-switch ()
@@ -1873,7 +1873,7 @@ Returns the process object."
                                             :model :max-turns)
                                for val = (plist-get kwargs key)
                                when val append (list key val))))
-         (env (agent-claude--exec-process-environment))
+         (env (agent-claude--exec-process-environment dir))
          (start-time (current-time))
          (output-buf (generate-new-buffer " *claude-run-output*")))
     (let ((process-environment env)
@@ -1927,9 +1927,9 @@ This is the `run-prompt' backend slot implementation."
                 :error (unless (eq code 0)
                          (format "claude exited with exit code %s" code)))))))
 
-(defun agent-claude--exec-process-environment ()
-  "Return the process environment for a non-interactive Claude run."
-  (if-let* ((account (agent-account-resolve 'claude-code))
+(defun agent-claude--exec-process-environment (dir)
+  "Return the process environment for a non-interactive Claude run in DIR."
+  (if-let* ((account (agent-account-resolve 'claude-code nil dir))
             (env (agent-account-env 'claude-code account)))
       (append env
               (cl-remove-if

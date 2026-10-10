@@ -150,6 +150,7 @@ Source: SVG Repo (CC0).")
 
 (agent-register-backend 'codex
   :buffer-p #'codex--buffer-p
+  :ambient-directory #'codex--directory
   :find-all-buffers #'codex--find-all-codex-buffers
   :find-buffers-for-dir #'codex--find-codex-buffers-for-directory
   :send-string #'agent-codex-send-command
@@ -401,15 +402,16 @@ Append the section when it does not exist."
         (insert "\n"))
       (insert header "\n" body))))
 
-(defun agent-codex-account-env (_buffer-name _dir)
-  "Return `CODEX_HOME' for the Codex session being started.
+(defun agent-codex-account-env (_buffer-name dir)
+  "Return `CODEX_HOME' for the Codex session being started in DIR.
 Resolves the account via `agent-account-resolve' (the in-flight
-start binding first, then the persisted selection) and never
-prompts or touches the filesystem.  Config-home syncing happens in
+start binding first, then the rule for DIR in
+`agent-account-directory-rules', then the persisted selection) and
+never prompts or touches the filesystem.  Config-home syncing happens in
 `agent-account-sync' from selection, initialization, and
 `agent-start-session' -- in particular, `codex exec' batch runs
 never trigger filesystem mutation."
-  (when-let* ((account (agent-account-resolve 'codex)))
+  (when-let* ((account (agent-account-resolve 'codex nil dir)))
     (agent-account-env 'codex account)))
 
 (defconst agent-codex--usage-endpoint
@@ -538,11 +540,9 @@ this account."
   (agent-account-select 'codex))
 
 (defun agent-codex--start-new ()
-  "Start a new Codex session using the current account."
+  "Start a new Codex session in the current buffer's project."
   (interactive)
-  (agent-start-session
-   (agent-session-create :backend 'codex
-                         :account (agent-account-resolve 'codex t))))
+  (agent--start-new-session-for-backend 'codex))
 
 ;;;;; Parameterized session start
 

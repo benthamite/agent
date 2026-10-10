@@ -1488,9 +1488,9 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
         (agent-claude-accounts nil)
         (agent-account--current (make-hash-table :test #'eq)))
     (should (member "ANTHROPIC_API_KEY=key"
-                    (agent-claude--exec-process-environment)))
+                    (agent-claude--exec-process-environment "/tmp/")))
     (should (member "ANTHROPIC_AUTH_TOKEN=token"
-                    (agent-claude--exec-process-environment)))))
+                    (agent-claude--exec-process-environment "/tmp/")))))
 
 (ert-deftest agent-claude-test-batch-env-strips-api-key-with-account ()
   "Strip conflicting auth when `CLAUDE_CONFIG_DIR' is set."
@@ -1500,7 +1500,7 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
         (agent-claude-accounts '(("work" . "/tmp/claude-work")))
         (agent-account--current (make-hash-table :test #'eq)))
     (puthash 'claude-code "work" agent-account--current)
-    (let ((env (agent-claude--exec-process-environment)))
+    (let ((env (agent-claude--exec-process-environment "/tmp/")))
       (should (member "CLAUDE_CONFIG_DIR=/tmp/claude-work" env))
       (should-not (member "ANTHROPIC_API_KEY=key" env))
       (should-not (member "ANTHROPIC_AUTH_TOKEN=token" env))

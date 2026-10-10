@@ -131,7 +131,7 @@ chain only once.  Only
   "Static description of one registered AI agent backend."
   name label icon program
   buffer-p find-all-buffers find-buffers-for-dir
-  start-session session-identity restart-options resume
+  start-session ambient-directory session-identity restart-options resume
   send-string send-return submit
   waiting-p busy-p background-tasks-p display-name-suffix
   notify
@@ -184,6 +184,12 @@ plist of `:exit-code', `:duration', `:text' and `:raw'), and
 `:prepare-fork' (prepare a fork of a session recorded under one
 directory to run in another).  A backend that omits a key does not
 support the commands that dispatch on it.
+
+The optional `:ambient-directory' key is a function of no arguments
+returning the directory a session started from the current buffer
+would run in when no directory is given.  `agent-start-session' uses
+it to know a session's directory before resolving its account, so
+`agent-account-directory-rules' can apply.
 
 Multi-account backends provide the optional account keys read by
 `agent-account': `:account-env-var' (environment variable naming
@@ -341,17 +347,20 @@ with a trailing slash.")
                                        &allow-other-keys)
   "Start SESSION through its backend's `start-session' function.
 SESSION is an `agent-session' whose backend, account, directory, and
-instance slots parameterize the new session; nil slots fall back to the
-backend's ambient defaults, except that a nil account slot is filled
-from `agent-account-resolve' so the recorded identity always matches
-the environment the backend spawns with (still nil when the backend has
-no accounts configured).  INITIAL-PROMPT is submitted as the first
-user message.  RESUME-ID resumes that session id instead of starting
-fresh; a non-fork RESUME-ID also seeds the session's `id' slot, because
-that identity is already known, while a fork acquires a fresh id that
-only the backend can report.  Remaining OPTIONS are passed through to
-the backend, which may support extras such as `:fork' (both backends)
-or `:terminal-backend' \(Codex).  When SESSION carries an account,
+instance slots parameterize the new session; nil slots fall back to
+the backend's ambient defaults.  A nil directory slot is filled first
+from the backend's `:ambient-directory' function, when it has one, and
+a nil account slot is then filled from `agent-account-resolve' for
+that directory, so `agent-account-directory-rules' apply and the
+recorded identity always matches the environment the backend spawns
+with (still nil when the backend has no accounts configured).
+INITIAL-PROMPT is submitted as the first user message.  RESUME-ID
+resumes that session id instead of starting fresh; a non-fork
+RESUME-ID also seeds the session's `id' slot, because that identity is
+already known, while a fork acquires a fresh id that only the backend
+can report.  Remaining OPTIONS are passed through to the backend,
+which may support extras such as `:fork' (both backends) or
+`:terminal-backend' \(Codex).  When SESSION carries an account,
 defensively sync its config home with `agent-account-sync' and bind
 `agent-account--starting' around the backend call so
 `process-environment' hooks see the account at spawn time.  Signal a
@@ -360,9 +369,12 @@ per `agent-account-logged-in-p', since the backend would only produce
 authentication failures.  Return the new session buffer."
   (ignore initial-prompt)
   (let* ((backend (agent-session-backend session))
+         (directory (or (agent-session-directory session)
+                        (setf (agent-session-directory session)
+                              (agent--ambient-directory backend))))
          (account (or (agent-session-account session)
                       (setf (agent-session-account session)
-                            (agent-account-resolve backend)))))
+                            (agent-account-resolve backend nil directory)))))
     (agent-check-session-start backend account)
     (when (and resume-id (not (plist-get options :fork)))
       (setf (agent-session-id session) resume-id))
@@ -371,6 +383,16 @@ authentication failures.  Return the new session buffer."
     (let ((agent-account--starting (and account (cons backend account))))
       (apply (agent-backend-start-session (agent-backend backend))
              session options))))
+
+(defun agent--ambient-directory (backend)
+  "Return the directory a new BACKEND session would run in, or nil.
+Call BACKEND's `:ambient-directory' function and map the result to its
+source checkout with `agent--session-source-directory'.  Return nil when
+BACKEND declares no such function."
+  (when-let* ((struct (agent-backend backend))
+              (fn (agent-backend-ambient-directory struct))
+              (directory (funcall fn)))
+    (agent--session-source-directory directory)))
 
 (defun agent-check-session-start (backend account)
   "Signal a `user-error' unless a BACKEND session can start under ACCOUNT.
@@ -440,7 +462,7 @@ from the currently selected account."
 Derive the backend with `agent--detect-backend', the directory
 and instance by parsing BUFFER's name, and the account from the
 in-flight `agent-account--starting' binding when it belongs to
-the backend, falling back to the resolved current selection.
+the backend, falling back to the account resolved for the directory.
 Return nil when BUFFER belongs to no registered backend or its
 name encodes no directory."
   (when-let* ((session (agent--derive-session buffer)))
@@ -453,7 +475,7 @@ name encodes no directory."
               (directory (agent--session-directory-from-buffer-name name)))
     (let ((account (or (and (eq (car-safe agent-account--starting) backend)
                             (cdr agent-account--starting))
-                       (agent-account-resolve backend))))
+                       (agent-account-resolve backend nil directory))))
       (agent-session-create
        :backend backend
        :account account
@@ -1104,10 +1126,15 @@ Signal a user error when no sessions are active."
         (agent--start-new-session-for-backend backend-sym))))))
 
 (defun agent--start-new-session-for-backend (backend)
-  "Start a new BACKEND session using its current account."
-  (agent-start-session
-   (agent-session-create :backend backend
-                         :account (agent-account-resolve backend t))))
+  "Start a new BACKEND session in its ambient directory.
+The account is the one `agent-account-resolve' picks for that
+directory, prompting for a selection when none is persisted."
+  (let ((directory (agent--ambient-directory backend)))
+    (agent-start-session
+     (agent-session-create :backend backend
+                           :directory directory
+                           :account (agent-account-resolve
+                                     backend t directory)))))
 
 (transient-define-prefix agent--session-switcher ()
   "Switch to an existing AI session."
@@ -3750,7 +3777,8 @@ again according to current usage, without prompting."
       (agent--restart-session
        buffer (lambda ()
                 (agent-restart--account
-                 backend (agent-session-account session)))))))
+                 backend (agent-session-account session)
+                 (agent-session-directory session)))))))
 
 (defun agent-restart-with-account (buffer selection)
   "Restart session BUFFER under the account or pool SELECTION.
@@ -3800,24 +3828,27 @@ restartable, and returns the account to resume under."
     (apply #'agent-start-session session
            :resume-id session-id extra-options)))
 
-(defun agent-restart--account (backend session-account)
+(defun agent-restart--account (backend session-account &optional directory)
   "Return the account to restart a BACKEND session with.
-SESSION-ACCOUNT is the account recorded on the session.  Prompt for
-which account to use when it differs from the currently selected
-account.  When the selection is a pool the session's account belongs
-to, reroute within that pool without prompting.
+SESSION-ACCOUNT is the account recorded on the session, and DIRECTORY
+its directory.  The selected account is the one `agent-account-resolve'
+picks for DIRECTORY, so a rule in `agent-account-directory-rules'
+outranks the persisted selection.  Prompt for which account to use when
+it differs from the selected account.  When the selection is a pool the
+session's account belongs to, reroute within that pool without
+prompting.
 
 Return nil when neither is set, because the session ran under the
 backend's ambient default home and the restart must reuse it.
 Prompting here would instead force an account the session never had
 and persist that choice globally, which also hides the session's own
 transcript from account-scoped history browsers."
-  (let ((selected (agent-account-resolve backend)))
+  (let ((selected (agent-account-resolve backend nil directory)))
     (agent-restart--ensure-account backend selected)
     (cond
      ((and session-account selected
            (not (agent-restart--session-in-selected-pool-p
-                 backend session-account))
+                 backend session-account directory))
            (not (equal session-account selected)))
       (agent-restart--ensure-account
        backend
@@ -3828,9 +3859,14 @@ transcript from account-scoped history browsers."
      (session-account
       (agent-restart--ensure-account backend session-account)))))
 
-(defun agent-restart--session-in-selected-pool-p (backend session-account)
-  "Return non-nil when SESSION-ACCOUNT belongs to BACKEND's selected pool."
-  (when-let* ((selection (agent-account-current backend))
+(defun agent-restart--session-in-selected-pool-p
+    (backend session-account &optional directory)
+  "Return non-nil when SESSION-ACCOUNT belongs to BACKEND's selected pool.
+The selection is the one `agent-account-directory-rules' names for
+DIRECTORY, else the persisted current selection."
+  (when-let* ((selection (or (agent-account-directory-selection
+                              backend directory)
+                             (agent-account-current backend)))
               ((agent-account-pool-p backend selection)))
     (and session-account
          (member session-account

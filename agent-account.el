@@ -207,24 +207,78 @@ it returns non-nil when called with the backend symbol."
 
 ;;;; Resolution
 
-(defun agent-account-resolve (backend &optional prompt-p)
+(defcustom agent-account-directory-rules nil
+  "Rules tying session directories to the account they must run under.
+Each element is (DIRECTORY . SELECTION).  A session whose directory is
+DIRECTORY or lies below it uses SELECTION instead of the persisted
+current selection.  SELECTION is either an account or pool name used
+for every backend, or an alist of (BACKEND . NAME) entries naming the
+account or pool per backend symbol; a backend missing from that alist
+is not governed by the rule.  The first matching rule wins, so list
+more specific directories first.  Symbolic links are resolved on both
+sides before comparing.
+
+A rule naming an account or pool the backend does not declare signals
+an error rather than falling back to the persisted selection, since
+the rule exists to keep sessions off the wrong account.  An account
+passed explicitly by the caller, such as the one recorded on a session
+being restarted or handed off, still takes precedence."
+  :type '(alist :key-type directory
+                :value-type (choice
+                             (string :tag "Account or pool for every backend")
+                             (alist :tag "Account or pool per backend"
+                                    :key-type symbol
+                                    :value-type string)))
+  :group 'agent)
+
+(defun agent-account-resolve (backend &optional prompt-p directory)
   "Return the account to use for BACKEND, or nil.
 Resolution order: the in-flight `agent-account--starting' binding
-when it belongs to BACKEND, then the persisted current selection,
-then -- only when PROMPT-P is non-nil -- an interactive prompt
-whose choice is persisted.  A selection naming a pool is routed to
-one of its members with `agent-account-route', so the result is
-always a concrete account name.  Returns nil when BACKEND has no
-accounts configured."
+when it belongs to BACKEND, then the rule in
+`agent-account-directory-rules' matching DIRECTORY when DIRECTORY is
+non-nil, then the persisted current selection, then -- only when
+PROMPT-P is non-nil -- an interactive prompt whose choice is
+persisted.  A selection naming a pool is routed to one of its members
+with `agent-account-route', so the result is always a concrete
+account name.  Returns nil when BACKEND has no accounts configured."
   (when (agent-account-list backend)
     (or (and (eq (car-safe agent-account--starting) backend)
              (cdr agent-account--starting))
         (agent-account--route-selection
          backend
-         (or (agent-account-current backend)
+         (or (agent-account-directory-selection backend directory)
+             (agent-account-current backend)
              (when prompt-p
                (when-let* ((account (agent-account--prompt backend)))
                  (agent-account-set backend account))))))))
+
+(defun agent-account-directory-selection (backend directory)
+  "Return the account or pool DIRECTORY's rule names for BACKEND, or nil.
+Consult `agent-account-directory-rules'; see there for the matching
+semantics.  Return nil when DIRECTORY is nil or no rule governs it for
+BACKEND.  Signal an error when the matching rule names a selection
+BACKEND does not declare."
+  (when-let* ((directory)
+              (rule (agent-account--directory-rule directory))
+              (spec (cdr rule))
+              (selection (if (stringp spec) spec (alist-get backend spec))))
+    (unless (member selection (agent-account-selection-names backend))
+      (error "Account rule for %s names no %s account or pool `%s'"
+             (car rule) backend selection))
+    selection))
+
+(defun agent-account--directory-rule (directory)
+  "Return the first `agent-account-directory-rules' entry covering DIRECTORY."
+  (let ((target (agent-account--comparable-directory directory)))
+    (cl-find-if (lambda (rule)
+                  (string-prefix-p
+                   (agent-account--comparable-directory (car rule))
+                   target))
+                agent-account-directory-rules)))
+
+(defun agent-account--comparable-directory (directory)
+  "Return DIRECTORY expanded, with links resolved and a trailing slash."
+  (file-name-as-directory (file-truename (expand-file-name directory))))
 
 (defun agent-account--route-selection (backend selection)
   "Return the concrete account SELECTION stands for in BACKEND.
