@@ -473,6 +473,7 @@ Sessions can also carry a one-line annotation after their name, shown dimmed in 
 @vindex agent-session-state-summary-functions
 @vindex agent-session-status-token-functions
 @findex agent-session-set-status
+@findex agent-session-state-summary
 The switcher keeps the session summary and adds two columns after it: the
 age of the current state and a short state description published by the agent.
 Ages use seconds, minutes, hours, or days (@samp{12s}, @samp{2m}, @samp{1h}, @samp{3d}), measured
@@ -521,6 +522,9 @@ The function validates the target and text, stores the update in that buffer, an
 @code{agent-session-state-summary-functions} supplies the column using the same
 cheap, first-non-nil convention as the session-summary hook. The built-in
 provider reads the published status without transcript I/O or model calls.
+The public function @code{agent-session-state-summary} returns a buffer's
+current description as a single line, for display elsewhere such as the
+mode line; publishing a status or marking it stale updates the mode line.
 
 Names, accounts, and annotations each line up in one column: names are padded to the widest name in the menu and accounts to the widest account, measured in display columns, so a name containing double-width characters does not push the columns after it to the right. Padding that nothing follows is trimmed, so a session with no annotation ends at its account, and a session with neither ends at its name.
 

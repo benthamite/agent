@@ -782,7 +782,7 @@ The buffer is bound to `buf' and holds session key \"a\"."
                 agent--session-state-changed-at 100.0)
     (should (agent-session-set-status (buffer-name buf) 'one
                                      "Testing  pagination\nfix" "session-1"))
-    (should (equal (agent--session-state-summary buf) "Testing pagination fix"))
+    (should (equal (agent-session-state-summary buf) "Testing pagination fix"))
     (should (= agent--session-state-changed-at 100.0))
     (should-error (agent-session-set-status (buffer-name buf) 'one
                                            "Wrong session" "session-2")
@@ -797,11 +797,11 @@ The buffer is bound to `buf' and holds session key \"a\"."
                   :type 'user-error)
     (should-error (agent-session-set-status (buffer-name buf) 'one
                                            (make-string 161 ?x)) :type 'user-error)
-    (should (equal (agent--session-state-summary buf) "Testing pagination fix"))
+    (should (equal (agent-session-state-summary buf) "Testing pagination fix"))
     (agent--session-set-state buf 'awaiting-input)
-    (should (agent--session-state-summary buf))
+    (should (agent-session-state-summary buf))
     (agent-session-event buf 'submit)
-    (should (equal (agent--session-state-summary buf) "Testing pagination fix"))))
+    (should (equal (agent-session-state-summary buf) "Testing pagination fix"))))
 
 (ert-deftest agent-test-session-published-status-survives-activity-turns ()
   "Keep the status current through notification turns."
@@ -812,11 +812,11 @@ The buffer is bound to `buf' and holds session key \"a\"."
     (agent-session-event buf 'stop)
     (agent-session-event buf 'activity)
     (should (eq agent--session-state 'busy))
-    (should (equal (agent--session-state-summary buf) "Running overnight cases"))
+    (should (equal (agent-session-state-summary buf) "Running overnight cases"))
     (agent-session-event buf 'blocked)
     (agent-session-event buf 'activity)
     (should-not (get-text-property
-                 0 'face (agent--session-state-summary buf)))))
+                 0 'face (agent-session-state-summary buf)))))
 
 (ert-deftest agent-test-session-published-status-goes-stale-on-prompts ()
   "Keep a status after a prompt, marked stale until the agent republishes.
@@ -829,12 +829,12 @@ clearing the status there would leave the session blank."
       (agent-session-set-status (buffer-name buf) 'one "Fixing the parser")
       (agent-session-event buf 'stop)
       (agent-session-event buf event)
-      (let ((status (agent--session-state-summary buf)))
+      (let ((status (agent-session-state-summary buf)))
         (should (equal status "Fixing the parser"))
         (should (eq (get-text-property 0 'face status)
                     'agent-session-stale-status)))
       (agent-session-set-status (buffer-name buf) 'one "Testing the parser")
-      (let ((status (agent--session-state-summary buf)))
+      (let ((status (agent-session-state-summary buf)))
         (should (equal status "Testing the parser"))
         (should-not (get-text-property 0 'face status))))))
 
@@ -880,7 +880,7 @@ clearing the status there would leave the session blank."
                 (agent-session-create :backend 'one :id "session-1"))
     (agent-session-set-status (buffer-name buf) 'one "Awaiting review")
     (agent--note-session-id buf "session-2")
-    (should-not (agent--session-state-summary buf))))
+    (should-not (agent-session-state-summary buf))))
 
 (ert-deftest agent-test-session-state-age-preserves-transition ()
   "Duplicate events and summary updates must not reset state age."

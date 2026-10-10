@@ -1349,7 +1349,8 @@ not change the session's lifecycle state or its state-transition timestamp."
       (with-current-buffer buffer
         (setq agent--session-published-status
               (unless (string-empty-p status) status)
-              agent--session-published-status-stale nil)))
+              agent--session-published-status-stale nil)
+        (force-mode-line-update)))
     (agent--refresh-session-switcher)
     t))
 
@@ -1386,7 +1387,7 @@ A status published before the latest prompt carries the face
             ((< seconds 86400) (format "%dh" (/ seconds 3600)))
             (t (format "%dd" (/ seconds 86400)))))))
 
-(defun agent--session-state-summary (buffer)
+(defun agent-session-state-summary (buffer)
   "Return BUFFER's published state description as a single line, or nil."
   (when-let* ((text (run-hook-with-args-until-success
                     'agent-session-state-summary-functions buffer))
@@ -1400,7 +1401,7 @@ A status published before the latest prompt carries the face
   (let* ((age (agent--session-column-width
                (lambda (buffer) (or (agent--session-state-age buffer) ""))))
          (state (agent--session-column-width
-                 (lambda (buffer) (or (agent--session-state-summary buffer) ""))))
+                 (lambda (buffer) (or (agent-session-state-summary buffer) ""))))
          (summary (agent--session-column-width
                    (lambda (buffer) (or (agent--session-annotation buffer) ""))))
          (available (max 0 (- (frame-width)
@@ -1441,7 +1442,7 @@ A status published before the latest prompt carries the face
             #'identity
             (cl-loop for text in (list (or annotation "")
                                       (or (agent--session-state-age buffer) "")
-                                      (or (agent--session-state-summary buffer) ""))
+                                      (or (agent-session-state-summary buffer) ""))
                      for width in agent--session-detail-widths
                      when (> width 0)
                      collect (let ((cell (agent--pad-to
@@ -1911,7 +1912,8 @@ ready alert fires only for `idle-prompt' events."
 (defun agent--session-mark-published-status-stale (buffer)
   "Mark the status the agent in BUFFER last published as stale."
   (with-current-buffer buffer
-    (setq agent--session-published-status-stale t)))
+    (setq agent--session-published-status-stale t)
+    (force-mode-line-update)))
 
 (defun agent--session-set-state (buffer state)
   "Set BUFFER's session state to STATE and record the transition time."
