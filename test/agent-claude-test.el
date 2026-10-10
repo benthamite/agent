@@ -499,6 +499,19 @@ its shell kept running."
                                         :status "running"))))
                  '(("b1" . "shell")))))
 
+(ert-deftest agent-claude-test-running-tasks-skips-artifact-watch ()
+  "A Monitor Claude Code arms on publishing an artifact is not work.
+A Monitor the agent started, which carries its command, still is."
+  (should (equal (agent-claude--running-tasks
+                  '(:hook_event_name "Stop"
+                    :background_tasks
+                    ((:id "s1" :type "monitor" :status "running"
+                      :description "live updates for artifact https://claude.ai/artifact/X (auto-armed on publish)")
+                     (:id "m1" :type "monitor" :status "running"
+                      :description "Watch the deploy log"
+                      :command "tail -f deploy.log"))))
+                 '(("m1" . "monitor")))))
+
 (ert-deftest agent-claude-test-running-tasks-requires-the-field ()
   "A payload without `background_tasks' is an error, not an empty list."
   (should-error (agent-claude--running-tasks '(:hook_event_name "Stop")))

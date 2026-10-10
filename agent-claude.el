@@ -1502,8 +1502,9 @@ cannot be parsed or lacks the `background_tasks' field."
 (defun agent-claude--running-tasks (payload)
   "Return the background tasks hook PAYLOAD reports running.
 Each is a cons of the task's id and type.  A SubagentStop payload
-lists the stopping subagent itself as running, so it is left out.
-Signal an error when PAYLOAD lacks the `background_tasks' field."
+lists the stopping subagent itself as running, so it is left out, as
+is a passive watch (see `agent-claude--passive-watch-p').  Signal an
+error when PAYLOAD lacks the `background_tasks' field."
   (unless (plist-member payload :background_tasks)
     (error "Hook payload has no background_tasks field"))
   (let ((self (and (equal (plist-get payload :hook_event_name) "SubagentStop")
@@ -1513,8 +1514,26 @@ Signal an error when PAYLOAD lacks the `background_tasks' field."
                     (let ((id (plist-get task :id)))
                       (and (equal (plist-get task :status) "running")
                            (not (equal id self))
+                           (not (agent-claude--passive-watch-p task))
                            (cons id (plist-get task :type)))))
                   (plist-get payload :background_tasks)))))
+
+(defconst agent-claude--passive-watch-regexp
+  "\\`live updates for artifact .*(auto-armed on publish)\\'"
+  "Regexp matching the description of a Monitor Claude Code arms itself.
+Publishing an artifact makes Claude Code start a Monitor that watches
+the artifact for comments for as long as the session lasts.")
+
+(defun agent-claude--passive-watch-p (task)
+  "Return non-nil when TASK is a watch Claude Code armed by itself.
+TASK is one entry of a hook payload's `background_tasks'.  Such a watch
+is not work the session is waiting on: it runs until the session ends,
+so counting it would show a finished session as busy."
+  (and (equal (plist-get task :type) "monitor")
+       (not (plist-get task :command))
+       (stringp (plist-get task :description))
+       (string-match-p agent-claude--passive-watch-regexp
+                       (plist-get task :description))))
 
 (defvar-local agent-claude--blocking-agent nil
   "Who raised the dialog this session is blocked on, or nil.
