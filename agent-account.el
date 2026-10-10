@@ -216,7 +216,12 @@ for every backend, or an alist of (BACKEND . NAME) entries naming the
 account or pool per backend symbol; a backend missing from that alist
 is not governed by the rule.  The first matching rule wins, so list
 more specific directories first.  Symbolic links are resolved on both
-sides before comparing.
+sides before comparing.  When no rule covers the session's directory,
+the rules are matched against its common Git directory, so a linked
+worktree follows its repository wherever it is checked out.  A
+repository whose Git directory lives apart from its working tree
+\(`git init --separate-git-dir') needs a rule for that Git directory
+for its worktrees to be covered.
 
 A rule naming an account or pool the backend does not declare signals
 an error rather than falling back to the persisted selection, since
@@ -268,6 +273,16 @@ BACKEND does not declare."
     selection))
 
 (defun agent-account--directory-rule (directory)
+  "Return the `agent-account-directory-rules' entry governing DIRECTORY.
+Try DIRECTORY itself first, then its common Git directory, so a linked
+worktree kept elsewhere follows the rule of the repository it belongs
+to."
+  (when agent-account-directory-rules
+    (or (agent-account--rule-covering directory)
+        (when-let* ((common (agent-account--git-common-directory directory)))
+          (agent-account--rule-covering common)))))
+
+(defun agent-account--rule-covering (directory)
   "Return the first `agent-account-directory-rules' entry covering DIRECTORY."
   (let ((target (agent-account--comparable-directory directory)))
     (cl-find-if (lambda (rule)
@@ -275,6 +290,20 @@ BACKEND does not declare."
                    (agent-account--comparable-directory (car rule))
                    target))
                 agent-account-directory-rules)))
+
+(defun agent-account--git-common-directory (directory)
+  "Return the absolute common Git directory of DIRECTORY, or nil.
+For a checkout this is its .git directory, or the separate Git
+directory it points to; for a linked worktree, the one of its main
+repository.  Return nil when DIRECTORY does not exist, is not in a
+Git repository, or Git is not installed."
+  (when (and (file-directory-p directory) (executable-find "git"))
+    (let ((default-directory (file-name-as-directory directory)))
+      (with-temp-buffer
+        (when (eql 0 (process-file "git" nil '(t nil) nil "rev-parse"
+                                   "--path-format=absolute"
+                                   "--git-common-dir"))
+          (string-trim (buffer-string)))))))
 
 (defun agent-account--comparable-directory (directory)
   "Return DIRECTORY expanded, with links resolved and a trailing slash."

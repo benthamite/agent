@@ -656,6 +656,55 @@ created and removed afterwards."
         (let ((agent-account-directory-rules `((,work . "work"))))
           (should (equal (agent-account-resolve 'stub nil link) "work")))))))
 
+(defun agent-account-test--git (directory &rest args)
+  "Run git with ARGS in DIRECTORY, signaling on failure."
+  (let ((default-directory directory))
+    (unless (zerop (apply #'call-process "git" nil nil nil
+                          "-c" "user.name=t" "-c" "user.email=t@t"
+                          "-c" "init.defaultBranch=main" args))
+      (error "Git failed: %S" args))))
+
+(ert-deftest agent-account-test-directory-rule-covers-linked-worktree ()
+  "Apply a repository's rule to its linked worktree kept elsewhere."
+  (skip-unless (executable-find "git"))
+  (agent-account-test--with-directories ((repo "work/repo") (trees "trees")
+                                         (plain "plain"))
+    (agent-account-test--git repo "init" "-q")
+    (agent-account-test--git repo "commit" "-q" "--allow-empty" "-m" "init")
+    (agent-account-test--git repo "worktree" "add" "-q"
+                             (expand-file-name "feature" trees))
+    (agent-account-test--git plain "init" "-q")
+    (agent-account-test--with-backend
+        (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+      (puthash 'stub "personal" agent-account--current)
+      (let ((agent-account-directory-rules
+             `((,(file-name-directory (directory-file-name repo)) . "work"))))
+        (should (equal (agent-account-resolve
+                        'stub nil (expand-file-name "feature/" trees))
+                       "work"))
+        (should (equal (agent-account-resolve 'stub nil plain) "personal"))))))
+
+(ert-deftest agent-account-test-directory-rule-covers-separate-git-dir ()
+  "Apply a rule naming a separate Git directory to its worktrees."
+  (skip-unless (executable-find "git"))
+  (agent-account-test--with-directories ((tree "notes") (git-dirs "git-dirs")
+                                         (trees "trees"))
+    (agent-account-test--git tree "init" "-q" "--separate-git-dir"
+                             (expand-file-name "notes" git-dirs))
+    (agent-account-test--git tree "commit" "-q" "--allow-empty" "-m" "init")
+    (agent-account-test--git tree "worktree" "add" "-q"
+                             (expand-file-name "plan" trees))
+    (agent-account-test--with-backend
+        (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+      (puthash 'stub "personal" agent-account--current)
+      (let ((agent-account-directory-rules
+             `((,tree . "work")
+               (,(expand-file-name "notes/" git-dirs) . "work"))))
+        (should (equal (agent-account-resolve 'stub nil tree) "work"))
+        (should (equal (agent-account-resolve
+                        'stub nil (expand-file-name "plan/" trees))
+                       "work"))))))
+
 (ert-deftest agent-account-test-directory-rule-per-backend ()
   "Read the selection for the backend from a per-backend rule."
   (agent-account-test--with-directories ((work "work"))
