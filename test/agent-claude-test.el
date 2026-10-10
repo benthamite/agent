@@ -480,27 +480,29 @@ notification would double-report the same interruption."
     (set-file-times file (time-add (current-time)
                                    (cl-incf agent-claude-test--tasks-tick)))))
 
-(ert-deftest agent-claude-test-running-task-ids-keeps-running-tasks ()
+(ert-deftest agent-claude-test-running-tasks-keeps-running-tasks ()
   "Only tasks whose status is running count."
-  (should (equal (agent-claude--running-task-ids
+  (should (equal (agent-claude--running-tasks
                   (json-parse-string agent-claude-test--stop-payload
                                      :object-type 'plist :array-type 'list))
-                 '("boi38yr6f"))))
+                 '(("boi38yr6f" . "shell")))))
 
-(ert-deftest agent-claude-test-running-task-ids-skips-stopping-subagent ()
+(ert-deftest agent-claude-test-running-tasks-skips-stopping-subagent ()
   "A SubagentStop payload's own subagent is not background work.
 Its subagent's shell is, as in a session whose subagent finished while
 its shell kept running."
-  (should (equal (agent-claude--running-task-ids
+  (should (equal (agent-claude--running-tasks
                   '(:hook_event_name "SubagentStop" :agent_id "a1"
-                    :background_tasks ((:id "a1" :status "running")
-                                       (:id "b1" :status "running"))))
-                 '("b1"))))
+                    :background_tasks ((:id "a1" :type "subagent"
+                                        :status "running")
+                                       (:id "b1" :type "shell"
+                                        :status "running"))))
+                 '(("b1" . "shell")))))
 
-(ert-deftest agent-claude-test-running-task-ids-requires-the-field ()
+(ert-deftest agent-claude-test-running-tasks-requires-the-field ()
   "A payload without `background_tasks' is an error, not an empty list."
-  (should-error (agent-claude--running-task-ids '(:hook_event_name "Stop")))
-  (should-not (agent-claude--running-task-ids
+  (should-error (agent-claude--running-tasks '(:hook_event_name "Stop")))
+  (should-not (agent-claude--running-tasks
                '(:hook_event_name "Stop" :background_tasks nil))))
 
 (ert-deftest agent-claude-test-has-background-tasks-reads-tasks-file ()
@@ -558,6 +560,64 @@ Return the exit status."
                            (expand-file-name script
                                              agent-claude--package-directory)
                            nil nil nil))))
+
+(defconst agent-claude-test--teammate-stop-payload
+  "{\"session_id\":\"s\",\"hook_event_name\":\"Stop\",\"stop_hook_active\":false,\"background_tasks\":[{\"id\":\"thrq022zj\",\"type\":\"teammate\",\"status\":\"running\",\"description\":\"Ping test teammate\"}],\"session_crons\":[]}"
+  "A Stop hook payload listing a teammate, as Claude Code 2.1.296 sends it.
+It is the same whether the teammate is working or idle.")
+
+(defun agent-claude-test--teammate-event (event)
+  "Return a hook payload for EVENT from teammate `apinger-1', trimmed."
+  (format "{\"session_id\":\"s\",\"hook_event_name\":\"%s\",\"agent_id\":\"apinger-1\",\"agent_type\":\"pinger\"%s}"
+          event
+          (pcase event
+            ("TeammateIdle" ",\"teammate_name\":\"pinger\"")
+            ("SubagentStop" (concat ",\"background_tasks\":[{\"id\":\"thrq022zj\","
+                                    "\"type\":\"teammate\",\"status\":\"running\"}]"))
+            (_ ""))))
+
+(ert-deftest agent-claude-test-teammate-counts-only-while-working ()
+  "A teammate task counts while the teammate works, not once it is idle.
+Replays the hook sequence a lead with one teammate produced: the
+teammate starts, goes idle, takes a message, and goes idle again,
+while every Stop lists it as running."
+  (agent-claude-test--with-tasks-session
+    (let ((has (lambda () (agent-claude--has-background-tasks-p
+                           (current-buffer))))
+          (hook (lambda (payload)
+                  (should (zerop (agent-claude-test--run-hook
+                                  "hooks/record-background-tasks.sh"
+                                  payload))))))
+      (funcall hook (agent-claude-test--teammate-event "SubagentStart"))
+      (funcall hook agent-claude-test--teammate-stop-payload)
+      (should (funcall has))
+      (funcall hook (agent-claude-test--teammate-event "SubagentStop"))
+      (funcall hook (agent-claude-test--teammate-event "TeammateIdle"))
+      (funcall hook agent-claude-test--teammate-stop-payload)
+      (should-not (funcall has))
+      (funcall hook (agent-claude-test--teammate-event "SubagentStart"))
+      (should (funcall has))
+      (funcall hook (agent-claude-test--teammate-event "TeammateIdle"))
+      (should-not (funcall has)))))
+
+(ert-deftest agent-claude-test-idle-teammate-keeps-other-tasks ()
+  "An idle teammate does not hide the session's other background tasks."
+  (agent-claude-test--with-tasks-session
+    (agent-claude-test--write-tasks
+     (replace-regexp-in-string
+      "\\]," (concat ",{\"id\":\"boi38yr6f\",\"type\":\"shell\","
+                     "\"status\":\"running\"}],")
+      agent-claude-test--teammate-stop-payload))
+    (should (equal (agent-claude--background-tasks (current-buffer))
+                   '("boi38yr6f")))))
+
+(ert-deftest agent-claude-test-agent-hooks-write-no-tasks-file ()
+  "SubagentStart and TeammateIdle carry no task list and leave the file alone."
+  (agent-claude-test--with-tasks-session
+    (dolist (event '("SubagentStart" "TeammateIdle"))
+      (agent-claude-test--run-hook "hooks/record-background-tasks.sh"
+                                   (agent-claude-test--teammate-event event)))
+    (should-not (file-exists-p (agent-claude--tasks-file (current-buffer))))))
 
 (ert-deftest agent-claude-test-record-session-id-writes-on-change ()
   "The status line's session id is written once per change."
@@ -1698,7 +1758,7 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
                      (list (agent-claude--state-hook-command "activity")))))))
 
 (ert-deftest agent-claude-test-ensure-background-hooks-installs-once ()
-  "Install the tasks hook under Stop and SubagentStop, replacing stale copies."
+  "Install the tasks hook under each background hook, replacing stale copies."
   (let* ((settings (make-hash-table :test #'equal))
          (stale "AGENT_CLAUDE_STATUS_DIR=/x /old/agent/hooks/record-background-tasks.sh")
          (hooks (make-hash-table :test #'equal)))

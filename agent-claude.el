@@ -920,13 +920,16 @@ buffer name for sessions started before the UUID existed."
    agent-claude-status-directory))
 
 (defun agent-claude--cleanup-status-file ()
-  "Delete the status, state, tasks, and session-id files for this buffer."
+  "Delete the status, state, tasks, agents, and session-id files for this buffer."
   (dolist (file (list (agent-claude--status-file)
                       (agent-claude--state-file (current-buffer))
                       (agent-claude--tasks-file (current-buffer))
                       (agent-claude--session-id-file (current-buffer))))
     (when (and file (file-exists-p file))
-      (delete-file file))))
+      (delete-file file)))
+  (when-let* ((dir (agent-claude--agents-file (current-buffer))))
+    (when (file-directory-p dir)
+      (delete-directory dir t))))
 
 (defun agent-claude--state-file (buffer)
   "Return the file mirroring BUFFER's lifecycle state for its hooks, or nil.
@@ -1409,32 +1412,65 @@ across every session on the machine."
 ;;;;; Background tasks from hooks
 
 ;; Claude Code's Stop and SubagentStop hook payloads carry a
-;; `background_tasks' list: every shell, Monitor, and background agent
-;; of the session, including those started by subagents, with its
-;; `status'.  The field is not in the hooks documentation, so a payload
-;; without it is reported as a warning rather than read as no tasks.
+;; `background_tasks' list: every shell, Monitor, background agent, and
+;; agent-team teammate of the session, including those started by
+;; subagents, with its `type' and `status'.  A payload without the field
+;; is reported as a warning rather than read as no tasks.
 ;; `record-background-tasks.sh' writes each payload to the session's
 ;; tasks file.  A task that ends while the session waits wakes Claude
 ;; with a task notification, so the turn that follows ends with a fresh
 ;; list.
+;;
+;; A teammate is the exception: the list reports it running until it is
+;; shut down, including while it sits idle waiting for a message.  The
+;; script therefore also keeps one file per working subagent or teammate
+;; in the session's agents directory, from SubagentStart, which fires
+;; each time a teammate takes a message, to SubagentStop or
+;; TeammateIdle.  Teammate tasks count only while one is there.  The
+;; list does not say which teammate a task is, so while any one works,
+;; every teammate task counts.
 
 (defvar-local agent-claude--background-tasks-cache nil
-  "Running task ids last read from this session's tasks file.
-A cons of the file's modification time and the list of ids, or nil
-when the file has not been read.")
+  "Running tasks last read from this session's tasks file.
+A cons of the file's modification time and the list of tasks, each a
+cons of its id and type, or nil when the file has not been read.")
 
 (defun agent-claude--background-tasks (buffer)
   "Return the ids of the background tasks running in Claude session BUFFER.
 Read them from the tasks file `record-background-tasks.sh' writes,
-re-parsing it only when it has changed since the previous read."
+re-parsing it only when it has changed since the previous read.
+Teammate tasks are left out unless a subagent or teammate is working,
+since an idle teammate is reported running too."
   (when-let* ((file (agent-claude--tasks-file buffer))
               (mtime (file-attribute-modification-time
                       (file-attributes file))))
-    (with-current-buffer buffer
-      (unless (equal (car agent-claude--background-tasks-cache) mtime)
-        (setq agent-claude--background-tasks-cache
-              (cons mtime (agent-claude--read-tasks-file file))))
-      (cdr agent-claude--background-tasks-cache))))
+    (let ((tasks (with-current-buffer buffer
+                   (unless (equal (car agent-claude--background-tasks-cache)
+                                  mtime)
+                     (setq agent-claude--background-tasks-cache
+                           (cons mtime (agent-claude--read-tasks-file file))))
+                   (cdr agent-claude--background-tasks-cache)))
+          (agents-working (agent-claude--agents-working-p buffer)))
+      (delq nil (mapcar (lambda (task)
+                          (and (or agents-working
+                                   (not (equal (cdr task) "teammate")))
+                               (car task)))
+                        tasks)))))
+
+(defun agent-claude--agents-file (buffer)
+  "Return the directory listing BUFFER's working agents, or nil.
+`record-background-tasks.sh' keeps one file in it per subagent or
+teammate that has started and not yet stopped or gone idle.  Keyed
+like `agent-claude--tasks-file'."
+  (when-let* ((uuid (buffer-local-value 'agent-claude--status-uuid buffer)))
+    (expand-file-name (concat (secure-hash 'sha256 uuid) ".agents")
+                      agent-claude-status-directory)))
+
+(defun agent-claude--agents-working-p (buffer)
+  "Return non-nil when a subagent or teammate of BUFFER is working."
+  (when-let* ((dir (agent-claude--agents-file buffer)))
+    (and (file-directory-p dir)
+         (directory-files dir nil directory-files-no-dot-files-regexp t 1))))
 
 (defun agent-claude--tasks-file (buffer)
   "Return the file holding BUFFER's last reported background tasks, or nil.
@@ -1446,11 +1482,11 @@ the UUID have no tasks file."
                       agent-claude-status-directory)))
 
 (defun agent-claude--read-tasks-file (file)
-  "Return the running task ids in the hook payload stored in FILE.
-Warn and return nil when FILE cannot be parsed or lacks the
-`background_tasks' field."
+  "Return the running tasks in the hook payload stored in FILE.
+See `agent-claude--running-tasks'.  Warn and return nil when FILE
+cannot be parsed or lacks the `background_tasks' field."
   (condition-case err
-      (agent-claude--running-task-ids
+      (agent-claude--running-tasks
        (json-parse-string (with-temp-buffer
                             (insert-file-contents file)
                             (buffer-string))
@@ -1463,11 +1499,11 @@ Warn and return nil when FILE cannot be parsed or lacks the
               file (error-message-string err)))
      nil)))
 
-(defun agent-claude--running-task-ids (payload)
-  "Return the ids of the background tasks hook PAYLOAD reports running.
-A SubagentStop payload lists the stopping subagent itself as running,
-so its id is left out.  Signal an error when PAYLOAD lacks the
-`background_tasks' field."
+(defun agent-claude--running-tasks (payload)
+  "Return the background tasks hook PAYLOAD reports running.
+Each is a cons of the task's id and type.  A SubagentStop payload
+lists the stopping subagent itself as running, so it is left out.
+Signal an error when PAYLOAD lacks the `background_tasks' field."
   (unless (plist-member payload :background_tasks)
     (error "Hook payload has no background_tasks field"))
   (let ((self (and (equal (plist-get payload :hook_event_name) "SubagentStop")
@@ -1477,7 +1513,7 @@ so its id is left out.  Signal an error when PAYLOAD lacks the
                     (let ((id (plist-get task :id)))
                       (and (equal (plist-get task :status) "running")
                            (not (equal id self))
-                           id)))
+                           (cons id (plist-get task :type)))))
                   (plist-get payload :background_tasks)))))
 
 (defvar-local agent-claude--blocking-agent nil
@@ -2375,8 +2411,12 @@ hook forwards its event exactly once."
               (string-match-p "/notify-emacs-state\\.sh " candidate))))
       (agent-claude--ensure-hook settings name command 5))))
 
-(defconst agent-claude--background-hook-events '("Stop" "SubagentStop")
-  "Claude Code hooks whose payload lists the session's background tasks.")
+(defconst agent-claude--background-hook-events
+  '("Stop" "SubagentStop" "SubagentStart" "TeammateIdle")
+  "Claude Code hooks that report the session's background work.
+Stop and SubagentStop payloads list the background tasks;
+SubagentStart, SubagentStop, and TeammateIdle mark when a subagent or
+teammate starts and stops working.")
 
 (defun agent-claude--ensure-background-hooks (settings)
   "Ensure SETTINGS has every hook in `agent-claude--background-hook-events'.
