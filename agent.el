@@ -133,7 +133,7 @@ chain only once.  Only
   buffer-p find-all-buffers find-buffers-for-dir
   start-session ambient-directory session-identity restart-options resume
   send-string send-return submit
-  waiting-p busy-p background-tasks-p display-name-suffix
+  waiting-p busy-p background-tasks-p status-unknown-p display-name-suffix
   notify
   account-env-var accounts account-file shared-config-items canonical-home
   account-init credential-file login-args usage-fetch
@@ -1587,6 +1587,8 @@ A session is waiting only when it is blocked on the user, meaning it
 has stopped and will not proceed until the user submits something.
 Being able to type into the prompt mid-turn is not waiting.
 
+A backend whose `:status-unknown-p' reports that it cannot currently
+tell the session's state displays it as `unknown' rather than guessing.
 Backends that observe a protocol report authoritatively through
 `:waiting-p' and `:busy-p', and those answers win.  Otherwise the
 session-event state machine decides, and a session that has never
@@ -1596,6 +1598,7 @@ display as `background-waiting'."
   (let ((backend (or backend (agent--detect-backend buffer)))
         (state (buffer-local-value 'agent--session-state buffer)))
     (cond
+     ((agent--backend-status-unknown-p buffer backend) 'unknown)
      ((agent--backend-waiting-p buffer backend)
       (agent--waiting-display-state buffer backend))
      ((agent--backend-busy-p buffer backend) 'busy)
@@ -1621,6 +1624,12 @@ Sessions with reported background work are distinguished from idle ones."
   "Return non-nil when BACKEND reports BUFFER is actively responding."
   (when-let* ((struct (and backend (agent-backend backend)))
               (fn (agent-backend-busy-p struct)))
+    (funcall fn buffer)))
+
+(defun agent--backend-status-unknown-p (buffer backend)
+  "Return non-nil when BACKEND reports it cannot tell BUFFER's state."
+  (when-let* ((struct (and backend (agent-backend backend)))
+              (fn (agent-backend-status-unknown-p struct)))
     (funcall fn buffer)))
 
 (defun agent--backend-background-tasks-p (buffer backend)

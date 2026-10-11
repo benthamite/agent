@@ -243,7 +243,9 @@ Source: lobehub/lobe-icons (MIT).")
   :canonical-home "~/.claude/"
   :account-init #'agent-claude--sync-account-json
   :usage-fetch #'agent-claude--usage-fetch
-  :background-tasks-p #'agent-claude--has-background-tasks-p
+  :waiting-p #'agent-claude--reported-waiting-p
+  :background-tasks-p #'agent-claude--reported-background-p
+  :status-unknown-p #'agent-claude--status-unknown-p
   :idle-p #'agent-claude--terminal-waiting-p
   :display-name-suffix #'agent-claude--branch-suffix
   :label "Claude Code"
@@ -1408,6 +1410,254 @@ across every session on the machine."
               (re-search-backward
                agent-claude--remote-control-active-regexp
                (max (point-min) (- (point-max) 800)) t)))))))
+
+;;;;; Session status reported by Claude Code
+
+;; `claude agents --json' is Claude Code's supported way to read session
+;; state from outside a session.  For each config directory it lists the
+;; live interactive sessions with a `status' of busy, waiting or idle,
+;; and busy includes background work left running after a turn ends.
+;; That status decides how Claude sessions display: idle or waiting
+;; shows the session waiting, and busy after the turn has ended shows
+;; background work.  Hooks still mark when a turn starts and ends.
+;;
+;; A query runs in the background for a config directory whenever one
+;; of its sessions sends a hook event, and when a display reads a result
+;; older than `agent-claude-agents-status-max-age'.  A result counts as
+;; current for a session only when its query began after the session's
+;; latest hook event; until then the session-event state machine
+;; decides.  A session is shown as unknown, never guessed, while no
+;; result exists for its config directory, when the latest query failed,
+;; or when a current result does not list it.  Each result is compared
+;; with what the hooks alone would show, and differences are logged.
+
+(defcustom agent-claude-agents-command '("claude" "agents" "--json")
+  "Command that prints Claude Code's live sessions as JSON.
+It runs once per config directory, with `CLAUDE_CONFIG_DIR' set."
+  :type '(repeat string)
+  :group 'agent)
+
+(defcustom agent-claude-agents-status-max-age 30
+  "Seconds after which displaying a session queries its status again."
+  :type 'number
+  :group 'agent)
+
+(defvar agent-claude--agents-status (make-hash-table :test #'equal)
+  "Latest `claude agents' result for each Claude config directory.
+Each value is a plist: `:started' is the `float-time' at which the query
+began, and either `:sessions' is a hash table from session id to a plist
+with `:status' and `:waiting-for', or `:error' describes the failure.")
+
+(defvar agent-claude--agents-queries (make-hash-table :test #'equal)
+  "Running `claude agents' process for each config directory.")
+
+(defvar agent-claude--agents-rerun (make-hash-table :test #'equal)
+  "Config directories that need another query once theirs finishes.")
+
+(defvar-local agent-claude--status-event-at 0
+  "The `float-time' of this session's latest hook event.")
+
+(defvar-local agent-claude--status-disagreement nil
+  "The latest logged difference between reported and inferred state.
+A cons of the reported and the inferred display state, or nil.")
+
+(defun agent-claude--reported-waiting-p (buffer)
+  "Return non-nil when Claude Code reports session BUFFER idle or waiting.
+Only a result current for BUFFER counts, so a turn that has just started
+is not shown waiting on the strength of an earlier reading."
+  (when-let* ((reported (agent-claude--reported-status buffer)))
+    (and (plist-get reported :current)
+         (member (plist-get reported :status) '("idle" "waiting")))))
+
+(defun agent-claude--reported-background-p (buffer)
+  "Return non-nil when Claude Code reports session BUFFER busy.
+Asked only once BUFFER's turn has ended, so busy means background work
+is still running.  Only a result current for BUFFER counts."
+  (when-let* ((reported (agent-claude--reported-status buffer)))
+    (and (plist-get reported :current)
+         (equal (plist-get reported :status) "busy"))))
+
+(defun agent-claude--status-unknown-p (buffer)
+  "Return non-nil when Claude Code's status of BUFFER cannot be read.
+That is when no result exists yet for BUFFER's config directory, when
+the latest query failed, or when a result current for BUFFER does not
+list its session."
+  (when-let* ((entry (agent-claude--agents-entry buffer)))
+    (or (eq entry 'none)
+        (plist-get entry :error)
+        (let ((reported (agent-claude--reported-status buffer)))
+          (and (null reported)
+               (agent-claude--current-for-p entry buffer))))))
+
+(defun agent-claude--reported-status (buffer)
+  "Return Claude Code's reported status of session BUFFER, or nil.
+The result is a plist with `:status', such as \"busy\", and
+`:current', non-nil when the query began after BUFFER's latest hook
+event.  Nil means no result lists BUFFER's session."
+  (let ((entry (agent-claude--agents-entry buffer))
+        (id (agent-claude--session-id buffer)))
+    (when-let* (((consp entry))
+                (sessions (plist-get entry :sessions))
+                (session (gethash id sessions)))
+      (list :status (plist-get session :status)
+            :current (agent-claude--current-for-p entry buffer)))))
+
+(defun agent-claude--current-for-p (entry buffer)
+  "Return non-nil when result ENTRY began after BUFFER's latest event."
+  (> (plist-get entry :started)
+     (buffer-local-value 'agent-claude--status-event-at buffer)))
+
+(defun agent-claude--agents-entry (buffer)
+  "Return the latest `claude agents' result for session BUFFER.
+Return `none' when there is none yet, and nil when BUFFER has no session
+id to look up.  Start a query when the result is missing or older than
+`agent-claude-agents-status-max-age' and none is already running."
+  (when-let* (((agent-claude--session-id buffer))
+              (dir (agent-claude--session-config-dir buffer)))
+    (let ((entry (gethash dir agent-claude--agents-status)))
+      (when (and (or (null entry)
+                     (> (- (float-time) (plist-get entry :started))
+                        agent-claude-agents-status-max-age))
+                 (not (process-live-p
+                       (gethash dir agent-claude--agents-queries))))
+        (agent-claude--query-agents-status dir))
+      (or entry 'none))))
+
+(defun agent-claude--session-id (buffer)
+  "Return the Claude session id of BUFFER, or nil when not yet known."
+  (when-let* ((session (agent-session buffer)))
+    (agent-session-id session)))
+
+(defun agent-claude--session-config-dir (buffer)
+  "Return the Claude config directory session BUFFER runs under."
+  (file-name-as-directory
+   (or (when-let* ((session (agent-session buffer)))
+         (agent-claude--account-config-dir (agent-session-account session)))
+       (expand-file-name "~/.claude/"))))
+
+(defun agent-claude--query-agents-status (dir)
+  "Start a background `claude agents' query for config directory DIR.
+When one is already running, run another as soon as it finishes."
+  (if (process-live-p (gethash dir agent-claude--agents-queries))
+      (puthash dir t agent-claude--agents-rerun)
+    (let* ((started (float-time))
+           (default-directory (expand-file-name "~/"))
+           (process-environment
+            (cons (concat "CLAUDE_CONFIG_DIR=" (directory-file-name dir))
+                  process-environment))
+           (stderr (generate-new-buffer " *claude-agents-stderr*" t))
+           (process
+            (make-process
+             :name "claude-agents"
+             :buffer (generate-new-buffer " *claude-agents*" t)
+             :command agent-claude-agents-command
+             :connection-type 'pipe
+             :noquery t
+             :stderr stderr
+             :sentinel (lambda (process _event)
+                         (unless (process-live-p process)
+                           (agent-claude--finish-agents-query
+                            process dir started))))))
+      (process-put process :stderr stderr)
+      (puthash dir process agent-claude--agents-queries))))
+
+(defun agent-claude--finish-agents-query (process dir started)
+  "Store the result of the `claude agents' PROCESS for config DIR.
+STARTED is when the query began.  Warn when it failed with a new error,
+log disagreements with the hooks, and run a queued query."
+  (let ((result (agent-claude--agents-query-result process started))
+        (previous (gethash dir agent-claude--agents-status)))
+    (puthash dir result agent-claude--agents-status)
+    (when (and (plist-get result :error)
+               (not (equal (plist-get result :error)
+                           (plist-get previous :error))))
+      (display-warning
+       'agent-claude
+       (format "Cannot read Claude Code's session status for %s: %s"
+               dir (plist-get result :error))))
+    (dolist (buffer (list (process-buffer process)
+                          (process-get process :stderr)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))
+    (remhash dir agent-claude--agents-queries)
+    (agent-claude--log-status-disagreements dir)
+    (force-mode-line-update t)
+    (when (gethash dir agent-claude--agents-rerun)
+      (remhash dir agent-claude--agents-rerun)
+      (agent-claude--query-agents-status dir))))
+
+(defun agent-claude--agents-query-result (process started)
+  "Return the result plist of the finished `claude agents' PROCESS.
+STARTED is when the query began."
+  (condition-case err
+      (if (and (eq (process-status process) 'exit)
+               (zerop (process-exit-status process)))
+          (list :started started
+                :sessions (agent-claude--parse-agents-json
+                           (with-current-buffer (process-buffer process)
+                             (buffer-string))))
+        (list :started started
+              :error (format "%s exited with status %s"
+                             (string-join agent-claude-agents-command " ")
+                             (process-exit-status process))))
+    (error (list :started started :error (error-message-string err)))))
+
+(defun agent-claude--parse-agents-json (json)
+  "Return a table from session id to status parsed from JSON.
+JSON is the output of `claude agents --json'.  Only interactive sessions
+are kept, each as a plist with `:status' and `:waiting-for'."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (session (json-parse-string json :object-type 'plist
+                                        :array-type 'list
+                                        :null-object nil
+                                        :false-object nil))
+      (when (and (equal (plist-get session :kind) "interactive")
+                 (stringp (plist-get session :sessionId)))
+        (puthash (plist-get session :sessionId)
+                 (list :status (plist-get session :status)
+                       :waiting-for (plist-get session :waitingFor))
+                 table)))
+    table))
+
+(defun agent-claude--refresh-status-on-event (message)
+  "Query Claude Code's status for the session that sent hook MESSAGE.
+Record the event time first, so the result counts as current only if
+its query began after the event.  Return nil so the remaining
+`claude-code-event-hook' functions run."
+  (when-let* ((buffer (get-buffer (plist-get message :buffer-name))))
+    (with-current-buffer buffer
+      (setq agent-claude--status-event-at (float-time)))
+    (agent-claude--query-agents-status
+     (agent-claude--session-config-dir buffer)))
+  nil)
+
+(defun agent-claude--log-status-disagreements (dir)
+  "Log each session of config DIR shown differently than hooks would show it.
+A message names the session, the state shown from Claude Code's report
+and the state the hooks alone would give.  It is logged once each time
+the difference changes."
+  (dolist (buffer (claude-code--find-all-claude-buffers))
+    (when (equal (agent-claude--session-config-dir buffer) dir)
+      (let* ((shown (agent-session-display-state buffer 'claude-code))
+             (inferred (agent-claude--inferred-display-state buffer))
+             (difference (unless (eq shown inferred) (cons shown inferred))))
+        (unless (equal difference
+                       (buffer-local-value 'agent-claude--status-disagreement
+                                           buffer))
+          (with-current-buffer buffer
+            (setq agent-claude--status-disagreement difference))
+          (when difference
+            (message "agent: %s: Claude Code reports %s, hooks alone say %s"
+                     (buffer-name buffer) shown inferred)))))))
+
+(defun agent-claude--inferred-display-state (buffer)
+  "Return the display state the hooks alone would give session BUFFER."
+  (pcase (buffer-local-value 'agent--session-state buffer)
+    ('awaiting-input (if (agent-claude--has-background-tasks-p buffer)
+                         'background-waiting
+                       'waiting))
+    ('unknown 'unknown)
+    (_ 'busy)))
 
 ;;;;; Background tasks from hooks
 
@@ -2785,6 +3035,7 @@ symmetrically and restores `claude-code-notification-function'."
   (add-hook 'claude-code-event-hook #'agent-claude--handle-notification)
   (add-hook 'claude-code-event-hook #'agent-claude--handle-stop)
   (add-hook 'claude-code-event-hook #'agent-claude--handle-session-state)
+  (add-hook 'claude-code-event-hook #'agent-claude--refresh-status-on-event)
   (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
   (dolist (fn agent-claude--start-hook-functions)
     (add-hook 'claude-code-start-hook fn))
@@ -2829,6 +3080,7 @@ symmetrically and restores `claude-code-notification-function'."
   (remove-hook 'claude-code-event-hook #'agent-claude--handle-notification)
   (remove-hook 'claude-code-event-hook #'agent-claude--handle-stop)
   (remove-hook 'claude-code-event-hook #'agent-claude--handle-session-state)
+  (remove-hook 'claude-code-event-hook #'agent-claude--refresh-status-on-event)
   (unless (bound-and-true-p agent-codex-mode)
     (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer)
     (agent-scroll-keys-global-mode -1))

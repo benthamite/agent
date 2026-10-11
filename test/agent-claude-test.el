@@ -2481,4 +2481,183 @@ its fixed port was reported and deleted as a leaked monet server."
     (should-not (agent-claude--session-headers (current-buffer)))))
 
 (provide 'agent-claude-test)
+
+;;;; Session status reported by Claude Code
+
+(defmacro agent-claude-test--with-reported-status (entry state &rest body)
+  "Run BODY in a session buffer in STATE whose config dir has result ENTRY.
+ENTRY is stored for the config directory /cfg/ unless it is nil.  The
+session id is \"s1\".  Queries are recorded in `queries' instead of run."
+  (declare (indent 2) (debug t))
+  `(let ((agent-claude--agents-status (make-hash-table :test #'equal))
+         (queries nil))
+     (when ,entry (puthash "/cfg/" ,entry agent-claude--agents-status))
+     (cl-letf (((symbol-function 'agent-claude--session-id) (lambda (_) "s1"))
+               ((symbol-function 'agent-claude--session-config-dir)
+                (lambda (_) "/cfg/"))
+               ((symbol-function 'agent-claude--query-agents-status)
+                (lambda (dir) (push dir queries)))
+               ((symbol-function 'agent-session-snoozed-p) #'ignore))
+       (with-temp-buffer
+         (setq agent--session-state ,state)
+         ,@body))))
+
+(defun agent-claude-test--result (status &optional started)
+  "Return a current result listing session s1 with STATUS.
+STARTED defaults to now; STATUS nil leaves s1 out."
+  (let ((sessions (make-hash-table :test #'equal)))
+    (when status (puthash "s1" (list :status status) sessions))
+    (list :started (or started (float-time)) :sessions sessions)))
+
+(ert-deftest agent-claude-test-parse-agents-json-keeps-interactive ()
+  "Only interactive sessions are kept, keyed by session id."
+  (let ((table (agent-claude--parse-agents-json
+                "[{\"kind\":\"background\",\"sessionId\":\"b1\",\"state\":\"blocked\"},
+                  {\"kind\":\"interactive\",\"sessionId\":\"i1\",\"status\":\"waiting\",
+                   \"waitingFor\":\"permission prompt\"}]")))
+    (should (equal (hash-table-keys table) '("i1")))
+    (should (equal (gethash "i1" table)
+                   '(:status "waiting" :waiting-for "permission prompt")))))
+
+(ert-deftest agent-claude-test-reported-idle-shows-waiting ()
+  "Claude Code's idle wins over a state machine stuck at busy."
+  (agent-claude-test--with-reported-status (agent-claude-test--result "idle") 'busy
+    (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                'waiting))))
+
+(ert-deftest agent-claude-test-reported-waiting-shows-waiting ()
+  "A session waiting on a permission prompt shows waiting."
+  (agent-claude-test--with-reported-status (agent-claude-test--result "waiting") 'busy
+    (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                'waiting))))
+
+(ert-deftest agent-claude-test-reported-busy-after-turn-shows-background ()
+  "Busy after the turn ended is background work, whatever hooks counted."
+  (agent-claude-test--with-reported-status (agent-claude-test--result "busy")
+      'awaiting-input
+    (cl-letf (((symbol-function 'agent-claude--has-background-tasks-p) #'ignore))
+      (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                  'background-waiting)))))
+
+(ert-deftest agent-claude-test-reported-idle-ignores-hook-task-list ()
+  "Idle shows waiting even when the hook task list reports work."
+  (agent-claude-test--with-reported-status (agent-claude-test--result "idle")
+      'awaiting-input
+    (cl-letf (((symbol-function 'agent-claude--has-background-tasks-p)
+               (lambda (_) t)))
+      (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                  'waiting)))))
+
+(ert-deftest agent-claude-test-reported-busy-during-turn-shows-busy ()
+  "Busy during a turn shows busy."
+  (agent-claude-test--with-reported-status (agent-claude-test--result "busy") 'busy
+    (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                'busy))))
+
+(ert-deftest agent-claude-test-result-older-than-event-defers-to-hooks ()
+  "A result from before the latest hook event does not decide waiting."
+  (agent-claude-test--with-reported-status
+      (agent-claude-test--result "idle" (- (float-time) 5)) 'busy
+    (setq agent-claude--status-event-at (float-time))
+    (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                'busy))
+    (setq agent--session-state 'awaiting-input)
+    (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                'waiting))))
+
+(ert-deftest agent-claude-test-status-unknown-cases ()
+  "No result, a failed query, or a current result without the session is unknown."
+  (agent-claude-test--with-reported-status nil 'awaiting-input
+    (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                'unknown))
+    (should (equal (delete-dups queries) '("/cfg/"))))
+  (agent-claude-test--with-reported-status
+      (list :started (float-time) :error "boom") 'awaiting-input
+    (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                'unknown)))
+  (agent-claude-test--with-reported-status (agent-claude-test--result nil)
+      'awaiting-input
+    (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                'unknown))))
+
+(ert-deftest agent-claude-test-absent-from-older-result-is-not-unknown ()
+  "A session missing from a result older than its latest event is not unknown."
+  (agent-claude-test--with-reported-status
+      (agent-claude-test--result nil (- (float-time) 5)) 'awaiting-input
+    (setq agent-claude--status-event-at (float-time))
+    (cl-letf (((symbol-function 'agent-claude--has-background-tasks-p) #'ignore))
+      (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                  'waiting)))))
+
+(ert-deftest agent-claude-test-stale-result-requests-a-query ()
+  "Reading a result older than the maximum age queries again; a fresh one does not."
+  (agent-claude-test--with-reported-status (agent-claude-test--result "idle") 'busy
+    (agent-session-display-state (current-buffer) 'claude-code)
+    (should-not queries))
+  (agent-claude-test--with-reported-status
+      (agent-claude-test--result
+       "idle" (- (float-time) agent-claude-agents-status-max-age 1))
+      'busy
+    (agent-session-display-state (current-buffer) 'claude-code)
+    (should queries)
+    (should (equal (delete-dups queries) '("/cfg/")))))
+
+(ert-deftest agent-claude-test-refresh-on-event-records-time-and-queries ()
+  "A hook event stamps the session and queries its config dir, returning nil."
+  (agent-claude-test--with-reported-status nil 'busy
+    (should-not (agent-claude--refresh-status-on-event
+                 (list :buffer-name (buffer-name (current-buffer)))))
+    (should (> agent-claude--status-event-at 0))
+    (should (equal queries '("/cfg/")))))
+
+(defun agent-claude-test--run-query (command)
+  "Run a real query with COMMAND for /cfg/ and return the stored result."
+  (let ((agent-claude--agents-status (make-hash-table :test #'equal))
+        (agent-claude--agents-queries (make-hash-table :test #'equal))
+        (agent-claude--agents-rerun (make-hash-table :test #'equal))
+        (agent-claude-agents-command command))
+    (cl-letf (((symbol-function 'claude-code--find-all-claude-buffers) #'ignore)
+              ((symbol-function 'display-warning) #'ignore))
+      (agent-claude--query-agents-status "/cfg/")
+      (let ((process (gethash "/cfg/" agent-claude--agents-queries)))
+        (while (gethash "/cfg/" agent-claude--agents-queries)
+          (accept-process-output process 0.1)))
+      (gethash "/cfg/" agent-claude--agents-status))))
+
+(ert-deftest agent-claude-test-query-reads-stdout-only ()
+  "The query parses stdout and ignores warnings Claude Code prints on stderr."
+  (let ((result (agent-claude-test--run-query
+                 '("sh" "-c" "echo 'a settings warning' >&2; printf '[{\"kind\":\"interactive\",\"sessionId\":\"s1\",\"status\":\"busy\"}]'"))))
+    (should-not (plist-get result :error))
+    (should (equal (gethash "s1" (plist-get result :sessions))
+                   '(:status "busy" :waiting-for nil)))))
+
+(ert-deftest agent-claude-test-query-failure-is-an-error-result ()
+  "A failing command stores an error, which shows sessions as unknown."
+  (let ((result (agent-claude-test--run-query '("sh" "-c" "exit 3"))))
+    (should (string-match-p "status 3" (plist-get result :error)))))
+
+(ert-deftest agent-claude-test-query-passes-config-dir ()
+  "The query runs with CLAUDE_CONFIG_DIR set to the config directory."
+  (let ((result (agent-claude-test--run-query
+                 '("sh" "-c" "printf '[{\"kind\":\"interactive\",\"sessionId\":\"%s\",\"status\":\"idle\"}]' \"$CLAUDE_CONFIG_DIR\""))))
+    (should (gethash "/cfg" (plist-get result :sessions)))))
+
+(ert-deftest agent-claude-test-disagreement-logged-once-per-change ()
+  "A difference from the hooks is logged once, and again only when it changes."
+  (agent-claude-test--with-reported-status (agent-claude-test--result "idle")
+      'awaiting-input
+    (let ((buffer (current-buffer)) (logged nil))
+      (cl-letf (((symbol-function 'claude-code--find-all-claude-buffers)
+                 (lambda () (list buffer)))
+                ((symbol-function 'agent-claude--has-background-tasks-p)
+                 (lambda (_) t))
+                ((symbol-function 'message)
+                 (lambda (&rest args) (push (apply #'format args) logged))))
+        (agent-claude--log-status-disagreements "/cfg/")
+        (agent-claude--log-status-disagreements "/cfg/")
+        (should (= (length logged) 1))
+        (should (string-match-p "reports waiting, hooks alone say background-waiting"
+                                (car logged)))))))
+
 ;;; agent-claude-test.el ends here
