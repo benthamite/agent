@@ -536,6 +536,12 @@ must read cached data without I/O or other side effects."
   "Abnormal hook run after a session's lifecycle state changes.
 Each function receives the session buffer and its new state symbol.")
 
+(defvar agent-session-event-functions nil
+  "Abnormal hook run for every event delivered to a session.
+Each function receives the session buffer and the event symbol, before
+`agent-session-event' applies the event, including an event that will
+leave the state unchanged.")
+
 (defvar agent-session-status-token-functions nil
   "Hook returning a backend's publisher process token for a session buffer.")
 
@@ -1899,7 +1905,8 @@ dialog.  An `activity' event marks the session busy on evidence that it
 is working, for backends whose CLI reports no turn start.
 This function is the single owner of
 `agent--session-state'; backends translate raw CLI events into
-calls to it and never set session state directly.  A `submit'
+calls to it and never set session state directly.  Every event first
+runs `agent-session-event-functions'.  A `submit'
 event delivered while BUFFER is already busy is ignored, because
 backend submission hooks can fire multiple times per submission
 and on submissions that start no turn.
@@ -1912,6 +1919,7 @@ cleared status would leave the session blank.  An `activity' event
 leaves it current: a turn started by a background notification usually
 continues the work the status already describes."
   (when (buffer-live-p buffer)
+    (run-hook-with-args 'agent-session-event-functions buffer event)
     (pcase event
       ((or 'stop 'idle-prompt 'blocked)
        (agent--session-event-awaiting-input buffer event))

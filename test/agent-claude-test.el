@@ -2487,7 +2487,8 @@ its fixed port was reported and deleted as a leaked monet server."
 (defmacro agent-claude-test--with-reported-status (entry state &rest body)
   "Run BODY in a session buffer in STATE whose config dir has result ENTRY.
 ENTRY is stored for the config directory /cfg/ unless it is nil.  The
-session id is \"s1\".  Queries are recorded in `queries' instead of run."
+session id is \"s1\".  Queries are recorded in `queries' instead of run:
+the directory for an immediate one, (scheduled DIR) for a scheduled one."
   (declare (indent 2) (debug t))
   `(let ((agent-claude--agents-status (make-hash-table :test #'equal))
          (queries nil))
@@ -2497,6 +2498,8 @@ session id is \"s1\".  Queries are recorded in `queries' instead of run."
                 (lambda (_) "/cfg/"))
                ((symbol-function 'agent-claude--query-agents-status)
                 (lambda (dir) (push dir queries)))
+               ((symbol-function 'agent-claude--schedule-agents-query)
+                (lambda (dir) (push (list 'scheduled dir) queries)))
                ((symbol-function 'agent-session-snoozed-p) #'ignore))
        (with-temp-buffer
          (setq agent--session-state ,state)
@@ -2565,6 +2568,42 @@ STARTED defaults to now; STATUS nil leaves s1 out."
     (should (eq (agent-session-display-state (current-buffer) 'claude-code)
                 'waiting))))
 
+(ert-deftest agent-claude-test-submit-after-idle-result-shows-busy ()
+  "A prompt sent from Emacs is not shown waiting from the previous turn's idle.
+No hook reaches Emacs for such a turn's start: the state hook drops
+activity events while the state file already reads busy."
+  (dolist (event '(submit user-submit))
+    (agent-claude-test--with-reported-status
+        (agent-claude-test--result "idle" (- (float-time) 1)) 'awaiting-input
+      (cl-letf (((symbol-function 'claude-code--buffer-p) (lambda (_) t)))
+        (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                    'waiting))
+        (setq queries nil)
+        (agent-session-event (current-buffer) event)
+        (should (eq agent--session-state 'busy))
+        (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                    'busy))
+        (should (member '(scheduled "/cfg/") queries))))))
+
+(ert-deftest agent-claude-test-submit-while-busy-still-invalidates-result ()
+  "A submit that changes no state still stops an older idle result deciding."
+  (agent-claude-test--with-reported-status
+      (agent-claude-test--result "idle" (- (float-time) 1)) 'busy
+    (cl-letf (((symbol-function 'claude-code--buffer-p) (lambda (_) t)))
+      (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                  'waiting))
+      (agent-session-event (current-buffer) 'submit)
+      (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                  'busy)))))
+
+(ert-deftest agent-claude-test-session-event-ignores-other-backends ()
+  "A session event in a buffer that is not a Claude session queries nothing."
+  (agent-claude-test--with-reported-status nil 'busy
+    (cl-letf (((symbol-function 'claude-code--buffer-p) #'ignore))
+      (agent-claude--refresh-status-on-session-event (current-buffer) 'submit)
+      (should-not queries)
+      (should (= agent-claude--status-event-at 0)))))
+
 (ert-deftest agent-claude-test-status-unknown-cases ()
   "No result, a failed query, or a current result without the session is unknown."
   (agent-claude-test--with-reported-status nil 'awaiting-input
@@ -2602,13 +2641,66 @@ STARTED defaults to now; STATUS nil leaves s1 out."
     (should queries)
     (should (equal (delete-dups queries) '("/cfg/")))))
 
-(ert-deftest agent-claude-test-refresh-on-event-records-time-and-queries ()
-  "A hook event stamps the session and queries its config dir, returning nil."
+(ert-deftest agent-claude-test-hook-traffic-refreshes-without-staling ()
+  "Hook traffic queries when there is no recent result, and stales nothing."
   (agent-claude-test--with-reported-status nil 'busy
     (should-not (agent-claude--refresh-status-on-event
                  (list :buffer-name (buffer-name (current-buffer)))))
-    (should (> agent-claude--status-event-at 0))
+    (should (= agent-claude--status-event-at 0))
+    (should (equal queries '("/cfg/"))))
+  (agent-claude-test--with-reported-status
+      (agent-claude-test--result
+       "idle" (- (float-time) agent-claude-agents-status-min-interval 1))
+      'busy
+    (agent-claude--refresh-status-on-event
+     (list :buffer-name (buffer-name (current-buffer))))
     (should (equal queries '("/cfg/")))))
+
+(ert-deftest agent-claude-test-hook-traffic-respects-minimum-interval ()
+  "Hook traffic starts no query while the last one is recent or one is pending."
+  (agent-claude-test--with-reported-status (agent-claude-test--result "idle") 'busy
+    (agent-claude--refresh-status-on-event
+     (list :buffer-name (buffer-name (current-buffer))))
+    (should-not queries))
+  (agent-claude-test--with-reported-status nil 'busy
+    (let ((agent-claude--agents-timers (make-hash-table :test #'equal)))
+      (puthash "/cfg/" t agent-claude--agents-timers)
+      (agent-claude--refresh-status-on-event
+       (list :buffer-name (buffer-name (current-buffer))))
+      (should-not queries))))
+
+(ert-deftest agent-claude-test-result-needs-settle-time-after-event ()
+  "A result read sooner than the settle time after an event is not current.
+Claude Code still reports idle at the instant a prompt is sent."
+  (let ((event (- (float-time) 10)))
+    (agent-claude-test--with-reported-status
+        (agent-claude-test--result
+         "idle" (+ event (/ agent-claude-status-settle-time 2.0)))
+        'busy
+      (setq agent-claude--status-event-at event)
+      (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                  'busy)))
+    (agent-claude-test--with-reported-status
+        (agent-claude-test--result
+         "idle" (+ event agent-claude-status-settle-time 0.1))
+        'busy
+      (setq agent-claude--status-event-at event)
+      (should (eq (agent-session-display-state (current-buffer) 'claude-code)
+                  'waiting)))))
+
+(ert-deftest agent-claude-test-scheduled-query-runs-once-after-settle ()
+  "Scheduling twice runs one query, after the settle time."
+  (let ((agent-claude--agents-timers (make-hash-table :test #'equal))
+        (agent-claude-status-settle-time 0.05)
+        (started nil))
+    (cl-letf (((symbol-function 'agent-claude--query-agents-status)
+               (lambda (dir) (push dir started))))
+      (agent-claude--schedule-agents-query "/cfg/")
+      (agent-claude--schedule-agents-query "/cfg/")
+      (should-not started)
+      (sleep-for 0.4)
+      (should (equal started '("/cfg/")))
+      (should-not (gethash "/cfg/" agent-claude--agents-timers)))))
 
 (defun agent-claude-test--run-query (command)
   "Run a real query with COMMAND for /cfg/ and return the stored result."

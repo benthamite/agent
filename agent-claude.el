@@ -1421,15 +1421,26 @@ across every session on the machine."
 ;; shows the session waiting, and busy after the turn has ended shows
 ;; background work.  Hooks still mark when a turn starts and ends.
 ;;
-;; A query runs in the background for a config directory whenever one
-;; of its sessions sends a hook event, and when a display reads a result
-;; older than `agent-claude-agents-status-max-age'.  A result counts as
-;; current for a session only when its query began after the session's
-;; latest hook event; until then the session-event state machine
-;; decides.  A session is shown as unknown, never guessed, while no
-;; result exists for its config directory, when the latest query failed,
-;; or when a current result does not list it.  Each result is compared
-;; with what the hooks alone would show, and differences are logged.
+;; Claude Code takes a moment to register a change: a query started the
+;; instant a prompt is sent still reads idle.  So a session event, which
+;; marks a turn boundary such as a prompt sent from Emacs or a stop,
+;; makes every earlier result stale for that session and schedules a
+;; query `agent-claude-status-settle-time' seconds later.  A result
+;; counts as current for a session only when its query began at least
+;; that long after the session's latest session event; until then the
+;; session-event state machine decides.
+;;
+;; Other hook traffic, such as a subagent's tool calls, marks no turn
+;; boundary.  It refreshes the result, no more often than
+;; `agent-claude-agents-status-min-interval', without making it stale:
+;; a teammate working under an idle lead would otherwise keep every
+;; result stale for as long as it worked.  A display also queries again
+;; when the result is older than `agent-claude-agents-status-max-age'.
+;;
+;; A session is shown as unknown, never guessed, while no result exists
+;; for its config directory, when the latest query failed, or when a
+;; current result does not list it.  Each result is compared with what
+;; the hooks alone would show, and differences are logged.
 
 (defcustom agent-claude-agents-command '("claude" "agents" "--json")
   "Command that prints Claude Code's live sessions as JSON.
@@ -1441,6 +1452,20 @@ It runs once per config directory, with `CLAUDE_CONFIG_DIR' set."
   "Seconds after which displaying a session queries its status again."
   :type 'number
   :group 'agent)
+
+(defcustom agent-claude-status-settle-time 2
+  "Seconds Claude Code is given to register a session event.
+A status read sooner after a session's latest event is not trusted."
+  :type 'number
+  :group 'agent)
+
+(defcustom agent-claude-agents-status-min-interval 5
+  "Least seconds between status queries that hook traffic starts."
+  :type 'number
+  :group 'agent)
+
+(defvar agent-claude--agents-timers (make-hash-table :test #'equal)
+  "Timer of the query scheduled for each config directory.")
 
 (defvar agent-claude--agents-status (make-hash-table :test #'equal)
   "Latest `claude agents' result for each Claude config directory.
@@ -1455,7 +1480,7 @@ with `:status' and `:waiting-for', or `:error' describes the failure.")
   "Config directories that need another query once theirs finishes.")
 
 (defvar-local agent-claude--status-event-at 0
-  "The `float-time' of this session's latest hook event.")
+  "The `float-time' of this session's latest session event.")
 
 (defvar-local agent-claude--status-disagreement nil
   "The latest logged difference between reported and inferred state.
@@ -1503,9 +1528,12 @@ event.  Nil means no result lists BUFFER's session."
             :current (agent-claude--current-for-p entry buffer)))))
 
 (defun agent-claude--current-for-p (entry buffer)
-  "Return non-nil when result ENTRY began after BUFFER's latest event."
-  (> (plist-get entry :started)
-     (buffer-local-value 'agent-claude--status-event-at buffer)))
+  "Return non-nil when result ENTRY is current for session BUFFER.
+Its query must have begun `agent-claude-status-settle-time' seconds or
+more after BUFFER's latest session event."
+  (>= (plist-get entry :started)
+      (+ (buffer-local-value 'agent-claude--status-event-at buffer)
+         agent-claude-status-settle-time)))
 
 (defun agent-claude--agents-entry (buffer)
   "Return the latest `claude agents' result for session BUFFER.
@@ -1620,16 +1648,55 @@ are kept, each as a plist with `:status' and `:waiting-for'."
     table))
 
 (defun agent-claude--refresh-status-on-event (message)
-  "Query Claude Code's status for the session that sent hook MESSAGE.
-Record the event time first, so the result counts as current only if
-its query began after the event.  Return nil so the remaining
-`claude-code-event-hook' functions run."
-  (when-let* ((buffer (get-buffer (plist-get message :buffer-name))))
+  "Refresh Claude Code's status for the session that sent hook MESSAGE.
+Hook traffic marks no turn boundary, so it leaves the current result
+current and only asks for a newer one, unless a query is scheduled or
+running or the last began under
+`agent-claude-agents-status-min-interval' seconds ago.  Return nil so
+the remaining `claude-code-event-hook' functions run."
+  (when-let* ((buffer (get-buffer (plist-get message :buffer-name)))
+              (dir (agent-claude--session-config-dir buffer)))
+    (let ((entry (gethash dir agent-claude--agents-status)))
+      (unless (or (gethash dir agent-claude--agents-timers)
+                  (process-live-p (gethash dir agent-claude--agents-queries))
+                  (and entry
+                       (< (- (float-time) (plist-get entry :started))
+                          agent-claude-agents-status-min-interval)))
+        (agent-claude--query-agents-status dir))))
+  nil)
+
+(defun agent-claude--refresh-status-on-session-event (buffer _event)
+  "Make Claude BUFFER's status stale and schedule a query after a session event.
+A session event marks a turn boundary.  One of them, a prompt sent from
+Emacs, reaches Emacs through no hook: the state hook drops activity
+events while the state file already reads busy.  Without this, the idle
+reading from the previous turn would show a working session as waiting."
+  (when (claude-code--buffer-p buffer)
     (with-current-buffer buffer
       (setq agent-claude--status-event-at (float-time)))
-    (agent-claude--query-agents-status
-     (agent-claude--session-config-dir buffer)))
-  nil)
+    (agent-claude--schedule-agents-query
+     (agent-claude--session-config-dir buffer))))
+
+(add-hook 'agent-session-event-functions
+          #'agent-claude--refresh-status-on-session-event)
+
+(defun agent-claude--schedule-agents-query (dir)
+  "Query config directory DIR once Claude Code has registered an event.
+The query starts just after `agent-claude-status-settle-time' seconds,
+so its result is current for the session whose event scheduled it.  A
+query already scheduled for DIR is replaced, since it would start too
+soon after this event."
+  (when-let* ((timer (gethash dir agent-claude--agents-timers)))
+    (cancel-timer timer))
+  (puthash dir
+           (run-at-time (+ agent-claude-status-settle-time 0.1) nil
+                        #'agent-claude--run-scheduled-agents-query dir)
+           agent-claude--agents-timers))
+
+(defun agent-claude--run-scheduled-agents-query (dir)
+  "Start the query scheduled for config directory DIR."
+  (remhash dir agent-claude--agents-timers)
+  (agent-claude--query-agents-status dir))
 
 (defun agent-claude--log-status-disagreements (dir)
   "Log each session of config DIR shown differently than hooks would show it.
