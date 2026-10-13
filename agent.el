@@ -4551,6 +4551,11 @@ when it is not installed."
 (add-hook 'enable-theme-functions #'agent-sync-theme)
 (add-hook 'agent-before-exit-functions #'agent-run-skill-before-exit)
 
+;; `doom-modeline' is optional: the session modeline is defined only for
+;; those who load it.
+(with-eval-after-load 'doom-modeline
+  (require 'agent-doom-modeline))
+
 ;;;; Provide
 
 (provide 'agent)

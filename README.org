@@ -33,6 +33,7 @@ The package is split into a small backend-agnostic core and focused modules:
 | =agent.el=           | Core: backend registry, session identity and state machine, session keys and teardown, unified orchestration commands (handoff, restart, exit, resume, branch navigation, skills, audits, backtrace debugging), transient menu, alerts, theme sync |
 | =agent-account.el=   | Multi-account support shared by all backends: selection, persistence, per-account config homes, symlinked shared state                                                                                                      |
 | =agent-usage.el=     | Per-account usage store and poller shared by all backends                                                                                                                                                                   |
+| =agent-doom-modeline.el= | Optional =doom-modeline= integration: the =ai-session= modeline of session buffers, defined only once =doom-modeline= is loaded |
 | =agent-capture.el=   | Persisted Org prompt capture, keyed to the session it targets                                                                                                                                                               |
 | =agent-project.el=   | Account-scoped project sources: registry and path-pattern candidates, model ranking, and the project prompt for things that carry no directory of their own                                                                 |
 | =agent-slack.el=     | Slack-message-to-project routing: reads the message at point as text with no directory of its own, leaving the project to the shared project reader                                                                          |
@@ -874,6 +875,9 @@ The slots that carry the unified session commands are all optional, and a backen
 :PROPERTIES:
 :CUSTOM_ID: h:modeline-functions
 :END:
+
+#+findex: agent-doom-modeline-session-status
+=doom-modeline= is optional. When it is loaded, whether before or after =agent=, =agent-doom-modeline.el= defines the =ai-session= modeline: the backend icon, the session name, the model, the reasoning effort, the account, and the status the session's agent last published, each separated by a bar. A field with no value is left out. ~agent-doom-modeline-session-status~ returns that text for the current buffer, for use in another modeline. Without =doom-modeline=, the file is never loaded and session buffers keep the standard mode line.
 
 #+findex: agent-claude-status-model
 #+findex: agent-claude-status-effort

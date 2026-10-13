@@ -96,7 +96,7 @@ Indices
 
 The package is split into a small backend-agnostic core and focused modules:
 
-@multitable {aaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+@multitable {aaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Module
 @tab Role
 @item @samp{agent.el}
@@ -105,6 +105,8 @@ The package is split into a small backend-agnostic core and focused modules:
 @tab Multi-account support shared by all backends: selection, persistence, per-account config homes, symlinked shared state
 @item @samp{agent-usage.el}
 @tab Per-account usage store and poller shared by all backends
+@item @samp{agent-doom-modeline.el}
+@tab Optional @samp{doom-modeline} integration: the @samp{ai-session} modeline of session buffers, defined only once @samp{doom-modeline} is loaded
 @item @samp{agent-capture.el}
 @tab Persisted Org prompt capture, keyed to the session it targets
 @item @samp{agent-project.el}
@@ -942,6 +944,9 @@ The slots that carry the unified session commands are all optional, and a backen
 
 @node Modeline and status helpers
 @section Modeline and status helpers
+
+@findex agent-doom-modeline-session-status
+@samp{doom-modeline} is optional. When it is loaded, whether before or after @samp{agent}, @samp{agent-doom-modeline.el} defines the @samp{ai-session} modeline: the backend icon, the session name, the model, the reasoning effort, the account, and the status the session's agent last published, each separated by a bar. A field with no value is left out. @code{agent-doom-modeline-session-status} returns that text for the current buffer, for use in another modeline. Without @samp{doom-modeline}, the file is never loaded and session buffers keep the standard mode line.
 
 @findex agent-claude-status-model
 @findex agent-claude-status-effort
