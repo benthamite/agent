@@ -2752,4 +2752,51 @@ Claude Code still reports idle at the instant a prompt is sent."
         (should (string-match-p "reports waiting, hooks alone say background-waiting"
                                 (car logged)))))))
 
+(ert-deftest agent-claude-test-query-finishes-outside-its-sentinel ()
+  "The sentinel only schedules finishing, so finishing never nests in it.
+Finishing kills buffers, which runs other processes' sentinels; inside a
+sentinel those nested without bound and froze Emacs."
+  (let ((agent-claude--agents-status (make-hash-table :test #'equal))
+        (agent-claude--agents-queries (make-hash-table :test #'equal))
+        (agent-claude--agents-rerun (make-hash-table :test #'equal))
+        (agent-claude-agents-command '("true"))
+        (finished nil))
+    (cl-letf (((symbol-function 'agent-claude--finish-agents-query)
+               (lambda (&rest args) (push args finished))))
+      (agent-claude--query-agents-status "/cfg/")
+      (let* ((process (gethash "/cfg/" agent-claude--agents-queries))
+             (sentinel (process-sentinel process)))
+        (set-process-sentinel process #'ignore)
+        (while (process-live-p process)
+          (accept-process-output process 0.05))
+        (funcall sentinel process "finished\n")
+        (should-not finished)
+        (sleep-for 0.1)
+        (should (= (length finished) 1))
+        (kill-buffer (process-get process :stderr))
+        (kill-buffer (process-buffer process))))))
+
+(ert-deftest agent-claude-test-exited-unfinished-query-blocks-another ()
+  "A query that exited but whose result is not stored yet queues a rerun."
+  (let ((agent-claude--agents-queries (make-hash-table :test #'equal))
+        (agent-claude--agents-rerun (make-hash-table :test #'equal)))
+    (puthash "/cfg/" 'exited-process agent-claude--agents-queries)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest _) (error "Started a duplicate query"))))
+      (agent-claude--query-agents-status "/cfg/"))
+    (should (gethash "/cfg/" agent-claude--agents-rerun))))
+
+(ert-deftest agent-claude-test-query-that-cannot-start-is-an-error-result ()
+  "A query whose process cannot start stores an error and leaks no buffers."
+  (let* ((count (lambda ()
+                  (seq-count (lambda (b)
+                               (string-prefix-p " *claude-agents"
+                                                (buffer-name b)))
+                             (buffer-list))))
+         (before (funcall count))
+         (result (agent-claude-test--run-query
+                  '("/nonexistent/agent-claude-test-command"))))
+    (should (plist-get result :error))
+    (should (= (funcall count) before))))
+
 ;;; agent-claude-test.el ends here

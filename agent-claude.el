@@ -1474,7 +1474,8 @@ began, and either `:sessions' is a hash table from session id to a plist
 with `:status' and `:waiting-for', or `:error' describes the failure.")
 
 (defvar agent-claude--agents-queries (make-hash-table :test #'equal)
-  "Running `claude agents' process for each config directory.")
+  "Unfinished `claude agents' process for each config directory.
+A process stays here after it exits, until its result is stored.")
 
 (defvar agent-claude--agents-rerun (make-hash-table :test #'equal)
   "Config directories that need another query once theirs finishes.")
@@ -1546,8 +1547,7 @@ id to look up.  Start a query when the result is missing or older than
       (when (and (or (null entry)
                      (> (- (float-time) (plist-get entry :started))
                         agent-claude-agents-status-max-age))
-                 (not (process-live-p
-                       (gethash dir agent-claude--agents-queries))))
+                 (not (gethash dir agent-claude--agents-queries)))
         (agent-claude--query-agents-status dir))
       (or entry 'none))))
 
@@ -1565,36 +1565,65 @@ id to look up.  Start a query when the result is missing or older than
 
 (defun agent-claude--query-agents-status (dir)
   "Start a background `claude agents' query for config directory DIR.
-When one is already running, run another as soon as it finishes."
-  (if (process-live-p (gethash dir agent-claude--agents-queries))
+When one is unfinished, run another as soon as it finishes.  When the
+query cannot start, store the failure as its result."
+  (if (gethash dir agent-claude--agents-queries)
       (puthash dir t agent-claude--agents-rerun)
     (let* ((started (float-time))
            (default-directory (expand-file-name "~/"))
            (process-environment
             (cons (concat "CLAUDE_CONFIG_DIR=" (directory-file-name dir))
                   process-environment))
-           (stderr (generate-new-buffer " *claude-agents-stderr*" t))
-           (process
-            (make-process
-             :name "claude-agents"
-             :buffer (generate-new-buffer " *claude-agents*" t)
-             :command agent-claude-agents-command
-             :connection-type 'pipe
-             :noquery t
-             :stderr stderr
-             :sentinel (lambda (process _event)
-                         (unless (process-live-p process)
-                           (agent-claude--finish-agents-query
-                            process dir started))))))
-      (process-put process :stderr stderr)
-      (puthash dir process agent-claude--agents-queries))))
+           (stdout (generate-new-buffer " *claude-agents*" t))
+           (stderr (generate-new-buffer " *claude-agents-stderr*" t)))
+      (condition-case err
+          (let ((process (agent-claude--start-agents-query
+                          dir started stdout stderr)))
+            (process-put process :stderr stderr)
+            (puthash dir process agent-claude--agents-queries))
+        (error
+         (mapc #'kill-buffer (list stdout stderr))
+         (agent-claude--store-agents-result
+          dir (list :started started :error (error-message-string err))))))))
+
+(defun agent-claude--start-agents-query (dir started stdout stderr)
+  "Start and return the `claude agents' process for config directory DIR.
+STARTED is when the query began.  The process writes to buffers STDOUT
+and STDERR.  Its sentinel only schedules the result's handling: handling
+kills buffers, which runs other processes' sentinels, and inside a
+sentinel those would nest without bound."
+  (make-process
+   :name "claude-agents"
+   :buffer stdout
+   :command agent-claude-agents-command
+   :connection-type 'pipe
+   :noquery t
+   :stderr stderr
+   :sentinel (lambda (process _event)
+               (unless (process-live-p process)
+                 (run-at-time 0 nil #'agent-claude--finish-agents-query
+                              process dir started)))))
 
 (defun agent-claude--finish-agents-query (process dir started)
-  "Store the result of the `claude agents' PROCESS for config DIR.
-STARTED is when the query began.  Warn when it failed with a new error,
-log disagreements with the hooks, and run a queued query."
-  (let ((result (agent-claude--agents-query-result process started))
-        (previous (gethash dir agent-claude--agents-status)))
+  "Store the result of the finished `claude agents' PROCESS for config DIR.
+STARTED is when the query began.  Release the query's buffers and run a
+queued query."
+  (unwind-protect
+      (agent-claude--store-agents-result
+       dir (agent-claude--agents-query-result process started))
+    (dolist (buffer (list (process-buffer process)
+                          (process-get process :stderr)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))
+    (remhash dir agent-claude--agents-queries))
+  (when (gethash dir agent-claude--agents-rerun)
+    (remhash dir agent-claude--agents-rerun)
+    (agent-claude--query-agents-status dir)))
+
+(defun agent-claude--store-agents-result (dir result)
+  "Store RESULT as the latest `claude agents' result for config DIR.
+Warn when it is a new error, and log disagreements with the hooks."
+  (let ((previous (gethash dir agent-claude--agents-status)))
     (puthash dir result agent-claude--agents-status)
     (when (and (plist-get result :error)
                (not (equal (plist-get result :error)
@@ -1603,16 +1632,8 @@ log disagreements with the hooks, and run a queued query."
        'agent-claude
        (format "Cannot read Claude Code's session status for %s: %s"
                dir (plist-get result :error))))
-    (dolist (buffer (list (process-buffer process)
-                          (process-get process :stderr)))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))
-    (remhash dir agent-claude--agents-queries)
     (agent-claude--log-status-disagreements dir)
-    (force-mode-line-update t)
-    (when (gethash dir agent-claude--agents-rerun)
-      (remhash dir agent-claude--agents-rerun)
-      (agent-claude--query-agents-status dir))))
+    (force-mode-line-update t)))
 
 (defun agent-claude--agents-query-result (process started)
   "Return the result plist of the finished `claude agents' PROCESS.
@@ -1658,7 +1679,7 @@ the remaining `claude-code-event-hook' functions run."
               (dir (agent-claude--session-config-dir buffer)))
     (let ((entry (gethash dir agent-claude--agents-status)))
       (unless (or (gethash dir agent-claude--agents-timers)
-                  (process-live-p (gethash dir agent-claude--agents-queries))
+                  (gethash dir agent-claude--agents-queries)
                   (and entry
                        (< (- (float-time) (plist-get entry :started))
                           agent-claude-agents-status-min-interval)))
