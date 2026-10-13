@@ -102,5 +102,95 @@ directory as well."
       (should (string-match-p "✗ two\n      fix it" (buffer-string)))
       (should (string-match-p "Fix the items" (buffer-string))))))
 
+;;;; Bundled skills
+
+(defmacro agent-setup-test--with-skills (var &rest body)
+  "Bind VAR to a temporary tool home and run BODY against bundled skills.
+The package directory holds the skills `one' and `two'; the tool's
+skills directory is VAR/skills/."
+  (declare (indent 1))
+  `(let* ((root (make-temp-file "agent-setup-skills" t))
+          (,var (expand-file-name "home/" root))
+          (agent-setup-package-directory (expand-file-name "package/" root)))
+     (unwind-protect
+         (progn
+           (make-directory ,var t)
+           (dolist (skill '("one" "two"))
+             (let ((dir (expand-file-name (concat "etc/skills/" skill)
+                                          agent-setup-package-directory)))
+               (make-directory dir t)
+               (with-temp-file (expand-file-name "SKILL.md" dir)
+                 (insert "---\nname: " skill "\n---\n"))))
+           ,@body)
+       (delete-directory root t))))
+
+(defun agent-setup-test--check-skills (home answer)
+  "Check the bundled skills for the tool home HOME, answering ANSWER.
+ANSWER is t, nil, or `fail' to signal an error when asked."
+  (cl-letf (((symbol-function 'y-or-n-p)
+             (lambda (&rest _)
+               (if (eq answer 'fail) (error "Should not ask") answer))))
+    (agent-setup--check-skill-directory
+     "Tool" (expand-file-name "skills/" home))))
+
+(ert-deftest agent-setup-test-skills-are-linked-on-yes ()
+  "Accepting links every bundled skill, and a second run asks nothing."
+  (agent-setup-test--with-skills home
+    (let ((check (agent-setup-test--check-skills home t)))
+      (should (plist-get check :ok))
+      (should (string-match-p "one, two" (plist-get check :label))))
+    (should (file-exists-p (expand-file-name "skills/one/SKILL.md" home)))
+    (should (file-symlink-p (expand-file-name "skills/two" home)))
+    (should (plist-get (agent-setup-test--check-skills home 'fail) :ok))))
+
+(ert-deftest agent-setup-test-declining-skills-links-nothing ()
+  "Declining creates nothing and reports the skills as not linked."
+  (agent-setup-test--with-skills home
+    (let ((check (agent-setup-test--check-skills home nil)))
+      (should-not (plist-get check :ok))
+      (should (string-match-p "not linked" (plist-get check :label))))
+    (should-not (file-exists-p (expand-file-name "skills" home)))))
+
+(ert-deftest agent-setup-test-own-skill-is-left-alone ()
+  "A skill of the same name that agent did not link is never replaced."
+  (agent-setup-test--with-skills home
+    (let ((own (expand-file-name "skills/one/" home)))
+      (make-directory own t)
+      (with-temp-file (expand-file-name "SKILL.md" own) (insert "mine"))
+      (let ((check (agent-setup-test--check-skills home t)))
+        (should (plist-get check :ok)))
+      (should-not (file-symlink-p (directory-file-name own)))
+      (should (equal (agent-setup-test--contents
+                      (expand-file-name "SKILL.md" own))
+                     "mine"))
+      (should (file-symlink-p (expand-file-name "skills/two" home)))
+      (should (string-match-p
+               "your own one left alone"
+               (plist-get (agent-setup-test--check-skills home 'fail) :label))))))
+
+(ert-deftest agent-setup-test-stale-skill-link-is-repointed ()
+  "A link into another checkout's bundled skills is replaced on yes."
+  (agent-setup-test--with-skills home
+    (make-directory (expand-file-name "skills/" home) t)
+    (make-symbolic-link "/gone/agent/etc/skills/one"
+                        (expand-file-name "skills/one" home))
+    (should (plist-get (agent-setup-test--check-skills home t) :ok))
+    (should (file-exists-p (expand-file-name "skills/one/SKILL.md" home)))))
+
+(ert-deftest agent-setup-test-tool-without-home-is-skipped ()
+  "A tool whose configuration directory is absent gets no check."
+  (agent-setup-test--with-skills home
+    (should-not (agent-setup-test--check-skills
+                 (expand-file-name "absent/" home) 'fail))))
+
+(ert-deftest agent-setup-test-bundled-skills-ship-with-the-package ()
+  "The checkout bundles the skills the commands rely on."
+  (let ((agent-setup-package-directory nil))
+    (dolist (skill '("handoff" "live-session-status" "message-agent-session"))
+      (should (member skill (agent-setup--bundled-skills))))
+    (should (file-executable-p
+             (expand-file-name "message-agent-session/scripts/agent-send"
+                               (agent-setup--skills-source))))))
+
 (provide 'agent-setup-test)
 ;;; agent-setup-test.el ends here

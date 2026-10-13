@@ -67,6 +67,7 @@ User options
 Commands
 
 * First-run setup::
+* Bundled skills::
 * Shared commands::
 * Phone remote control::
 * Branch navigation::
@@ -95,7 +96,7 @@ Indices
 
 The package is split into a small backend-agnostic core and focused modules:
 
-@multitable {aaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+@multitable {aaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Module
 @tab Role
 @item @samp{agent.el}
@@ -131,7 +132,7 @@ The package is split into a small backend-agnostic core and focused modules:
 @item @samp{agent-chief.el}
 @tab Inspectable chief-of-staff loop: Emacs owns timers, state, context collection, and notifications, while Claude Code or Codex provides one-shot judgment on each tick
 @item @samp{agent-setup.el}
-@tab First-run checks: finds the agent CLIs and @samp{emacsclient}, starts the Emacs server, checks the hooks passed to Claude sessions and offers to remove copies left in global settings, and reports what is left
+@tab First-run checks: finds the agent CLIs and @samp{emacsclient}, starts the Emacs server, checks the hooks passed to Claude sessions and offers to remove copies left in global settings, offers to link the bundled skills, and reports what is left
 @end multitable
 
 The main workflow is to load @samp{agent.el}, require the backend modules you use, and enable their minor modes (see @ref{Backend minor modes}); loading a backend module installs nothing by itself. Once the Claude and Codex modules are active, @samp{M-x agent-menu} and @samp{M-x agent-select-session} operate across both tools. Sessions are listed with their account in a column of its own, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
@@ -403,6 +404,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 
 @menu
 * First-run setup::
+* Bundled skills::
 * Shared commands::
 * Phone remote control::
 * Branch navigation::
@@ -416,7 +418,27 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @section First-run setup
 
 @findex agent-setup
-@code{agent-setup} checks what the package needs outside Emacs and reports the result in the @samp{*agent-setup*} buffer. It looks for the @samp{claude} and @samp{codex} programs (@code{claude-code-program} and @code{codex-program}) and for @samp{emacsclient} on the @samp{exec-path}, and gives install instructions for any that are missing; it installs nothing itself. It offers to start the Emacs server when none is running, because the Claude Code hooks report session state through @samp{emacsclient}. It then writes the settings file passed to each Claude session and reports where it is (@ref{Claude Code backend}). When @code{agent-claude-settings-file} still holds the package's status line or hooks, it offers to remove them with @code{agent-claude-remove-global-config}, since sessions would otherwise receive each event twice; declining leaves the file untouched and is reported, and a file without such entries is neither asked about nor written. Run the command again after fixing anything it marks as missing.
+@code{agent-setup} checks what the package needs outside Emacs and reports the result in the @samp{*agent-setup*} buffer. It looks for the @samp{claude} and @samp{codex} programs (@code{claude-code-program} and @code{codex-program}) and for @samp{emacsclient} on the @samp{exec-path}, and gives install instructions for any that are missing; it installs nothing itself. It offers to start the Emacs server when none is running, because the Claude Code hooks report session state through @samp{emacsclient}. It then writes the settings file passed to each Claude session and reports where it is (@ref{Claude Code backend}). When @code{agent-claude-settings-file} still holds the package's status line or hooks, it offers to remove them with @code{agent-claude-remove-global-config}, since sessions would otherwise receive each event twice; declining leaves the file untouched and is reported, and a file without such entries is neither asked about nor written. Finally it offers to link the bundled skills into each tool's skills directory (@ref{Bundled skills}). Run the command again after fixing anything it marks as missing.
+
+@node Bundled skills
+@section Bundled skills
+
+@vindex agent-setup-skill-directories
+@vindex agent-setup-package-directory
+The package ships three skills in @samp{etc/skills/}, each written for both Claude Code and Codex:
+
+@itemize
+@item
+@samp{handoff} prepares the prompt for a fresh session and saves it where @code{agent-handoff} reads it. That command needs this skill, or one of your own that writes the same file.
+@item
+@samp{live-session-status} reports what another live session is doing by reading its transcript.
+@item
+@samp{message-agent-session} sends a message to another live session with @samp{bin/agent-send}.
+@end itemize
+
+@code{agent-setup} offers to link them into the directories in @code{agent-setup-skill-directories}, by default @samp{~/.claude/skills/} and @samp{~/.codex/skills/}. It asks once per tool and links nothing without a yes. A tool whose configuration directory does not exist is skipped. A skill of the same name that the package did not link is yours and is never replaced. The links point into the source checkout, so updating the package updates the skills; a link left pointing at another checkout is offered for relinking. Set @code{agent-setup-package-directory} to a stable alias of the checkout when its real path changes, for example between Emacs profiles.
+
+The executable @samp{bin/agent-send} submits a message, read from standard input, to another live session's buffer, and reports success only when the recipient's transcript records it. It prepends a header saying that the message comes from another agent session and was not typed by the user. @samp{agent-send --list} lists the live sessions, and @samp{agent-send --help} gives the full contract. Its library, @samp{lib/python/agent_session_lib.py}, holds the guarded prompt delivery and transcript checks, and other tools can load it by path.
 
 @node Shared commands
 @section Shared commands

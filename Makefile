@@ -12,7 +12,7 @@ LOAD_PATH := --eval '(setq load-prefer-newer t)' --eval '(dolist (dir (file-expa
 SRC := agent-util.el agent.el agent-account.el agent-usage.el agent-doom-modeline.el agent-capture.el agent-slack.el agent-snippet.el agent-forge.el agent-todo.el agent-claude-cli.el agent-claude.el agent-codex.el agent-chief.el agent-project.el agent-mu4e.el agent-remote.el agent-setup.el
 TEST_FILES := test/agent-util-test.el test/agent-directory-test.el test/agent-test.el test/agent-account-test.el test/agent-usage-test.el test/agent-doom-modeline-test.el test/agent-capture-test.el test/agent-slack-test.el test/agent-snippet-test.el test/agent-forge-test.el test/agent-todo-test.el test/agent-claude-cli-test.el test/agent-claude-test.el test/agent-codex-test.el test/agent-chief-test.el test/agent-project-test.el test/agent-mu4e-test.el test/agent-remote-test.el test/agent-setup-test.el
 
-.PHONY: compile test clean
+.PHONY: compile test test-python clean
 
 compile:
 	$(EMACS) --batch $(LOAD_PATH) -f batch-byte-compile $(SRC)
@@ -20,6 +20,9 @@ compile:
 
 test:
 	$(EMACS) --batch $(LOAD_PATH) --eval '(require (quote ert))' $(foreach f,$(TEST_FILES),-l $(f)) -f ert-run-tests-batch-and-exit
+
+test-python:
+	python3 -m unittest discover -s test/python -p 'test_*.py'
 
 clean:
 	rm -f *.elc test/*.elc

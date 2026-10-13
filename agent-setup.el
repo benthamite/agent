@@ -25,9 +25,9 @@
 ;;; Commentary:
 
 ;; `agent-setup' checks what agent needs outside Emacs -- the agent
-;; CLIs, `emacsclient', the Emacs server and Claude Code's hooks --
-;; fixes what can be fixed from Emacs after asking, and reports the
-;; rest with instructions.
+;; CLIs, `emacsclient', the Emacs server, Claude Code's hooks and the
+;; skills some commands rely on -- fixes what can be fixed from Emacs
+;; after asking, and reports the rest with instructions.
 
 ;;; Code:
 
@@ -46,6 +46,32 @@
 (defconst agent-setup-buffer-name "*agent-setup*"
   "Name of the buffer `agent-setup' reports in.")
 
+(defconst agent-setup--package-directory
+  (file-name-directory
+   (file-truename
+    (concat (file-name-sans-extension (or load-file-name buffer-file-name))
+            ".el")))
+  "Absolute path to the source checkout holding this library.
+Resolved through the `.el' file because Elpaca's build directory holds
+only the Lisp files, not the bundled `etc/' directory.")
+
+(defcustom agent-setup-package-directory nil
+  "Checkout whose bundled skills `agent-setup' links, or nil.
+Nil links the loaded checkout.  Set this to a stable alias of the
+checkout when its real path changes, for example between Emacs
+profiles, so the links keep working after a change."
+  :type '(choice (const :tag "The loaded checkout" nil) directory)
+  :group 'agent)
+
+(defcustom agent-setup-skill-directories
+  '(("Claude Code" . "~/.claude/skills/")
+    ("Codex" . "~/.codex/skills/"))
+  "Directories `agent-setup' links the bundled skills into.
+Each entry is (TOOL . DIRECTORY).  A tool whose configuration
+directory, the parent of DIRECTORY, does not exist is skipped."
+  :type '(alist :key-type string :value-type directory)
+  :group 'agent)
+
 (defconst agent-setup--install-hints
   '((claude . "Install Claude Code: https://code.claude.com/docs/en/setup")
     (codex . "Install Codex: npm install -g @openai/codex")
@@ -59,8 +85,10 @@ Start the Emacs server, which the Claude Code hooks report session state
 through, and check the settings agent passes to each Claude session.
 Offer to remove agent entries that earlier versions wrote into Claude
 Code's global settings, since sessions would receive those events twice.
-Ask before each change.  Missing programs are reported with
-instructions, since installing them is left to the user."
+Offer to link the skills bundled with agent into each tool's skills
+directory; `agent-handoff' needs the handoff skill.  Ask before each
+change.  Missing programs are reported with instructions, since
+installing them is left to the user."
   (interactive)
   (agent-setup--report
    (append
@@ -70,7 +98,8 @@ instructions, since installing them is left to the user."
            'codex (agent-setup--program 'codex-program "codex"))
           (agent-setup--check-program 'emacsclient "emacsclient")
           (agent-setup--check-server))
-    (agent-setup--check-claude-settings))))
+    (agent-setup--check-claude-settings)
+    (agent-setup--check-skills))))
 
 (defun agent-setup--program (variable default)
   "Return the value of VARIABLE when it is bound, else DEFAULT."
@@ -135,6 +164,112 @@ passes them to each session itself " count name))
            (list :ok nil
                  :label (format "%d agent entries remain in %s" count name)
                  :hint "Sessions receive those events twice; run M-x agent-claude-remove-global-config")))))
+
+;;;; Bundled skills
+
+(defun agent-setup--skills-source ()
+  "Return the directory holding the skills bundled with agent."
+  (file-name-as-directory
+   (expand-file-name "etc/skills"
+                     (or agent-setup-package-directory
+                         agent-setup--package-directory))))
+
+(defun agent-setup--bundled-skills ()
+  "Return the names of the skills bundled with agent."
+  (let ((source (agent-setup--skills-source)))
+    (seq-filter (lambda (name)
+                  (file-exists-p (expand-file-name "SKILL.md"
+                                                   (expand-file-name name source))))
+                (and (file-directory-p source)
+                     (directory-files source nil "\\`[^.]")))))
+
+(defun agent-setup--check-skills ()
+  "Return the check results for the bundled skills, one per tool.
+Offer to link the skills that are not installed."
+  (delq nil
+        (mapcar (lambda (entry)
+                  (agent-setup--check-skill-directory (car entry) (cdr entry)))
+                agent-setup-skill-directories)))
+
+(defun agent-setup--check-skill-directory (tool directory)
+  "Return the check result for the bundled skills of TOOL in DIRECTORY.
+Return nil when TOOL has no configuration directory.  Offer to link the
+skills that are missing or linked to another checkout.  A skill of the
+same name that agent did not link is the user's own and is left alone."
+  (let* ((directory (file-name-as-directory (expand-file-name directory)))
+         (name (abbreviate-file-name directory)))
+    (when (file-directory-p (file-name-directory (directory-file-name directory)))
+      (let* ((states (mapcar (lambda (skill)
+                               (cons skill (agent-setup--skill-state skill directory)))
+                             (agent-setup--bundled-skills)))
+             (wanted (agent-setup--skills-in-state states 'missing 'stale)))
+        (cond ((null wanted)
+               (list :ok t :label (agent-setup--skills-label tool name states)))
+              ((y-or-n-p (format "Link %s into %s? "
+                                 (agent-setup--skill-list wanted) name))
+               (dolist (skill wanted)
+                 (agent-setup--link-skill skill directory))
+               (list :ok t :label (format "%s skills linked into %s: %s"
+                                          tool name (string-join wanted ", "))))
+              (t
+               (list :ok nil
+                     :label (format "%s skills not linked into %s: %s"
+                                    tool name (string-join wanted ", "))
+                     :hint (if (member "handoff" wanted)
+                               "agent-handoff needs the handoff skill; \
+run M-x agent-setup again to link it"
+                             "Run M-x agent-setup again to link them"))))))))
+
+(defun agent-setup--skill-state (skill directory)
+  "Return how the bundled SKILL is installed in DIRECTORY.
+The value is `linked' when it is a link to the bundled skill, `stale'
+when it is a link to another checkout's copy or to nothing, `own' when
+something else has that name, and `missing' otherwise."
+  (let* ((target (expand-file-name skill directory))
+         (source (expand-file-name skill (agent-setup--skills-source)))
+         (link (file-symlink-p target)))
+    (cond ((and link (equal (file-truename target) (file-truename source)))
+           'linked)
+          ((and link (or (not (file-exists-p target))
+                         (string-suffix-p (concat "etc/skills/" skill)
+                                          (directory-file-name link))))
+           'stale)
+          ((or link (file-exists-p target)) 'own)
+          (t 'missing))))
+
+(defun agent-setup--skills-in-state (states &rest wanted)
+  "Return the skills in STATES whose state is one of WANTED.
+STATES is an alist from skill name to state."
+  (mapcar #'car (seq-filter (lambda (state) (memq (cdr state) wanted)) states)))
+
+(defun agent-setup--link-skill (skill directory)
+  "Link the bundled SKILL into DIRECTORY, replacing a stale link."
+  (let ((target (expand-file-name skill directory)))
+    (make-directory directory t)
+    (when (file-symlink-p target)
+      (delete-file target))
+    (make-symbolic-link (expand-file-name skill (agent-setup--skills-source))
+                        target)))
+
+(defun agent-setup--skills-label (tool name states)
+  "Return the label for TOOL's skills in the directory NAME, all settled.
+STATES is an alist from skill name to state."
+  (let ((linked (agent-setup--skills-in-state states 'linked))
+        (own (agent-setup--skills-in-state states 'own)))
+    (concat (if linked
+                (format "%s skills linked into %s: %s"
+                        tool name (string-join linked ", "))
+              (format "%s skills in %s are your own" tool name))
+            (when (and linked own)
+              (format " (your own %s left alone)" (string-join own ", "))))))
+
+(defun agent-setup--skill-list (skills)
+  "Return a phrase naming SKILLS, such as \"the handoff skill\"."
+  (if (cdr skills)
+      (format "the %s skills" (string-join skills ", "))
+    (format "the %s skill" (car skills))))
+
+;;;; Report
 
 (defun agent-setup--report (checks)
   "Show CHECKS in `agent-setup-buffer-name' and return the buffer.

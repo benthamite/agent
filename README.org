@@ -46,7 +46,7 @@ The package is split into a small backend-agnostic core and focused modules:
 | =agent-claude-cli.el= | Quarantined undocumented Claude CLI conventions: Keychain credential naming, the usage API endpoint, the =~/.claude/projects/= directory encoding, transcript JSONL parsing, and the =.claude.json= merge engine            |
 | =agent-codex.el=     | Codex backend: integrates =codex.el= with theme sync, =codex exec= execution, =config.toml= helpers, modeline helpers, and ~agent-codex-mode~                                                                               |
 | =agent-chief.el=     | Inspectable chief-of-staff loop: Emacs owns timers, state, context collection, and notifications, while Claude Code or Codex provides one-shot judgment on each tick                                                        |
-| =agent-setup.el=     | First-run checks: finds the agent CLIs and =emacsclient=, starts the Emacs server, checks the hooks passed to Claude sessions and offers to remove copies left in global settings, and reports what is left |
+| =agent-setup.el=     | First-run checks: finds the agent CLIs and =emacsclient=, starts the Emacs server, checks the hooks passed to Claude sessions and offers to remove copies left in global settings, offers to link the bundled skills, and reports what is left |
 
 The main workflow is to load =agent.el=, require the backend modules you use, and enable their minor modes (see [[#h:minor-modes][Backend minor modes]]); loading a backend module installs nothing by itself. Once the Claude and Codex modules are active, =M-x agent-menu= and =M-x agent-select-session= operate across both tools. Sessions are listed with their account in a column of its own, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
 
@@ -332,7 +332,24 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 :END:
 
 #+findex: agent-setup
-~agent-setup~ checks what the package needs outside Emacs and reports the result in the =*agent-setup*= buffer. It looks for the =claude= and =codex= programs (~claude-code-program~ and ~codex-program~) and for =emacsclient= on the =exec-path=, and gives install instructions for any that are missing; it installs nothing itself. It offers to start the Emacs server when none is running, because the Claude Code hooks report session state through =emacsclient=. It then writes the settings file passed to each Claude session and reports where it is ([[#h:claude-options][Claude Code backend]]). When ~agent-claude-settings-file~ still holds the package's status line or hooks, it offers to remove them with ~agent-claude-remove-global-config~, since sessions would otherwise receive each event twice; declining leaves the file untouched and is reported, and a file without such entries is neither asked about nor written. Run the command again after fixing anything it marks as missing.
+~agent-setup~ checks what the package needs outside Emacs and reports the result in the =*agent-setup*= buffer. It looks for the =claude= and =codex= programs (~claude-code-program~ and ~codex-program~) and for =emacsclient= on the =exec-path=, and gives install instructions for any that are missing; it installs nothing itself. It offers to start the Emacs server when none is running, because the Claude Code hooks report session state through =emacsclient=. It then writes the settings file passed to each Claude session and reports where it is ([[#h:claude-options][Claude Code backend]]). When ~agent-claude-settings-file~ still holds the package's status line or hooks, it offers to remove them with ~agent-claude-remove-global-config~, since sessions would otherwise receive each event twice; declining leaves the file untouched and is reported, and a file without such entries is neither asked about nor written. Finally it offers to link the bundled skills into each tool's skills directory ([[#h:bundled-skills][Bundled skills]]). Run the command again after fixing anything it marks as missing.
+
+** Bundled skills
+:PROPERTIES:
+:CUSTOM_ID: h:bundled-skills
+:END:
+
+#+vindex: agent-setup-skill-directories
+#+vindex: agent-setup-package-directory
+The package ships three skills in =etc/skills/=, each written for both Claude Code and Codex:
+
+- =handoff= prepares the prompt for a fresh session and saves it where ~agent-handoff~ reads it. That command needs this skill, or one of your own that writes the same file.
+- =live-session-status= reports what another live session is doing by reading its transcript.
+- =message-agent-session= sends a message to another live session with =bin/agent-send=.
+
+~agent-setup~ offers to link them into the directories in ~agent-setup-skill-directories~, by default =~/.claude/skills/= and =~/.codex/skills/=. It asks once per tool and links nothing without a yes. A tool whose configuration directory does not exist is skipped. A skill of the same name that the package did not link is yours and is never replaced. The links point into the source checkout, so updating the package updates the skills; a link left pointing at another checkout is offered for relinking. Set ~agent-setup-package-directory~ to a stable alias of the checkout when its real path changes, for example between Emacs profiles.
+
+The executable =bin/agent-send= submits a message, read from standard input, to another live session's buffer, and reports success only when the recipient's transcript records it. It prepends a header saying that the message comes from another agent session and was not typed by the user. =agent-send --list= lists the live sessions, and =agent-send --help= gives the full contract. Its library, =lib/python/agent_session_lib.py=, holds the guarded prompt delivery and transcript checks, and other tools can load it by path.
 
 ** Shared commands
 :PROPERTIES:
