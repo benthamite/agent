@@ -1297,34 +1297,6 @@ observation."
       (delete-directory dir-one t)
       (delete-directory dir-two t))))
 
-(ert-deftest agent-test-post-push-ci-runs-skill-for-head ()
-  "Run post-push CI through the selected backend with the current HEAD."
-  (let* ((agent-backends nil)
-         (root (make-temp-file "agent-skills" t))
-         (skill-file (expand-file-name "post-push-ci/SKILL.md" root))
-         ran)
-    (unwind-protect
-        (progn
-          (make-directory (file-name-directory skill-file) t)
-          (with-temp-file skill-file
-            (insert "---\nname: post-push-ci\n---\nClose the loop.\n"))
-          (apply #'agent-register-backend
-           'one
-           (agent-test--backend
-            :skill-roots (lambda () (list (cons root 'file)))
-            :run-prompt (cl-function
-                         (lambda (prompt &key directory callback)
-                           (ignore directory callback)
-                           (setq ran prompt)))))
-          (cl-letf (((symbol-function 'process-file)
-                     (lambda (&rest _args)
-                       (insert "abc123\n")
-                       0)))
-            (agent-post-push-ci)
-            (should (string-match-p (regexp-quote skill-file) ran))
-            (should (string-match-p "--no-push --commit abc123" ran))))
-      (delete-directory root t))))
-
 (ert-deftest agent-test-skill-result-does-not-modify-new-user-buffer ()
   "Display skill output in a result buffer, not an unrelated new buffer."
   (let ((unrelated (get-buffer-create "*agent-unrelated*"))
@@ -1343,53 +1315,6 @@ observation."
         (kill-buffer unrelated))
       (when-let* ((buf (get-buffer result-buffer)))
         (kill-buffer buf)))))
-
-;;;; Project audit
-
-(ert-deftest agent-test-audit-commits-after-successful-skill ()
-  "Auto-commit after each successful audit skill and not after failures."
-  (let ((agent-backends nil)
-        (agent-audit-skills '("a" "b"))
-        commits)
-    (apply #'agent-register-backend
-     'one
-     (agent-test--backend
-      :skill-roots (lambda () nil)
-      :run-prompt (cl-function
-                   (lambda (prompt &key directory callback)
-                     (ignore directory)
-                     (funcall callback "out"
-                              :error (when (string-match-p "/b" prompt)
-                                       "exit code 1"))))))
-    (cl-letf (((symbol-function 'agent--audit-commit-changes)
-               (lambda (_dir title) (push title commits)))
-              ((symbol-function 'agent--audit-finish) #'ignore))
-      (agent--audit-run-next (list :backend 'one :queue agent-audit-skills
-                                   :results nil :dir "/tmp/"
-                                   :start-time (current-time))))
-    (should (equal commits '("a")))))
-
-(ert-deftest agent-test-audit-strips-leading-slash-from-skill-names ()
-  "Resolve legacy slash-format audit skill names like plain names."
-  (let ((agent-backends nil)
-        prompts)
-    (apply #'agent-register-backend
-     'one
-     (agent-test--backend
-      :skill-roots (lambda () nil)
-      :run-prompt (cl-function
-                   (lambda (prompt &key directory callback)
-                     (ignore directory)
-                     (push prompt prompts)
-                     (funcall callback "out" :error nil)))))
-    (cl-letf (((symbol-function 'agent--audit-commit-changes) #'ignore)
-              ((symbol-function 'agent--audit-finish) #'ignore))
-      (dolist (queue '(("/code-audit") ("code-audit")))
-        (agent--audit-run-next (list :backend 'one :queue queue
-                                     :results nil :dir "/tmp/"
-                                     :start-time (current-time)))))
-    (should (equal prompts
-                   '("/code-audit --accept" "/code-audit --accept")))))
 
 (ert-deftest agent-test-force-kill-buffer-ignores-query-functions ()
   "Kill buffers even when unrelated query functions would veto it."
@@ -3856,10 +3781,11 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
     (dolist (key '("l" "r" "O" "R" "s" "b n" "b s" "a l" "a u" "n" "X" "-a" "-c" "-w"
-                   "t ." "t r" "t a" "t c" "t o" "p c" "p i" "p b"))
+                   "t ." "t r" "p c" "p i" "p b"))
       (should (member key keys)))
     (dolist (key '("H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
-                   "." "e" "N" "B" "L" "u" "a" "c" "o" "p" "i" "b"))
+                   "." "e" "N" "B" "L" "u" "a" "c" "o" "p" "i" "b"
+                   "t a" "t c" "t o"))
       (should-not (member key keys))))
   (dolist (binding '(("r" . agent-resume)
                      ("O" . agent-restore-sessions)

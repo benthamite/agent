@@ -1,0 +1,5 @@
+#!/bin/sh
+# Byte-compile every source file and run the whole test suite.
+set -eu
+cd "$(dirname "$0")/.."
+make compile test

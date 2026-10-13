@@ -69,7 +69,6 @@ Commands
 * First-run setup::
 * Shared commands::
 * Phone remote control::
-* Orchestration run view::
 * Branch navigation::
 * Org TODO commands::
 * Chief-of-staff commands::
@@ -96,11 +95,11 @@ Indices
 
 The package is split into a small backend-agnostic core and focused modules:
 
-@multitable {aaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+@multitable {aaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Module
 @tab Role
 @item @samp{agent.el}
-@tab Core: backend registry, session identity and state machine, session keys and teardown, unified orchestration commands (handoff, restart, exit, resume, branch navigation, skills, audits, backtrace debugging), transient menu, alerts, theme sync
+@tab Core: backend registry, session identity and state machine, session keys and teardown, unified orchestration commands (handoff, restart, exit, resume, branch navigation, skills, backtrace debugging), transient menu, alerts, theme sync
 @item @samp{agent-account.el}
 @tab Multi-account support shared by all backends: selection, persistence, per-account config homes, symlinked shared state
 @item @samp{agent-usage.el}
@@ -259,8 +258,6 @@ The global minor modes @code{agent-claude-mode} and @code{agent-codex-mode} own 
 @vindex agent-alert-sound-player
 @vindex agent-backtrace-file
 @vindex agent-handoff-files
-@vindex agent-audit-skills
-@vindex agent-audit-project-directories
 @vindex agent-debug-backtrace-model
 @vindex agent-debug-backtrace-backend
 @vindex agent-prompt-capture-directory
@@ -278,7 +275,7 @@ The user option @code{agent-alert-on-ready} is a boolean that defaults to @code{
 
 The user option @code{agent-backtrace-file} controls where @code{agent-save-backtrace} and @code{agent-debug-backtrace} write Emacs backtraces. It defaults to a file in @code{temporary-file-directory}.
 
-The unified orchestration commands share one set of options across backends. @code{agent-handoff-files} maps backend symbols to the handoff files read by @code{agent-handoff}. @code{agent-audit-skills} lists the audit skills run by @code{agent-audit-project}, and @code{agent-audit-project-directories} stores completion candidates for the audit directory prompt. @code{agent-debug-backtrace-model} and @code{agent-debug-backtrace-backend} configure the @samp{gptel} request used by @code{agent-debug-backtrace} to identify likely culprit packages from an Emacs backtrace.
+The unified orchestration commands share one set of options across backends. @code{agent-handoff-files} maps backend symbols to the handoff files read by @code{agent-handoff}. @code{agent-debug-backtrace-model} and @code{agent-debug-backtrace-backend} configure the @samp{gptel} request used by @code{agent-debug-backtrace} to identify likely culprit packages from an Emacs backtrace.
 
 Slack-message routing has no options of its own any more. The model and @samp{gptel} backend that pick a project from the message are the shared @code{agent-project-ranking-model} and @code{agent-project-ranking-backend} (@ref{Project sources}), and @code{agent-act-on-slack-message-model} and @code{agent-act-on-slack-message-backend} are obsolete aliases of them. The project candidates come from @code{agent-project-sources}, so a registry that used to be named by @code{agent-epoch-project-registry-file} now belongs in that alist: that option is obsolete and nothing reads it, which means a configuration setting it alone routes against the default source list instead of the registry. Loading @samp{agent-project} warns when that option still holds a value, because marking a variable obsolete warns only code that mentions it and says nothing to a configuration that merely sets it, which is the whole of what such a configuration does. @code{agent-epoch-projects-root} is an obsolete alias of @code{agent-project-registry-root} and still resolves the registry's relative paths. The function @code{agent-epoch-project-candidates}, which read that registry into project plists, is replaced by @code{agent-project-candidates}, which reads every source an account has and answers in a different shape. The old name is marked obsolete but no longer defined, so a configuration still calling it is warned at byte-compile time which name replaced it, and fails if it runs. All three renamings are declared in @samp{agent-project.el} ahead of the options they rename, because a setting made before the package loads — which is what @code{use-package}'s @code{:custom} does — reaches the new name only while that name is still unbound.
 
@@ -366,7 +363,7 @@ The Codex backend options control account selection, skill discovery, and non-in
 
 @code{agent-codex-skill-directories} is a list of additional directories scanned for Codex skills. The backend also scans standard Codex skill locations and project-local skill directories.
 
-@code{agent-codex-exec-approval-policy}, @code{agent-codex-exec-sandbox-mode}, and @code{agent-codex-exec-skip-git-repo-check} configure the non-interactive Codex calls used by skill and audit workflows. The approval policy is passed as a top-level Codex CLI option before the @samp{exec} subcommand, while the sandbox and repository-check options are passed to @samp{codex exec} itself.
+@code{agent-codex-exec-approval-policy}, @code{agent-codex-exec-sandbox-mode}, and @code{agent-codex-exec-skip-git-repo-check} configure the non-interactive Codex calls used by skill workflows. The approval policy is passed as a top-level Codex CLI option before the @samp{exec} subcommand, while the sandbox and repository-check options are passed to @samp{codex exec} itself.
 
 The @samp{gptel} classifier requests used by backtrace debugging and project ranking ignore reasoning-block callback events and parse only the final response text. Backtrace debugging sends the model a truncated excerpt of the backtrace rather than the full contents: each line is cut at 400 characters and the excerpt is capped at 100,000 characters, since backtraces can embed multi-megabyte printed objects that exceed API payload limits, while the frame names at the start of each line suffice to identify packages. The agent session itself still receives the path to the complete backtrace file.
 
@@ -408,7 +405,6 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 * First-run setup::
 * Shared commands::
 * Phone remote control::
-* Orchestration run view::
 * Branch navigation::
 * Org TODO commands::
 * Chief-of-staff commands::
@@ -430,10 +426,8 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-jump-to-waiting
 @findex agent-toggle-snooze
 @findex agent-run-skill
-@findex agent-post-push-ci
 @findex agent-handoff
 @findex agent-handoff-from-emacsclient
-@findex agent-audit-project
 @findex agent-act-on-thing-at-point
 @findex agent-debug-backtrace
 @findex agent-act-on-slack-message
@@ -448,7 +442,7 @@ In stateless mode, backend output may include echoed CLI transcript text before 
 @findex agent-setup-kill-on-exit
 @findex agent-setup-scroll-keys
 @findex agent-snippet-tab
-The command @code{agent-menu} opens the unified transient menu. Every entry in it works with either backend: session switching, waiting-session jumps, resuming a past session, creating a branch of the current session, switching between branches, handoff, restart, exit, history browsing, skill execution, project audit, one dispatcher that acts on the thing at point, and a Prompts section beneath Tools in the same column for prompt capture, captured prompt insertion, and batch TODO processing.
+The command @code{agent-menu} opens the unified transient menu. Every entry in it works with either backend: session switching, waiting-session jumps, resuming a past session, creating a branch of the current session, switching between branches, handoff, restart, exit, history browsing, skill execution, one dispatcher that acts on the thing at point, and a Prompts section beneath Tools in the same column for prompt capture, captured prompt insertion, and batch TODO processing.
 
 The Sessions section holds general session management: new session (@samp{n}),
 resume session (@samp{r}), select session (@samp{s}), jump to waiting, and open log.
@@ -457,8 +451,7 @@ The Current session column holds branching, toggle snooze (@samp{z}), handoff,
 restart (@samp{R}), and exit commands. It labels
 @code{agent-exit} (@samp{x}) as “exit” and @code{agent-exit-without-skills} (@samp{X}) as “exit immediately”.
 
-Tools use the @samp{t} prefix: act on thing at point (@samp{t .}), run skill (@samp{t r}),
-audit project (@samp{t a}), post-push CI (@samp{t c}), and orchestration run (@samp{t o}).
+Tools use the @samp{t} prefix: act on thing at point (@samp{t .}) and run skill (@samp{t r}).
 Prompts use @samp{p}: capture (@samp{p c}), insert (@samp{p i}), and batch TODOs (@samp{p b}).
 Options put account selection first, then buffer protection and branch warnings,
 followed by ready alerts and theme synchronization.
@@ -558,11 +551,6 @@ The command @code{agent-run-skill} discovers skills from every loaded backend th
 
 The command @code{agent-capture-prompt} opens a session-specific Org file and appends a new prompt entry. The command @code{agent-insert-captured-prompt} reads pending nonempty entries for the current session, prompts for one with a short body preview in the completion candidate, inserts its text into the backend prompt without submitting it, and removes the selected Org entry from the capture file. With a prefix argument, it includes legacy entries already marked as inserted. When a session still has pending captured prompts, @code{agent-exit}, @code{agent-exit-without-skills}, @code{agent-restart}, and @code{agent-handoff} ask for confirmation before closing or replacing that session.
 
-The command @code{agent-post-push-ci} runs the @code{post-push-ci} skill through the
-selected backend with @samp{--no-push --commit HEAD}. Use it after a push has
-already happened and you want an agent to inspect GitHub Actions failures, fix
-the root cause, and continue the authorized CI closeout loop.
-
 The command @code{agent-act-on-slack-message}, called on a message in a Slack room
 buffer, starts a session in the project that message is about and inserts its
 permalink into the prompt without submitting it. With a prefix argument it
@@ -658,7 +646,7 @@ A payload marked @samp{:submit} reaches a @strong{new} session as its initial pr
 
 Because extraction can be asynchronous, the continuation may run long after the command was invoked, in whatever buffer the user has moved to since. The dispatcher therefore captures the invocation buffer and resolves the backend up front, before the extractor runs: the session adopts the backend of the buffer the thing was read from rather than of wherever the callback lands, no backend prompt appears in the middle of an asynchronous wait, and the @samp{:after} thunk runs back in the invocation buffer, which starting a session has displaced as the current one. A thunk whose buffer has been killed meanwhile is dropped, since the thing it would act on is gone.
 
-The commands @code{agent-handoff}, @code{agent-audit-project}, @code{agent-debug-backtrace}, @code{agent-act-on-slack-message}, @code{agent-exit}, and @code{agent-restart} resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (@code{agent-claude-handoff}, @code{agent-codex-restart}, and so on) remain available as obsolete aliases. @code{agent-exit}, bound to @samp{x}, kills the session buffer after any configured before-exit skills finish. @code{agent-exit-without-skills}, bound to @samp{X}, uses the same exit path but inhibits the configured before-exit skills. It still checks for pending captured prompts and runs other before-exit functions. Neither command deletes the Emacs window that displayed the session.
+The commands @code{agent-handoff}, @code{agent-debug-backtrace}, @code{agent-act-on-slack-message}, @code{agent-exit}, and @code{agent-restart} resolve a backend from the current session buffer or by prompting. This lets the same keybinding operate on Claude or Codex sessions without separate wrapper commands. The old per-backend command names (@code{agent-claude-handoff}, @code{agent-codex-restart}, and so on) remain available as obsolete aliases. @code{agent-exit}, bound to @samp{x}, kills the session buffer after any configured before-exit skills finish. @code{agent-exit-without-skills}, bound to @samp{X}, uses the same exit path but inhibits the configured before-exit skills. It still checks for pending captured prompts and runs other before-exit functions. Neither command deletes the Emacs window that displayed the session.
 
 @code{agent-handoff} reads the backend's entry in @code{agent-handoff-files}, kills the current session buffer, and starts a new session with the handoff prompt. By default the new session keeps the source directory. A handoff file can select another directory with YAML front matter:
 
@@ -793,38 +781,6 @@ The server listens on @code{agent-remote-listen-address} and @code{agent-remote-
 
 The page is @samp{etc/agent-remote.html}, served from the source checkout. The @samp{android/} directory holds a single-purpose Android app, ``Agents'', for phones without a browser. It shows only this page and cancels any navigation to another origin. @samp{android/build.sh install} builds it with the Android command-line tools, without Gradle, and installs it over @samp{adb}; @samp{AGENT_REMOTE_URL} sets the page address it is built for.
 
-@node Orchestration run view
-@section Orchestration run view
-
-@findex agent-run-open
-@findex agent-run-mode
-The command @code{agent-run-open}, bound to @samp{t o} in the Tools column of
-@code{agent-menu}, opens an @samp{orchestrate-review} run JSON file in a read-only
-@code{agent-run-mode} buffer. Select the private run file created by the skill;
-the command remembers opened filenames for the current Emacs session and
-does not scan temporary directories. Each run has its own view.
-
-The view shows the recorded stage, phase, status, author and reviewer, and
-the latest stage-level progress with the progress file's age. Pending delivery
-reconciliation and a recorded incomplete return appear as attention items.
-Old progress does not establish that an actor stopped. A returned implementation
-is distinct from a completed run; the helper still owns verification evidence
-and completion. This view does not validate the full workflow contract.
-
-Session links recheck the recorded native identity before opening a buffer.
-An unavailable or replaced session is labeled unavailable. Legacy version-2
-runs remain readable, but actors without recorded identities cannot be linked.
-File links open the run record, progress file, run directory, or repository.
-The run format does not record ordinary spec/plan paths or blocker descriptions;
-the view says so rather than looking through conversations to infer them.
-
-Visible views refresh every five seconds; @samp{g} refreshes immediately and @samp{q}
-quits the window. Killing a view cancels its refresh timer. A read failure
-replaces the display with an explicit error, so stale data cannot appear current.
-Only local files are supported. Run reads are limited to 4 MiB, and progress
-reads to the final 16 KiB@. The view never submits prompts, advances phases,
-reads transcripts, inspects internal tasks, or starts workers.
-
 @node Branch navigation
 @section Branch navigation
 
@@ -889,7 +845,7 @@ The command @code{agent-chief-open-state} opens the auditable Org state file. @c
 @findex agent-claude-ensure-state-hook-config
 @findex agent-claude-setup-config
 @findex agent-claude-remove-global-config
-The Claude commands expose workflows that are specific to Claude Code; handoff, restart, exit, resume, branch navigation, skill execution, project audits, backtrace debugging, TODO workflows, and Slack-message routing use the unified @code{agent-*} commands described above. @code{agent-claude-start-or-switch} starts Claude under the selected account or opens the unified switcher. @code{agent-claude-select-account} persists an account choice, and @code{agent-claude-init-account} prepares a new account directory with shared configuration files and symlinks.
+The Claude commands expose workflows that are specific to Claude Code; handoff, restart, exit, resume, branch navigation, skill execution, backtrace debugging, TODO workflows, and Slack-message routing use the unified @code{agent-*} commands described above. @code{agent-claude-start-or-switch} starts Claude under the selected account or opens the unified switcher. @code{agent-claude-select-account} persists an account choice, and @code{agent-claude-init-account} prepares a new account directory with shared configuration files and symlinks.
 
 The branch and TODO commands that used to be Claude's own are now the shared @code{agent-create-branch}, @code{agent-switch-branch}, @code{agent-batch-todos}, and @code{agent-send-todo-at-point}; @code{agent-claude-create-branch}, @code{agent-claude-switch-branch}, @code{agent-claude-batch-todos}, and @code{agent-claude-send-todo-at-point} remain as obsolete aliases.
 
@@ -904,7 +860,7 @@ The setup command @code{agent-claude-setup-config} ensures that Claude's statusl
 @findex agent-codex-select-account
 @findex agent-codex-resume
 @findex agent-codex-fork
-The Codex commands expose workflows that are specific to the Codex CLI; handoff, restart, exit, skill execution, project audits, backtrace debugging, and Slack-message routing use the unified @code{agent-*} commands described above. @code{agent-codex-start-or-switch} starts Codex under the selected account when no Codex sessions exist, otherwise it opens the shared switcher. @code{agent-codex-select-account} persists an account choice by name and applies it to new interactive sessions and non-interactive @samp{codex exec} runs. Skills run non-interactively with @samp{codex exec}, using local skill metadata when available and falling back to a slash invocation otherwise; additional programmatic skill directories are configured through @code{agent-codex-programmatic-skill-directories}.
+The Codex commands expose workflows that are specific to the Codex CLI; handoff, restart, exit, skill execution, backtrace debugging, and Slack-message routing use the unified @code{agent-*} commands described above. @code{agent-codex-start-or-switch} starts Codex under the selected account when no Codex sessions exist, otherwise it opens the shared switcher. @code{agent-codex-select-account} persists an account choice by name and applies it to new interactive sessions and non-interactive @samp{codex exec} runs. Skills run non-interactively with @samp{codex exec}, using local skill metadata when available and falling back to a slash invocation otherwise; additional programmatic skill directories are configured through @code{agent-codex-programmatic-skill-directories}.
 
 When @code{agent-restart} operates on a Codex session, it resumes codex.el's canonical session identity under the chosen account and current default @code{codex-terminal-backend}; app-server sessions use the native app-server resume path and terminal backends use @samp{codex resume}. Changing @code{codex-terminal-backend} and then restarting a Codex session switches the relaunched session to that backend. The unified commands cover both Codex resuming and Codex forking: @code{agent-resume} resumes a past session of whichever backend the context names, and @code{agent-create-branch} forks the current session of either backend, reaching Codex through @samp{codex fork} on the terminal backends and @samp{thread/fork} on the app-server backend. @code{agent-codex-resume} and @code{agent-codex-fork} still expose the CLI's own subcommands and remain available through @samp{M-x}, though neither is in @code{agent-menu} any more. @code{agent-codex-fork} is not redundant: it forks a session you pick from Codex's own history, whereas @code{agent-create-branch} forks the session you are sitting in.
 

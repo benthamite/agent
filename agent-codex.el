@@ -1063,11 +1063,6 @@ This is the `run-prompt' backend slot implementation."
                 :error (unless (eq code 0)
                          (format "codex exited with exit code %s" code)))))))
 
-;;;;; Project audit
-
-(define-obsolete-function-alias 'agent-codex-audit-project
-  #'agent-audit-project "0.2")
-
 ;;;;; Debug backtrace
 
 (define-obsolete-function-alias 'agent-codex-debug-backtrace

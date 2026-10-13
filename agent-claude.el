@@ -2321,11 +2321,6 @@ programmatic directories are pointed at by file."
 (make-obsolete-variable 'agent-claude-run-skill-model
                         'agent-claude-batch-model "0.2")
 
-;;;;; Project audit
-
-(define-obsolete-function-alias 'agent-claude-audit-project
-  #'agent-audit-project "0.2")
-
 ;;;;; Theme sync
 
 (defun agent-claude--sync-theme (theme)
