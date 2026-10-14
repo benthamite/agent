@@ -10,6 +10,29 @@
 (require 'agent-claude)
 (require 'agent-capture)
 
+;;;; Isolation
+
+;; Session events schedule a `claude agents' query for the session's config
+;; directory, which is the user's own unless a test mocks it.  A query a test
+;; leaves behind fires during whichever later test is waiting then.  A query
+;; a test starts without mocking it runs a command that cannot start, never
+;; the real one.
+(setq agent-claude-agents-command '("agent-claude-test-unmocked-query"))
+
+(defun agent-claude-test--isolate-queries (run test)
+  "Call RUN on TEST, then cancel and forget the status queries it left."
+  (unwind-protect
+      (funcall run test)
+    (maphash (lambda (_dir timer) (cancel-timer timer))
+             agent-claude--agents-timers)
+    (dolist (table (list agent-claude--agents-timers
+                         agent-claude--agents-queries
+                         agent-claude--agents-rerun
+                         agent-claude--agents-status))
+      (clrhash table))))
+
+(advice-add 'ert-run-test :around #'agent-claude-test--isolate-queries)
+
 ;;;; Handoff
 
 (ert-deftest agent-claude-test-handoff-file-default-matches-skill ()
@@ -2711,9 +2734,11 @@ Claude Code still reports idle at the instant a prompt is sent."
     (cl-letf (((symbol-function 'claude-code--find-all-claude-buffers) #'ignore)
               ((symbol-function 'display-warning) #'ignore))
       (agent-claude--query-agents-status "/cfg/")
-      (let ((process (gethash "/cfg/" agent-claude--agents-queries)))
+      ;; Waiting on the query's process would return at once after it
+      ;; exits, without running sentinels, so the result could never land.
+      (with-timeout (10 (ert-fail "The query never finished"))
         (while (gethash "/cfg/" agent-claude--agents-queries)
-          (accept-process-output process 0.1)))
+          (accept-process-output nil 0.1)))
       (gethash "/cfg/" agent-claude--agents-status))))
 
 (ert-deftest agent-claude-test-query-reads-stdout-only ()
