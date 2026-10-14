@@ -63,12 +63,22 @@ profiles, so the links keep working after a change."
   :type '(choice (const :tag "The loaded checkout" nil) directory)
   :group 'agent)
 
+(defun agent-setup--tool-skill-directory (variable default)
+  "Return the skills directory under the configuration home in VARIABLE.
+VARIABLE names the environment variable the tool reads its home from;
+DEFAULT is the home the tool uses when it is unset."
+  (file-name-as-directory
+   (expand-file-name "skills" (or (getenv variable) default))))
+
 (defcustom agent-setup-skill-directories
-  '(("Claude Code" . "~/.claude/skills/")
-    ("Codex" . "~/.codex/skills/"))
+  `(("Claude Code" . ,(agent-setup--tool-skill-directory
+                       "CLAUDE_CONFIG_DIR" "~/.claude/"))
+    ("Codex" . ,(agent-setup--tool-skill-directory "CODEX_HOME" "~/.codex/")))
   "Directories `agent-setup' links the bundled skills into.
 Each entry is (TOOL . DIRECTORY).  A tool whose configuration
-directory, the parent of DIRECTORY, does not exist is skipped."
+directory, the parent of DIRECTORY, does not exist is skipped.  The
+defaults are the skills directories of the homes Claude Code and Codex
+read, `CLAUDE_CONFIG_DIR' and `CODEX_HOME', when Emacs has them set."
   :type '(alist :key-type string :value-type directory)
   :group 'agent)
 

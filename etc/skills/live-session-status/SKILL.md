@@ -20,6 +20,10 @@ cannot be seen; read its transcript and report.
 
 ## 2. Find its transcript
 
+Each tool keeps transcripts under its configuration home: `$CLAUDE_CONFIG_DIR`
+for Claude and `$CODEX_HOME` for Codex, `~/.claude` and `~/.codex` when unset.
+The paths below use the defaults.
+
 - Claude: `~/.claude/projects/<slug>/<session-id>.jsonl`. The slug is the
   session's absolute working directory with every character other than a
   letter, digit or `-` replaced by `-` (`/Users/me/My Drive/x` becomes

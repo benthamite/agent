@@ -133,6 +133,17 @@ ANSWER is t, nil, or `fail' to signal an error when asked."
     (agent-setup--check-skill-directory
      "Tool" (expand-file-name "skills/" home))))
 
+(ert-deftest agent-setup-test-skill-directory-follows-tool-home ()
+  "A tool's skills go under the home its variable names, else the default."
+  (let ((process-environment (cons "AGENT_SETUP_TEST_HOME=/tmp/tool"
+                                   process-environment)))
+    (should (equal (agent-setup--tool-skill-directory
+                    "AGENT_SETUP_TEST_HOME" "~/.tool/")
+                   "/tmp/tool/skills/")))
+  (should (equal (agent-setup--tool-skill-directory
+                  "AGENT_SETUP_TEST_UNSET" "/tmp/default/")
+                 "/tmp/default/skills/")))
+
 (ert-deftest agent-setup-test-skills-are-linked-on-yes ()
   "Accepting links every bundled skill, and a second run asks nothing."
   (agent-setup-test--with-skills home

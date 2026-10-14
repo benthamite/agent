@@ -9,23 +9,23 @@ Usage:
 
 With --latest, PROJECT_DIR is the peer session's working directory (or a
 Claude transcript directory). Claude transcripts are looked up in
-~/.claude/projects/<slug>/, where the slug replaces every character other than
-a letter, digit or "-" with "-". With --codex, the newest rollout under
-~/.codex/sessions/ whose session_meta cwd equals PROJECT_DIR is used.
+$CLAUDE_CONFIG_DIR/projects/<slug>/ (default ~/.claude), where the slug
+replaces every character other than a letter, digit or "-" with "-". With
+--codex, the newest rollout under $CODEX_HOME/sessions/ (default ~/.codex)
+whose session_meta cwd equals PROJECT_DIR is used.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 
-CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
-CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 CODEX_SCAN_LIMIT = 400  # newest rollouts inspected when matching a cwd
 INJECTED_PREFIXES = ("# AGENTS.md instructions", "<environment_context>",
                      "<user_instructions>", "<permissions instructions>")
@@ -36,6 +36,20 @@ def local_time(ts: str) -> str:
         return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     except ValueError:
         return ts
+
+
+def tool_home(variable: str, default: str) -> Path:
+    """Return the configuration home a tool reads from VARIABLE, else ~/DEFAULT."""
+    value = os.environ.get(variable)
+    return Path(value).expanduser() if value else Path.home() / default
+
+
+def claude_projects() -> Path:
+    return tool_home("CLAUDE_CONFIG_DIR", ".claude") / "projects"
+
+
+def codex_sessions() -> Path:
+    return tool_home("CODEX_HOME", ".codex") / "sessions"
 
 
 def claude_slug(cwd: str) -> str:
@@ -124,7 +138,7 @@ def latest(project: str, codex: bool, exclude: str | None) -> Path:
 
     if codex:
         target = str(Path(project).expanduser().resolve())
-        rollouts = sorted(CODEX_SESSIONS.glob("*/*/*/rollout-*.jsonl"),
+        rollouts = sorted(codex_sessions().glob("*/*/*/rollout-*.jsonl"),
                           key=lambda p: p.stat().st_mtime, reverse=True)
         for p in rollouts[:CODEX_SCAN_LIMIT]:
             if not keep(p):
@@ -136,7 +150,7 @@ def latest(project: str, codex: bool, exclude: str | None) -> Path:
         sys.exit(f"no Codex rollout with cwd {target} among the newest {CODEX_SCAN_LIMIT}")
     d = Path(project).expanduser()
     if not any(d.glob("*.jsonl")):
-        d = CLAUDE_PROJECTS / claude_slug(project)
+        d = claude_projects() / claude_slug(project)
     candidates = [p for p in d.glob("*.jsonl") if keep(p)]
     if not candidates:
         sys.exit(f"no Claude transcripts in {d}")
