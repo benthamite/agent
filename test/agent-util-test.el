@@ -7,6 +7,9 @@
 ;;; Code:
 
 (require 'ert)
+(require 'agent-test-helper
+         (expand-file-name "agent-test-helper"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 (require 'agent-util)
 
 (defmacro agent-util-test--with-file (contents &rest body)

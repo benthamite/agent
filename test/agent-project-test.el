@@ -6,6 +6,9 @@
 
 (require 'cl-lib)
 (require 'ert)
+(require 'agent-test-helper
+         (expand-file-name "agent-test-helper"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 (require 'agent-project)
 
 (defmacro agent-project-test--with-tree (var specs &rest body)

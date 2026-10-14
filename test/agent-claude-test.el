@@ -5,6 +5,9 @@
 ;;; Code:
 
 (require 'ert)
+(require 'agent-test-helper
+         (expand-file-name "agent-test-helper"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 (require 'json)
 (require 'agent-account)
 (require 'agent-claude)
@@ -13,18 +16,17 @@
 ;;;; Isolation
 
 ;; Session events schedule a `claude agents' query for the session's config
-;; directory, which is the user's own unless a test mocks it.  A query a test
-;; leaves behind fires during whichever later test is waiting then.  A query
-;; a test starts without mocking it runs a command that cannot start, never
-;; the real one.
+;; directory, which is the user's own unless a test mocks it.  The shared
+;; helper cancels the timer of a query a test leaves scheduled; its state is
+;; forgotten here, so a later test does not see a query as scheduled or
+;; running.  A query a test starts without mocking it runs a command that
+;; cannot start, never the real one.
 (setq agent-claude-agents-command '("agent-claude-test-unmocked-query"))
 
 (defun agent-claude-test--isolate-queries (run test)
-  "Call RUN on TEST, then cancel and forget the status queries it left."
+  "Call RUN on TEST, then forget the status queries it left."
   (unwind-protect
       (funcall run test)
-    (maphash (lambda (_dir timer) (cancel-timer timer))
-             agent-claude--agents-timers)
     (dolist (table (list agent-claude--agents-timers
                          agent-claude--agents-queries
                          agent-claude--agents-rerun
