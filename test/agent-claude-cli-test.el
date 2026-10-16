@@ -248,5 +248,35 @@ known to be corrupt."
                        "s1"))
       (delete-file file))))
 
+;;;; Background sessions
+
+(defconst agent-claude-cli-test--sessions-json
+  "[{\"pid\":1,\"id\":\"420819cf\",\"kind\":\"background\",
+     \"sessionId\":\"420819cf-9776\"},
+    {\"pid\":2,\"kind\":\"interactive\",\"sessionId\":\"11e3c9fd-17e5\"}]"
+  "Output of `claude agents --json' with one background session.")
+
+(ert-deftest agent-claude-cli-test-background-attach-id-matches-session ()
+  "Return the short id of a background session with the given full id."
+  (should (equal (agent-claude-cli-background-attach-id
+                  agent-claude-cli-test--sessions-json "420819cf-9776")
+                 "420819cf")))
+
+(ert-deftest agent-claude-cli-test-background-attach-id-ignores-interactive ()
+  "Return nil for an interactive or unknown session."
+  (should-not (agent-claude-cli-background-attach-id
+               agent-claude-cli-test--sessions-json "11e3c9fd-17e5"))
+  (should-not (agent-claude-cli-background-attach-id
+               agent-claude-cli-test--sessions-json "absent")))
+
+(ert-deftest agent-claude-cli-test-background-attach-id-warns-on-bad-json ()
+  "Warn once and return nil when the output is not JSON."
+  (let ((agent-claude-cli--warned nil)
+        (warnings nil))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (&rest args) (push args warnings))))
+      (should-not (agent-claude-cli-background-attach-id "not json" "x")))
+    (should (= (length warnings) 1))))
+
 (provide 'agent-claude-cli-test)
 ;;; agent-claude-cli-test.el ends here

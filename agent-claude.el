@@ -2041,19 +2041,43 @@ SESSION is an `agent-session'.  INITIAL-PROMPT is passed to the Claude
 CLI as the opening user message.  RESUME-ID resumes that session id.
 FORK non-nil adds `--fork-session' to a resume.  The session account
 is bound as `agent-account--starting' by `agent-start-session' so
-environment hooks see it at spawn time."
+environment hooks see it at spawn time.
+
+A resume without FORK of a session that is still running in the
+background attaches to it instead, since the CLI refuses to resume a
+live session; INITIAL-PROMPT is then not sent."
   (setf (agent-session-directory session)
         (agent--session-source-directory
          (or (agent-session-directory session) (claude-code--directory))))
-  (let* ((switches (append (when resume-id (list "--resume" resume-id))
-                           (when fork (list "--fork-session"))
-                           (when initial-prompt (list initial-prompt))))
-         (buffer (agent-claude--start-with-overrides
-                  (agent-session-directory session)
-                  (agent-session-instance session)
-                  switches)))
+  (let* ((attach-id (and resume-id (not fork)
+                         (agent-claude--background-attach-id
+                          resume-id (agent-session-directory session))))
+         (switches (if attach-id
+                       (list "attach" attach-id)
+                     (append (when resume-id (list "--resume" resume-id))
+                             (when fork (list "--fork-session"))
+                             (when initial-prompt (list initial-prompt)))))
+         (buffer (let ((claude-code-program-switches
+                        (unless attach-id claude-code-program-switches)))
+                   (agent-claude--start-with-overrides
+                    (agent-session-directory session)
+                    (agent-session-instance session)
+                    switches))))
+    (when (and attach-id initial-prompt)
+      (message "Attached to running session %s; prompt not sent" attach-id))
     (agent--set-session buffer session)
     buffer))
+
+(defun agent-claude--background-attach-id (session-id dir)
+  "Return the attach id of SESSION-ID if it runs in the background, or nil.
+Query the CLI under the account of the session starting in DIR.  A
+failed query returns nil, so the caller resumes as before."
+  (let ((process-environment
+         (append (agent-claude-account-env nil dir) process-environment)))
+    (with-temp-buffer
+      (when (eql 0 (apply #'call-process claude-code-program nil
+                          '(t nil) nil agent-claude-cli-list-sessions-args))
+        (agent-claude-cli-background-attach-id (buffer-string) session-id)))))
 
 (defun agent-claude--start-with-overrides (dir instance switches)
   "Run `claude-code--start' with DIR and INSTANCE injected.

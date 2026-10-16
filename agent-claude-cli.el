@@ -481,6 +481,38 @@ itself) never observes a truncated file."
          (delete-file temp))
        (signal (car err) (cdr err))))))
 
+;;;; Background sessions
+
+;; CLI convention: a session whose terminal closes while it is working
+;; keeps running in the background.  `claude --resume ID' refuses such
+;; a session until it stops; `claude attach SHORT-ID' reopens it.
+;; `claude agents --json' lists live sessions as an array of objects
+;; whose `sessionId' is the full id, `kind' is "background" or
+;; "interactive", and `id' is the short id `attach' takes.
+;; Last verified against Claude Code 2.1.302 on 2026-10-16.
+
+(defconst agent-claude-cli-list-sessions-args '("agents" "--json")
+  "CLI arguments that print the live sessions as JSON.")
+
+(defun agent-claude-cli-background-attach-id (json session-id)
+  "Return the id that attaches to background session SESSION-ID, or nil.
+JSON is the output of the CLI run with
+`agent-claude-cli-list-sessions-args'.  Return nil when SESSION-ID is
+not a live background session.  Unparseable JSON warns once and
+returns nil, so the caller resumes as before."
+  (condition-case nil
+      (when-let* ((entry (seq-find
+                          (lambda (entry)
+                            (and (equal (plist-get entry :sessionId) session-id)
+                                 (equal (plist-get entry :kind) "background")))
+                          (json-parse-string json :object-type 'plist
+                                             :array-type 'list))))
+        (plist-get entry :id))
+    (error
+     (agent-claude-cli--warn-once
+      'list-sessions "unparseable output from `claude agents --json'")
+     nil)))
+
 ;;;; Provide
 
 (provide 'agent-claude-cli)

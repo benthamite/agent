@@ -2080,6 +2080,33 @@ Run the hook as session UUID with state files in STATUS-DIR."
             (should (eq (agent-session buffer) session))))
       (kill-buffer buffer))))
 
+(ert-deftest agent-claude-test-start-session-attaches-background-session ()
+  "Attach to a resumed session that is still running in the background."
+  (let ((buffer (generate-new-buffer " *claude-test-session*"))
+        (claude-code-program-switches '("--chrome"))
+        captured-switches captured-program-switches)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-account-sync) #'ignore)
+                  ((symbol-function 'agent-claude--background-attach-id)
+                   (lambda (session-id _dir)
+                     (and (equal session-id "abc-full") "abc")))
+                  ((symbol-function 'claude-code--start)
+                   (lambda (_arg switches &optional _force-prompt _force-switch)
+                     (setq captured-switches switches)
+                     (setq captured-program-switches
+                           claude-code-program-switches)
+                     buffer)))
+          (let ((session (agent-session-create
+                          :backend 'claude-code
+                          :directory "/tmp/project/")))
+            (agent-start-session session :resume-id "abc-full")
+            (should (equal captured-switches '("attach" "abc")))
+            (should-not captured-program-switches)
+            (agent-start-session session :resume-id "other")
+            (should (equal captured-switches '("--resume" "other")))
+            (should (equal captured-program-switches '("--chrome")))))
+      (kill-buffer buffer))))
+
 ;;;; Minor mode
 
 (ert-deftest agent-claude-test-snippet-start-hook-function-is-autoloaded ()
