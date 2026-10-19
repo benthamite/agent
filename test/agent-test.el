@@ -1451,6 +1451,46 @@ sentinel has run."
           (agent-exit))
         (should ran)))))
 
+(ert-deftest agent-test-exit-snoozes-session-before-chain ()
+  "Snooze the session before the before-exit functions run."
+  (let ((agent-backends nil)
+        (agent-before-exit-functions nil)
+        snoozed-during-chain)
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))))
+        (add-hook 'agent-before-exit-functions
+                  (lambda (_backend buffer)
+                    (setq snoozed-during-chain
+                          (agent-session-snoozed-p buffer))
+                    nil))
+        (agent-exit)
+        (should snoozed-during-chain)
+        (should (agent-session-snoozed-p buf))
+        ;; A repeated exit request keeps the session snoozed.
+        (agent-exit)
+        (should (agent-session-snoozed-p buf))))))
+
+(ert-deftest agent-test-exit-declined-confirmation-leaves-session-unsnoozed ()
+  "Do not snooze the session when the exit is declined at confirmation."
+  (let ((agent-backends nil)
+        (agent-before-exit-functions nil))
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))))
+        (cl-letf (((symbol-function 'agent--confirm-no-captured-prompts)
+                   (lambda (&rest _) nil)))
+          (agent-exit))
+        (should-not (agent-session-snoozed-p buf))))))
+
 (ert-deftest agent-test-exit-runs-configured-skills-without-threshold ()
   "Run configured skills on every normal exit regardless of session age."
   (let ((agent-backends nil)

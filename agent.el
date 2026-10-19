@@ -2321,11 +2321,10 @@ registered, use it.  Otherwise, prompt."
 
 (defun agent--run-before-exit-functions (backend buffer)
   "Return non-nil if BACKEND session BUFFER should exit."
-  (and (agent--confirm-no-captured-prompts backend buffer "Exit")
-       (catch 'abort
-         (dolist (fn agent-before-exit-functions t)
-           (unless (funcall fn backend buffer)
-             (throw 'abort nil))))))
+  (catch 'abort
+    (dolist (fn agent-before-exit-functions t)
+      (unless (funcall fn backend buffer)
+        (throw 'abort nil)))))
 
 (defun agent--confirm-no-captured-prompts (backend buffer action)
   "Confirm ACTION for BACKEND session BUFFER when captures are pending.
@@ -3581,16 +3580,21 @@ repeated calls and pre-existing sentinels all run."
 ;;;###autoload
 (defun agent-exit ()
   "Exit the current AI session and kill its buffer.
-Runs the before-exit chain, then submits `/exit'.  Claude Code
-handles `/exit' natively; the codex backend intercepts it and
-kills the session, since the Codex CLI has no `/exit'."
+Once any pending captured prompts are confirmed away, snoozes the
+session, so that it stays out of the way while the before-exit chain
+runs, then runs that chain and submits `/exit'.  Claude Code handles
+`/exit' natively; the codex backend intercepts it and kills the
+session, since the Codex CLI has no `/exit'."
   (interactive)
   (let* ((session (or (agent-session)
                       (user-error "Not in an AI session buffer")))
          (backend (agent-session-backend session))
          (buffer (current-buffer)))
-    (when (agent--run-before-exit-functions backend buffer)
-      (agent--exit-session buffer))))
+    (when (agent--confirm-no-captured-prompts backend buffer "Exit")
+      (unless (agent-session-snoozed-p buffer)
+        (agent-toggle-snooze buffer))
+      (when (agent--run-before-exit-functions backend buffer)
+        (agent--exit-session buffer)))))
 
 ;;;###autoload
 (defun agent-exit-without-skills ()
