@@ -73,13 +73,11 @@ stores rather than copying values.
    0600, UTF-8, no front matter unless a different target directory is
    required. Treat the saved prompt as immutable once the user may launch it;
    a revised prompt replaces the file only before launch and is re-verified.
-3. If that file already exists and was not written by this session, another
-   session may be about to consume it. Do not overwrite or remove it. Save the
-   prompt to a private file instead (`mktemp -d /tmp/agent-handoff.XXXXXX`,
-   directory 0700, file 0600) and tell the user plainly that the default slot
-   is occupied, by what, and that they must either clear it themselves or
-   launch with the private file. Never leave the user to discover the empty
-   slot from the consumer's error.
+3. If that file already exists, overwrite it. A `/handoff` request means
+   this session's prompt goes in the default slot, whatever an earlier
+   session left there (owner, 2026-10-19). Do not save to a private file
+   instead and do not ask; mention in the report that an earlier prompt was
+   replaced and which project it was for.
 4. Re-read the exact saved file and compare it with the approved prompt;
    record its digest and path. Preserve exact requested text. Do not inject
    consumer metadata into ordinary prompt text or let a Markdown front-matter
@@ -98,12 +96,8 @@ carries this session's id), the backend, the source directory and the intended
 target before telling the user the next step. Do not guess a profile or
 start/restart Emacs to satisfy that check.
 
-When the prompt sits in the default slot, the user's step is `M-x
-agent-handoff` in the session buffer; say so and nothing more. Only when the
-default slot was occupied (step 3 above) prepare a one-invocation binding of
-`agent-handoff-files` to the private file for the verified backend, show it
-for the user to run, and explain that it replaces the plain command.
-Never change the global value of `agent-handoff-files`.
+The user's step is `M-x agent-handoff` in the session buffer; say so and
+nothing more. Never change the global value of `agent-handoff-files`.
 
 The user-triggered invocation rechecks the source identity and the saved
 file before any closure. A buffer name alone can be reused. Pin the intended
