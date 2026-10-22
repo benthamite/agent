@@ -3877,23 +3877,122 @@ because only then can it be resumed."
 
 (defun agent--read-session-registry ()
   "Return the registry stored in `agent-session-registry-file', or nil."
-  (when (file-exists-p agent-session-registry-file)
-    (with-temp-buffer
-      (insert-file-contents agent-session-registry-file)
-      (read (current-buffer)))))
+  (agent--read-data-file agent-session-registry-file))
 
 (defun agent--write-session-registry (registry)
   "Atomically write REGISTRY to `agent-session-registry-file'; return it."
+  (agent--write-data-file agent-session-registry-file registry))
+
+(defun agent--read-data-file (file)
+  "Return the Lisp object stored in FILE, or nil when FILE does not exist."
+  (when (file-exists-p file)
+    (with-temp-buffer
+      (insert-file-contents file)
+      (read (current-buffer)))))
+
+(defun agent--write-data-file (file data)
+  "Atomically write the Lisp object DATA to FILE; return DATA."
   (let ((temp (make-temp-file (expand-file-name
-                               "agent-sessions-"
-                               (file-name-directory
-                                agent-session-registry-file)))))
+                               (concat (file-name-base file) "-")
+                               (file-name-directory file)))))
     (with-temp-file temp
       (let ((print-length nil)
             (print-level nil))
-        (prin1 registry (current-buffer))))
-    (rename-file temp agent-session-registry-file t))
-  registry)
+        (prin1 data (current-buffer))))
+    (rename-file temp file t))
+  data)
+
+;;;; Named session groups
+
+(defcustom agent-session-groups-file
+  (locate-user-emacs-file "agent-session-groups.eld")
+  "File storing the session groups `agent-save-session-group' saves.
+Each group maps a name to the resumable sessions that were live when it
+was saved, recorded in the same form as `agent-session-registry-file'."
+  :type 'file
+  :group 'agent)
+
+;;;###autoload
+(defun agent-save-session-group (name)
+  "Save every live resumable session as the session group NAME.
+`agent-restore-session-group' resumes the group later.  Saving under an
+existing NAME replaces that group after confirmation."
+  (interactive
+   (list (completing-read "Save sessions as group: "
+                          (mapcar #'car (agent--read-session-groups)))))
+  (when (string-empty-p name)
+    (user-error "Group name cannot be empty"))
+  (let ((entries (agent--session-registry-entries))
+        (groups (agent--read-session-groups)))
+    (unless entries
+      (user-error "No resumable sessions to save"))
+    (when (and (assoc name groups)
+               (not (y-or-n-p (format "Replace session group `%s'? " name))))
+      (user-error "Session group `%s' not replaced" name))
+    (agent--write-session-groups
+     (cons (cons name (list :saved (float-time) :sessions entries))
+           (assoc-delete-all name groups)))
+    (message "Saved %d session%s as group `%s'" (length entries)
+             (if (cdr entries) "s" "") name)))
+
+;;;###autoload
+(defun agent-restore-session-group (name)
+  "Resume every session saved in the session group NAME.
+Sessions already live in this Emacs are skipped.  The group is kept, so
+it can be restored again; the sessions that fail to resume are reported."
+  (interactive (list (agent--read-session-group-name "Restore session group: ")))
+  (let* ((group (or (cdr (assoc name (agent--read-session-groups)))
+                    (user-error "No session group named `%s'" name)))
+         (pending (seq-remove (lambda (entry)
+                                (agent--buffer-for-session-id
+                                 (plist-get entry :id)))
+                              (plist-get group :sessions))))
+    (unless pending
+      (user-error "Every session in group `%s' is already live" name))
+    (let ((failed (agent--restore-session-entries pending)))
+      (if failed
+          (message "Resumed %d of %d sessions; failed: %s"
+                   (- (length pending) (length failed)) (length pending)
+                   (mapconcat #'cdr failed "; "))
+        (message "Resumed %d session%s from group `%s'" (length pending)
+                 (if (cdr pending) "s" "") name)))))
+
+;;;###autoload
+(defun agent-delete-session-group (name)
+  "Delete the session group NAME."
+  (interactive (list (agent--read-session-group-name "Delete session group: ")))
+  (agent--write-session-groups
+   (assoc-delete-all name (agent--read-session-groups)))
+  (message "Deleted session group `%s'" name))
+
+(defun agent--read-session-group-name (prompt)
+  "Read the name of a saved session group with PROMPT.
+Each candidate is annotated with its session count and save time."
+  (let ((groups (or (agent--read-session-groups)
+                    (user-error "No saved session groups"))))
+    (completing-read
+     prompt
+     (lambda (string predicate action)
+       (if (eq action 'metadata)
+           `(metadata
+             (annotation-function
+              . ,(lambda (name)
+                   (when-let* ((group (cdr (assoc name groups))))
+                     (format "  %d session%s, saved %s"
+                             (length (plist-get group :sessions))
+                             (if (cdr (plist-get group :sessions)) "s" "")
+                             (format-time-string
+                              "%F %R" (plist-get group :saved)))))))
+         (complete-with-action action groups string predicate)))
+     nil t)))
+
+(defun agent--read-session-groups ()
+  "Return the alist of session groups in `agent-session-groups-file'."
+  (agent--read-data-file agent-session-groups-file))
+
+(defun agent--write-session-groups (groups)
+  "Atomically write GROUPS to `agent-session-groups-file'; return them."
+  (agent--write-data-file agent-session-groups-file groups))
 
 ;;;; Transient boolean infix class
 
@@ -4310,6 +4409,9 @@ when it is not installed."
     ("n" "new session" agent-start-new-session)
     ("r" "resume session" agent-resume)
     ("O" "restore sessions" agent-restore-sessions)
+    ("g s" "save session group" agent-save-session-group)
+    ("g r" "restore session group" agent-restore-session-group)
+    ("g d" "delete session group" agent-delete-session-group)
     ("s" "select session" agent-select-session)
     ("w" "jump to waiting" agent-jump-to-waiting)
     ("l" "open log" agent-history)]

@@ -3824,6 +3824,7 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
     (dolist (key '("l" "r" "O" "R" "s" "b n" "b s" "a l" "a u" "n" "X" "-a" "-c" "-w"
+                   "g s" "g r" "g d"
                    "t ." "t r" "p c" "p i" "p b"))
       (should (member key keys)))
     (dolist (key '("H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
@@ -3832,6 +3833,9 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
       (should-not (member key keys))))
   (dolist (binding '(("r" . agent-resume)
                      ("O" . agent-restore-sessions)
+                     ("g s" . agent-save-session-group)
+                     ("g r" . agent-restore-session-group)
+                     ("g d" . agent-delete-session-group)
                      ("R" . agent-restart)
                      ("s" . agent-select-session)))
     (should (eq (plist-get (cdr (transient-get-suffix 'agent-menu (car binding)))
@@ -4929,6 +4933,84 @@ is itself a kind of `error' and nothing here should special-case it."
           (should (equal (plist-get (agent--read-session-registry) :previous)
                          (list :saved 100.0 :sessions (list bad)))))
       (delete-file agent-session-registry-file))))
+
+;;;; Named session groups
+
+(ert-deftest agent-test-save-session-group-records-live-sessions ()
+  "Saving records the live sessions and replaces a same-named group."
+  (let* ((agent-session-groups-file (make-temp-file "agent-groups"))
+         (one '(:backend one :id "sid-1"))
+         (two '(:backend one :id "sid-2"))
+         (entries (list one)))
+    (unwind-protect
+        (progn
+          (delete-file agent-session-groups-file)
+          (cl-letf (((symbol-function 'agent--session-registry-entries)
+                     (lambda () entries))
+                    ((symbol-function 'y-or-n-p) (lambda (_prompt) t)))
+            (agent-save-session-group "work")
+            (agent-save-session-group "other")
+            (setq entries (list one two))
+            (agent-save-session-group "work"))
+          (let ((groups (agent--read-session-groups)))
+            (should (equal (mapcar #'car groups) '("work" "other")))
+            (should (equal (plist-get (cdr (assoc "work" groups)) :sessions)
+                           (list one two)))))
+      (when (file-exists-p agent-session-groups-file)
+        (delete-file agent-session-groups-file)))))
+
+(ert-deftest agent-test-save-session-group-refuses-without-sessions ()
+  "Saving with no resumable session signals instead of writing a group."
+  (let ((agent-session-groups-file (make-temp-file "agent-groups")))
+    (unwind-protect
+        (progn
+          (delete-file agent-session-groups-file)
+          (cl-letf (((symbol-function 'agent--session-registry-entries)
+                     #'ignore))
+            (should-error (agent-save-session-group "work")
+                          :type 'user-error))
+          (should-not (file-exists-p agent-session-groups-file)))
+      (when (file-exists-p agent-session-groups-file)
+        (delete-file agent-session-groups-file)))))
+
+(ert-deftest agent-test-restore-session-group-resumes-non-live ()
+  "Restoring resumes the group's non-live sessions and keeps the group."
+  (let* ((agent-session-groups-file (make-temp-file "agent-groups"))
+         (ok '(:backend one :account "a" :directory "~/ok/" :instance nil
+                        :id "sid-ok" :options (:x 1)))
+         (live '(:backend one :account "a" :directory "~/live/" :instance nil
+                          :id "sid-live" :options nil))
+         (groups (list (cons "work" (list :saved 100.0
+                                          :sessions (list ok live)))))
+         started)
+    (unwind-protect
+        (progn
+          (agent--write-session-groups groups)
+          (cl-letf (((symbol-function 'agent--buffer-for-session-id)
+                     (lambda (id) (equal id "sid-live")))
+                    ((symbol-function 'agent-start-session)
+                     (lambda (session &rest options)
+                       (push (cons (agent-session-directory session) options)
+                             started))))
+            (agent-restore-session-group "work")
+            (should-error (agent-restore-session-group "missing")
+                          :type 'user-error))
+          (should (equal started '(("~/ok/" :resume-id "sid-ok" :x 1))))
+          (should (equal (agent--read-session-groups) groups)))
+      (delete-file agent-session-groups-file))))
+
+(ert-deftest agent-test-delete-session-group-removes-only-named ()
+  "Deleting removes the named group and keeps the others."
+  (let ((agent-session-groups-file (make-temp-file "agent-groups")))
+    (unwind-protect
+        (progn
+          (agent--write-session-groups
+           (list (cons "work" (list :saved 1.0 :sessions nil))
+                 (cons "other" (list :saved 2.0 :sessions nil))))
+          (agent-delete-session-group "work")
+          (should (equal (mapcar #'car (agent--read-session-groups))
+                         '("other"))))
+      (delete-file agent-session-groups-file))))
 
 (provide 'agent-test)
 ;;; agent-test.el ends here
