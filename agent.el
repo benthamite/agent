@@ -3916,7 +3916,8 @@ was saved, recorded in the same form as `agent-session-registry-file'."
 (defun agent-save-session-group (name)
   "Save every live resumable session as the session group NAME.
 `agent-restore-session-group' resumes the group later.  Saving under an
-existing NAME replaces that group after confirmation."
+existing NAME replaces that group after confirmation.  Afterwards, offer
+to close the saved sessions as `agent-exit-without-skills' does."
   (interactive
    (list (completing-read "Save sessions as group: "
                           (mapcar #'car (agent--read-session-groups)))))
@@ -3933,7 +3934,20 @@ existing NAME replaces that group after confirmation."
      (cons (cons name (list :saved (float-time) :sessions entries))
            (assoc-delete-all name groups)))
     (message "Saved %d session%s as group `%s'" (length entries)
-             (if (cdr entries) "s" "") name)))
+             (if (cdr entries) "s" "") name)
+    (when (y-or-n-p (format "Close the %d saved session%s? " (length entries)
+                            (if (cdr entries) "s" "")))
+      (agent--exit-sessions-without-skills
+       (delq nil (mapcar (lambda (entry)
+                           (agent--buffer-for-session-id
+                            (plist-get entry :id)))
+                         entries))))))
+
+(defun agent--exit-sessions-without-skills (buffers)
+  "Exit each session in BUFFERS as `agent-exit-without-skills' does."
+  (dolist (buffer buffers)
+    (with-current-buffer buffer
+      (agent-exit-without-skills))))
 
 ;;;###autoload
 (defun agent-restore-session-group (name)
@@ -4409,12 +4423,14 @@ when it is not installed."
     ("n" "new session" agent-start-new-session)
     ("r" "resume session" agent-resume)
     ("O" "restore sessions" agent-restore-sessions)
-    ("g s" "save session group" agent-save-session-group)
-    ("g r" "restore session group" agent-restore-session-group)
-    ("g d" "delete session group" agent-delete-session-group)
     ("s" "select session" agent-select-session)
     ("w" "jump to waiting" agent-jump-to-waiting)
-    ("l" "open log" agent-history)]
+    ("l" "open log" agent-history)
+    ""
+    "Session groups"
+    ("g s" "save" agent-save-session-group)
+    ("g r" "restore" agent-restore-session-group)
+    ("g d" "delete" agent-delete-session-group)]
    ["Current session"
     ("b n" "new branch" agent-create-branch)
     ("b s" "switch branch" agent-switch-branch)
