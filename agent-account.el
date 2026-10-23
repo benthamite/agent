@@ -272,6 +272,43 @@ BACKEND does not declare."
              (car rule) backend selection))
     selection))
 
+(defcustom agent-account-origin-rules nil
+  "Rules tying the origin of a routed thing to an account.
+Each element is (REGEXP . SELECTION).  A thing routed with
+`agent-act-on-thing-at-point' whose origin matches REGEXP has its
+project chosen from the sources `agent-project-sources' gives
+SELECTION, instead of those of the persisted current selection.
+SELECTION has the shape it has in `agent-account-directory-rules'.  The
+first matching rule wins.
+
+An origin is a string naming where the thing comes from: \"slack:\"
+followed by the Slack team name for a Slack message, and \"mu4e:\"
+followed by the maildir for an email, such as \"mu4e:/work/Inbox\".
+Things of other kinds have no origin."
+  :type '(alist :key-type regexp
+                :value-type (choice
+                             (string :tag "Account or pool for every backend")
+                             (alist :tag "Account or pool per backend"
+                                    :key-type symbol
+                                    :value-type string)))
+  :group 'agent)
+
+(defun agent-account-origin-selection (backend origin)
+  "Return the account or pool ORIGIN's rule names for BACKEND, or nil.
+Consult `agent-account-origin-rules'.  Return nil when ORIGIN is nil or
+no rule governs it for BACKEND.  Signal an error when the matching rule
+names a selection BACKEND does not declare."
+  (when-let* ((origin)
+              (rule (cl-find-if (lambda (rule)
+                                  (string-match-p (car rule) origin))
+                                agent-account-origin-rules))
+              (spec (cdr rule))
+              (selection (if (stringp spec) spec (alist-get backend spec))))
+    (unless (member selection (agent-account-selection-names backend))
+      (error "Account rule for origin %s names no %s account or pool `%s'"
+             (car rule) backend selection))
+    selection))
+
 (defun agent-account--directory-rule (directory)
   "Return the `agent-account-directory-rules' entry governing DIRECTORY.
 Try DIRECTORY itself first, then its common Git directory, so a linked

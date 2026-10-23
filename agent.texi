@@ -198,6 +198,15 @@ The persisted selection is global, so on its own it would start a session for on
           ("~/My Drive/Forethought/" . "forethought")))
 @end lisp
 
+@vindex agent-account-origin-rules
+A thing routed with @code{agent-act-on-thing-at-point} has no directory yet, so the directory rules cannot pick the account whose project sources it is offered. @code{agent-account-origin-rules} ties where the thing comes from to an account instead: each rule is @samp{(REGEXP . SELECTION)}, with SELECTION shaped as in the directory rules, and the first rule whose REGEXP matches the thing's origin names the account. A Slack message's origin is @samp{slack:} followed by the name its team was registered under, and an email's is @samp{mu4e:} followed by its maildir; other things have none, and a thing whose origin no rule matches uses the persisted selection. For example:
+
+@lisp
+(setopt agent-account-origin-rules
+        '(("\\`slack:Forethought\\'" . "forethought")
+          ("\\`mu4e:/forethought/" . "forethought")))
+@end lisp
+
 @findex agent-account-login
 Credentials are part of the account model too. A backend may declare the account-local credentials file inside each home (@samp{auth.json} for Codex) and the CLI arguments of its login flow. @code{agent-account-login} — bound to @samp{a l} in @code{agent-menu} — runs that login flow with the selected account's environment, so the credentials always land in the right account home; running the bare CLI login in a terminal would write to the backend's default home instead. The command shows the login output, including the authentication URL, in a dedicated buffer and reports success or failure when the flow finishes. Session starts guard on the same declaration: when an account's credentials file is missing — after the in-session logout command, or when tokens were removed out of band — @code{agent-start-session} refuses to spawn a session that could only fail to authenticate and points at @code{agent-account-login} instead. Backends that do not declare a credentials file (Claude Code stores credentials in the macOS Keychain) are assumed logged in and never blocked.
 
@@ -301,7 +310,7 @@ Snippet helpers use @samp{yasnippet} and @samp{consult-yasnippet} only when thos
 @findex agent-project-read
 The @samp{agent-project} module enumerates the projects a session can be started in when the thing the session acts on carries no directory of its own. The user option @code{agent-project-sources} is an alist of (REGEXP . SOURCES). The regexp is searched for anywhere in the account name of the backend that will run the session — anchor it with @samp{\`} and @samp{\'} to match a whole name, since a bare @samp{"epoch"} also matches an account called @samp{epoch-personal} — and the first matching entry wins, so an empty regexp is a catch-all that also covers a backend with no account selected. It defaults to one catch-all entry listing @code{project-known} followed by @samp{~/repos/*}, @samp{~/code/*}, @samp{~/src/*}, @samp{~/projects/*} and @samp{~/Developer/*}; a directory that does not exist contributes nothing.
 
-Each source is the symbol @code{project-known}, a registry file, whose name ends in @samp{.json}, a @samp{(FILE . ROOT)} pair naming a registry file together with its root, or a path pattern. @code{project-known} stands for the local projects Emacs remembers, as listed by @code{project-known-project-roots}; remote roots and roots that no longer exist are passed over.
+Each source is the symbol @code{project-known}, a function symbol, a registry file, whose name ends in @samp{.json}, a @samp{(FILE . ROOT)} pair naming a registry file together with its root, or a path pattern. @code{project-known} stands for the local projects Emacs remembers, as listed by @code{project-known-project-roots}; remote roots and roots that no longer exist are passed over. Any other symbol names a function called with no arguments that returns project directories, which are offered whether or not they are repositories; @samp{forethought-project-dirs} is one.
 
 A path pattern may contain wildcards. A wildcard is @samp{*}, @samp{?}, or a @samp{[...]} character class, and a pattern containing one is expanded a single level per wildcard component: @samp{~/repos/*} reaches the children of @samp{~/repos/}, and @samp{~/repos/.worktrees/*/*} its grandchildren two levels down. Wildcard expansion keeps only git repositories and worktrees; a worktree records its git directory in a file rather than a directory, and both count. A pattern without a wildcard names exactly one directory, which is kept whether or not it is a repository, and dropped when it does not exist or is not a directory. A pattern that cannot be expanded at all, such as one holding an unbalanced @samp{[}, is reported in the echo area and skipped, so one malformed source never suppresses the candidates of the others.
 

@@ -3881,11 +3881,34 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
       (search-forward "Needs you")
       (should (eq (agent--extractor-at-point) 'agent-slack-resume-context)))))
 
+(ert-deftest agent-test-extractor-origin-picks-account ()
+  "A thing whose origin a rule names is routed under that rule's account."
+  (let ((agent-account-origin-rules '(("\\`slack:Work\\'" . "work")))
+        target)
+    (put 'agent-test--origin-extractor 'agent-origin-function
+         (lambda () "slack:Work"))
+    (fset 'agent-test--origin-extractor
+          (lambda (callback) (funcall callback '(:text "hi"))))
+    (cl-letf (((symbol-function 'agent--resolve-backend) (lambda () 'stub))
+              ((symbol-function 'agent-account-selection-names)
+               (lambda (_) '("work" "personal")))
+              ((symbol-function 'agent-account-current)
+               (lambda (_) "personal"))
+              ((symbol-function 'agent--deliver-context)
+               (lambda (_context _existing _origin resolved)
+                 (setq target resolved))))
+      (agent--act-on-context 'agent-test--origin-extractor nil)
+      (should (equal target '(stub . "work")))
+      (put 'agent-test--origin-extractor 'agent-origin-function
+           (lambda () "slack:Other"))
+      (agent--act-on-context 'agent-test--origin-extractor nil)
+      (should (equal target '(stub . "personal"))))))
+
 (ert-deftest agent-test-session-naming-extractor-prompts-for-nothing ()
   "Acting on a thing that names a session resolves no backend."
   (let (delivered)
     (cl-letf (((symbol-function 'agent--resolve-backend-account)
-               (lambda () (error "Should not resolve a backend")))
+               (lambda (&rest _) (error "Should not resolve a backend")))
               ((symbol-function 'agent--deliver-context)
                (lambda (context existing _origin target)
                  (setq delivered (list context existing target)))))

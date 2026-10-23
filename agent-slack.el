@@ -55,6 +55,7 @@
 (declare-function slack-message-body "slack-message")
 (declare-function slack-room-find "slack-room")
 (declare-function slack-room-find-message "slack-room")
+(declare-function slack-team-name "slack-team")
 (declare-function slack-request "slack-request")
 (declare-function slack-request-create "slack-request")
 
@@ -81,6 +82,15 @@ picks the project."
      (funcall callback (list :text (plist-get context :text)
                              :payload (plist-get context :url)
                              :submit nil)))))
+
+;;;###autoload
+(defun agent-slack-origin ()
+  "Return the origin of the Slack message at point, or nil.
+It is \"slack:\" followed by the name the buffer's team was registered
+under; see `agent-account-origin-rules'."
+  (when-let* (((require 'slack nil t))
+              (team (agent-slack--team-at-point)))
+    (concat "slack:" (slack-team-name team))))
 
 (defun agent-slack-resume-context (callback)
   "Call CALLBACK with the context reopening the session the message names.

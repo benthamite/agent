@@ -56,6 +56,8 @@
 (autoload 'agent-forge-context "agent-forge")
 (autoload 'agent-mu4e-context "agent-mu4e")
 (autoload 'agent-todo-context "agent-todo")
+(autoload 'agent-slack-origin "agent-slack")
+(autoload 'agent-mu4e-origin "agent-mu4e")
 
 ;;;; Custom group
 
@@ -3317,9 +3319,17 @@ called rather than returned to because extraction can require network
 round-trips, and it may therefore run in another buffer than the one
 the thing was read from.  An extractor that has to work for its
 directory leaves it out when `agent--context-wants-directory' says the
-directory would be discarded.")
+directory would be discarded.
+
+An extractor whose symbol has an `agent-origin-function' property names
+where its things come from: that function, called with no arguments in
+the current buffer, returns the origin string matched against
+`agent-account-origin-rules', which picks the account whose project
+sources are offered.")
 
 (put 'agent-slack-resume-context 'agent-names-session t)
+(put 'agent-slack-context 'agent-origin-function #'agent-slack-origin)
+(put 'agent-mu4e-context 'agent-origin-function #'agent-mu4e-origin)
 
 (defun agent--extractor-at-point ()
   "Return the extractor for the thing at point, or nil when there is none."
@@ -3336,24 +3346,39 @@ delivery: by the time the continuation runs, the user may have moved or
 selected another account.  A running session brings its own directory, so
 extraction is told not to resolve one, and told which account to resolve
 it for; see `agent--context-wants-directory' and
-`agent--context-account'.  An extractor whose symbol has the
-`agent-names-session' property answers with an existing session, so no
-backend or account is resolved for it and nothing is prompted for."
+`agent--context-account'.  The account is the one the thing's origin
+names, when its extractor reports one, and otherwise the persisted
+selection; see `agent--extractor-origin'.  An extractor whose symbol has
+the `agent-names-session' property answers with an existing session, so
+no backend or account is resolved for it and nothing is prompted for."
   (let* ((origin (current-buffer))
          (names-session (and (symbolp extractor)
                              (get extractor 'agent-names-session)))
          (target (unless (or existing names-session)
-                   (agent--resolve-backend-account)))
+                   (agent--resolve-backend-account
+                    (agent--extractor-origin extractor))))
          (agent--context-wants-directory (not (or existing names-session)))
          (agent--context-account (cdr target)))
     (funcall extractor
              (lambda (context)
                (agent--deliver-context context existing origin target)))))
 
-(defun agent--resolve-backend-account ()
-  "Return the current context's backend and its selected account."
+(defun agent--extractor-origin (extractor)
+  "Return the origin of the thing EXTRACTOR reads at point, or nil.
+The origin comes from the function in EXTRACTOR's `agent-origin-function'
+property, called in the current buffer."
+  (when-let* (((symbolp extractor))
+              (function (get extractor 'agent-origin-function)))
+    (funcall function)))
+
+(defun agent--resolve-backend-account (&optional thing-origin)
+  "Return the current context's backend and its account.
+The account is the selection `agent-account-origin-rules' gives
+THING-ORIGIN, the origin string of the thing being routed, and
+otherwise the persisted selection."
   (let ((backend (agent--resolve-backend)))
-    (cons backend (agent-account-current backend))))
+    (cons backend (or (agent-account-origin-selection backend thing-origin)
+                      (agent-account-current backend)))))
 
 (defun agent--deliver-context (context existing origin target)
   "Deliver CONTEXT to a session, choosing a running one when EXISTING.

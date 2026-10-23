@@ -659,6 +659,34 @@ created and removed afterwards."
         (let ((agent-account-directory-rules `((,work . "work"))))
           (should (equal (agent-account-resolve 'stub nil link) "work")))))))
 
+;;;; Origin rules
+
+(ert-deftest agent-account-test-origin-rule-names-selection ()
+  "Return the selection of the first rule matching the origin."
+  (agent-account-test--with-backend
+      (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+    (let ((agent-account-origin-rules '(("\\`slack:Work\\'" . "work")
+                                        ("\\`mu4e:/work/" . ((stub . "work"))))))
+      (should (equal (agent-account-origin-selection 'stub "slack:Work") "work"))
+      (should (equal (agent-account-origin-selection 'stub "mu4e:/work/Inbox")
+                     "work"))
+      (should-not (agent-account-origin-selection 'stub "slack:Other"))
+      (should-not (agent-account-origin-selection 'stub nil)))))
+
+(ert-deftest agent-account-test-origin-rule-skips-ungoverned-backend ()
+  "Ignore a per-backend rule that does not name the backend."
+  (agent-account-test--with-backend
+      (list :accounts '(("work" . "/tmp/w")))
+    (let ((agent-account-origin-rules '(("slack:" . ((other . "work"))))))
+      (should-not (agent-account-origin-selection 'stub "slack:Work")))))
+
+(ert-deftest agent-account-test-origin-rule-rejects-undeclared-account ()
+  "Signal when the matching rule names an account the backend lacks."
+  (agent-account-test--with-backend
+      (list :accounts '(("work" . "/tmp/w")))
+    (let ((agent-account-origin-rules '(("slack:" . "missing"))))
+      (should-error (agent-account-origin-selection 'stub "slack:Work")))))
+
 (defun agent-account-test--git (directory &rest args)
   "Run git with ARGS in DIRECTORY, signaling on failure."
   (let ((default-directory directory))

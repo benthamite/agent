@@ -100,13 +100,16 @@ REGEXP is matched against the account name of the backend that will run
 the session; the first matching entry wins, so \"\" is a catch-all that
 also covers a backend with no account selected.
 
-Each source in SOURCES is the symbol `project-known', a registry file,
+Each source in SOURCES is the symbol `project-known', a function
+symbol, a registry file,
 whose name ends in \".json\", a (FILE . ROOT) pair naming a registry
 FILE together with the directory ROOT its relative paths are expanded
 against, or a path pattern.  How a registry's root is chosen is
 described in `agent-project-registry-root'.  `project-known' stands
 for the local projects Emacs remembers, as listed by
-`project-known-project-roots'.  A wildcard is `*', `?' or a `[...]'
+`project-known-project-roots'.  Any other symbol names a function
+called with no arguments that returns project directories; it is
+signaled as void when it is not defined.  A wildcard is `*', `?' or a `[...]'
 character class, and a pattern containing one is expanded a single
 level per wildcard component, so \"*\" reaches the children of a
 directory and \"*/*\" its grandchildren, keeping only git repositories
@@ -119,6 +122,7 @@ not exist contributes nothing."
   :type '(alist :key-type regexp
                 :value-type (repeat (choice (const :tag "Projects Emacs remembers"
                                                    project-known)
+                                            (function :tag "Function returning directories")
                                             (cons :tag "Registry with its root"
                                                   file directory)
                                             string)))
@@ -204,11 +208,13 @@ ACCOUNT may be nil, which matches a catch-all entry."
 
 (defun agent-project--candidates-from-source (source)
   "Return the candidates contributed by SOURCE.
-The symbol `project-known' stands for the projects Emacs remembers, a
-SOURCE naming a JSON file is a registry, and anything else is a path
-pattern."
+The symbol `project-known' stands for the projects Emacs remembers, any
+other symbol for a function returning directories, a SOURCE naming a
+JSON file is a registry, and anything else is a path pattern."
   (cond ((eq source 'project-known)
          (agent-project--candidates-from-known-projects))
+        ((symbolp source)
+         (mapcar #'agent-project--directory-candidate (funcall source)))
         ((consp source)
          (agent-project--candidates-from-registry (expand-file-name (car source))
                                                   (cdr source)))

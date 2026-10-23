@@ -56,6 +56,16 @@ subject and sender are the text a project is chosen from."
                             :payload path
                             :submit nil))))
 
+;;;###autoload
+(defun agent-mu4e-origin ()
+  "Return the origin of the mu4e message at point, or nil.
+It is \"mu4e:\" followed by the message's maildir; see
+`agent-account-origin-rules'."
+  (when-let* (((require 'mu4e nil t))
+              (maildir (mu4e-message-field-at-point :maildir))
+              ((not (string-empty-p maildir))))
+    (concat "mu4e:" maildir)))
+
 (defun agent-mu4e--path ()
   "Return the maildir path of the message at point.
 `mu4e-message-field' sanitizes a missing string field to the empty

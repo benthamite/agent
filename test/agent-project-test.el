@@ -84,6 +84,18 @@ whether that directory is a git repository."
                                (agent-project-candidates nil))
                        '("alpha" "beta")))))))
 
+(ert-deftest agent-project-test-function-source ()
+  "Offer the directories a function source returns, repositories or not."
+  (agent-project-test--with-tree root '(("alpha" . t) ("beta" . nil))
+    (cl-letf (((symbol-function 'agent-project-test--dirs)
+               (lambda ()
+                 (list (expand-file-name "alpha" root)
+                       (expand-file-name "beta" root)))))
+      (let ((agent-project-sources '(("" . (agent-project-test--dirs)))))
+        (should (equal (mapcar (lambda (c) (plist-get c :label))
+                               (agent-project-candidates nil))
+                       '("alpha" "beta")))))))
+
 (ert-deftest agent-project-test-malformed-pattern-spares-the-others ()
   "Drop a pattern that will not compile, keeping the other sources."
   (agent-project-test--with-tree root '(("alpha" . t))
