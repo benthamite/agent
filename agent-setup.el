@@ -108,6 +108,8 @@ installing them is left to the user."
            'codex (agent-setup--program 'codex-program "codex"))
           (agent-setup--check-program 'emacsclient "emacsclient")
           (agent-setup--check-server))
+    (delq nil (list (agent-setup--check-codex-timeout
+                     (agent-setup--program 'codex-program "codex"))))
     (agent-setup--check-claude-settings)
     (agent-setup--check-skills))))
 
@@ -122,6 +124,19 @@ installing them is left to the user."
                                  (abbreviate-file-name file)))
     (list :ok nil :label (format "%s not found" name)
           :hint (alist-get name agent-setup--install-hints))))
+
+(defun agent-setup--check-codex-timeout (codex)
+  "Return the check result for the timeout program Codex sessions need, or nil.
+CODEX is the Codex program.  agent-log lists Codex sessions from a
+catalog it builds behind `timeout' or `gtimeout', and macOS ships
+neither; without one its session browser and search silently show no
+Codex sessions.  Return nil when CODEX or agent-log is not installed."
+  (when (and (executable-find codex) (locate-library "agent-log-codex"))
+    (if-let* ((file (seq-some #'executable-find '("timeout" "gtimeout"))))
+        (list :ok t :label (format "timeout found at %s"
+                                   (abbreviate-file-name file)))
+      (list :ok nil :label "timeout and gtimeout not found"
+            :hint "agent-log lists no Codex sessions without one; on macOS, run brew install coreutils"))))
 
 (defun agent-setup--check-server ()
   "Return the server check result, starting the server if the user agrees."

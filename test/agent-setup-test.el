@@ -53,6 +53,41 @@ directory as well."
   "A program on PATH is reported as found."
   (should (plist-get (agent-setup--check-program 'emacsclient "sh") :ok)))
 
+(defmacro agent-setup-test--with-programs (programs &rest body)
+  "Run BODY with `exec-path' holding only executables named PROGRAMS."
+  (declare (indent 1))
+  `(let* ((dir (make-temp-file "agent-setup-test" t))
+          (exec-path (list dir)))
+     (unwind-protect
+         (progn
+           (dolist (program ,programs)
+             (let ((file (expand-file-name program dir)))
+               (with-temp-file file (insert "#!/bin/sh\n"))
+               (set-file-modes file #o755)))
+           (cl-letf (((symbol-function 'locate-library)
+                      (lambda (library &rest _)
+                        (and (equal library "agent-log-codex")
+                             "/agent-log/agent-log-codex.el"))))
+             ,@body))
+       (delete-directory dir t))))
+
+(ert-deftest agent-setup-test-missing-timeout-is-reported-for-codex ()
+  "Codex without timeout or gtimeout is reported with how to install one."
+  (agent-setup-test--with-programs '("codex")
+    (let ((check (agent-setup--check-codex-timeout "codex")))
+      (should-not (plist-get check :ok))
+      (should (string-match-p "coreutils" (plist-get check :hint))))))
+
+(ert-deftest agent-setup-test-gtimeout-satisfies-codex ()
+  "The coreutils name gtimeout counts as the timeout program."
+  (agent-setup-test--with-programs '("codex" "gtimeout")
+    (should (plist-get (agent-setup--check-codex-timeout "codex") :ok))))
+
+(ert-deftest agent-setup-test-timeout-not-checked-without-codex ()
+  "Without Codex the timeout program is not checked."
+  (agent-setup-test--with-programs nil
+    (should-not (agent-setup--check-codex-timeout "codex"))))
+
 (ert-deftest agent-setup-test-session-settings-written ()
   "The session settings check writes the file it reports."
   (agent-setup-test--with-settings file nil
