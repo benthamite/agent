@@ -2149,6 +2149,60 @@ Run the hook as session UUID with state files in STATUS-DIR."
                                  'claude-code-send-escape))
     (should-not agent-claude--monet-gc-timer)))
 
+;;;; Parent-session markers
+
+(defun agent-claude-test--session-environment ()
+  "Return the environment `claude-code--start' would give a new session."
+  (append (apply #'append
+                 (mapcar (lambda (func) (funcall func "*claude*" "/tmp/"))
+                         claude-code-process-environment-functions))
+          process-environment))
+
+(ert-deftest agent-claude-test-mode-unsets-parent-session-markers-last ()
+  "The marker function runs after the other environment functions."
+  (let ((claude-code-notification-function #'ignore)
+        (claude-code-start-hook nil)
+        (claude-code-event-hook nil)
+        (claude-code-process-environment-functions nil)
+        (agent-scroll-keys-global-mode nil)
+        (kill-buffer-query-functions kill-buffer-query-functions))
+    (add-hook 'claude-code-process-environment-functions #'ignore)
+    (agent-claude-mode 1)
+    (unwind-protect
+        (should (eq (car (last claude-code-process-environment-functions))
+                    #'agent-claude--parent-session-env))
+      (agent-claude-mode -1))))
+
+(ert-deftest agent-claude-test-session-env-unsets-parent-session-markers ()
+  "A session started inside another drops that session's markers only."
+  (let ((process-environment '("CLAUDECODE=1"
+                               "CLAUDE_CODE_CHILD_SESSION=1"
+                               "CLAUDE_CODE_SESSION_ID=outer"
+                               "CLAUDE_CODE_SSE_PORT=1111"
+                               "CLAUDE_CODE_USE_BEDROCK=1"))
+        (claude-code-process-environment-functions
+         (list (lambda (_buffer-name _dir) '("CLAUDE_CODE_SSE_PORT=2222"))
+               #'agent-claude--parent-session-env)))
+    (let ((process-environment (agent-claude-test--session-environment)))
+      (should-not (getenv "CLAUDECODE"))
+      (should-not (getenv "CLAUDE_CODE_CHILD_SESSION"))
+      (should-not (getenv "CLAUDE_CODE_SESSION_ID"))
+      (should (equal (getenv "CLAUDE_CODE_SSE_PORT") "2222"))
+      (should (equal (getenv "CLAUDE_CODE_USE_BEDROCK") "1")))))
+
+(ert-deftest agent-claude-test-batch-env-unsets-parent-session-markers ()
+  "A non-interactive run drops the markers of the session around Emacs."
+  (let ((process-environment '("CLAUDECODE=1"
+                               "CLAUDE_CODE_CHILD_SESSION=1"
+                               "CLAUDE_CODE_USE_BEDROCK=1"))
+        (agent-claude-accounts nil)
+        (agent-account--current (make-hash-table :test #'eq)))
+    (let ((process-environment
+           (agent-claude--exec-process-environment "/tmp/")))
+      (should-not (getenv "CLAUDECODE"))
+      (should-not (getenv "CLAUDE_CODE_CHILD_SESSION"))
+      (should (equal (getenv "CLAUDE_CODE_USE_BEDROCK") "1")))))
+
 (ert-deftest agent-claude-test-mode-registers-existing-session-teardown ()
   "Enabling the mode registers teardown for already-live Claude buffers."
   (let ((buf (generate-new-buffer "*claude:~/repo/project/:default*"))

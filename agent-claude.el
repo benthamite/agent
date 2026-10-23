@@ -409,6 +409,24 @@ subprocesses and makes the Anthropic SDK build an illegal empty
 error; see `process-environment'.  This mirrors the shell `claude' shim,
 which clears the same variables with `unset'.")
 
+(defconst agent-claude--parent-session-env
+  '("CLAUDECODE" "CLAUDE_PID" "CLAUDE_CODE_ENTRYPOINT"
+    "CLAUDE_CODE_CHILD_SESSION" "CLAUDE_CODE_SESSION_ID"
+    "CLAUDE_CODE_SESSION_ATTENDED" "CLAUDE_CODE_EXECPATH"
+    "CLAUDE_CODE_SSE_PORT" "CLAUDE_CODE_MESSAGING_SOCKET"
+    "CLAUDE_CODE_MESSAGING_TOKEN" "CLAUDE_CODE_BRIDGE_SESSION_ID")
+  "Variables a Claude Code session sets for the processes it spawns.
+An Emacs started from inside a Claude Code session inherits them, and
+a session started from that Emacs would then present itself as part of
+the outer one: `CLAUDE_CODE_CHILD_SESSION', for one, turns off
+transcript saving.  Like `agent-claude--account-auth-shadow-env', each
+is a bare name, so it is unset rather than set to the empty string.
+Configuration variables such as `CLAUDE_CODE_USE_BEDROCK' are kept.")
+
+(defun agent-claude--parent-session-env (_buffer-name _dir)
+  "Return `agent-claude--parent-session-env' to unset it for a new session."
+  agent-claude--parent-session-env)
+
 (defun agent-claude-account-env (_buffer-name dir)
   "Return `CLAUDE_CONFIG_DIR' for the Claude session being started in DIR.
 Resolves the account via `agent-account-resolve' (the in-flight
@@ -2310,16 +2328,18 @@ This is the `run-prompt' backend slot implementation."
 
 (defun agent-claude--exec-process-environment (dir)
   "Return the process environment for a non-interactive Claude run in DIR."
-  (if-let* ((account (agent-account-resolve 'claude-code nil dir))
-            (env (agent-account-env 'claude-code account)))
-      (append env
-              (cl-remove-if
-               (lambda (s)
-                 (or (string-prefix-p "CLAUDE_CODE" s)
-                     (string-prefix-p "ANTHROPIC_API_KEY=" s)
-                     (string-prefix-p "ANTHROPIC_AUTH_TOKEN=" s)))
-               process-environment))
-    process-environment))
+  (append
+   agent-claude--parent-session-env
+   (if-let* ((account (agent-account-resolve 'claude-code nil dir))
+             (env (agent-account-env 'claude-code account)))
+       (append env
+               (cl-remove-if
+                (lambda (s)
+                  (or (string-prefix-p "CLAUDE_CODE" s)
+                      (string-prefix-p "ANTHROPIC_API_KEY=" s)
+                      (string-prefix-p "ANTHROPIC_AUTH_TOKEN=" s)))
+                process-environment))
+     process-environment)))
 
 ;;;;; Skill runner
 
@@ -3157,6 +3177,10 @@ symmetrically and restores `claude-code-notification-function'."
             #'agent-claude--server-env)
   (add-hook 'claude-code-process-environment-functions
             #'agent-claude--sync-theme-before-start)
+  ;; Last, so an entry another function sets, such as monet's
+  ;; CLAUDE_CODE_SSE_PORT, precedes the bare name and wins.
+  (add-hook 'claude-code-process-environment-functions
+            #'agent-claude--parent-session-env 90)
   (advice-add 'claude-code--eat-send-return :before
               #'agent-claude--note-user-submission)
   (advice-add 'claude-code--vterm-send-return :before
@@ -3202,6 +3226,8 @@ symmetrically and restores `claude-code-notification-function'."
                #'agent-claude--server-env)
   (remove-hook 'claude-code-process-environment-functions
                #'agent-claude--sync-theme-before-start)
+  (remove-hook 'claude-code-process-environment-functions
+               #'agent-claude--parent-session-env)
   (advice-remove 'claude-code--start #'agent-claude--start-with-session-settings)
   (advice-remove 'claude-code--eat-send-return #'agent-claude--note-user-submission)
   (advice-remove 'claude-code--vterm-send-return #'agent-claude--note-user-submission)
