@@ -49,10 +49,14 @@
     font: 12px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     white-space: pre-wrap; word-break: break-word; background: var(--bg); }
   #output.nowrap { white-space: pre; word-break: normal; }
-  .keys { display: flex; gap: 6px; padding: 8px 10px 0; overflow-x: auto;
+  .keys { display: flex; gap: 14px; padding: 8px 10px 0; overflow-x: auto;
     background: var(--panel); border-top: 1px solid var(--line); }
-  .key { flex: 0 0 auto; min-width: 48px; height: 44px; padding: 0 12px;
-    border-radius: 10px; background: var(--panel-2); font-size: 16px; }
+  .key-group { display: flex; flex: 0 0 auto; gap: 2px; }
+  .key { flex: 0 0 auto; min-width: 44px; height: 44px; padding: 0 10px;
+    background: var(--panel-2); font-size: 16px; }
+  .key:first-child { border-radius: 10px 0 0 10px; }
+  .key:last-child { border-radius: 0 10px 10px 0; }
+  .key:only-child { border-radius: 10px; }
   .key:active { background: var(--line); }
   .compose { display: flex; gap: 8px; padding: 8px 10px 10px;
     background: var(--panel); align-items: flex-end;
@@ -64,8 +68,14 @@
   .send { height: 44px; padding: 0 18px; border-radius: 12px;
     background: var(--accent); color: #fff; font-weight: 600; }
   .send:disabled { opacity: .5; }
-  .toggle { background: var(--panel-2); border-radius: 10px; padding: 8px 10px;
+  .title { flex: 1; min-width: 0; display: flex; flex-direction: column;
+    align-items: flex-start; gap: 3px; }
+  .title h1 { flex: none; max-width: 100%; }
+  .title .badge { font-size: 10px; padding: 2px 6px; }
+  .actions-bar { display: flex; gap: 6px; flex: 0 0 auto; }
+  .toggle { background: var(--panel-2); border-radius: 10px; padding: 8px 9px;
     font-size: 13px; }
+  .toggle.danger { color: var(--error); }
   .sheet { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none;
     align-items: flex-end; }
   .sheet.open { display: flex; }
@@ -102,10 +112,16 @@
 <section id="session-view" class="view">
   <header>
     <button class="back" id="back" aria-label="Back">‹</button>
-    <h1 id="session-title"></h1>
-    <span id="session-badge" class="badge"></span>
-    <button class="toggle" id="wrap">Wrap</button>
-    <button class="toggle" id="restart">Restart</button>
+    <div class="title">
+      <h1 id="session-title"></h1>
+      <span id="session-badge" class="badge"></span>
+    </div>
+    <div class="actions-bar">
+      <button class="toggle" id="wrap">Wrap</button>
+      <button class="toggle" id="new">New</button>
+      <button class="toggle" id="restart">Restart</button>
+      <button class="toggle danger" id="exit">Exit</button>
+    </div>
   </header>
   <pre id="output"></pre>
   <div class="keys" id="keys"></div>
@@ -127,11 +143,46 @@
   </div>
 </div>
 
+<div class="sheet" id="new-sheet">
+  <div class="panel">
+    <h2>New session</h2>
+    <p class="note" id="new-note"></p>
+    <div id="backends"></div>
+    <div class="actions">
+      <button class="cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="exit-sheet">
+  <div class="panel">
+    <h2>Exit session</h2>
+    <p class="note" id="exit-note"></p>
+    <button class="choice" id="exit-skills">
+      <div class="main"><div>Exit</div>
+        <div class="meta">Run the before-exit skills, then exit.</div></div>
+    </button>
+    <button class="choice" id="exit-plain">
+      <div class="main"><div>Exit without skills</div>
+        <div class="meta">Exit now, skipping the before-exit skills.</div></div>
+    </button>
+    <div class="actions">
+      <button class="cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <script>
 "use strict";
-const KEYS = [["esc", "Esc"], ["1", "1"], ["2", "2"], ["3", "3"],
-              ["up", "↑"], ["down", "↓"], ["enter", "⏎"], ["tab", "Tab"],
-              ["shift-tab", "⇧Tab"], ["y", "y"], ["n", "n"], ["ctrl-c", "^C"]];
+// Grouped by purpose: interrupt, move through a menu, pick an option
+// by number or letter, and cycle modes.
+const KEY_GROUPS = [
+  [["esc", "Esc"], ["ctrl-c", "^C"]],
+  [["up", "↑"], ["down", "↓"], ["enter", "Enter"]],
+  [["1", "1"], ["2", "2"], ["3", "3"]],
+  [["y", "y"], ["n", "n"]],
+  [["shift-tab", "⇧Tab"], ["tab", "Tab"]]
+];
 const STATE_LABEL = { "waiting": "waiting", "background-waiting": "bg work",
                       "busy": "busy", "unknown": "?" };
 const STATE_ORDER = { "waiting": 0, "background-waiting": 1, "unknown": 2, "busy": 3 };
@@ -230,7 +281,7 @@ function openSession(s) {
 }
 
 function closeSession() {
-  closeRestart();
+  closeSheets();
   current = null;
   show("list-view");
   refreshList();
@@ -243,6 +294,7 @@ async function refreshSession(forceBottom) {
   try {
     const data = await api("/api/output?id=" + encodeURIComponent(id));
     if (id !== current) return;
+    $("session-title").textContent = data.name;
     const out = $("output");
     const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
     if (out.textContent !== data.output) out.textContent = data.output;
@@ -251,6 +303,9 @@ async function refreshSession(forceBottom) {
     badge.className = "badge " + data.state;
     badge.textContent = STATE_LABEL[data.state] || data.state;
   } catch (e) {
+    if (id !== current) return;
+    // An exited session disappears; go back to the list.
+    if (e.message.startsWith("No such session")) { history.back(); return; }
     const badge = $("session-badge");
     badge.className = "badge";
     badge.textContent = "offline";
@@ -344,8 +399,69 @@ async function openRestart() {
   }
 }
 
-function closeRestart() {
-  $("restart-sheet").classList.remove("open");
+function closeSheets() {
+  for (const sheet of document.querySelectorAll(".sheet"))
+    sheet.classList.remove("open");
+}
+
+function followSession(id) {
+  closeSheets();
+  current = id;
+  $("output").textContent = "";
+  setTimeout(() => refreshSession(true), 1500);
+}
+
+async function openNew() {
+  if (!current) return;
+  $("backends").replaceChildren();
+  $("new-note").textContent = "Loading…";
+  $("new-sheet").classList.add("open");
+  try {
+    const data = await api("/api/backends?id=" + encodeURIComponent(current));
+    $("new-note").textContent = "In " + data.directory;
+    for (const c of data.choices) {
+      const b = document.createElement("button");
+      b.className = "choice";
+      b.textContent = c.label;
+      b.addEventListener("click", () => doNew(c, b));
+      $("backends").appendChild(b);
+    }
+  } catch (e) {
+    $("new-note").textContent = "Error: " + e.message;
+  }
+}
+
+async function doNew(choice, button) {
+  for (const b of $("backends").children) b.disabled = true;
+  button.textContent = "Starting " + choice.label + "…";
+  try {
+    const data = await api("/api/new", { id: current, backend: choice.name });
+    history.replaceState({ session: data.id }, "");
+    followSession(data.id);
+  } catch (e) {
+    $("new-note").textContent = "Error: " + e.message;
+    button.textContent = choice.label;
+    for (const b of $("backends").children) b.disabled = false;
+  }
+}
+
+function openExit() {
+  if (!current) return;
+  $("exit-note").textContent = $("session-title").textContent;
+  $("exit-skills").disabled = $("exit-plain").disabled = false;
+  $("exit-sheet").classList.add("open");
+}
+
+async function doExit(skills) {
+  $("exit-skills").disabled = $("exit-plain").disabled = true;
+  try {
+    await api("/api/exit", { id: current, skills });
+    closeSheets();
+    setTimeout(() => refreshSession(true), 800);
+  } catch (e) {
+    $("exit-note").textContent = "Error: " + e.message;
+    $("exit-skills").disabled = $("exit-plain").disabled = false;
+  }
 }
 
 async function doRestart() {
@@ -354,10 +470,7 @@ async function doRestart() {
   $("restart-go").textContent = "Restarting…";
   try {
     const data = await api("/api/restart", { id: current, account: picked });
-    closeRestart();
-    current = data.id;
-    $("output").textContent = "";
-    setTimeout(() => refreshSession(true), 1500);
+    followSession(data.id);
   } catch (e) {
     $("restart-note").textContent = "Error: " + e.message;
     $("restart-go").textContent = "Restart with " + picked;
@@ -378,23 +491,34 @@ function autosize() {
   area.style.height = area.scrollHeight + "px";
 }
 
-for (const [key, label] of KEYS) {
-  const b = document.createElement("button");
-  b.className = "key";
-  b.textContent = label;
-  b.addEventListener("click", () => sendKey(key));
-  $("keys").appendChild(b);
+for (const keys of KEY_GROUPS) {
+  const group = document.createElement("div");
+  group.className = "key-group";
+  for (const [key, label] of keys) {
+    const b = document.createElement("button");
+    b.className = "key";
+    b.textContent = label;
+    b.addEventListener("click", () => sendKey(key));
+    group.appendChild(b);
+  }
+  $("keys").appendChild(group);
 }
 $("send").addEventListener("click", sendText);
 $("text").addEventListener("input", autosize);
 $("back").addEventListener("click", () => history.back());
 $("wrap").addEventListener("click", () => $("output").classList.toggle("nowrap"));
 $("restart").addEventListener("click", openRestart);
-$("restart-cancel").addEventListener("click", closeRestart);
+$("restart-cancel").addEventListener("click", closeSheets);
 $("restart-go").addEventListener("click", doRestart);
-$("restart-sheet").addEventListener("click", (e) => {
-  if (e.target === $("restart-sheet")) closeRestart();
-});
+$("new").addEventListener("click", openNew);
+$("exit").addEventListener("click", openExit);
+$("exit-skills").addEventListener("click", () => doExit(true));
+$("exit-plain").addEventListener("click", () => doExit(false));
+for (const sheet of document.querySelectorAll(".sheet")) {
+  sheet.addEventListener("click", (e) => { if (e.target === sheet) closeSheets(); });
+  for (const b of sheet.querySelectorAll(".cancel"))
+    b.addEventListener("click", closeSheets);
+}
 window.addEventListener("popstate", () => { if (current) closeSession(); });
 document.addEventListener("visibilitychange", () => {
   schedule();

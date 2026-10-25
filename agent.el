@@ -1121,6 +1121,42 @@ directory, prompting for a selection when none is persisted."
                            :account (agent-account-resolve
                                      backend t directory)))))
 
+(defun agent-start-session-beside (buffer backend)
+  "Start a new BACKEND session in the directory of session BUFFER.
+Never prompts: the account is the one `agent-account-resolve' picks
+for that directory without prompting, and when a BACKEND session
+already runs there the new one gets the first free instance name of
+the form \"new-N\".  Return the new session buffer."
+  (let* ((session (or (agent-session buffer)
+                      (user-error "Not an AI session buffer: %s" buffer)))
+         (directory (agent-session-directory session)))
+    (unless (assq backend agent-backends)
+      (user-error "No AI backend named `%s'" backend))
+    (agent-start-session
+     (agent-session-create
+      :backend backend
+      :directory directory
+      :instance (agent--free-instance-name backend directory "new")))))
+
+(defun agent--free-instance-name (backend directory prefix)
+  "Return an instance name no live BACKEND session in DIRECTORY uses.
+Return nil, the default instance, when no BACKEND session runs in
+DIRECTORY; otherwise return PREFIX-N for the smallest free N."
+  (let ((taken (delq nil
+                     (mapcar (lambda (buf)
+                               (when-let* ((s (agent-session buf)))
+                                 (and (eq (agent-session-backend s) backend)
+                                      (equal (agent-session-directory s)
+                                             directory)
+                                      (or (agent-session-instance s)
+                                          "default"))))
+                             (agent-session-buffers)))))
+    (when taken
+      (let ((n 1))
+        (while (member (format "%s-%d" prefix n) taken)
+          (setq n (1+ n)))
+        (format "%s-%d" prefix n)))))
+
 (transient-define-prefix agent--session-switcher ()
   "Switch to an existing AI session."
   [["Sessions"
@@ -3616,10 +3652,14 @@ session, since the Codex CLI has no `/exit'."
          (backend (agent-session-backend session))
          (buffer (current-buffer)))
     (when (agent--confirm-no-captured-prompts backend buffer "Exit")
-      (unless (agent-session-snoozed-p buffer)
-        (agent-toggle-snooze buffer))
-      (when (agent--run-before-exit-functions backend buffer)
-        (agent--exit-session buffer)))))
+      (agent--exit-confirmed backend buffer))))
+
+(defun agent--exit-confirmed (backend buffer)
+  "Snooze BACKEND session BUFFER, run the before-exit chain, then exit it."
+  (unless (agent-session-snoozed-p buffer)
+    (agent-toggle-snooze buffer))
+  (when (agent--run-before-exit-functions backend buffer)
+    (agent--exit-session buffer)))
 
 ;;;###autoload
 (defun agent-exit-without-skills ()
@@ -3628,6 +3668,28 @@ session, since the Codex CLI has no `/exit'."
   (let ((agent-before-exit-functions
          (remove #'agent-run-skill-before-exit agent-before-exit-functions)))
     (agent-exit)))
+
+(defun agent-exit-buffer (buffer &optional without-skills)
+  "Exit session BUFFER as `agent-exit' does, without prompting.
+With WITHOUT-SKILLS, skip the before-exit skills, as
+`agent-exit-without-skills' does.  Refuse when BUFFER has captured
+prompts, which the exit would orphan.  When its process exits, kill
+BUFFER without asking about the session's branches, since the caller
+has already confirmed the exit."
+  (let* ((session (or (agent-session buffer)
+                      (user-error "Not an AI session buffer: %s" buffer)))
+         (backend (agent-session-backend session))
+         (agent-before-exit-functions
+          (if without-skills
+              (remove #'agent-run-skill-before-exit agent-before-exit-functions)
+            agent-before-exit-functions)))
+    (when (and (require 'agent-capture nil t)
+               (> (agent-capture-pending-count backend buffer) 0))
+      (user-error "%s has captured prompts; exit it from Emacs"
+                  (agent-display-name buffer)))
+    (with-current-buffer buffer
+      (setq-local agent-warn-kill-with-branches nil))
+    (agent--exit-confirmed backend buffer)))
 
 (defun agent--exit-session (buffer)
   "Submit `/exit' to session BUFFER without re-running before-exit hooks."

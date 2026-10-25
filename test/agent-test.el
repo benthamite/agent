@@ -1491,6 +1491,82 @@ sentinel has run."
           (agent-exit))
         (should-not (agent-session-snoozed-p buf))))))
 
+(ert-deftest agent-test-exit-buffer-skips-skills-on-request ()
+  "`agent-exit-buffer' drops the before-exit skills only when asked."
+  (let ((agent-backends nil)
+        (agent-before-exit-functions (list #'agent-run-skill-before-exit))
+        chains)
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))))
+        (cl-letf (((symbol-function 'agent--run-before-exit-functions)
+                   (lambda (&rest _) (push agent-before-exit-functions chains) t))
+                  ((symbol-function 'agent--exit-session) #'ignore)
+                  ((symbol-function 'agent-capture-pending-count)
+                   (lambda (&rest _) 0)))
+          (agent-exit-buffer buf)
+          (agent-exit-buffer buf t))
+        (should (equal chains (list nil (list #'agent-run-skill-before-exit))))
+        (should-not (buffer-local-value 'agent-warn-kill-with-branches buf))))))
+
+(ert-deftest agent-test-exit-buffer-refuses-captured-prompts ()
+  "`agent-exit-buffer' refuses, rather than prompts, over captured prompts."
+  (let ((agent-backends nil)
+        (agent-before-exit-functions nil))
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))))
+        (cl-letf (((symbol-function 'agent-capture-pending-count)
+                   (lambda (&rest _) 2))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_) (error "Should not exit"))))
+          (should-error (agent-exit-buffer buf) :type 'user-error))
+        (should-not (agent-session-snoozed-p buf))))))
+
+(ert-deftest agent-test-free-instance-name ()
+  "A new session gets the default instance only when none runs there."
+  (let ((buffers (list (cons 'one "~/a/") (cons 'one "~/a/")
+                       (cons 'two "~/b/")))
+        (instances '(nil "new-1" nil)))
+    (cl-letf (((symbol-function 'agent-session-buffers)
+               (lambda () (number-sequence 0 2)))
+              ((symbol-function 'agent-session)
+               (lambda (i)
+                 (agent-session-create :backend (car (nth i buffers))
+                                       :directory (cdr (nth i buffers))
+                                       :instance (nth i instances)))))
+      (should (equal (agent--free-instance-name 'one "~/a/" "new") "new-2"))
+      (should (equal (agent--free-instance-name 'two "~/b/" "new") "new-1"))
+      (should-not (agent--free-instance-name 'two "~/a/" "new")))))
+
+(ert-deftest agent-test-start-session-beside-uses-session-directory ()
+  "`agent-start-session-beside' starts in the session's directory."
+  (let ((agent-backends nil)
+        started)
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/project/:default*" t)
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))))
+        (cl-letf (((symbol-function 'agent-start-session)
+                   (lambda (session &rest _) (setq started session) buf)))
+          (should (eq (agent-start-session-beside buf 'one) buf))
+          (should-error (agent-start-session-beside buf 'nope)
+                        :type 'user-error))
+        (should (eq (agent-session-backend started) 'one))
+        (should (equal (agent-session-directory started)
+                       (agent-session-directory (agent-session buf))))))))
+
 (ert-deftest agent-test-exit-runs-configured-skills-without-threshold ()
   "Run configured skills on every normal exit regardless of session age."
   (let ((agent-backends nil)

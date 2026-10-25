@@ -28,8 +28,9 @@
 ;; AI sessions.  `agent-remote-mode' serves a touch-friendly page and a
 ;; JSON API on the machine's Tailscale address: the page lists every
 ;; session with its state and account, shows a session's recent
-;; output, sends typed replies and single keys to it, and restarts it
-;; under another account when it has run out of usage.  Because it
+;; output, sends typed replies and single keys to it, restarts it
+;; under another account when it has run out of usage, starts a new
+;; session beside it, and exits it.  Because it
 ;; drives the session buffers themselves, it reaches Claude and Codex
 ;; sessions under every account alike.
 ;;
@@ -314,6 +315,8 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
           (agent-remote--json (agent-remote--output request)))
          ((and (equal method "GET") (equal path "/api/accounts"))
           (agent-remote--json (agent-remote--accounts request)))
+         ((and (equal method "GET") (equal path "/api/backends"))
+          (agent-remote--json (agent-remote--backends request)))
          ((not (equal method "POST"))
           (agent-remote--error "405 Method Not Allowed" "Method not allowed"))
          ((not (assoc "x-agent-remote" (plist-get request :headers)))
@@ -324,6 +327,10 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
           (agent-remote--json (agent-remote--key request)))
          ((equal path "/api/restart")
           (agent-remote--json (agent-remote--restart request)))
+         ((equal path "/api/new")
+          (agent-remote--json (agent-remote--new request)))
+         ((equal path "/api/exit")
+          (agent-remote--json (agent-remote--exit request)))
          (t (agent-remote--error "404 Not Found" "Not found"))))
     (user-error (agent-remote--error "400 Bad Request" (cadr err)))
     (error (agent-remote--error "500 Internal Server Error"
@@ -464,6 +471,45 @@ Return the name of the new session buffer, which the phone follows."
       (user-error "No account given"))
     (list :ok t
           :id (buffer-name (agent-restart-with-account buffer account)))))
+
+(defun agent-remote--backends (request)
+  "Return the backends a new session beside REQUEST's session can use.
+The session's own backend comes first."
+  (let* ((buffer (agent-remote--session-buffer
+                  (agent-remote--query-param request "id")))
+         (own (agent--detect-backend buffer))
+         (backends (mapcar #'car agent-backends)))
+    (list :directory (agent-session-directory (agent-session buffer))
+          :choices (vconcat
+                    (mapcar (lambda (backend)
+                              (list :name (symbol-name backend)
+                                    :label (or (agent-backend-label
+                                                (agent-backend backend))
+                                               (symbol-name backend))))
+                            (if (memq own backends)
+                                (cons own (delq own backends))
+                              backends))))))
+
+(defun agent-remote--new (request)
+  "Start a session beside the one named in REQUEST's JSON body.
+The body's `backend' names the new session's backend.  Return the name
+of the new session buffer, which the phone follows."
+  (let* ((args (agent-remote--json-body request))
+         (buffer (agent-remote--session-buffer (alist-get 'id args)))
+         (name (alist-get 'backend args))
+         (backend (and (stringp name) (intern-soft name))))
+    (unless backend
+      (user-error "No backend given"))
+    (list :ok t
+          :id (buffer-name (agent-start-session-beside buffer backend)))))
+
+(defun agent-remote--exit (request)
+  "Exit the session named in REQUEST's JSON body.
+The body's `skills' is false to skip the before-exit skills."
+  (let* ((args (agent-remote--json-body request))
+         (buffer (agent-remote--session-buffer (alist-get 'id args))))
+    (agent-exit-buffer buffer (eq (alist-get 'skills args) :false))
+    (list :ok t)))
 
 (defun agent-remote--json-body (request)
   "Return REQUEST's body parsed as a JSON object, as an alist."

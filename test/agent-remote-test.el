@@ -346,6 +346,64 @@ HOST overrides the Host header, which defaults to the server's own."
                            (buffer-name buffer)))
             (should (equal called (list buffer "work")))))))))
 
+(ert-deftest agent-remote-test-backends-lists-own-backend-first ()
+  "The backends endpoint offers the session's own backend first."
+  (agent-remote-test--with-session buffer
+    (let ((agent-backends
+           (list (cons 'codex (agent-backend--create :label "Codex"))
+                 (cons 'claude (agent-backend--create)))))
+      (cl-letf (((symbol-function 'agent-session)
+                 (lambda (_) (agent-session-create :backend 'claude
+                                                   :directory "~/proj/"))))
+        (agent-remote-test--with-server
+          (let ((data (agent-remote-test--json
+                       (agent-remote-test--http
+                        "GET" (concat "/api/backends?id="
+                                      (url-hexify-string
+                                       (buffer-name buffer)))))))
+            (should (equal (alist-get 'directory data) "~/proj/"))
+            (should (equal (mapcar (lambda (c) (alist-get 'name c))
+                                   (alist-get 'choices data))
+                           '("claude" "codex")))
+            (should (equal (mapcar (lambda (c) (alist-get 'label c))
+                                   (alist-get 'choices data))
+                           '("claude" "Codex")))))))))
+
+(ert-deftest agent-remote-test-new-starts-session-beside ()
+  "The new endpoint starts a session beside the named one and returns it."
+  (agent-remote-test--with-session buffer
+    (let (called)
+      (cl-letf (((symbol-function 'agent-start-session-beside)
+                 (lambda (buf backend) (setq called (list buf backend)) buf)))
+        (agent-remote-test--with-server
+          (let ((response (agent-remote-test--http
+                           "POST" "/api/new"
+                           (json-serialize (list :id (buffer-name buffer)
+                                                 :backend "codex"))
+                           '("X-Agent-Remote: 1"))))
+            (should (= (agent-remote-test--status response) 200))
+            (should (equal (alist-get 'id (agent-remote-test--json response))
+                           (buffer-name buffer)))
+            (should (equal called (list buffer 'codex)))))))))
+
+(ert-deftest agent-remote-test-exit-passes-skills-choice ()
+  "The exit endpoint skips the before-exit skills only when told to."
+  (agent-remote-test--with-session buffer
+    (let (calls)
+      (cl-letf (((symbol-function 'agent-exit-buffer)
+                 (lambda (buf without-skills) (push (list buf without-skills) calls))))
+        (agent-remote-test--with-server
+          (dolist (skills '(t :false))
+            (should (= (agent-remote-test--status
+                        (agent-remote-test--http
+                         "POST" "/api/exit"
+                         (json-serialize (list :id (buffer-name buffer)
+                                               :skills skills))
+                         '("X-Agent-Remote: 1")))
+                       200))))
+        (should (equal (reverse calls) (list (list buffer nil)
+                                             (list buffer t))))))))
+
 (ert-deftest agent-remote-test-connections-are-cleaned-up ()
   "Closed client connections do not accumulate as processes."
   (agent-remote-test--with-server
