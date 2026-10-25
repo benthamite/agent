@@ -368,7 +368,11 @@ defensively sync its config home with `agent-account-sync' and bind
 `process-environment' hooks see the account at spawn time.  Signal a
 `user-error' before spawning anything when the account is logged out
 per `agent-account-logged-in-p', since the backend would only produce
-authentication failures.  Return the new session buffer."
+authentication failures.  Signal a `user-error' too when SESSION names
+an instance that a live session in the same directory already holds:
+the backend would hand back that session's buffer, still running its
+own conversation, and SESSION would overwrite its identity.  Return the
+new session buffer."
   (ignore initial-prompt)
   (let* ((backend (agent-session-backend session))
          (directory (or (agent-session-directory session)
@@ -377,6 +381,12 @@ authentication failures.  Return the new session buffer."
          (account (or (agent-session-account session)
                       (setf (agent-session-account session)
                             (agent-account-resolve backend nil directory)))))
+    (when-let* ((instance (agent-session-instance session))
+                ((stringp directory))
+                (holder (assoc instance
+                               (agent--instance-holders backend directory))))
+      (user-error "Instance `%s' in %s is already taken by %s"
+                  instance directory (buffer-name (cdr holder))))
     (agent-check-session-start backend account)
     (when (and resume-id (not (plist-get options :fork)))
       (setf (agent-session-id session) resume-id))
@@ -1142,20 +1152,28 @@ the form \"new-N\".  Return the new session buffer."
   "Return an instance name no live BACKEND session in DIRECTORY uses.
 Return nil, the default instance, when no BACKEND session runs in
 DIRECTORY; otherwise return PREFIX-N for the smallest free N."
-  (let ((taken (delq nil
-                     (mapcar (lambda (buf)
-                               (when-let* ((s (agent-session buf)))
-                                 (and (eq (agent-session-backend s) backend)
-                                      (equal (agent-session-directory s)
-                                             directory)
-                                      (or (agent-session-instance s)
-                                          "default"))))
-                             (agent-session-buffers)))))
+  (let ((taken (mapcar #'car (agent--instance-holders backend directory))))
     (when taken
       (let ((n 1))
         (while (member (format "%s-%d" prefix n) taken)
           (setq n (1+ n)))
         (format "%s-%d" prefix n)))))
+
+(defun agent--instance-holders (backend directory)
+  "Return (INSTANCE . BUFFER) for each live BACKEND session in DIRECTORY.
+INSTANCE is \"default\" for a session started without one.  Directories
+are compared expanded, so an abbreviated DIRECTORY matches."
+  (let ((dir (file-name-as-directory (expand-file-name directory))))
+    (delq nil
+          (mapcar (lambda (buf)
+                    (when-let* ((s (agent-session buf))
+                                ((eq (agent-session-backend s) backend))
+                                (own (agent-session-directory s))
+                                ((equal (file-name-as-directory
+                                         (expand-file-name own))
+                                        dir)))
+                      (cons (or (agent-session-instance s) "default") buf)))
+                  (agent-session-buffers)))))
 
 (transient-define-prefix agent--session-switcher ()
   "Switch to an existing AI session."
@@ -3865,7 +3883,9 @@ that fail to resume stay recorded, so the command can be run again."
 
 (defun agent--restore-session-entries (entries)
   "Resume each registry entry in ENTRIES.
-Return a list of (ENTRY . ERROR-MESSAGE) for the entries that failed."
+An entry whose instance name another live session took in the meantime
+resumes under the first free name derived from it.  Return a list of
+\(ENTRY . ERROR-MESSAGE) for the entries that failed."
   (let (failed)
     (dolist (entry entries)
       (condition-case err
@@ -3874,7 +3894,7 @@ Return a list of (ENTRY . ERROR-MESSAGE) for the entries that failed."
                   :backend (plist-get entry :backend)
                   :account (plist-get entry :account)
                   :directory (plist-get entry :directory)
-                  :instance (plist-get entry :instance))
+                  :instance (agent--free-entry-instance entry))
                  :resume-id (plist-get entry :id)
                  (plist-get entry :options))
         (error
@@ -3882,6 +3902,18 @@ Return a list of (ENTRY . ERROR-MESSAGE) for the entries that failed."
                                    (error-message-string err)))
                failed))))
     (nreverse failed)))
+
+(defun agent--free-entry-instance (entry)
+  "Return the instance name to resume registry ENTRY under.
+That is ENTRY's own instance unless a live session in its directory
+holds it, and otherwise the first free name derived from it."
+  (let* ((backend (plist-get entry :backend))
+         (directory (plist-get entry :directory))
+         (instance (or (plist-get entry :instance) "default")))
+    (if (and directory
+             (assoc instance (agent--instance-holders backend directory)))
+        (agent--free-instance-name backend directory instance)
+      (plist-get entry :instance))))
 
 (defun agent--schedule-session-registry-save ()
   "Save the session registry shortly, coalescing bursts of changes.

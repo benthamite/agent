@@ -5123,6 +5123,68 @@ is itself a kind of `error' and nothing here should special-case it."
           (should (equal (agent--read-session-groups) groups)))
       (delete-file agent-session-groups-file))))
 
+(ert-deftest agent-test-restore-session-group-renames-taken-instance ()
+  "Restoring resumes under a free name when a live session took the instance."
+  (let* ((agent-session-groups-file (make-temp-file "agent-groups"))
+         (agent-backends nil)
+         (entry '(:backend one :account "a" :directory "~/home/"
+                           :instance nil :id "sid-old" :options nil))
+         started)
+    (with-temp-buffer
+      (let ((holder (current-buffer)))
+        (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate holder))
+                :find-all-buffers (lambda () (list holder))))
+        (agent--set-session holder (agent-session-create
+                                    :backend 'one :directory "~/home/"
+                                    :id "sid-new"))
+        (unwind-protect
+            (progn
+              (agent--write-session-groups
+               (list (cons "work" (list :saved 1.0 :sessions (list entry)))))
+              (cl-letf (((symbol-function 'agent--buffer-for-session-id)
+                         #'ignore)
+                        ((symbol-function 'agent-start-session)
+                         (lambda (session &rest options)
+                           (push (cons (agent-session-instance session)
+                                       options)
+                                 started))))
+                (agent-restore-session-group "work"))
+              (should (equal started '(("default-1" :resume-id "sid-old")))))
+          (delete-file agent-session-groups-file))))))
+
+(ert-deftest agent-test-start-session-refuses-taken-instance ()
+  "Refuse to start under an instance a live session in the directory holds."
+  (let ((agent-backends nil)
+        started)
+    (with-temp-buffer
+      (let ((holder (current-buffer)))
+        (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate holder))
+                :find-all-buffers (lambda () (list holder))
+                :start-session (lambda (session &rest _)
+                                 (push (agent-session-instance session)
+                                       started))))
+        (agent--set-session holder (agent-session-create
+                                    :backend 'one :directory "~/home/"
+                                    :instance "aaa"))
+        (cl-letf (((symbol-function 'agent-account-resolve) #'ignore))
+          (should-error (agent-start-session
+                         (agent-session-create
+                          :backend 'one
+                          :directory (expand-file-name "~/home/")
+                          :instance "aaa")
+                         :resume-id "sid")
+                        :type 'user-error)
+          (agent-start-session (agent-session-create
+                                :backend 'one :directory "~/home/"
+                                :instance "bbb")))
+        (should (equal started '("bbb")))))))
+
 (ert-deftest agent-test-delete-session-group-removes-only-named ()
   "Deleting removes the named group and keeps the others."
   (let ((agent-session-groups-file (make-temp-file "agent-groups")))
