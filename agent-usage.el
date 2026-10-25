@@ -87,6 +87,11 @@ Each consecutive failure doubles the account's wait, starting from
   :type 'integer
   :group 'agent-usage)
 
+(defcustom agent-usage-request-timeout 30
+  "Seconds after which a usage request is abandoned as a network failure."
+  :type 'integer
+  :group 'agent-usage)
+
 (defcustom agent-usage-cache-file
   (locate-user-emacs-file "agent-usage-cache.eld")
   "File caching the last usage reading of every polled account.
@@ -269,8 +274,8 @@ from the previous one."
 ;;;;; HTTP responses
 
 (defun agent-usage-response-result (status normalize &optional explain)
-  "Return the fetch result for the `url-retrieve' response in this buffer.
-STATUS is the plist `url-retrieve' passed to its callback.  On success
+  "Return the fetch result for the HTTP response in this buffer.
+STATUS is the plist `agent-usage-http-get' passed to its callback.  On success
 return NORMALIZE applied to the JSON body, parsed as a plist with JSON
 null and false read as nil.  Otherwise return a failure from
 `agent-usage-failure'.  EXPLAIN, when non-nil, is called in the
@@ -318,6 +323,76 @@ Only the delay-seconds form is read; an HTTP date yields nil."
   (when-let* ((value (agent-usage-http-header "Retry-After"))
               ((string-match-p "\\`[0-9]+\\'" value)))
     (string-to-number value)))
+
+;;;;; HTTP requests
+
+(defun agent-usage-http-get (url headers callback cbargs)
+  "Request URL with HEADERS from a `curl' subprocess and return the process.
+HEADERS is an alist of (NAME . VALUE) strings, passed to curl on its
+standard input so that tokens stay out of the process list.  When the
+request ends, CALLBACK is called with a `url-retrieve' status plist
+followed by CBARGS, in a buffer holding the response headers and body
+and setting `url-http-response-status' and `url-http-end-of-headers'
+as `url-retrieve' does.  CALLBACK must kill that buffer.
+
+Unlike `url-retrieve', which resolves the host and negotiates TLS on
+the main thread, this never blocks Emacs on the network, and it gives
+up after `agent-usage-request-timeout' seconds."
+  (let* ((default-directory temporary-file-directory)
+         (process
+          (make-process
+           :name "agent-usage-http"
+           :buffer (generate-new-buffer " *agent-usage-http*")
+           :command (list "curl" "--disable" "--silent" "--include"
+                          "--suppress-connect-headers"
+                          "--max-time"
+                          (number-to-string agent-usage-request-timeout)
+                          "--config" "-" url)
+           :connection-type 'pipe
+           :noquery t
+           :sentinel #'agent-usage--http-sentinel)))
+    (process-put process :callback (cons callback cbargs))
+    (process-send-string process (agent-usage--curl-headers headers))
+    (process-send-eof process)
+    process))
+
+(defun agent-usage--curl-headers (headers)
+  "Return a curl config that sends HEADERS, an alist of (NAME . VALUE)."
+  (mapconcat (lambda (header)
+               (format "header = \"%s\"\n"
+                       (replace-regexp-in-string
+                        "[\"\\]" "\\\\\\&"
+                        (concat (car header) ": " (cdr header)))))
+             headers ""))
+
+(defun agent-usage--http-sentinel (process _event)
+  "Pass the response of the finished request PROCESS to its callback."
+  (let ((buffer (process-buffer process))
+        (callback (process-get process :callback)))
+    (when (and (memq (process-status process) '(exit signal))
+               (buffer-live-p buffer))
+      (with-current-buffer buffer
+        (apply (car callback)
+               (agent-usage--http-status (process-exit-status process))
+               (cdr callback))))))
+
+(defun agent-usage--http-status (exit)
+  "Return the `url-retrieve' status plist for the curl response in this buffer.
+EXIT is curl's exit status.  Set `url-http-response-status' and
+`url-http-end-of-headers' when the buffer holds a complete header."
+  (goto-char (point-min))
+  (when (and (eql exit 0)
+             (looking-at "HTTP/[0-9.]+ \\([0-9]+\\)"))
+    (let ((code (string-to-number (match-string 1))))
+      (when (re-search-forward "\r?\n\r?\n" nil t)
+        (setq-local url-http-response-status code)
+        (setq-local url-http-end-of-headers (point)))))
+  (cond
+   ((not (eql exit 0))
+    (list :error (list 'error 'curl exit)))
+   ((and (local-variable-p 'url-http-response-status)
+         (>= url-http-response-status 400))
+    (list :error (list 'error 'http url-http-response-status)))))
 
 (defun agent-usage--fetcher (backend)
   "Return BACKEND's usage fetch function, or nil."

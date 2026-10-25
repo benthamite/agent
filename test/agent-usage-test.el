@@ -350,5 +350,87 @@
     (should (equal (agent-usage--age (list :fetched-at (- now 7200))) "2h"))
     (should (equal (agent-usage--age (list :fetched-at (- now 172800))) "2d"))))
 
+;;;; HTTP requests
+
+(defun agent-usage-test--http-server (reply)
+  "Start a local HTTP server that answers each request with REPLY.
+A nil REPLY accepts connections and never answers.  Return the server
+process; its `:requests' property collects the request texts."
+  (let (server)
+    (setq server
+          (make-network-process
+           :name "agent-usage-test-server" :server t :host 'local :service t
+           :noquery t
+           :filter (lambda (connection text)
+                     (process-put server :requests
+                                  (cons text (process-get server :requests)))
+                     (when (and reply (string-search "\r\n\r\n" text))
+                       (process-send-string connection reply)
+                       (delete-process connection)))))
+    server))
+
+(defun agent-usage-test--http-get (server)
+  "Request SERVER with `agent-usage-http-get' and wait for the callback.
+Return (STATUS CODE BODY TICKS RESULT), where TICKS counts the
+event-loop turns taken while waiting and RESULT is the callback buffer's
+`agent-usage-response-result'."
+  (let ((url (format "http://127.0.0.1:%d/usage"
+                     (process-contact server :service)))
+        (ticks 0)
+        result)
+    (agent-usage-http-get
+     url '(("Authorization" . "Bearer tok\"en"))
+     (lambda (status tag)
+       (setq result (list status
+                          (and (local-variable-p 'url-http-response-status)
+                               url-http-response-status)
+                          (and (local-variable-p 'url-http-end-of-headers)
+                               (buffer-substring url-http-end-of-headers
+                                                 (point-max)))
+                          tag
+                          (agent-usage-response-result status #'identity)))
+       (kill-buffer))
+     '(tag))
+    (while (and (not result) (< ticks 100))
+      (accept-process-output nil 0.1)
+      (cl-incf ticks))
+    (list (nth 0 result) (nth 1 result) (nth 2 result) ticks (nth 4 result))))
+
+(ert-deftest agent-usage-test-http-get-success ()
+  "Pass a successful response, its status and its headers to the callback."
+  (let ((server (agent-usage-test--http-server
+                 "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\n{\"a\":1}")))
+    (unwind-protect
+        (let ((result (agent-usage-test--http-get server)))
+          (should-not (nth 0 result))
+          (should (eql (nth 1 result) 200))
+          (should (equal (nth 2 result) "{\"a\":1}"))
+          (should (string-search "Authorization: Bearer tok\"en"
+                                 (car (process-get server :requests)))))
+      (delete-process server))))
+
+(ert-deftest agent-usage-test-http-get-http-error ()
+  "Report an HTTP error status as `url-retrieve' does."
+  (let ((server (agent-usage-test--http-server
+                 "HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\n\r\n{}")))
+    (unwind-protect
+        (let ((result (agent-usage-test--http-get server)))
+          (should (equal (nth 0 result) '(:error (error http 401))))
+          (should (eql (nth 1 result) 401))
+          (should (equal (nth 4 result) '(:error "HTTP 401" :retry-after nil))))
+      (delete-process server))))
+
+(ert-deftest agent-usage-test-http-get-silent-server ()
+  "Give up on a server that never answers without blocking Emacs."
+  (let ((agent-usage-request-timeout 1)
+        (server (agent-usage-test--http-server nil)))
+    (unwind-protect
+        (let ((result (agent-usage-test--http-get server)))
+          (should (eq (car (plist-get (nth 0 result) :error)) 'error))
+          (should-not (nth 1 result))
+          (should (plist-get (nth 4 result) :network))
+          (should (> (nth 3 result) 5)))
+      (delete-process server))))
+
 (provide 'agent-usage-test)
 ;;; agent-usage-test.el ends here

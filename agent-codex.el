@@ -37,10 +37,8 @@
 (require 'json)
 (require 'subr-x)
 (require 'transient)
-(require 'url)
 
 (defvar url-http-end-of-headers)
-(defvar url-http-attempt-keepalives)
 
 ;;;; Variables
 
@@ -428,17 +426,14 @@ Reads the OAuth tokens from ACCOUNT's `auth.json' and queries
 `agent-usage-failure' when the account has no usable tokens or the
 request fails.  This is the Codex backend's `:usage-fetch' slot."
   (if-let* ((auth (agent-codex--usage-auth account)))
-      (let ((url-http-attempt-keepalives nil)
-            (url-request-method "GET")
-            (url-request-extra-headers
-             `(("Authorization" . ,(concat "Bearer " (car auth)))
-               ("ChatGPT-Account-Id" . ,(cdr auth)))))
-        (condition-case nil
-            (url-retrieve agent-codex--usage-endpoint
-                          #'agent-codex--handle-usage-response
-                          (list account callback) t t)
-          (error
-           (funcall callback (agent-usage-network-failure)))))
+      (condition-case nil
+          (agent-usage-http-get agent-codex--usage-endpoint
+                                `(("Authorization" . ,(concat "Bearer " (car auth)))
+                                  ("ChatGPT-Account-Id" . ,(cdr auth)))
+                                #'agent-codex--handle-usage-response
+                                (list account callback))
+        (error
+         (funcall callback (agent-usage-network-failure))))
     (funcall callback (agent-usage-failure "no tokens in auth.json"))))
 
 (defun agent-codex--usage-auth (account)
@@ -460,7 +455,7 @@ request fails.  This is the Codex backend's `:usage-fetch' slot."
 
 (defun agent-codex--handle-usage-response (status _account callback)
   "Handle the async usage response and report to CALLBACK.
-STATUS is the plist passed by `url-retrieve'.  CALLBACK receives the
+STATUS is the plist passed by `agent-usage-http-get'.  CALLBACK receives the
 normalized usage plist, or a failure from `agent-usage-failure'."
   (unwind-protect
       (funcall callback

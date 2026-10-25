@@ -1036,7 +1036,12 @@ from `agent-usage-failure' when the account has no OAuth token or the
 request fails.  This is the Claude backend's `:usage-fetch' slot."
   (if-let* ((token (agent-claude-cli-oauth-token
                     (agent-claude--account-config-dir account))))
-      (agent-claude--fetch-usage-with-token account token callback t)
+      (condition-case nil
+          (agent-usage-http-get agent-claude-cli-usage-endpoint
+                                (agent-claude-cli-usage-headers token)
+                                #'agent-claude--handle-usage-response
+                                (list account callback))
+        (error (funcall callback (agent-usage-network-failure))))
     (funcall callback (agent-usage-failure "no OAuth token in the Keychain"))))
 
 (defun agent-claude--fetch-usage-for-account (account)
@@ -1050,55 +1055,9 @@ either because ACCOUNT is nil or because it has no entry in
 `agent-claude-accounts'."
   (agent-account-home 'claude-code account))
 
-(defun agent-claude--fetch-usage-with-token (account token callback retry)
-  "Fetch usage data for ACCOUNT with TOKEN, reporting to CALLBACK.
-If RETRY is non-nil, retry stale URL process write failures once.
-Other synchronous request errors report failure to CALLBACK without retrying."
-  (condition-case err
-      (agent-claude--url-retrieve-usage account token callback)
-    (error
-     (agent-claude--handle-usage-retrieve-error
-      account token callback err retry))))
-
-(defun agent-claude--url-retrieve-usage (account token callback)
-  "Start the async usage request for ACCOUNT with TOKEN.
-CALLBACK receives the normalized result."
-  (agent-claude-cli-fetch-usage
-   token #'agent-claude--handle-usage-response (list account callback)))
-
-(defun agent-claude--handle-usage-retrieve-error (account token callback err retry)
-  "Handle synchronous usage request error ERR for ACCOUNT.
-TOKEN is reused only when RETRY allows a stale-process retry;
-otherwise CALLBACK is told the fetch failed."
-  (agent-claude--delete-error-process err)
-  (if (and retry (agent-claude--url-process-write-error-p err))
-      (agent-claude--fetch-usage-with-token account token callback nil)
-    (funcall callback (agent-usage-network-failure))))
-
-(defun agent-claude--url-process-write-error-p (err)
-  "Return non-nil if ERR is a URL process write failure."
-  (and (eq (car-safe err) 'file-error)
-       (member "Writing to process" (cdr err))
-       (agent-claude--error-process err)))
-
-(defun agent-claude--delete-error-process (err)
-  "Delete the process recorded in ERR, if any."
-  (when-let* ((process (agent-claude--error-process err)))
-    (delete-process process)))
-
-(defun agent-claude--error-process (err)
-  "Return the first process object recorded in ERR."
-  (let ((items (cdr-safe err))
-        process)
-    (while (and items (not process))
-      (when (processp (car items))
-        (setq process (car items)))
-      (setq items (cdr items)))
-    process))
-
 (defun agent-claude--handle-usage-response (status _account callback)
   "Handle the async usage API response and report to CALLBACK.
-STATUS is the plist passed by `url-retrieve'.  CALLBACK receives the
+STATUS is the plist passed by `agent-usage-http-get'.  CALLBACK receives the
 normalized usage plist, or a failure from `agent-usage-failure'."
   (unwind-protect
       (funcall callback

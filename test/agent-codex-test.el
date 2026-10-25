@@ -2021,7 +2021,7 @@ session that never restarts would otherwise keep every one of them."
   (let ((agent-codex-accounts nil)
         reported called)
     (cl-letf (((symbol-function 'agent-codex--usage-auth) #'ignore)
-              ((symbol-function 'url-retrieve)
+              ((symbol-function 'agent-usage-http-get)
                (lambda (&rest _args) (setq called t))))
       (agent-codex--usage-fetch "acct" (lambda (u) (setq reported (list u))))
       (should-not called)

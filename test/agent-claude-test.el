@@ -1226,117 +1226,40 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
 
 ;;;; Usage polling
 
-(defvar url-http-attempt-keepalives)
+(ert-deftest agent-claude-test-fetch-usage-requests-endpoint-with-token ()
+  "Request the usage endpoint with the account's OAuth token."
+  (let (request)
+    (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
+               (lambda (_config-dir) "token"))
+              ((symbol-function 'agent-usage-http-get)
+               (lambda (&rest args) (setq request args) :started)))
+      (should (eq (agent-claude--usage-fetch "personal" #'ignore) :started))
+      (should (equal (nth 0 request) agent-claude-cli-usage-endpoint))
+      (should (equal (cdr (assoc "Authorization" (nth 1 request)))
+                     "Bearer token"))
+      (should (eq (nth 2 request) #'agent-claude--handle-usage-response)))))
 
-(ert-deftest agent-claude-test-fetch-usage-retries-stale-url-process ()
-  "Retry once when `url-retrieve' signals a stale process write error."
-  (let ((proc (make-pipe-process :name "agent-usage-test" :noquery t))
-        calls
-        deleted
-        reported)
-    (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
-                   (lambda (_config-dir) "token"))
-                  ((symbol-function 'delete-process)
-                   (lambda (process)
-                     (setq deleted process)))
-                  ((symbol-function 'url-retrieve)
-                   (lambda (&rest args)
-                     (push args calls)
-                     (if (= (length calls) 1)
-                         (signal 'file-error
-                                 (list "Writing to process"
-                                       "Invalid argument"
-                                       proc))
-                       :retrieved))))
-          (should (eq (agent-claude--usage-fetch
-                       "personal" (lambda (usage) (setq reported (list usage))))
-                      :retrieved))
-          (should (= (length calls) 2))
-          (should (eq deleted proc))
-          (should-not reported))
-      (when (process-live-p proc)
-        (delete-process proc)))))
-
-(ert-deftest agent-claude-test-fetch-usage-reports-failure-after-retry-fails ()
-  "Report a failed fetch instead of signaling when the retry also fails."
-  (let ((proc (make-pipe-process :name "agent-usage-test" :noquery t))
-        (calls 0)
-        reported)
-    (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
-                   (lambda (_config-dir) "token"))
-                  ((symbol-function 'url-retrieve)
-                   (lambda (&rest _args)
-                     (setq calls (1+ calls))
-                     (signal 'file-error
-                             (list "Writing to process"
-                                   "Invalid argument"
-                                   proc)))))
-          (agent-claude--usage-fetch
-           "personal" (lambda (usage) (setq reported (list usage))))
-          (should (= calls 2))
-          (should (stringp (plist-get (car reported) :error))))
-      (when (process-live-p proc)
-        (delete-process proc)))))
-
-(ert-deftest agent-claude-test-fetch-usage-reports-dns-failure ()
-  "Report synchronous DNS failure once without retrying or debugging."
+(ert-deftest agent-claude-test-fetch-usage-reports-start-failure ()
+  "Report a request that cannot start as a network failure, once."
   (let ((calls 0)
         (debug-on-error t)
         reported)
     (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
                (lambda (_config-dir) "token"))
-              ((symbol-function 'url-retrieve)
+              ((symbol-function 'agent-usage-http-get)
                (lambda (&rest _args)
                  (cl-incf calls)
-                 (error "api.anthropic.com/443 nodename nor servname provided, or not known"))))
+                 (error "Searching for program: No such file or directory, curl"))))
       (agent-claude--usage-fetch
        "personal" (lambda (usage) (push usage reported)))
       (should (= calls 1))
       (should (plist-get (car reported) :network)))))
 
-(ert-deftest agent-claude-test-fetch-usage-reports-dns-failure-on-retry ()
-  "Report DNS failure on the stale-process retry without a third attempt."
-  (let ((proc (make-pipe-process :name "agent-usage-test" :noquery t))
-        (calls 0)
-        reported)
-    (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
-                   (lambda (_config-dir) "token"))
-                  ((symbol-function 'url-retrieve)
-                   (lambda (&rest _args)
-                     (if (= (cl-incf calls) 1)
-                         (signal 'file-error
-                                 (list "Writing to process" "Invalid argument" proc))
-                       (error "api.anthropic.com/443 nodename nor servname provided, or not known")))))
-          (agent-claude--usage-fetch
-           "personal" (lambda (usage) (push usage reported)))
-          (should (= calls 2))
-          (should-not (process-live-p proc))
-          (should (stringp (plist-get (car reported) :error))))
-      (when (process-live-p proc)
-        (delete-process proc)))))
-
-(ert-deftest agent-claude-test-fetch-usage-disables-url-keepalives ()
-  "Do not keep idle URL connections open for periodic usage polling."
-  (let ((url-http-attempt-keepalives t)
-        observed)
-    (cl-letf (((symbol-function 'agent-claude-cli-oauth-token)
-               (lambda (_config-dir) "token"))
-              ((symbol-function 'url-retrieve)
-               (lambda (&rest _args)
-                 (setq observed url-http-attempt-keepalives)
-                 :retrieved)))
-      (should (eq (agent-claude--usage-fetch "personal" #'ignore)
-                  :retrieved))
-      (should-not observed))))
-
 (ert-deftest agent-claude-test-fetch-usage-reports-missing-token ()
   "Report failure without a request when the account has no OAuth token."
   (let (reported called)
     (cl-letf (((symbol-function 'agent-claude-cli-oauth-token) #'ignore)
-              ((symbol-function 'url-retrieve)
+              ((symbol-function 'agent-usage-http-get)
                (lambda (&rest _args) (setq called t))))
       (agent-claude--usage-fetch
        "personal" (lambda (usage) (setq reported (list usage))))

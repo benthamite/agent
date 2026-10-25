@@ -37,10 +37,7 @@
 (require 'json)
 (require 'seq)
 (require 'subr-x)
-(require 'url)
 (require 'agent-util)
-
-(defvar url-http-attempt-keepalives)
 
 ;;;; Warn-once machinery
 
@@ -128,16 +125,11 @@ CONFIG-DIR is nil, returns the default service name."
 (defconst agent-claude-cli-usage-beta-header "oauth-2025-04-20"
   "Value of the `anthropic-beta' header required by the usage endpoint.")
 
-(defun agent-claude-cli-fetch-usage (token callback cbargs)
-  "Start an async request against the usage endpoint with TOKEN.
-CALLBACK and CBARGS are passed through to `url-retrieve'.
-Returns the value of `url-retrieve'."
-  (let ((url-http-attempt-keepalives nil)
-        (url-request-method "GET")
-        (url-request-extra-headers
-         `(("Authorization" . ,(concat "Bearer " token))
-           ("anthropic-beta" . ,agent-claude-cli-usage-beta-header))))
-    (url-retrieve agent-claude-cli-usage-endpoint callback cbargs t t)))
+(defun agent-claude-cli-usage-headers (token)
+  "Return the request headers for the usage endpoint with OAuth TOKEN.
+The value is an alist of (NAME . VALUE) strings."
+  `(("Authorization" . ,(concat "Bearer " token))
+    ("anthropic-beta" . ,agent-claude-cli-usage-beta-header)))
 
 ;;;; Projects directory
 
