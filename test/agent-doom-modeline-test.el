@@ -54,7 +54,7 @@
                      " proj ")))))
 
 (ert-deftest agent-doom-modeline-test-session-status-shows-monitor ()
-  "A session that accepts wake-ups shows \"monitor\" before its status."
+  "A session that accepts wake-ups shows the monitor icon after its name."
   (skip-unless (require 'doom-modeline nil t))
   (agent-doom-modeline-test--with-session 'codex
     (cl-letf (((symbol-function 'agent-codex-status-model) #'ignore)
@@ -63,7 +63,9 @@
                (lambda (&rest _) t)))
       (should (equal (substring-no-properties
                       (agent-doom-modeline-session-status))
-                     " proj | monitor | 50%% done ")))))
+                     (concat " proj " (substring-no-properties
+                                       (agent-doom-modeline--monitor-icon))
+                             " | 50%% done "))))))
 
 (ert-deftest agent-doom-modeline-test-no-status-outside-session ()
   "A buffer that is not a session has no status."

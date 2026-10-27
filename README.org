@@ -429,7 +429,7 @@ Such a tool may also keep items for the user to review on a session's behalf, su
 
 #+findex: agent-process-review-file
 #+vindex: agent-review-process-prompt
-While a session accepts wake-ups, its doom-modeline status shows a =monitor= field after the account.
+While a session accepts wake-ups, its doom-modeline status shows a small broadcast icon after the session name (the letter =M= without Nerd Fonts); hovering over it explains it.
 
 After writing comments in the review file, such as "send", "change X" or "drop" next to each draft, ~agent-process-review-file~ (=m p=) hands them to the session: it saves the file if it has unsaved changes and submits ~agent-review-process-prompt~, which asks the session to carry out every comment and then update the file. Since you invoke it, the prompt is your instruction, and the comments carry your authority.
 

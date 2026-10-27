@@ -51,8 +51,9 @@
 (defun agent-doom-modeline-session-status ()
   "Return the description of the current buffer's session for the modeline.
 It holds the backend icon, the session name, the model, the reasoning
-effort, the account, \"monitor\" while the session accepts wake-ups from
-outside tools, and the status the session's agent last published.
+effort, the account and the status the session's agent last published,
+with a monitor icon after the name while the session accepts wake-ups
+from outside tools.
 Return nil when the current buffer is not a session."
   (when-let* ((backend (agent--detect-backend (current-buffer))))
     (let ((icon (agent-backend-icon-string backend 'mode-line-active))
@@ -62,19 +63,25 @@ Return nil when the current buffer is not a session."
        (unless (string-empty-p icon) (concat icon " "))
        (propertize (agent-display-name (current-buffer))
                    'face '(bold doom-modeline-buffer-major-mode))
+       (when (agent-session-accepts-wake-ups-p (current-buffer))
+         (concat " " (agent-doom-modeline--monitor-icon)))
        (agent-doom-modeline--field (agent-doom-modeline--model backend) "Model")
        (agent-doom-modeline--field (agent-doom-modeline--effort backend)
                                    "Reasoning effort")
        (agent-doom-modeline--field (and session (agent-session-account session))
                                    "Account" 'doom-modeline-buffer-path)
        (agent-doom-modeline--field
-        (and (agent-session-accepts-wake-ups-p (current-buffer)) "monitor")
-        "Accepts wake-ups from outside tools (m m in agent-menu toggles it)"
-        'doom-modeline-info)
-       (agent-doom-modeline--field
         (agent-session-state-summary (current-buffer))
         "Latest published session status")
        (doom-modeline-spc)))))
+
+(defun agent-doom-modeline--monitor-icon ()
+  "Return the icon that marks a session accepting wake-ups.
+Use a Nerd Fonts broadcast icon when `nerd-icons' is available, else M."
+  (propertize (or (and (fboundp 'nerd-icons-mdicon)
+                       (ignore-errors (nerd-icons-mdicon "nf-md-access_point")))
+                  "M")
+              'help-echo "Monitor on: accepts wake-ups from outside tools (m m in agent-menu)"))
 
 (defun agent-doom-modeline--model (backend)
   "Return the model name of the current buffer's session, or nil.
