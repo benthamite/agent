@@ -576,6 +576,25 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
     (agent-toggle-wake-ups a)
     (should-not (agent-session-accepts-wake-ups-p a))))
 
+(ert-deftest agent-test-open-review-file-opens-the-function-s-file ()
+  "Open the file `agent-review-file-function' returns for the session."
+  (agent-test--with-two-sessions
+    (let* ((file (make-temp-file "agent-review" nil ".md"))
+           (agent-review-file-function (lambda (buf) (and (eq buf a) file))))
+      (unwind-protect
+          (progn
+            (agent-open-review-file a)
+            (should (equal (buffer-file-name) file))
+            (kill-buffer)
+            (should-error (agent-open-review-file b) :type 'user-error))
+        (delete-file file)))))
+
+(ert-deftest agent-test-open-review-file-requires-the-option ()
+  "Signal a user error when `agent-review-file-function' is unset."
+  (agent-test--with-two-sessions
+    (let ((agent-review-file-function nil))
+      (should-error (agent-open-review-file a) :type 'user-error))))
+
 (ert-deftest agent-test-snoozed-sessions-are-listed-last ()
   "List snoozed sessions after every active one, keeping their keys."
   (agent-test--with-two-sessions

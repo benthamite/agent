@@ -397,9 +397,10 @@ The command ~agent-menu~ opens the unified transient menu. Every entry in it wor
 The Sessions section holds general session management: new session (=n=),
 resume session (=r=), select session (=s=), jump to waiting, and open log.
 The Account section beneath Options holds login (=a l=) and usage (=a u=).
-The Current session column holds branching, toggle snooze (=z=), toggle
-wake-ups (=W=), handoff,
-restart (=R=), and exit commands. It labels
+The Current session column holds branching, toggle snooze (=z=), handoff,
+restart (=R=), and exit commands, and beneath them a Monitor section for
+tools outside Emacs that act on sessions: toggle wake-ups (=W=) and open
+review file (=D=). It labels
 ~agent-exit~ (=x=) as “exit” and ~agent-exit-without-skills~ (=X=) as “exit immediately”.
 
 Tools use the =t= prefix: act on thing at point (=t .=) and run skill (=t r=).
@@ -421,6 +422,10 @@ A session that is waiting for something you can only do later can be set aside w
 #+findex: agent-toggle-wake-ups
 #+findex: agent-session-accepts-wake-ups-p
 A tool outside Emacs, such as a message monitor, can wake an idle session by submitting a prompt to it with ~agent-submit~. Sessions refuse such wake-ups by default: ~agent-toggle-wake-ups~, bound to =W= in ~agent-menu~, lets the current session accept them, and invoking it again stops it. Tools ask with ~agent-session-accepts-wake-ups-p~; agent.el does not enforce the setting on ~agent-submit~, so a tool that never asks is not stopped by it. The command prompts for a session when the current buffer is not one or with a prefix argument. Like the snooze mark, the setting is a property of the buffer and ends with the session.
+
+#+vindex: agent-review-file-function
+#+findex: agent-open-review-file
+Such a tool may also keep items for the user to review on a session's behalf, such as draft replies to the messages it routed there. Set ~agent-review-file-function~ to a function that takes the session buffer and returns that file (or nil when the session has none); ~agent-open-review-file~, bound to =D= in the Monitor section of ~agent-menu~, then opens it. Like ~agent-toggle-wake-ups~, it acts on the current session and prompts for one when the current buffer is not a session or with a prefix argument. With the option unset, the command signals an error saying so.
 
 #+findex: agent-tab-bar-mode
 #+vindex: agent-tab-bar-refresh-interval

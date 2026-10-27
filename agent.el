@@ -678,6 +678,15 @@ that function is available."
   :type 'boolean
   :group 'agent)
 
+(defcustom agent-review-file-function nil
+  "Function that returns the review file of a session, or nil.
+It is called with the session buffer.  A tool that collects items
+for the user to review on a session's behalf, such as a message
+monitor's draft replies, can point this at its file, and
+`agent-open-review-file' then opens it."
+  :type '(choice (const :tag "None" nil) function)
+  :group 'agent)
+
 (defcustom agent-sync-theme nil
   "When non-nil, sync AI CLI themes with the current Emacs theme.
 Theme changes are persisted through registered backend
@@ -1874,6 +1883,22 @@ the setting is a property of the buffer, so it ends with the session."
       (setq agent--accepts-wake-ups (not agent--accepts-wake-ups))
       (message "%s %s wake-ups" (agent-display-name buf)
                (if agent--accepts-wake-ups "accepts" "no longer accepts")))))
+
+(defun agent-open-review-file (&optional buffer)
+  "Open the review file of session BUFFER.
+BUFFER defaults to the current session buffer, and is prompted for
+when the current buffer is not a session or with a prefix argument.
+The file comes from `agent-review-file-function'."
+  (interactive
+   (list (agent--resolve-session-buffer
+          (and current-prefix-arg (agent--read-session-buffer)))))
+  (unless agent-review-file-function
+    (user-error "Set `agent-review-file-function' to open review files"))
+  (let* ((buf (agent--resolve-session-buffer buffer))
+         (file (funcall agent-review-file-function buf)))
+    (unless file
+      (user-error "%s has no review file" (agent-display-name buf)))
+    (find-file file)))
 
 ;;;; Buffer protection
 
@@ -4584,11 +4609,14 @@ when it is not installed."
     ("b n" "new branch" agent-create-branch)
     ("b s" "switch branch" agent-switch-branch)
     ("z" "toggle snooze" agent-toggle-snooze)
-    ("W" "toggle wake-ups" agent-toggle-wake-ups)
     ("h" "handoff" agent-handoff)
     ("R" "restart" agent-restart)
     ("x" "exit" agent-exit)
-    ("X" "exit immediately" agent-exit-without-skills)]
+    ("X" "exit immediately" agent-exit-without-skills)
+    ""
+    "Monitor"
+    ("W" "toggle wake-ups" agent-toggle-wake-ups)
+    ("D" "open review file" agent-open-review-file)]
    ["Tools"
     ("t ." "act on thing at point" agent-act-on-thing-at-point)
     ("t r" "run skill" agent-run-skill)
