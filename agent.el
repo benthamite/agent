@@ -1892,6 +1892,7 @@ the setting is a property of the buffer, so it ends with the session."
   (let ((buf (agent--resolve-session-buffer buffer)))
     (with-current-buffer buf
       (setq agent--accepts-wake-ups (not agent--accepts-wake-ups))
+      (force-mode-line-update)
       (message "%s %s wake-ups" (agent-display-name buf)
                (if agent--accepts-wake-ups "accepts" "no longer accepts")))))
 

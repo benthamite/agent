@@ -53,6 +53,18 @@
                       (agent-doom-modeline-session-status))
                      " proj ")))))
 
+(ert-deftest agent-doom-modeline-test-session-status-shows-monitor ()
+  "A session that accepts wake-ups shows \"monitor\" before its status."
+  (skip-unless (require 'doom-modeline nil t))
+  (agent-doom-modeline-test--with-session 'codex
+    (cl-letf (((symbol-function 'agent-codex-status-model) #'ignore)
+              ((symbol-function 'agent-codex-status-effort) #'ignore)
+              ((symbol-function 'agent-session-accepts-wake-ups-p)
+               (lambda (&rest _) t)))
+      (should (equal (substring-no-properties
+                      (agent-doom-modeline-session-status))
+                     " proj | monitor | 50%% done ")))))
+
 (ert-deftest agent-doom-modeline-test-no-status-outside-session ()
   "A buffer that is not a session has no status."
   (skip-unless (require 'doom-modeline nil t))

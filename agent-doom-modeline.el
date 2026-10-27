@@ -40,6 +40,7 @@
 (declare-function agent-session "agent")
 (declare-function agent-session-account "agent")
 (declare-function agent-session-state-summary "agent")
+(declare-function agent-session-accepts-wake-ups-p "agent")
 (declare-function agent-claude-status-model "agent-claude")
 (declare-function agent-claude-status-effort "agent-claude")
 (declare-function agent-codex-status-model "agent-codex")
@@ -50,7 +51,8 @@
 (defun agent-doom-modeline-session-status ()
   "Return the description of the current buffer's session for the modeline.
 It holds the backend icon, the session name, the model, the reasoning
-effort, the account and the status the session's agent last published.
+effort, the account, \"monitor\" while the session accepts wake-ups from
+outside tools, and the status the session's agent last published.
 Return nil when the current buffer is not a session."
   (when-let* ((backend (agent--detect-backend (current-buffer))))
     (let ((icon (agent-backend-icon-string backend 'mode-line-active))
@@ -65,6 +67,10 @@ Return nil when the current buffer is not a session."
                                    "Reasoning effort")
        (agent-doom-modeline--field (and session (agent-session-account session))
                                    "Account" 'doom-modeline-buffer-path)
+       (agent-doom-modeline--field
+        (and (agent-session-accepts-wake-ups-p (current-buffer)) "monitor")
+        "Accepts wake-ups from outside tools (m m in agent-menu toggles it)"
+        'doom-modeline-info)
        (agent-doom-modeline--field
         (agent-session-state-summary (current-buffer))
         "Latest published session status")
