@@ -566,6 +566,16 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
     (agent-toggle-snooze a)
     (should-not (agent-session-snoozed-p a))))
 
+(ert-deftest agent-test-toggle-wake-ups-flips-the-flag ()
+  "Refuse wake-ups by default, accept them after one toggle, refuse after two."
+  (agent-test--with-two-sessions
+    (should-not (agent-session-accepts-wake-ups-p a))
+    (agent-toggle-wake-ups a)
+    (should (agent-session-accepts-wake-ups-p a))
+    (should-not (agent-session-accepts-wake-ups-p b))
+    (agent-toggle-wake-ups a)
+    (should-not (agent-session-accepts-wake-ups-p a))))
+
 (ert-deftest agent-test-snoozed-sessions-are-listed-last ()
   "List snoozed sessions after every active one, keeping their keys."
   (agent-test--with-two-sessions

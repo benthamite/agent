@@ -838,6 +838,12 @@ last and dimmed, `agent-jump-to-waiting' skips it, and it fires no
 ready alert.  Set only by `agent-toggle-snooze', and cleared by it or
 by `agent--snooze-expire' when a timed snooze runs out.")
 
+(defvar-local agent--accepts-wake-ups nil
+  "Non-nil when this AI session accepts wake-ups from external tools.
+A wake-up is a prompt that a tool outside Emacs, such as a message
+monitor, submits to an idle session through `agent-submit'.  Off by
+default; set only by `agent-toggle-wake-ups'.")
+
 (defvar-local agent--snooze-timer nil
   "Pending timer ending this session's timed snooze, or nil.
 Armed by `agent-toggle-snooze' when the snooze was given a duration in
@@ -1844,6 +1850,30 @@ session is waiting for input."
       (setq agent--snooze-timer nil))
     (when (agent--session-waiting-p buffer)
       (agent--session-notify-ready buffer))))
+
+;;;; Wake-ups
+
+(defun agent-session-accepts-wake-ups-p (buffer)
+  "Return non-nil when session BUFFER accepts wake-ups from external tools.
+Tools that submit unrequested prompts to idle sessions consult this
+before waking BUFFER."
+  (buffer-local-value 'agent--accepts-wake-ups buffer))
+
+;;;###autoload
+(defun agent-toggle-wake-ups (&optional buffer)
+  "Let external tools wake session BUFFER, or stop letting them.
+BUFFER defaults to the current session buffer, and is prompted for
+when the current buffer is not a session or with a prefix argument.
+Sessions accept no wake-ups until this turns them on.  Like snoozing,
+the setting is a property of the buffer, so it ends with the session."
+  (interactive
+   (list (agent--resolve-session-buffer
+          (and current-prefix-arg (agent--read-session-buffer)))))
+  (let ((buf (agent--resolve-session-buffer buffer)))
+    (with-current-buffer buf
+      (setq agent--accepts-wake-ups (not agent--accepts-wake-ups))
+      (message "%s %s wake-ups" (agent-display-name buf)
+               (if agent--accepts-wake-ups "accepts" "no longer accepts")))))
 
 ;;;; Buffer protection
 
@@ -4554,6 +4584,7 @@ when it is not installed."
     ("b n" "new branch" agent-create-branch)
     ("b s" "switch branch" agent-switch-branch)
     ("z" "toggle snooze" agent-toggle-snooze)
+    ("W" "toggle wake-ups" agent-toggle-wake-ups)
     ("h" "handoff" agent-handoff)
     ("R" "restart" agent-restart)
     ("x" "exit" agent-exit)

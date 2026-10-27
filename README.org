@@ -397,7 +397,8 @@ The command ~agent-menu~ opens the unified transient menu. Every entry in it wor
 The Sessions section holds general session management: new session (=n=),
 resume session (=r=), select session (=s=), jump to waiting, and open log.
 The Account section beneath Options holds login (=a l=) and usage (=a u=).
-The Current session column holds branching, toggle snooze (=z=), handoff,
+The Current session column holds branching, toggle snooze (=z=), toggle
+wake-ups (=W=), handoff,
 restart (=R=), and exit commands. It labels
 ~agent-exit~ (=x=) as “exit” and ~agent-exit-without-skills~ (=X=) as “exit immediately”.
 
@@ -416,6 +417,10 @@ The command ~agent-select-session~ opens the session switcher, which contains on
 The switcher lists every session in one flat list ordered by home-row key, whatever account each session runs under. The account is a column of its own, between the session name and its annotation, shown dimmed in the ~agent-session-account~ face. A session is therefore found at the key it always answers to, rather than at a position that moves when a neighbor's account changes. Sessions whose backend has no accounts configured leave the column blank, and when no session on screen records an account the column is left out altogether.
 
 A session that is waiting for something you can only do later can be set aside with ~agent-toggle-snooze~, bound to =z= in ~agent-menu~; invoking it again unsnoozes. A snoozed session keeps its key and its buffer, but the switcher lists it after every active session in the dimmed italic ~agent-snoozed~ face instead of a state color, ~agent-jump-to-waiting~ skips it, and it fires no ready alert when its turn ends. When snoozing, the command reads a duration in hours from the minibuffer; leaving it blank snoozes indefinitely. A timed snooze ends by itself when the hours run out, and if the session is waiting for input at that point, the ready alert that snoozing suppressed fires then. The command acts on the current session, and prompts for one when the current buffer is not a session or with a prefix argument. The mark is a property of the buffer, so it ends with the session and is not carried over by a restart or a handoff.
+
+#+findex: agent-toggle-wake-ups
+#+findex: agent-session-accepts-wake-ups-p
+A tool outside Emacs, such as a message monitor, can wake an idle session by submitting a prompt to it with ~agent-submit~. Sessions refuse such wake-ups by default: ~agent-toggle-wake-ups~, bound to =W= in ~agent-menu~, lets the current session accept them, and invoking it again stops it. Tools ask with ~agent-session-accepts-wake-ups-p~; agent.el does not enforce the setting on ~agent-submit~, so a tool that never asks is not stopped by it. The command prompts for a session when the current buffer is not one or with a prefix argument. Like the snooze mark, the setting is a property of the buffer and ends with the session.
 
 #+findex: agent-tab-bar-mode
 #+vindex: agent-tab-bar-refresh-interval
