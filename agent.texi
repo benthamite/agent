@@ -486,8 +486,8 @@ resume session (@samp{r}), select session (@samp{s}), jump to waiting, and open 
 The Account section beneath Options holds login (@samp{a l}) and usage (@samp{a u}).
 The Current session column holds branching, toggle snooze (@samp{z}), handoff,
 restart (@samp{R}), and exit commands, and beneath them a Monitor section for
-tools outside Emacs that act on sessions: toggle wake-ups (@samp{W}) and open
-review file (@samp{D}). It labels
+tools outside Emacs that act on sessions: toggle wake-ups (@samp{m w}) and open
+review file (@samp{m f}). It labels
 @code{agent-exit} (@samp{x}) as “exit” and @code{agent-exit-without-skills} (@samp{X}) as “exit immediately”.
 
 Tools use the @samp{t} prefix: act on thing at point (@samp{t .}) and run skill (@samp{t r}).
@@ -508,11 +508,11 @@ A session that is waiting for something you can only do later can be set aside w
 
 @findex agent-toggle-wake-ups
 @findex agent-session-accepts-wake-ups-p
-A tool outside Emacs, such as a message monitor, can wake an idle session by submitting a prompt to it with @code{agent-submit}. Sessions refuse such wake-ups by default: @code{agent-toggle-wake-ups}, bound to @samp{W} in @code{agent-menu}, lets the current session accept them, and invoking it again stops it. Tools ask with @code{agent-session-accepts-wake-ups-p}; agent.el does not enforce the setting on @code{agent-submit}, so a tool that never asks is not stopped by it. The command prompts for a session when the current buffer is not one or with a prefix argument. Like the snooze mark, the setting is a property of the buffer and ends with the session.
+A tool outside Emacs, such as a message monitor, can wake an idle session by submitting a prompt to it with @code{agent-submit}. Sessions refuse such wake-ups by default: @code{agent-toggle-wake-ups}, bound to @samp{m w} in @code{agent-menu}, lets the current session accept them, and invoking it again stops it. Tools ask with @code{agent-session-accepts-wake-ups-p}; agent.el does not enforce the setting on @code{agent-submit}, so a tool that never asks is not stopped by it. The command prompts for a session when the current buffer is not one or with a prefix argument. Like the snooze mark, the setting is a property of the buffer and ends with the session.
 
 @vindex agent-review-file-function
 @findex agent-open-review-file
-Such a tool may also keep items for the user to review on a session's behalf, such as draft replies to the messages it routed there. Set @code{agent-review-file-function} to a function that takes the session buffer and returns that file (or nil when the session has none); @code{agent-open-review-file}, bound to @samp{D} in the Monitor section of @code{agent-menu}, then opens it. Like @code{agent-toggle-wake-ups}, it acts on the current session and prompts for one when the current buffer is not a session or with a prefix argument. With the option unset, the command signals an error saying so.
+Such a tool may also keep items for the user to review on a session's behalf, such as draft replies to the messages it routed there. Set @code{agent-review-file-function} to a function that takes the session buffer and returns that file (or nil when the session has none); @code{agent-open-review-file}, bound to @samp{m f} in the Monitor section of @code{agent-menu}, then opens it. Like @code{agent-toggle-wake-ups}, it acts on the current session and prompts for one when the current buffer is not a session or with a prefix argument. With the option unset, the command signals an error saying so.
 
 @findex agent-tab-bar-mode
 @vindex agent-tab-bar-refresh-interval

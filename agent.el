@@ -4615,8 +4615,8 @@ when it is not installed."
     ("X" "exit immediately" agent-exit-without-skills)
     ""
     "Monitor"
-    ("W" "toggle wake-ups" agent-toggle-wake-ups)
-    ("D" "open review file" agent-open-review-file)]
+    ("m w" "toggle wake-ups" agent-toggle-wake-ups)
+    ("m f" "open review file" agent-open-review-file)]
    ["Tools"
     ("t ." "act on thing at point" agent-act-on-thing-at-point)
     ("t r" "run skill" agent-run-skill)
