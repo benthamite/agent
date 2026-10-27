@@ -687,6 +687,17 @@ monitor's draft replies, can point this at its file, and
   :type '(choice (const :tag "None" nil) function)
   :group 'agent)
 
+(defcustom agent-review-process-prompt
+  "Process my review file %s. Each of my comments in it is my instruction \
+about the item it is attached to (in CriticMarkup, {>>comment<<} after the \
+{==highlighted==} text): for example to send a draft as it is, to change it, \
+or to drop it. Carry out every comment, then update the file to show what \
+was done and remove the comments you handled."
+  "Prompt that `agent-process-review-file' submits to the session.
+The review file's name replaces the %s."
+  :type 'string
+  :group 'agent)
+
 (defcustom agent-sync-theme nil
   "When non-nil, sync AI CLI themes with the current Emacs theme.
 Theme changes are persisted through registered backend
@@ -1892,13 +1903,32 @@ The file comes from `agent-review-file-function'."
   (interactive
    (list (agent--resolve-session-buffer
           (and current-prefix-arg (agent--read-session-buffer)))))
-  (unless agent-review-file-function
-    (user-error "Set `agent-review-file-function' to open review files"))
+  (find-file (agent--review-file (agent--resolve-session-buffer buffer))))
+
+(defun agent-process-review-file (&optional buffer)
+  "Ask session BUFFER to act on the user's comments in its review file.
+Save the review file first if a buffer visits it with unsaved changes,
+then submit `agent-review-process-prompt' with the file's name.  BUFFER
+defaults to the current session buffer, and is prompted for when the
+current buffer is not a session or with a prefix argument."
+  (interactive
+   (list (agent--resolve-session-buffer
+          (and current-prefix-arg (agent--read-session-buffer)))))
   (let* ((buf (agent--resolve-session-buffer buffer))
-         (file (funcall agent-review-file-function buf)))
-    (unless file
-      (user-error "%s has no review file" (agent-display-name buf)))
-    (find-file file)))
+         (file (agent--review-file buf)))
+    (when-let* ((visiting (find-buffer-visiting file)))
+      (with-current-buffer visiting
+        (when (buffer-modified-p) (save-buffer))))
+    (agent-submit (format agent-review-process-prompt file) buf)
+    (message "Asked %s to process %s" (agent-display-name buf)
+             (abbreviate-file-name file))))
+
+(defun agent--review-file (buffer)
+  "Return session BUFFER's review file, or signal a user error."
+  (unless agent-review-file-function
+    (user-error "Set `agent-review-file-function' to use review files"))
+  (or (funcall agent-review-file-function buffer)
+      (user-error "%s has no review file" (agent-display-name buffer))))
 
 ;;;; Buffer protection
 
@@ -4616,7 +4646,8 @@ when it is not installed."
     ""
     "Monitor"
     ("m w" "toggle wake-ups" agent-toggle-wake-ups)
-    ("m f" "open review file" agent-open-review-file)]
+    ("m f" "open review file" agent-open-review-file)
+    ("m p" "process review file" agent-process-review-file)]
    ["Tools"
     ("t ." "act on thing at point" agent-act-on-thing-at-point)
     ("t r" "run skill" agent-run-skill)

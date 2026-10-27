@@ -399,8 +399,8 @@ resume session (=r=), select session (=s=), jump to waiting, and open log.
 The Account section beneath Options holds login (=a l=) and usage (=a u=).
 The Current session column holds branching, toggle snooze (=z=), handoff,
 restart (=R=), and exit commands, and beneath them a Monitor section for
-tools outside Emacs that act on sessions: toggle wake-ups (=m w=) and open
-review file (=m f=). It labels
+tools outside Emacs that act on sessions: toggle wake-ups (=m w=), open
+review file (=m f=) and process review file (=m p=). It labels
 ~agent-exit~ (=x=) as “exit” and ~agent-exit-without-skills~ (=X=) as “exit immediately”.
 
 Tools use the =t= prefix: act on thing at point (=t .=) and run skill (=t r=).
@@ -426,6 +426,10 @@ A tool outside Emacs, such as a message monitor, can wake an idle session by sub
 #+vindex: agent-review-file-function
 #+findex: agent-open-review-file
 Such a tool may also keep items for the user to review on a session's behalf, such as draft replies to the messages it routed there. Set ~agent-review-file-function~ to a function that takes the session buffer and returns that file (or nil when the session has none); ~agent-open-review-file~, bound to =m f= in the Monitor section of ~agent-menu~, then opens it. Like ~agent-toggle-wake-ups~, it acts on the current session and prompts for one when the current buffer is not a session or with a prefix argument. With the option unset, the command signals an error saying so.
+
+#+findex: agent-process-review-file
+#+vindex: agent-review-process-prompt
+After writing comments in the review file, such as "send", "change X" or "drop" next to each draft, ~agent-process-review-file~ (=m p=) hands them to the session: it saves the file if it has unsaved changes and submits ~agent-review-process-prompt~, which asks the session to carry out every comment and then update the file. Since you invoke it, the prompt is your instruction, and the comments carry your authority.
 
 #+findex: agent-tab-bar-mode
 #+vindex: agent-tab-bar-refresh-interval

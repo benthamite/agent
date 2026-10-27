@@ -589,6 +589,24 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
             (should-error (agent-open-review-file b) :type 'user-error))
         (delete-file file)))))
 
+(ert-deftest agent-test-process-review-file-saves-and-submits ()
+  "Save the visited review file, then submit the prompt naming it."
+  (agent-test--with-two-sessions
+    (let* ((file (make-temp-file "agent-review" nil ".md"))
+           (agent-review-file-function (lambda (_) file))
+           (agent-review-process-prompt "process %s")
+           submitted)
+      (unwind-protect
+          (cl-letf (((symbol-function 'agent-submit)
+                     (lambda (string buf) (setq submitted (list string buf)))))
+            (with-current-buffer (find-file-noselect file)
+              (insert "{>>send<<}")
+              (agent-process-review-file a)
+              (should-not (buffer-modified-p))
+              (kill-buffer))
+            (should (equal submitted (list (concat "process " file) a))))
+        (delete-file file)))))
+
 (ert-deftest agent-test-open-review-file-requires-the-option ()
   "Signal a user error when `agent-review-file-function' is unset."
   (agent-test--with-two-sessions
