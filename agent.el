@@ -4645,7 +4645,7 @@ when it is not installed."
     ("X" "exit immediately" agent-exit-without-skills)
     ""
     "Monitor"
-    ("m w" "toggle wake-ups" agent-toggle-wake-ups)
+    ("m m" "toggle monitor" agent-toggle-wake-ups)
     ("m f" "open review file" agent-open-review-file)
     ("m p" "process review file" agent-process-review-file)]
    ["Tools"

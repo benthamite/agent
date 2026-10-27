@@ -399,7 +399,7 @@ resume session (=r=), select session (=s=), jump to waiting, and open log.
 The Account section beneath Options holds login (=a l=) and usage (=a u=).
 The Current session column holds branching, toggle snooze (=z=), handoff,
 restart (=R=), and exit commands, and beneath them a Monitor section for
-tools outside Emacs that act on sessions: toggle wake-ups (=m w=), open
+tools outside Emacs that act on sessions: toggle monitor (=m m=), open
 review file (=m f=) and process review file (=m p=). It labels
 ~agent-exit~ (=x=) as “exit” and ~agent-exit-without-skills~ (=X=) as “exit immediately”.
 
@@ -421,7 +421,7 @@ A session that is waiting for something you can only do later can be set aside w
 
 #+findex: agent-toggle-wake-ups
 #+findex: agent-session-accepts-wake-ups-p
-A tool outside Emacs, such as a message monitor, can wake an idle session by submitting a prompt to it with ~agent-submit~. Sessions refuse such wake-ups by default: ~agent-toggle-wake-ups~, bound to =m w= in ~agent-menu~, lets the current session accept them, and invoking it again stops it. Tools ask with ~agent-session-accepts-wake-ups-p~; agent.el does not enforce the setting on ~agent-submit~, so a tool that never asks is not stopped by it. The command prompts for a session when the current buffer is not one or with a prefix argument. Like the snooze mark, the setting is a property of the buffer and ends with the session.
+A tool outside Emacs, such as a message monitor, can wake an idle session by submitting a prompt to it with ~agent-submit~. Sessions refuse such wake-ups by default: ~agent-toggle-wake-ups~, bound to =m m= (“toggle monitor”) in ~agent-menu~, lets the current session accept them, and invoking it again stops it. Tools ask with ~agent-session-accepts-wake-ups-p~; agent.el does not enforce the setting on ~agent-submit~, so a tool that never asks is not stopped by it. The command prompts for a session when the current buffer is not one or with a prefix argument. Like the snooze mark, the setting is a property of the buffer and ends with the session.
 
 #+vindex: agent-review-file-function
 #+findex: agent-open-review-file
