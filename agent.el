@@ -4644,11 +4644,15 @@ when it is not installed."
     ("R" "restart" agent-restart)
     ("x" "exit" agent-exit)
     ("X" "exit immediately" agent-exit-without-skills)
-    ""
-    "Monitor"
-    ("m m" "toggle monitor" agent-toggle-wake-ups)
-    ("m f" "open review file" agent-open-review-file)
-    ("m p" "process review file" agent-process-review-file)]
+    ;; Display-only lines stand in for the "" and heading strings,
+    ;; which cannot take `:if'.
+    (:info "" :format "%d" :if agent--monitor-menu-p)
+    (:info "Monitor" :format "%d" :face transient-heading
+     :if agent--monitor-menu-p)
+    ("m m" "toggle monitor" agent-toggle-wake-ups :if agent--monitor-menu-p)
+    ("m f" "open review file" agent-open-review-file :if agent--monitor-menu-p)
+    ("m p" "process review file" agent-process-review-file
+     :if agent--monitor-menu-p)]
    ["Tools"
     ("t ." "act on thing at point" agent-act-on-thing-at-point)
     ("t r" "run skill" agent-run-skill)
@@ -4667,6 +4671,13 @@ when it is not installed."
     "Account"
     ("a l" "login" agent-account-login)
     ("a u" "usage" agent-usage-show)]])
+
+(defun agent--monitor-menu-p ()
+  "Return non-nil when `agent-menu' should show its Monitor section.
+The section serves a tool outside Emacs that acts on sessions, and
+such a tool sets `agent-review-file-function', so without the option
+the section's commands have nothing to work with."
+  (and agent-review-file-function t))
 
 (transient-define-infix agent--infix-alert-on-ready ()
   "Toggle `agent-alert-on-ready'."

@@ -613,6 +613,26 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
     (let ((agent-review-file-function nil))
       (should-error (agent-open-review-file a) :type 'user-error))))
 
+(ert-deftest agent-test-menu-shows-monitor-only-with-review-file-function ()
+  "Show the Monitor heading and keys only when the review file option is set."
+  (let ((heading nil))
+    (letrec ((walk (lambda (node)
+                     (cond
+                      ((vectorp node) (mapc walk (append node nil)))
+                      ((consp node)
+                       (when (equal (plist-get (cdr node) :description) "Monitor")
+                         (setq heading node))
+                       (mapc walk node))))))
+      (funcall walk (get 'agent-menu 'transient--layout)))
+    (should (eq (plist-get (cdr heading) :if) 'agent--monitor-menu-p)))
+  (dolist (key '("m m" "m f" "m p"))
+    (should (eq (plist-get (cdr (transient-get-suffix 'agent-menu key)) :if)
+                'agent--monitor-menu-p)))
+  (let ((agent-review-file-function nil))
+    (should-not (agent--monitor-menu-p)))
+  (let ((agent-review-file-function #'ignore))
+    (should (agent--monitor-menu-p))))
+
 (ert-deftest agent-test-snoozed-sessions-are-listed-last ()
   "List snoozed sessions after every active one, keeping their keys."
   (agent-test--with-two-sessions

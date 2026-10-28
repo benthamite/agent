@@ -487,7 +487,9 @@ The Account section beneath Options holds login (@samp{a l}) and usage (@samp{a 
 The Current session column holds branching, toggle snooze (@samp{z}), handoff,
 restart (@samp{R}), and exit commands, and beneath them a Monitor section for
 tools outside Emacs that act on sessions: toggle monitor (@samp{m m}), open
-review file (@samp{m f}) and process review file (@samp{m p}). It labels
+review file (@samp{m f}) and process review file (@samp{m p}). Such a tool sets
+@code{agent-review-file-function}, and the Monitor section appears only while
+that option is set. It labels
 @code{agent-exit} (@samp{x}) as “exit” and @code{agent-exit-without-skills} (@samp{X}) as “exit immediately”.
 
 Tools use the @samp{t} prefix: act on thing at point (@samp{t .}) and run skill (@samp{t r}).

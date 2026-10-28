@@ -400,7 +400,9 @@ The Account section beneath Options holds login (=a l=) and usage (=a u=).
 The Current session column holds branching, toggle snooze (=z=), handoff,
 restart (=R=), and exit commands, and beneath them a Monitor section for
 tools outside Emacs that act on sessions: toggle monitor (=m m=), open
-review file (=m f=) and process review file (=m p=). It labels
+review file (=m f=) and process review file (=m p=). Such a tool sets
+~agent-review-file-function~, and the Monitor section appears only while
+that option is set. It labels
 ~agent-exit~ (=x=) as “exit” and ~agent-exit-without-skills~ (=X=) as “exit immediately”.
 
 Tools use the =t= prefix: act on thing at point (=t .=) and run skill (=t r=).
