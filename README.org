@@ -676,12 +676,18 @@ run an unscoped skill before exiting every session.
 
 For a ~:receipt~ entry, Agent creates a private temporary directory and appends
 ~--receipt-file PATH~ to the submitted command. The skill must write one JSON
-object to that path. Its ~status~ must be exactly ~success~, ~no-op~, or
-~failure~; a failure receipt can include a ~message~. Agent advances the chain
-or exits only after ~success~ or ~no-op~. A missing file, invalid JSON, unknown
-status, or ~failure~ stops the chain, keeps the session open, and shows a
-warning; a missing file is ignored while the backend's idle probe still shows
-the session working, since that completion event belongs to an earlier turn. Agent removes the temporary receipt directory after reading it or
+object to that path. Its ~status~ must be exactly ~success~, ~no-op~, ~held~,
+or ~failure~; a ~held~ or ~failure~ receipt can include a ~message~. Agent
+advances the chain or exits only after ~success~ or ~no-op~. ~held~ means the
+skill finished its own work but needs the user, for example to approve
+proposals it presented: the chain stops without a warning, the session stays
+open and is marked as awaiting input (with the usual ready alert), and the echo
+area names the skill and shows the receipt's ~message~. A missing file, invalid
+JSON, unknown status, or ~failure~ stops the chain, keeps the session open, and
+shows a warning; a missing file is ignored while the backend's idle probe still shows
+the session working, since that completion event belongs to an earlier turn. After ~held~ or
+~failure~, the next ~agent-exit~ starts the chain again from its first entry.
+Agent removes the temporary receipt directory after reading it or
 tearing down the session. Receipt gating is per entry: plain entries keep the
 stop-event behavior. This lets a learning-capture entry run independently
 before a receipt-gated bookkeeping entry. Repeating ~agent-exit~ while a chain

@@ -88,7 +88,12 @@ that restrict where the skill runs, overriding
 `agent-before-exit-skill-directories') and `:args' (a string appended to the
 submitted command).  An entry with `:receipt' non-nil must write a JSON result
 to the path supplied through `--receipt-file'.  Its `status' must be `success',
-`no-op', or `failure'.
+`no-op', `held', or `failure'.  `success' and `no-op' advance the chain.
+`held' means the skill finished its work but needs the user: the chain stops
+without a warning, the session stays open awaiting input, and the receipt's
+`message' is shown.  `failure', a missing receipt, or an invalid one stops the
+chain with a warning.  After `held' or `failure', the next `agent-exit' starts
+the chain again from its first entry.
 
 Skills are submitted in order, each after the previous one finishes, and the
 session exits after the last.  When nil, `agent-before-exit-skill-name' is used
@@ -2573,8 +2578,10 @@ Return non-nil when the chain consumed the event."
 
 (defun agent--before-exit-accept-receipt-p (buffer)
   "Return non-nil if BUFFER's current entry has an accepted receipt.
-Ungated entries need no receipt.  A missing, invalid, or failed
-receipt stops the chain and keeps BUFFER open.  A receipt that is
+Ungated entries need no receipt.  A held receipt stops the chain
+without a warning and keeps BUFFER open for the user.  A missing,
+invalid, or failed receipt stops the chain with a warning and keeps
+BUFFER open.  A receipt that is
 missing while the backend still shows the session working is not a
 failure: the completion event belongs to an earlier turn (a late Stop
 hook or a stray idle notification), so the chain stays armed and
@@ -2591,6 +2598,9 @@ re-checks on the next event."
          ((memq (plist-get result :status) '(success no-op))
           (agent--before-exit-cleanup-receipt)
           t)
+         ((eq (plist-get result :status) 'held)
+          (agent--before-exit-cleanup-receipt)
+          (agent--before-exit-hold buffer result))
          (t
           (agent--before-exit-cleanup-receipt)
           (agent--before-exit-fail buffer result))))
@@ -2608,7 +2618,7 @@ no evidence for."
 (defun agent--before-exit-read-receipt (file)
   "Return the validated closeout receipt from FILE.
 The result is a plist whose `:status' is `success', `no-op',
-`failure', `missing', or `invalid'."
+`held', `failure', `missing', or `invalid'."
   (if (not (file-readable-p file))
       '(:status missing :message "no receipt file was written")
     (condition-case err
@@ -2622,6 +2632,7 @@ The result is a plist whose `:status' is `success', `no-op',
           (cond
            ((equal status "success") (plist-put data :status 'success))
            ((equal status "no-op") (plist-put data :status 'no-op))
+           ((equal status "held") (plist-put data :status 'held))
            ((equal status "failure") (plist-put data :status 'failure))
            (t (list :status 'invalid
                     :message (format "invalid receipt status `%s'" status)))))
@@ -2629,14 +2640,34 @@ The result is a plist whose `:status' is `success', `no-op',
                    :message (format "invalid receipt: %s"
                                     (error-message-string err)))))))
 
+(defun agent--before-exit-hold (buffer result)
+  "Stop BUFFER's closeout chain because receipt RESULT holds it for the user.
+Show the receipt's message as a notice rather than a warning, reset
+the chain so that a later exit request starts it afresh, and mark
+BUFFER as awaiting input.  The completion event that delivered the
+receipt is left unconsumed, so the usual ready alert still fires.
+Return nil."
+  (let* ((skill (agent--before-exit-current-skill-name))
+         (detail (or (plist-get result :message) "no message given")))
+    (agent--before-exit-reset)
+    (message "agent: %s needs your input before exit: %s" skill detail)
+    (when (buffer-live-p buffer)
+      (agent--session-set-state buffer 'awaiting-input))
+    nil))
+
+(defun agent--before-exit-current-skill-name ()
+  "Return the name of the running before-exit skill entry, or a placeholder."
+  (let ((entry (plist-get agent--before-exit :current-entry)))
+    (or (and entry (agent--before-exit-skill-entry-name entry))
+        "before-exit skill")))
+
 (defun agent--before-exit-fail (buffer result)
   "Stop BUFFER's closeout chain because of receipt RESULT."
-  (let* ((entry (plist-get agent--before-exit :current-entry))
-         (skill (and entry (agent--before-exit-skill-entry-name entry)))
+  (let* ((skill (agent--before-exit-current-skill-name))
          (detail (or (plist-get result :message)
                      (format "status `%s'" (plist-get result :status))))
          (message-text (format "agent: %s closeout stopped: %s"
-                               (or skill "before-exit skill") detail)))
+                               skill detail)))
     (agent--before-exit-reset)
     (display-warning 'agent message-text :warning)
     (message "%s" message-text)

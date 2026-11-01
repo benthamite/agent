@@ -2436,6 +2436,66 @@ session's account and id, and `synced' the synced selections."
           (should (= (length events) 1))
           (should (string-match-p "commit failed" (car warnings))))))))
 
+(ert-deftest agent-test-before-exit-receipt-held-stops-chain-quietly ()
+  "Hold the session for the user when a gated entry reports held."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names
+         '(("skill-audit" :receipt t) "must-not-run"))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        events
+        warnings
+        notices
+        alerts
+        exited
+        receipt-directory)
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+         'one
+         (agent-test--backend
+          :buffer-p (lambda (candidate) (eq candidate buf))
+          :skill-command-prefix "/"
+          :notify (lambda (title _message) (push title alerts))
+          :submit (lambda (command &optional _buffer) (push command events))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil))
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (apply function args)))
+                  ((symbol-function 'display-warning)
+                   (lambda (_type message &rest _args) (push message warnings)))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (push (apply #'format format-string args) notices))))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (let ((receipt (plist-get agent--before-exit :receipt-file)))
+            (setq receipt-directory (file-name-directory receipt))
+            (with-temp-file receipt
+              (insert "{\"status\":\"held\","
+                      "\"message\":\"3 proposals await approval\"}")))
+          (agent-session-event buf 'stop)
+          (agent-session-event buf 'idle-prompt)
+          (should-not agent--before-exit)
+          (should-not exited)
+          (should-not warnings)
+          (should (= (length events) 1))
+          (should-not (file-exists-p receipt-directory))
+          (should (eq agent--session-state 'awaiting-input))
+          (should (equal alerts '("Test ready")))
+          (should (cl-some (lambda (notice)
+                             (and (string-match-p "skill-audit" notice)
+                                  (string-match-p "3 proposals await approval"
+                                                  notice)))
+                           notices))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (should (= (length events) 2))
+          (should (string-match-p "\\`/skill-audit --receipt-file "
+                                  (car events)))
+          (should (plist-get agent--before-exit :receipt-file)))))))
+
 (ert-deftest agent-test-before-exit-missing-receipt-stops-chain ()
   "Keep the session open when a gated entry writes no receipt."
   (let ((agent-backends nil)
