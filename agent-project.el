@@ -443,9 +443,9 @@ directory."
 
 (defun agent-project-read (account text prompt callback &optional suggestion)
   "Read a project directory for ACCOUNT and call CALLBACK with it.
-TEXT describes the thing being routed and orders the candidates when TEXT
-and at least one description hold more than whitespace; a blank string is
-nothing to rank on, so no request is made.  PROMPT is the completion
+TEXT describes the thing being routed and orders the candidates when it
+holds more than whitespace and there is more than one candidate; see
+`agent-project--rankable-p'.  PROMPT is the completion
 prompt.  CALLBACK receives the directory of the chosen project.
 
 SUGGESTION is a directory the caller worked out for itself.  It is
@@ -482,12 +482,12 @@ from the choice it is meant to lead."
 
 (defun agent-project--rankable-p (text candidates)
   "Return non-nil when TEXT and CANDIDATES give a model something to rank.
-A blank string is nothing to rank on, whether it is TEXT or a
-description, so it counts as absent and no request is made."
+A blank TEXT is nothing to rank on, and a single candidate has nothing
+to be ranked against, so neither makes a request.  Descriptions are not
+required: a project's label is its name, and a name such as
+`white-glove' is enough for a model to match a text against."
   (and (agent-project--text-p text)
-       (seq-some (lambda (candidate)
-                   (agent-project--text-p (plist-get candidate :description)))
-                 candidates)))
+       (cdr candidates)))
 
 (defun agent-project--text-p (value)
   "Return non-nil when VALUE is a string holding more than whitespace."
@@ -531,10 +531,13 @@ signals `file-missing' when asked to spawn curl there."
           (string-join (mapcar #'agent-project--ranking-line candidates) "\n")))
 
 (defun agent-project--ranking-line (candidate)
-  "Return the ranking description of CANDIDATE."
-  (format "%s: %s"
-          (plist-get candidate :label)
-          (or (plist-get candidate :description) "")))
+  "Return the ranking description of CANDIDATE.
+A candidate without a description is described by its label alone."
+  (let ((label (plist-get candidate :label))
+        (description (plist-get candidate :description)))
+    (if (agent-project--text-p description)
+        (format "%s: %s" label description)
+      label)))
 
 (defun agent-project--ranked (candidates response info)
   "Return CANDIDATES ordered by RESPONSE, or unchanged when it failed.

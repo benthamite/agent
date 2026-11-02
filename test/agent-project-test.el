@@ -179,13 +179,6 @@ the live registry takes.")
       \"repo_paths\": []}]}"
   "Registry JSON whose only entry records no title, paths or text.")
 
-(defconst agent-project-test--blank-summary-json
-  "{\"projects\": [
-     {\"id\": \"epsilon\", \"title\": \"Epsilon\", \"summary\": \"\",
-      \"project_doc_paths\": [], \"repo_paths\": [], \"slack_channels\": [],
-      \"aliases\": []}]}"
-  "Registry JSON whose only entry records an empty summary.")
-
 (defmacro agent-project-test--with-registry (var json &rest body)
   "Run BODY with VAR bound to a temporary registry file holding JSON.
 The file is deleted when BODY finishes."
@@ -376,8 +369,23 @@ symbolic link, so the two directories differ as strings."
       (agent-project-test--write-registry second "alpha")
       (should (= (length (agent-project-candidates nil)) 1)))))
 
-(ert-deftest agent-project-test-read-skips-ranking-without-descriptions ()
-  "Complete directly when no candidate carries a description."
+(ert-deftest agent-project-test-read-ranks-without-descriptions ()
+  "Rank candidates by their labels when none carries a description."
+  (agent-project-test--with-tree root '(("alpha" . t) ("beta" . t))
+    (let ((agent-project-sources
+           (list (cons "" (list (expand-file-name "*" root)))))
+          (ranked nil))
+      (cl-letf (((symbol-function 'agent-project--rank)
+                 (lambda (candidates _text callback)
+                   (setq ranked t)
+                   (funcall callback candidates)))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) "alpha")))
+        (agent-project-read nil "some text" "Project: " #'ignore))
+      (should ranked))))
+
+(ert-deftest agent-project-test-read-skips-ranking-a-single-candidate ()
+  "Complete directly when there is only one candidate to offer."
   (agent-project-test--with-tree root '(("alpha" . t))
     (let ((agent-project-sources
            (list (cons "" (list (expand-file-name "*" root)))))
@@ -392,6 +400,14 @@ symbolic link, so the two directories differ as strings."
       (should-not ranked)
       (should (equal chosen (file-name-as-directory
                              (expand-file-name "alpha" root)))))))
+
+(ert-deftest agent-project-test-ranking-line-without-description ()
+  "Describe a candidate without a description by its label alone."
+  (should (equal (agent-project--ranking-line '(:label "white-glove"))
+                 "white-glove"))
+  (should (equal (agent-project--ranking-line
+                  '(:label "alpha" :description "Alpha"))
+                 "alpha: Alpha")))
 
 (ert-deftest agent-project-test-read-offers-the-suggestion-first ()
   "Offer a suggested directory as the default, and rank nothing.
@@ -436,19 +452,6 @@ answer selected instead of paying a model to guess at it."
       (should (equal (car offered) "beta"))
       (should (member "alpha" offered))
       (should (equal chosen (file-name-as-directory elsewhere))))))
-
-(ert-deftest agent-project-test-read-skips-ranking-for-a-blank-description ()
-  "Complete directly when the only description a candidate carries is blank."
-  (agent-project-test--with-registry file agent-project-test--blank-summary-json
-    (let ((agent-project-registry-root "/tmp/projects/")
-          (agent-project-sources (list (cons "" (list file))))
-          (ranked nil))
-      (cl-letf (((symbol-function 'agent-project--rank)
-                 (lambda (&rest _) (setq ranked t)))
-                ((symbol-function 'completing-read)
-                 (lambda (&rest _) "epsilon - Epsilon")))
-        (agent-project-read nil "some text" "Project: " #'ignore))
-      (should-not ranked))))
 
 (ert-deftest agent-project-test-read-ranks-when-descriptions-exist ()
   "Rank candidates when a registry contributed them."
