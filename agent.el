@@ -49,6 +49,7 @@
 (autoload 'agent-act-on-slack-message "agent-slack" nil t)
 (autoload 'agent-act-on-forge-notification "agent-forge" nil t)
 (autoload 'agent-act-on-email "agent-mu4e" nil t)
+(autoload 'agent-act-on-linear-issue "agent-org-linear" nil t)
 (autoload 'agent-setup-snippet-keys "agent-snippet" nil t)
 (autoload 'agent-setup "agent-setup" nil t)
 (autoload 'agent-slack-context "agent-slack")
@@ -56,6 +57,8 @@
 (autoload 'agent-forge-context "agent-forge")
 (autoload 'agent-mu4e-context "agent-mu4e")
 (autoload 'agent-todo-context "agent-todo")
+(autoload 'agent-org-linear-context "agent-org-linear")
+(autoload 'agent-org-linear-origin "agent-org-linear")
 (autoload 'agent-slack-origin "agent-slack")
 (autoload 'agent-mu4e-origin "agent-mu4e")
 
@@ -893,6 +896,9 @@ hours; an indefinite snooze arms no timer.")
 (declare-function find-library-name "find-func")
 (declare-function project-root "project" (project))
 (declare-function org-get-todo-state "org" ())
+(declare-function org-entry-get "org" (epom property &optional inherit literal-nil))
+(declare-function org-before-first-heading-p "org" ())
+(declare-function org-get-at-bol "org-macs" (property))
 (declare-function forge-notification-at-point "forge-notify" (&optional demand))
 (declare-function forge-topic-at-point "forge-topic" (&optional demand))
 (declare-function mu4e-message-at-point "mu4e-message" (&optional noerror))
@@ -3457,11 +3463,13 @@ Start a new session for it, or with prefix argument EXISTING send it to
 a running session chosen by completion.  The thing is the first entry
 in `agent-at-point-things' whose predicate matches: a backtrace, a
 Slack message naming a session to resume, a Slack message, a Forge
-notification or topic, an email, or an org TODO."
+notification or topic, an email, a Linear issue mirrored by
+`org-linear', or an org TODO, the last two in an org buffer or an
+agenda."
   (interactive "P")
   (agent--act-on-context
    (or (agent--extractor-at-point)
-       (user-error "Nothing to act on at point; expected a backtrace, a Slack message, a Forge notification or topic, an email, or an org TODO"))
+       (user-error "Nothing to act on at point; expected a backtrace, a Slack message, a Forge notification or topic, an email, a Linear issue, or an org TODO"))
    existing))
 
 (defvar agent-at-point-things
@@ -3470,6 +3478,7 @@ notification or topic, an email, or an org TODO."
     (agent--slack-message-at-point-p . agent-slack-context)
     (agent--forge-topic-at-point-p . agent-forge-context)
     (agent--mu4e-message-at-point-p . agent-mu4e-context)
+    (agent--org-linear-issue-at-point-p . agent-org-linear-context)
     (agent--org-todo-at-point-p . agent-todo-context))
   "Things `agent-act-on-thing-at-point' recognizes, in order.
 Each entry is a cons of a predicate called with no arguments in the
@@ -3501,6 +3510,7 @@ sources are offered.")
 (put 'agent-slack-resume-context 'agent-names-session t)
 (put 'agent-slack-context 'agent-origin-function #'agent-slack-origin)
 (put 'agent-mu4e-context 'agent-origin-function #'agent-mu4e-origin)
+(put 'agent-org-linear-context 'agent-origin-function #'agent-org-linear-origin)
 
 (defun agent--extractor-at-point ()
   "Return the extractor for the thing at point, or nil when there is none."
@@ -3718,8 +3728,42 @@ never calls into `mu4e'."
        (mu4e-message-at-point t)))
 
 (defun agent--org-todo-at-point-p ()
-  "Return non-nil when point is on an org TODO heading."
-  (and (derived-mode-p 'org-mode) (org-get-todo-state)))
+  "Return non-nil when point is on an org TODO heading.
+In an agenda the heading is the one the line at point shows."
+  (agent--at-org-entry #'org-get-todo-state))
+
+(defun agent--org-linear-issue-at-point-p ()
+  "Return non-nil when point is on a Linear issue mirrored by `org-linear'.
+Such an issue is an org heading carrying a `LINEAR_URL' property, read
+in an org buffer or through the agenda line showing it, so no module of
+`org-linear' has to be loaded to answer."
+  (agent--at-org-entry (lambda () (org-entry-get nil "LINEAR_URL"))))
+
+(defun agent--org-entry-marker ()
+  "Return a marker at the org entry at point, or nil when there is none.
+In an org buffer that is point itself, when it is under a heading.  In
+an agenda it is the heading the line at point shows; the agenda resets
+its own markers whenever it is rebuilt, so a copy is returned, which
+keeps pointing at the heading after a sync redoes the agenda."
+  (cond
+   ((derived-mode-p 'org-agenda-mode)
+    (when-let* ((marker (org-get-at-bol 'org-hd-marker))
+                ((marker-buffer marker)))
+      (copy-marker marker)))
+   ((and (derived-mode-p 'org-mode) (not (org-before-first-heading-p)))
+    (point-marker))))
+
+(defun agent--at-org-entry (function)
+  "Call FUNCTION with point at the org entry at point and return its value.
+Return nil when there is no org entry at point; see
+`agent--org-entry-marker'."
+  (when-let* ((marker (agent--org-entry-marker)))
+    (with-current-buffer (marker-buffer marker)
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char marker)
+          (funcall function))))))
 
 ;;;###autoload
 (defun agent-setup-kill-on-exit ()

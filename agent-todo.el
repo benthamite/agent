@@ -37,6 +37,8 @@
 (require 'project)
 (require 'agent)
 
+(declare-function org-agenda-redo "org-agenda" (&optional all))
+
 ;;;; Customization
 
 (defgroup agent-todo nil
@@ -317,21 +319,23 @@ starting one in a project chosen from the TODO's text."
 
 (defun agent-todo-context (callback)
   "Call CALLBACK with the context for the org TODO at point.
-The TODO is both the text a project is chosen from and the request
-itself, so it is submitted rather than left for review.  The heading is
-remembered as a marker because choosing that project can take a model
-request and a prompt, by which time point has moved."
-  (unless (derived-mode-p 'org-mode)
-    (user-error "Must be called from an org-mode buffer"))
-  (unless (org-get-todo-state)
-    (user-error "Point is not on a TODO heading"))
-  (let* ((prompt (agent-todo--format-prompt (agent-todo--collect-at-point)))
-         (marker (point-marker)))
-    (funcall callback
-             (list :text prompt
-                   :payload prompt
-                   :submit t
-                   :after (lambda () (agent-todo--mark-in-progress marker))))))
+The TODO is the heading at point in an org buffer, or the heading the
+line at point shows in an agenda.  It is both the text a project is
+chosen from and the request itself, so it is submitted rather than left
+for review.  The heading is remembered as a marker because choosing that
+project can take a model request and a prompt, by which time point has
+moved, or the agenda has been rebuilt."
+  (let ((marker (or (agent--org-entry-marker)
+                    (user-error "Must be called on an org heading or agenda entry"))))
+    (unless (agent--at-org-entry #'org-get-todo-state)
+      (user-error "Point is not on a TODO heading"))
+    (let ((prompt (agent-todo--format-prompt
+                   (agent--at-org-entry #'agent-todo--collect-at-point))))
+      (funcall callback
+               (list :text prompt
+                     :payload prompt
+                     :submit t
+                     :after (lambda () (agent-todo--mark-in-progress marker)))))))
 
 (defun agent-todo--mark-in-progress (marker)
   "Set the TODO state at MARKER to `agent-todo-in-progress-keyword'.
@@ -345,7 +349,16 @@ signalling here would leave a running session unshown."
         (goto-char marker)
         (when (and (not (org-before-first-heading-p))
                    (org-get-todo-state))
-          (org-todo agent-todo-in-progress-keyword))))))
+          (org-todo agent-todo-in-progress-keyword))))
+    (agent-todo--redo-agenda)))
+
+(defun agent-todo--redo-agenda ()
+  "Rebuild the agenda when it is the current buffer.
+The state change was made in the heading's own buffer, which leaves the
+agenda line showing the old keyword, and in an agenda grouped by keyword
+on the wrong group."
+  (when (derived-mode-p 'org-agenda-mode)
+    (org-agenda-redo t)))
 
 (provide 'agent-todo)
 ;;; agent-todo.el ends here

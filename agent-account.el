@@ -283,8 +283,10 @@ first matching rule wins.
 
 An origin is a string naming where the thing comes from: \"slack:\"
 followed by the Slack team name for a Slack message, and \"mu4e:\"
-followed by the maildir for an email, such as \"mu4e:/work/Inbox\".
-Things of other kinds have no origin."
+followed by the maildir for an email, such as \"mu4e:/work/Inbox\",
+and \"linear:\" followed by the workspace slug of the issue's URL for a
+Linear issue, such as \"linear:acme\".  Things of other kinds have no
+origin."
   :type '(alist :key-type regexp
                 :value-type (choice
                              (string :tag "Account or pool for every backend")
