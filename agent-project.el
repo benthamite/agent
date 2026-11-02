@@ -195,6 +195,28 @@ recorded path after the repository moves."
                 repository))
             (agent-project-candidates account)))
 
+(defun agent-project-named-directory (name &optional account)
+  "Return the directory of ACCOUNT's project called NAME, or nil.
+NAME is a project's name as another tool spells it, such as \"White
+glove\" for the directory `white-glove': case and runs of anything but
+letters and digits are ignored on both sides.  The first candidate whose
+directory is so named answers, and a directory that no longer exists is
+passed over."
+  (let ((key (agent-project--name-key name)))
+    (seq-some (lambda (candidate)
+                (when-let* ((directory (plist-get candidate :directory))
+                            ((equal key (agent-project--name-key
+                                         (agent-project--directory-name
+                                          directory))))
+                            ((file-directory-p directory)))
+                  directory))
+              (agent-project-candidates account))))
+
+(defun agent-project--name-key (name)
+  "Return NAME downcased, with runs of non-alphanumerics made one hyphen."
+  (string-trim (replace-regexp-in-string "[^[:alnum:]]+" "-" (downcase name))
+               "-" "-"))
+
 (defun agent-project--directory-name (directory)
   "Return the last component of DIRECTORY."
   (file-name-nondirectory (directory-file-name directory)))

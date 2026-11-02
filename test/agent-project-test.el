@@ -648,5 +648,21 @@ lose its registry from routing without a message."
                "is obsolete and ignored"
                (agent-project-test--load-warnings '(require 'agent-project)))))
 
+(ert-deftest agent-project-test-named-directory-ignores-case-and-separators ()
+  "Find the project directory a name spells with other case and spacing.
+A directory that is gone is passed over."
+  (let ((root (make-temp-file "agent-project-test-named" t)))
+    (unwind-protect
+        (let ((present (file-name-as-directory (expand-file-name "white-glove" root)))
+              (gone (file-name-as-directory (expand-file-name "White_Glove" root))))
+          (make-directory present)
+          (cl-letf (((symbol-function 'agent-project-candidates)
+                     (lambda (_account)
+                       (list (list :label "gone" :directory gone)
+                             (list :label "present" :directory present)))))
+            (should (equal (agent-project-named-directory "White glove") present))
+            (should-not (agent-project-named-directory "White"))))
+      (delete-directory root t))))
+
 (provide 'agent-project-test)
 ;;; agent-project-test.el ends here

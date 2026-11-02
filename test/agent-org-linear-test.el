@@ -135,6 +135,33 @@ The agenda is rebuilt, so its line shows the new keyword."
       (search-forward "Agree on")
       (should (equal (org-get-todo-state) "DOING")))))
 
+(ert-deftest agent-org-linear-test-context-suggests-the-named-project ()
+  "Suggest the account's project named like the issue's Linear project."
+  (let ((elsewhere (make-temp-file "agent-org-linear-test-other" t))
+        (root (make-temp-file "agent-org-linear-test-root" t)))
+    (unwind-protect
+        (let ((named (file-name-as-directory
+                      (expand-file-name "research-stages" root))))
+          (make-directory named)
+          (cl-letf (((symbol-function 'agent-project-candidates)
+                     (lambda (_account)
+                       (list (list :label "other" :directory elsewhere)
+                             (list :label "research-stages" :directory named)))))
+            (agent-org-linear-test--with-file
+              (goto-char (point-min))
+              (search-forward "Agree on")
+              (should (equal (plist-get (agent-org-linear-test--context)
+                                        :suggested-directory)
+                             named))
+              (let ((agent--context-wants-directory nil))
+                (should-not (plist-get (agent-org-linear-test--context)
+                                       :suggested-directory)))
+              (search-forward "Loose issue")
+              (should-not (plist-get (agent-org-linear-test--context)
+                                     :suggested-directory)))))
+      (delete-directory elsewhere t)
+      (delete-directory root t))))
+
 ;;;; Origin
 
 (ert-deftest agent-org-linear-test-origin-names-the-workspace ()

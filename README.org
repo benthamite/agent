@@ -610,10 +610,15 @@ after its Linear project, with the issue's URL in a =LINEAR_URL= property, so
 the issue is routed as the org TODO it is: its heading and body are submitted
 to a session started for it, and the heading moves to
 ~agent-todo-in-progress-keyword~, which =org-linear= then pushes to Linear as
-a state change. Two things are added. The Linear project's name leads the text
-the project is ranked by, since it is the likeliest clue to the repository the
-issue is about; an issue in no project is ranked by its own text alone. And the
-issue's URL follows the prompt, so the agent can reach the issue itself. The
+a state change. Three things are added. When the account has a project whose
+directory is named like the Linear project, ignoring case and separators, so
+that =White glove= finds =white-glove=, that directory is suggested, so the
+project reader opens on it and a bare =RET= starts there, as a Forge topic's
+clone is suggested; ~agent-project-named-directory~ does the lookup. Otherwise
+the Linear project's name leads the text the project is ranked by, since it is
+the likeliest clue to the repository the issue is about; an issue in no project
+is ranked by its own text alone. And the issue's URL follows the prompt, so the
+agent can reach the issue itself. The
 origin of an issue is =linear:= followed by the workspace slug of its URL, so an
 entry in ~agent-account-origin-rules~ can tie a Linear workspace to an account.
 Its extractor, ~agent-org-linear-context~, reads only the properties and outline

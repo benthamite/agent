@@ -41,6 +41,7 @@
 
 (require 'agent)
 (require 'agent-todo)
+(require 'agent-project)
 (require 'org)
 
 ;;;###autoload
@@ -58,7 +59,10 @@ session instead."
   "Call CALLBACK with the context for the Linear issue at point.
 The context is the issue's org TODO context, see `agent-todo-context',
 with the issue's URL added to the payload and its Linear project's name
-put first in the text the project is ranked by."
+put first in the text the project is ranked by.  When a directory is
+wanted and the account has a project named like the Linear project, that
+directory is suggested, so the project reader opens on it; see
+`agent-project-named-directory'."
   (let ((url (or (agent--at-org-entry (lambda () (org-entry-get nil "LINEAR_URL")))
                  (user-error "No Linear issue at point")))
         (project (agent--at-org-entry #'agent-org-linear--project-name)))
@@ -67,14 +71,26 @@ put first in the text the project is ranked by."
        (let ((payload (format "%s\n\nLinear issue: %s"
                               (plist-get context :payload) url)))
          (funcall callback
-                  (thread-first context
-                                (copy-sequence)
-                                (plist-put :payload payload)
-                                (plist-put :text
-                                           (if project
-                                               (format "Linear project: %s\n%s"
-                                                       project payload)
-                                             payload)))))))))
+                  (append (agent-org-linear--project-context project)
+                          (thread-first context
+                                        (copy-sequence)
+                                        (plist-put :payload payload)
+                                        (plist-put :text
+                                                   (if project
+                                                       (format "Linear project: %s\n%s"
+                                                               project payload)
+                                                     payload))))))))))
+
+(defun agent-org-linear--project-context (project)
+  "Return the `:suggested-directory' part of the context for PROJECT, or nil.
+PROJECT is the Linear project's name, or nil for an issue in none.  The
+directory is offered rather than imposed, as a Forge topic's clone is,
+so the issue ends in the same project choice as every other thing."
+  (when-let* ((agent--context-wants-directory)
+              (project)
+              (directory (agent-project-named-directory
+                          project agent--context-account)))
+    (list :suggested-directory directory)))
 
 (defun agent-org-linear--project-name ()
   "Return the name of the Linear project of the issue at point, or nil.
