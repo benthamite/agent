@@ -101,7 +101,8 @@ The file is written to disk so that an agenda can be built from it."
   (agent-org-linear-test--with-file
     (agent-org-linear-test--in-agenda "Agree on"
       (let ((context (agent-org-linear-test--context)))
-        (should (plist-get context :submit))
+        (should (plist-member context :submit))
+        (should-not (plist-get context :submit))
         (should-not (plist-get context :directory))
         (should (equal (plist-get context :payload)
                        "Agree on the pipeline version\n\nAsk Peter which one.\n\nLinear issue: https://linear.app/acme/issue/AS-33/agree"))

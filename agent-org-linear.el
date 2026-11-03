@@ -49,9 +49,9 @@
   "Route the Linear issue at point to an AI session.
 The issue is the heading at point in the file `org-linear' mirrors, or
 the heading the agenda line at point shows.  Start a session in a
-project ranked by the issue's Linear project and text, and submit the
-issue to it.  With prefix argument EXISTING submit it to a running
-session instead."
+project ranked by the issue's Linear project and text, and type the
+issue into its prompt for editing before it is sent.  With prefix
+argument EXISTING type it into a running session's prompt instead."
   (interactive "P")
   (agent--act-on-context #'agent-org-linear-context existing))
 
@@ -59,10 +59,12 @@ session instead."
   "Call CALLBACK with the context for the Linear issue at point.
 The context is the issue's org TODO context, see `agent-todo-context',
 with the issue's URL added to the payload and its Linear project's name
-put first in the text the project is ranked by.  When a directory is
-wanted and the account has a project named like the Linear project, that
-directory is suggested, so the project reader opens on it; see
-`agent-project-named-directory'."
+put first in the text the project is ranked by.  Unlike a TODO the
+payload is not submitted: an issue is written for the people tracking
+it, not as a prompt, so it is left in the prompt to be edited.  When a
+directory is wanted and the account has a project named like the Linear
+project, that directory is suggested, so the project reader opens on
+it; see `agent-project-named-directory'."
   (let ((url (or (agent--at-org-entry (lambda () (org-entry-get nil "LINEAR_URL")))
                  (user-error "No Linear issue at point")))
         (project (agent--at-org-entry #'agent-org-linear--project-name)))
@@ -75,6 +77,7 @@ directory is suggested, so the project reader opens on it; see
                           (thread-first context
                                         (copy-sequence)
                                         (plist-put :payload payload)
+                                        (plist-put :submit nil)
                                         (plist-put :text
                                                    (if project
                                                        (format "Linear project: %s\n%s"

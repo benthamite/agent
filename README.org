@@ -607,10 +607,12 @@ The command ~agent-act-on-linear-issue~ routes a Linear issue mirrored by
 showing it, such as one in the list ~org-linear-my-issues~ builds. =org-linear=
 writes each issue as an org TODO heading filed under a level-1 heading named
 after its Linear project, with the issue's URL in a =LINEAR_URL= property, so
-the issue is routed as the org TODO it is: its heading and body are submitted
-to a session started for it, and the heading moves to
+the issue is routed as the org TODO it is, except that its heading and body
+are typed into the prompt of the session started for it rather than submitted,
+since an issue is written for the people tracking it rather than as a prompt and
+usually wants editing first. The heading moves to
 ~agent-todo-in-progress-keyword~, which =org-linear= then pushes to Linear as
-a state change. Three things are added. When the account has a project whose
+a state change. Three more things are added. When the account has a project whose
 directory is named like the Linear project, ignoring case and separators, so
 that =White glove= finds =white-glove=, that directory is suggested, so the
 project reader opens on it and a bare =RET= starts there, as a Forge topic's
@@ -632,7 +634,7 @@ Recognizing the thing, choosing the session, and delivering the payload are thre
 
 A running session already has a directory, so on that path the core tells the extractor not to resolve one, and an extractor that has to work for its directory leaves it out. That saves what the work costs: routing a backtrace to a running session asks no model which packages it implicates and prompts for none, and routing a Forge topic there no longer refuses a repository that was never cloned locally. The extractors that carry only text are unaffected, since the project they would otherwise pick is chosen after the session is, and only for a new one.
 
-What each kind sends differs, because the payloads differ. A Slack permalink, a Forge topic URL and an email's maildir path are references to something the agent should read, so they arrive unsubmitted and you type the request next to them. A backtrace, an org TODO and a Linear issue already are the request, so they submit.
+What each kind sends differs, because the payloads differ. A Slack permalink, a Forge topic URL and an email's maildir path are references to something the agent should read, so they arrive unsubmitted and you type the request next to them. A backtrace and an org TODO already are the request, so they submit. A Linear issue is a request too, but one written for the people tracking it, so it arrives unsubmitted for you to edit.
 
 A payload marked =:submit= reaches a *new* session as its initial prompt, handed to the backend at launch rather than typed into the terminal afterwards. Claude passes it on the CLI's command line, and Codex does too except when it is resuming a session or running through its app server, where it sends the prompt itself once the session is up. Either way the payload never races the terminal: nothing sequences typed input against a session whose process has only just been spawned, and these sessions often start in a directory the CLI has never opened, where it greets the user with a trust prompt that the typed text would answer instead of the model. A payload the context does not submit is typed in on both paths, since it is meant to sit in the prompt for the user to edit. A submitted payload reaching an already-running session is typed in and then submitted, because that session is past its startup and needs no hand-off at launch.
 
