@@ -564,8 +564,10 @@ it was called more than once."
 (defconst agent-claude-cli--screen-message-regexp "\\`⏺[  ]"
   "Regexp matching the first line of a message on a Claude Code screen.")
 
-(defconst agent-claude-cli--screen-prompt-regexp "\\`❯ [^0-9]"
-  "Regexp matching a past prompt on a Claude Code screen, not a numbered option.")
+(defconst agent-claude-cli--screen-prompt-regexp "\\`❯ "
+  "Regexp matching a past prompt on a Claude Code screen.
+Only meaningful with an input box on the screen, as without one this may
+be a dialog's option.")
 
 (defconst agent-claude-cli--screen-done-regexp "\\`✻ "
   "Regexp matching the line Claude Code prints when a turn has ended.")
@@ -577,11 +579,10 @@ the index of the first such line.  `:block' is the index of the message
 just above them, which the transcript lacks while it is still being
 written, or nil.  `:dialog' is non-nil when SCREEN shows no input box,
 which means a dialog, a picker or something unrecognized.  In that case
-`:start' errs towards more lines: the whole screen if nothing marks
-where the dialog can begin."
+`:start' errs towards more lines, so no part of a dialog is cut off: the
+whole screen if nothing marks where the dialog can begin."
   (let* ((lines (vconcat (split-string screen "\n")))
          (rules (agent-claude-cli--screen-rules lines))
-         (last-rule (car rules))
          (box-rule (cadr rules)))
     (if (and box-rule
              (string-match-p agent-claude-cli--screen-input-regexp
@@ -590,9 +591,7 @@ where the dialog can begin."
           (list :start start
                 :block (agent-claude-cli--screen-message-above lines start)
                 :dialog nil))
-      (list :start (if last-rule
-                       (agent-claude-cli--screen-dialog-start lines last-rule)
-                     0)
+      (list :start (agent-claude-cli--screen-dialog-start lines rules)
             :block nil
             :dialog t))))
 
@@ -649,21 +648,29 @@ it, since then nothing is still being written."
       (setq index (1- index)))
     found))
 
-(defun agent-claude-cli--screen-dialog-start (lines rule)
-  "Return the index where a dialog whose last rule is RULE should show from.
-LINES is the screen as a vector.  Go up to the nearest message, kept for
-the tool call it may name, or past the nearest prompt or ended turn.
-With neither on the screen, show all of it."
-  (let ((index (1- rule)) (start nil))
-    (while (and (not start) (>= index 0))
+(defun agent-claude-cli--screen-dialog-start (lines rules)
+  "Return the index where a dialog on a screen with no input box shows from.
+LINES is the screen as a vector and RULES the indices of its rules, last
+first.  A dialog opens with a rule and may hold more, so take the topmost
+rule below the nearest message or ended turn, which no dialog holds.  A
+past prompt is no such mark, as it reads like an option.  Without a mark
+the dialog may have outgrown the screen, leaving only its inner rules,
+so show all of it."
+  (let ((mark (agent-claude-cli--screen-last-mark lines)))
+    (cond ((null mark) 0)
+          ((car (last (seq-filter (lambda (rule) (> rule mark)) rules))))
+          (t mark))))
+
+(defun agent-claude-cli--screen-last-mark (lines)
+  "Return the index of the last message or ended turn in vector LINES, or nil."
+  (let ((index (1- (length lines))) (found nil))
+    (while (and (not found) (>= index 0))
       (let ((line (aref lines index)))
-        (cond ((string-match-p agent-claude-cli--screen-message-regexp line)
-               (setq start index))
-              ((or (string-match-p agent-claude-cli--screen-prompt-regexp line)
-                   (string-match-p agent-claude-cli--screen-done-regexp line))
-               (setq start (1+ index)))))
+        (when (or (string-match-p agent-claude-cli--screen-message-regexp line)
+                  (string-match-p agent-claude-cli--screen-done-regexp line))
+          (setq found index)))
       (setq index (1- index)))
-    (or start 0)))
+    found))
 
 ;;;; .claude.json merge engine
 

@@ -539,8 +539,33 @@ CONTENT is written as UTF-8."
     (should (plist-get panel :dialog))
     (should (member " Bash command" lines))
     (should (member " ❯ 1. Yes" lines))
-    (should (equal (car lines) ""))
-    (should-not (member "⏺ Earlier text" lines))))
+    (should (equal (car lines) agent-claude-cli-test--rule))
+    (should-not (member "⏺ Earlier text" lines))
+    (should-not (member "❯ Run it" lines))))
+
+(ert-deftest agent-claude-cli-test-panel-unnumbered-margin-option ()
+  "An option at the margin that reads like a past prompt cuts nothing off."
+  (let* ((screen (agent-claude-cli-test--screen
+                  "✻ Sautéed" "" "❯ Ask me" 'rule " ☐ Drink" ""
+                  "Do you prefer tea or coffee?" "" "❯ Tea" "  Coffee"
+                  'rule "  Chat about this" "" "Enter to select"))
+         (lines (agent-claude-cli-test--panel-lines screen)))
+    (should (equal (car lines) agent-claude-cli-test--rule))
+    (should (member "Do you prefer tea or coffee?" lines))
+    (should-not (member "❯ Ask me" lines))))
+
+(ert-deftest agent-claude-cli-test-panel-dialog-taller-than-screen ()
+  "With its opening rule gone, a dialog's inner rule does not cut it."
+  (let ((screen (agent-claude-cli-test--screen
+                 "Do you prefer tea or coffee?" "❯ 1. Tea" "  2. Coffee"
+                 'rule "  3. Chat about this" "Enter to select")))
+    (should (= (plist-get (agent-claude-cli-screen-panel screen) :start) 0))))
+
+(ert-deftest agent-claude-cli-test-panel-dialog-with-no-rule-below-the-mark ()
+  "A screen with a mark but no rule below it shows from the mark."
+  (let ((screen (agent-claude-cli-test--screen
+                 'rule "old" "⏺ Something" "  and then" " an unknown prompt")))
+    (should (= (plist-get (agent-claude-cli-screen-panel screen) :start) 2))))
 
 (ert-deftest agent-claude-cli-test-panel-question-dialog-with-inner-rule ()
   "An option at the margin and a rule inside the dialog do not cut it."
@@ -553,7 +578,8 @@ CONTENT is written as UTF-8."
     (should (plist-get (agent-claude-cli-screen-panel screen) :dialog))
     (should (member "Do you prefer tea or coffee?" lines))
     (should (member " ☐ Drink" lines))
-    (should (member "❯ 1. Tea" lines))))
+    (should (member "❯ 1. Tea" lines))
+    (should-not (member "  please." lines))))
 
 (ert-deftest agent-claude-cli-test-panel-picker-with-block-rule ()
   "A picker opening with an upper-block rule and effort text is a dialog."
