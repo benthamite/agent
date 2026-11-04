@@ -552,7 +552,9 @@ it was called more than once."
 ;; and may carry a session name or effort indicator.  A dialog or picker
 ;; replaces the input box, opens with a rule of its own, may hold further
 ;; rules, and marks its options "❯ 1." with an ordinary space, as earlier
-;; prompts in the conversation are also marked.
+;; prompts in the conversation are also marked.  The spinner reads
+;; "✢ Forging… (4m 35s · ↓ 2.9k tokens)", with or without parentheses, and
+;; the line below the box reads "⏵⏵ auto mode on (shift+tab to cycle) · 5 shells".
 ;; Last verified against Claude Code 2.1.318 on 2026-11-04.
 
 (defconst agent-claude-cli--screen-rule-regexp "\\`[─▔]\\{20,\\}"
@@ -569,8 +571,22 @@ it was called more than once."
 Only meaningful with an input box on the screen, as without one this may
 be a dialog's option.")
 
-(defconst agent-claude-cli--screen-done-regexp "\\`✻ "
-  "Regexp matching the line Claude Code prints when a turn has ended.")
+(defconst agent-claude-cli--screen-done-regexp "\\`✻ [^…]*\\'"
+  "Regexp matching the line Claude Code prints when a turn has ended.
+The running spinner may use the same glyph, but has an ellipsis.")
+
+(defconst agent-claude-cli--screen-spinner-regexp
+  "\\`[^[:space:][:alnum:]] \\([[:alpha:]][^…(]*…\\)\\(?: *(\\(.*\\))\\)?"
+  "Regexp matching Claude Code's spinner line, such as \"✢ Forging… (4m 35s)\".
+Group 1 is its verb and group 2 the details in parentheses, if any.")
+
+(defconst agent-claude-cli--screen-notice-option-regexp
+  "\\(?:\\`\\| \\)[0-9]: [[:alpha:]]"
+  "Regexp matching an option in a notice, such as \"1: Learn more\".")
+
+(defconst agent-claude-cli--screen-option-regexp
+  "\\`[^[:alnum:]]*\\([0-9]\\)\\. "
+  "Regexp matching a numbered option in a dialog, such as \" ❯ 1. Yes\".")
 
 (defun agent-claude-cli-screen-panel (screen)
   "Return which trailing lines of SCREEN the transcript cannot show.
@@ -671,6 +687,167 @@ so show all of it."
           (setq found index)))
       (setq index (1- index)))
     found))
+
+(defun agent-claude-cli-screen-state (screen)
+  "Return what the text of a Claude Code SCREEN shows that a transcript cannot.
+Return a plist.  `:status' is the running spinner as plain text, or nil.
+`:mode' is the mode line as plain text, or nil.  `:running' is non-nil
+when a spinner shows.  `:writing' is the text of the message just above
+the status, unwrapped, which the transcript lacks while it is being
+written, or nil.  `:card' is the text of a dialog, a picker or a notice
+that takes input, or nil.  `:options' lists as strings the digits that
+choose among the card's options.
+
+A screen with no input box always has a card, by the rules of
+`agent-claude-cli-screen-panel'.  A notice with no options takes no input
+and is dropped."
+  (let* ((lines (vconcat (split-string screen "\n")))
+         (panel (agent-claude-cli-screen-panel screen))
+         (start (plist-get panel :start)))
+    (if (plist-get panel :dialog)
+        (let ((card (append (seq-subseq lines start) nil)))
+          (list :card (string-join card "\n")
+                :options (agent-claude-cli--screen-options card)))
+      (agent-claude-cli--screen-box-state lines panel))))
+
+(defun agent-claude-cli--screen-box-state (lines panel)
+  "Return the state of a screen that shows an input box.
+LINES is the screen as a vector and PANEL the result of
+`agent-claude-cli-screen-panel' for it."
+  (let* ((rules (agent-claude-cli--screen-rules lines))
+         (box (cadr rules))
+         (status (append (seq-subseq lines (plist-get panel :start) box) nil))
+         (spinner (seq-find (lambda (line)
+                              (string-match-p
+                               agent-claude-cli--screen-spinner-regexp line))
+                            status))
+         (notice (seq-some (lambda (line)
+                             (string-match-p
+                              agent-claude-cli--screen-notice-option-regexp line))
+                           status)))
+    (list :status (and spinner (agent-claude-cli--screen-spinner-text spinner))
+          :running (and spinner t)
+          :mode (agent-claude-cli--screen-mode-text
+                 (append (seq-subseq lines (1+ (car rules))) nil))
+          :writing (when-let* ((block (plist-get panel :block)))
+                     (agent-claude-cli--screen-writing lines block box))
+          :card (and notice
+                     (string-join (seq-remove
+                                   (lambda (line) (equal line spinner)) status)
+                                  "\n"))
+          :options (and notice
+                        (agent-claude-cli--screen-notice-options status)))))
+
+(defun agent-claude-cli--screen-plain (text)
+  "Return TEXT without glyphs a phone's fonts may lack, and trimmed."
+  (string-join
+   (split-string (replace-regexp-in-string "[^[:alnum:] !-~…·]" "" text) " +" t)
+   " "))
+
+(defun agent-claude-cli--screen-spinner-text (line)
+  "Return spinner LINE as \"Verb… 4m 35s · 2.9k tokens\"."
+  (when (string-match agent-claude-cli--screen-spinner-regexp line)
+    (let ((verb (match-string 1 line))
+          (details (match-string 2 line)))
+      (string-join
+       (delq nil
+             (list verb
+                  (when details
+                    (agent-claude-cli--screen-plain
+                     (string-join
+                      (seq-remove (lambda (part)
+                                    (string-search "esc to" part))
+                                  (split-string details " · " t))
+                      " · ")))))
+       " "))))
+
+(defun agent-claude-cli--screen-mode-text (lines)
+  "Return the mode line found in LINES, those below the input box, as text.
+Hints on how to use the terminal, and what is right-aligned, are left out."
+  (when-let* ((line (seq-find (lambda (line) (not (string-blank-p line))) lines))
+              (left (car (split-string (string-trim line) "  +" t))))
+    (let ((parts (seq-remove
+                  (lambda (part)
+                    (string-match-p
+                     "esc to\\|for shortcuts\\|for agents\\|/rc\\|/effort" part))
+                  (split-string left " · " t))))
+      (agent-claude-cli--non-empty-string
+       (string-join
+        (mapcar (lambda (part)
+                  (agent-claude-cli--screen-plain
+                   (replace-regexp-in-string " *(.*)" "" part)))
+                parts)
+        " · ")))))
+
+(defun agent-claude-cli--non-empty-string (string)
+  "Return STRING, or nil if it is empty."
+  (unless (string-empty-p string) string))
+
+(defun agent-claude-cli--screen-writing (lines block end)
+  "Return the text of the message at BLOCK in LINES, before index END, or nil.
+It stops at the next line at the margin, a spinner or notice, and leaves
+out right-aligned text.  A tool call is no message being written."
+  (let ((head (aref lines block))
+        (index (1+ block))
+        (body nil))
+    (while (and (< index end)
+                (let ((line (aref lines index)))
+                  (or (string-blank-p line) (string-prefix-p " " line))))
+      (push (aref lines index) body)
+      (setq index (1+ index)))
+    (setq body (nreverse body))
+    (unless (or (string-match-p "\\`⏺[  ][[:alpha:]_-]+(" head)
+                (seq-some (lambda (line)
+                            (string-match-p "\\`[  ]*⎿" line))
+                          body))
+      (agent-claude-cli--screen-unwrap
+       (cons (substring head 2)
+             (mapcar (lambda (line)
+                       (if (string-prefix-p "  " line) (substring line 2) line))
+                     (seq-remove (lambda (line)
+                                   (string-match-p "\\` \\{20,\\}" line))
+                                 body)))))))
+
+(defun agent-claude-cli--screen-unwrap (lines)
+  "Return LINES of a message as text, undoing the terminal's wrapping.
+A line joins the one before unless it is blank, indented or starts a
+list, and it is a guess: only the transcript has the real line breaks."
+  (let ((text "") (previous-blank t))
+    (dolist (line lines)
+      (let ((blank (string-blank-p line)))
+        (setq text
+              (concat text
+                      (cond ((string-empty-p text) "")
+                            ((or blank previous-blank
+                                 (string-match-p "\\`\\(?: \\|[-*+] \\|[0-9]+[.)] \\)" line))
+                             "\n")
+                            (t " "))
+                      (if blank "" line))
+              previous-blank blank)))
+    (string-trim text)))
+
+(defun agent-claude-cli--screen-options (lines)
+  "Return the digits choosing among the options of a dialog in LINES.
+Options come after any content the dialog shows between dashed rules,
+such as a file with numbered steps of its own."
+  (let (options)
+    (dolist (line (reverse (seq-take-while
+                            (lambda (line)
+                              (not (string-prefix-p "╌╌╌" line)))
+                            (reverse lines))))
+      (when (string-match agent-claude-cli--screen-option-regexp line)
+        (push (match-string 1 line) options)))
+    (delete-dups (nreverse options))))
+
+(defun agent-claude-cli--screen-notice-options (lines)
+  "Return the digits choosing among the options of a notice in LINES."
+  (let (options)
+    (dolist (line lines)
+      (let ((start 0))
+        (while (string-match "\\(?:\\`\\| \\)\\([0-9]\\): [[:alpha:]]" line start)
+          (push (match-string 1 line) options)
+          (setq start (match-end 1)))))
+    (delete-dups (nreverse options))))
 
 ;;;; .claude.json merge engine
 

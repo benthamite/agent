@@ -261,7 +261,7 @@ Source: lobehub/lobe-icons (MIT).")
   :session-headers #'agent-claude--session-headers
   :session-prompt #'agent-claude--session-prompt
   :session-history #'agent-claude--session-history
-  :screen-panel #'agent-claude-cli-screen-panel
+  :screen-state #'agent-claude-cli-screen-state
   :prepare-fork #'agent-claude--prepare-fork
   :resume #'claude-code-resume)
 

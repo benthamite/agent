@@ -391,8 +391,8 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
 
 (defun agent-remote--output (request)
   "Return the session summary and recent output named by REQUEST.
-`panel' says which of the output's lines the transcript cannot show,
-for a backend that can tell.  When REQUEST has `after', `history' is
+`screen' is what the output shows that the transcript cannot, for a
+backend that can tell.  When REQUEST has `after', `history' is
 what the session's transcript gained since that byte offset; the phone
 page polls this, so polling costs one file status check while nothing
 is new."
@@ -403,18 +403,21 @@ is new."
          (output (agent-remote--buffer-tail buffer)))
     (append (agent-remote--session-summary buffer)
             (list :output output)
-            (agent-remote--output-panel backend output)
+            (agent-remote--output-screen backend output)
             (and after (agent-remote--output-history backend buffer after)))))
 
-(defun agent-remote--output-panel (backend output)
-  "Return a plist with `:panel' for screen text OUTPUT, or nil.
-BACKEND is the session's backend struct, or nil.  Without a panel the
-page shows the whole screen, so a failure here is safe to swallow."
-  (when-let* ((function (and backend (agent-backend-screen-panel backend)))
-              (panel (ignore-errors (funcall function output))))
-    (list :panel (list :start (plist-get panel :start)
-                       :block (plist-get panel :block)
-                       :dialog (if (plist-get panel :dialog) t :false)))))
+(defun agent-remote--output-screen (backend output)
+  "Return a plist with `:screen', the state of screen text OUTPUT, or nil.
+BACKEND is the session's backend struct, or nil.  Without it the page
+shows the whole screen, so a failure here is safe to swallow."
+  (when-let* ((function (and backend (agent-backend-screen-state backend)))
+              (state (ignore-errors (funcall function output))))
+    (list :screen (list :status (plist-get state :status)
+                        :mode (plist-get state :mode)
+                        :running (if (plist-get state :running) t :false)
+                        :writing (plist-get state :writing)
+                        :card (plist-get state :card)
+                        :options (vconcat (plist-get state :options))))))
 
 (defun agent-remote--output-history (backend buffer after)
   "Return a plist with `:history' from byte offset AFTER, or nil.

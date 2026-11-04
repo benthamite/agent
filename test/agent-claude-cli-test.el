@@ -608,6 +608,137 @@ CONTENT is written as UTF-8."
                  'rule "❯ Earlier prompt" 'rule " ❯ 1. Yes" " Esc to cancel")))
     (should (plist-get (agent-claude-cli-screen-panel screen) :dialog))))
 
+;;;; Screen state
+
+(defun agent-claude-cli-test--state (&rest lines)
+  "Return the screen state of a screen made from LINES."
+  (agent-claude-cli-screen-state (apply #'agent-claude-cli-test--screen lines)))
+
+(ert-deftest agent-claude-cli-test-state-spinner-and-mode ()
+  "A running spinner and the mode line become plain text."
+  (let ((state (agent-claude-cli-test--state
+                "⏺ Earlier" "" "✶ Forging… (11m 33s · ↓ 2.9k tokens · esc to interrupt)"
+                "  ⎿  Tip: Create skills" "" 'rule "❯ " 'rule ""
+                "  ⏵⏵ auto mode on (shift+tab to cycle) · 5 shells · ← 1 agent")))
+    (should (equal (plist-get state :status) "Forging… 11m 33s · 2.9k tokens"))
+    (should (plist-get state :running))
+    (should (equal (plist-get state :mode) "auto mode on · 5 shells · 1 agent"))
+    (should-not (plist-get state :card))))
+
+(ert-deftest agent-claude-cli-test-state-spinner-variants ()
+  "Spinners without details, or with the ended turn's glyph, still count."
+  (should (equal (plist-get (agent-claude-cli-test--state
+                             "· Slithering…" "   ◐ medium" 'rule "❯" 'rule "  m")
+                            :status)
+                 "Slithering…"))
+  (should (equal (plist-get (agent-claude-cli-test--state
+                             "✻ Symbioting… (48s · ↓ 2.1k tokens)" "  "
+                             'rule "❯" 'rule "  m")
+                            :status)
+                 "Symbioting… 48s · 2.1k tokens")))
+
+(ert-deftest agent-claude-cli-test-state-idle-has-no-status ()
+  "An ended turn is no status, and hints leave the mode line."
+  (let ((state (agent-claude-cli-test--state
+                "⏺ Answer" "" "✻ Worked for 34s · done 17:34" ""
+                'rule "❯" 'rule
+                "  ⏸ manual mode on · ? for shortcuts · ← for agents     ◐ medium · /effort")))
+    (should-not (plist-get state :status))
+    (should-not (plist-get state :running))
+    (should-not (plist-get state :writing))
+    (should (equal (plist-get state :mode) "manual mode on"))))
+
+(ert-deftest agent-claude-cli-test-state-mode-absent ()
+  "A screen with nothing below the box has no mode."
+  (should-not (plist-get (agent-claude-cli-test--state "✻ Done" 'rule "❯" 'rule)
+                         :mode)))
+
+(ert-deftest agent-claude-cli-test-state-text-being-written ()
+  "A message above the box is unwrapped, without the effort line."
+  (let ((state (agent-claude-cli-test--state
+                "❯ Write about tea" ""
+                "⏺ Tea asks for patience, and it"
+                "  suits the pace." ""
+                "  - a list"
+                "  - of things" ""
+                "  Its history runs" "  longer."
+                "                         ◐ medium · /effort"
+                'rule "❯" 'rule "  m")))
+    (should (equal (plist-get state :writing)
+                   (concat "Tea asks for patience, and it suits the pace.\n\n"
+                           "- a list\n- of things\n\nIts history runs longer.")))))
+
+(ert-deftest agent-claude-cli-test-state-stops-writing-at-spinner ()
+  "The spinner and what follows are not part of the message."
+  (should (equal (plist-get (agent-claude-cli-test--state
+                             "⏺ Short text" "" "✶ Forging… (1s)" "  ⎿  Tip: x"
+                             'rule "❯" 'rule "  m")
+                            :writing)
+                 "Short text")))
+
+(ert-deftest agent-claude-cli-test-state-tool-call-is-not-writing ()
+  "A tool call on screen is left to the spinner."
+  (dolist (lines '(("⏺ Bash(touch x)" "  ⎿  Running…")
+                   ("⏺ User declined" "  ⎿  · Tea?")))
+    (should-not (plist-get (apply #'agent-claude-cli-test--state
+                                  (append lines '("" "✶ Forging… (1s)" "" rule "❯" rule)))
+                           :writing))))
+
+(ert-deftest agent-claude-cli-test-state-dialog-card ()
+  "A dialog becomes a card with the digits of its options."
+  (let* ((state (agent-claude-cli-test--state
+                 "⏺ Earlier" "" 'rule " Write a.txt"
+                 (make-string 60 ?╌) "  1 1. Line one" "  9 9. Line nine"
+                 (make-string 60 ?╌) " Do you want to create a.txt?"
+                 " ❯ 1. Yes" "   2. Yes, and allow" "   3. No" ""
+                 " Esc to cancel"))
+         (card (plist-get state :card)))
+    (should (string-search " Write a.txt" card))
+    (should (string-search "Esc to cancel" card))
+    (should-not (string-search "Earlier" card))
+    (should (equal (plist-get state :options) '("1" "2" "3")))
+    (should-not (plist-get state :status))))
+
+(ert-deftest agent-claude-cli-test-state-picker-options ()
+  "A scrolled picker offers only the options on screen."
+  (should (equal (plist-get (agent-claude-cli-test--state
+                             "✻ Done" (make-string 60 ?▔) "   Select model"
+                             "   ↑ 3.  Fable" "     4.  Sonnet" "   ❯ 5.  Haiku"
+                             "      … +8 models" "   Esc to cancel")
+                            :options)
+                 '("3" "4" "5"))))
+
+(ert-deftest agent-claude-cli-test-state-unrecognized-is-a-card ()
+  "A screen with nothing recognized is shown whole on a card."
+  (let ((state (agent-claude-cli-screen-state "something\nunknown")))
+    (should (equal (plist-get state :card) "something\nunknown"))
+    (should-not (plist-get state :options))))
+
+(ert-deftest agent-claude-cli-test-state-notice-with-options ()
+  "A notice taking input is a card; without options it is dropped."
+  (let ((state (agent-claude-cli-test--state
+                "⏺ Compacted" "                [-]" "✦ Heads up · Something new"
+                "  1: Learn more   2: Knew this   0: Dismiss" "   Restart"
+                'rule "❯" 'rule "  m")))
+    (should (string-search "Heads up" (plist-get state :card)))
+    (should (equal (plist-get state :options) '("1" "2" "0"))))
+  (let ((state (agent-claude-cli-test--state
+                "✦ Heads up · Something new" "  more of it" ""
+                'rule "❯" 'rule "  m")))
+    (should-not (plist-get state :card))
+    (should-not (plist-get state :status))))
+
+(ert-deftest agent-claude-cli-test-state-done-time-is-not-an-option ()
+  "A clock in the status line does not make a notice."
+  (should-not (plist-get (agent-claude-cli-test--state
+                          "✻ Worked for 3s · done 19:37" "" 'rule "❯" 'rule "  m")
+                         :card)))
+
+(ert-deftest agent-claude-cli-test-plain-text-drops-unknown-glyphs ()
+  "Status text holds no glyph a phone font may lack."
+  (should (equal (agent-claude-cli--screen-plain "⏵⏵ auto ◐ ↓ 2k · ñandú…")
+                 "auto 2k · ñandú…")))
+
 ;;;; Claude JSON
 
 (ert-deftest agent-claude-cli-test-read-claude-json-retries-mid-write ()

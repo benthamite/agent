@@ -410,27 +410,30 @@ BODY can refer to the transcript as `file'."
         (should (equal (plist-get data :output) "screen"))
         (should-not (plist-member data :history))))))
 
-(ert-deftest agent-remote-test-output-carries-the-panel ()
-  "The backend's panel reaches the page, and only if it has one."
+(ert-deftest agent-remote-test-output-carries-the-screen-state ()
+  "The backend's reading of the screen reaches the page, if it has one."
   (agent-remote-test--with-session buffer
     (with-current-buffer buffer (insert "screen"))
     (let ((path (concat "/api/output?id=" (url-hexify-string (buffer-name buffer)))))
       (cl-letf (((symbol-function 'agent-backend)
                  (lambda (_) (agent-backend--create
-                              :screen-panel
+                              :screen-state
                               (lambda (text)
                                 (should (equal text "screen"))
-                                (list :start 3 :block nil :dialog t))))))
+                                (list :status "Forging…" :running t
+                                      :card "A dialog" :options '("1" "2")))))))
         (agent-remote-test--with-server
-          (let ((panel (alist-get 'panel
+          (let ((state (alist-get 'screen
                                   (agent-remote-test--json
                                    (agent-remote-test--http "GET" path)))))
-            (should (= (alist-get 'start panel) 3))
-            (should (eq (alist-get 'dialog panel) t)))))
+            (should (equal (alist-get 'status state) "Forging…"))
+            (should (eq (alist-get 'running state) t))
+            (should (equal (alist-get 'card state) "A dialog"))
+            (should (equal (alist-get 'options state) '("1" "2"))))))
       (cl-letf (((symbol-function 'agent-backend)
                  (lambda (_) (agent-backend--create))))
         (agent-remote-test--with-server
-          (should-not (alist-get 'panel
+          (should-not (alist-get 'screen
                                  (agent-remote-test--json
                                   (agent-remote-test--http "GET" path)))))))))
 
