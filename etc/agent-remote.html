@@ -52,15 +52,23 @@
     font: 12px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     white-space: pre-wrap; word-break: break-word; }
   .nowrap .screen { white-space: pre; word-break: normal; }
-  #panel { display: none; flex: 0 0 auto; flex-direction: column; min-height: 0;
-    max-height: 45%; background: var(--panel); border-top: 1px solid var(--line); }
-  #panel.dialog { max-height: 70%; border-top: 3px solid var(--waiting); }
-  #panel-label { padding: 4px 12px; font-size: 13px; color: var(--muted); }
-  #panel.dialog #panel-label { color: var(--waiting); font-weight: 600; }
-  #panel-text { overflow: auto; padding: 0 12px 6px; flex: 0 1 auto; min-height: 0; }
-  /* With a transcript it is the main view, above a panel of the screen's
-     last lines.  Without one, the whole screen is the only view. */
-  #session-view.transcript #panel { display: flex; }
+  /* One conversation: nothing around it changes its size.  A card lies
+     over its bottom, and the status line is always there at one height. */
+  #conversation { flex: 1; min-height: 0; display: flex; position: relative; }
+  #status { flex: 0 0 44px; height: 44px; display: flex; align-items: center;
+    gap: 8px; padding: 0 12px; background: var(--panel);
+    border-top: 1px solid var(--line); }
+  #status-text { flex: 1; min-width: 0; font-size: 13px; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #card { display: none; position: absolute; z-index: 5; left: 8px; right: 8px;
+    bottom: 8px; max-height: 70%; flex-direction: column;
+    background: var(--panel); border: 2px solid var(--waiting);
+    border-radius: 12px; box-shadow: 0 -4px 16px rgba(0,0,0,.5); }
+  #card.open { display: flex; }
+  #card-label { padding: 6px 12px 2px; font-size: 13px; font-weight: 600;
+    color: var(--waiting); }
+  #card-text { flex: 0 1 auto; min-height: 0; overflow: auto; padding: 0 12px 8px; }
+  /* Without a transcript the whole screen is the only view. */
   #session-view.transcript #live { display: none; }
   #history-bar { display: none; align-items: center; gap: 10px; padding-bottom: 8px;
     font-size: 13px; color: var(--muted); }
@@ -170,18 +178,22 @@
       <button class="toggle danger" id="exit">Exit</button>
     </div>
   </header>
-  <div id="output">
-    <div id="history-bar">
-      <span id="history-note"></span>
-      <button id="older">Load older</button>
+  <div id="conversation">
+    <div id="output">
+      <div id="history-bar">
+        <span id="history-note"></span>
+        <button id="older">Load older</button>
+      </div>
+      <div id="messages"></div>
+      <div id="writing"></div>
+      <pre id="live" class="screen"></pre>
     </div>
-    <div id="messages"></div>
-    <pre id="live" class="screen"></pre>
+    <div id="card">
+      <div id="card-label">Waiting on you</div>
+      <pre id="card-text" class="screen"></pre>
+    </div>
   </div>
-  <div id="panel">
-    <div id="panel-label"></div>
-    <pre id="panel-text" class="screen"></pre>
-  </div>
+  <div id="status"><span id="status-text"></span></div>
   <div class="keys" id="keys"></div>
   <div class="compose">
     <textarea id="text" rows="1" placeholder="Reply…"></textarea>
@@ -342,9 +354,14 @@ function openSession(s) {
 
 function resetSessionView() {
   past = { before: null, after: null, size: 0, loading: false, available: true,
-           failed: false, redacted: true, session: null, polls: 0 };
+           failed: false, redacted: true, session: null, polls: 0, writing: null,
+           overlay: 0 };
   $("live").textContent = "";
-  $("panel-text").textContent = "";
+  $("card-text").textContent = "";
+  $("card").classList.remove("open");
+  $("status-text").textContent = "";
+  $("writing").replaceChildren();
+  $("output").style.paddingBottom = "";
   $("messages").replaceChildren();
   $("history-bar").classList.remove("shown");
   applyViewMode();
@@ -378,9 +395,10 @@ async function refreshSession(forceBottom) {
     if (id !== current || state !== past) return;
     $("session-title").textContent = data.name;
     const out = $("output");
-    const atBottom = isAtBottom(out);
+    const atBottom = isOutputAtBottom();
     const live = $("live");
-    if (live.textContent !== data.output) live.textContent = data.output;
+    const screen = safeGlyphs(data.output);
+    if (live.textContent !== screen) live.textContent = screen;
     const session = data.history && data.history.session;
     if (session && state.session && session !== state.session) {
       resetSessionView();
@@ -388,8 +406,8 @@ async function refreshSession(forceBottom) {
       return;
     }
     if (data.history && after === state.after) applyNewHistory(data.history);
-    renderPanel(data, forceBottom);
-    if (forceBottom || atBottom) out.scrollTop = out.scrollHeight;
+    renderScreenState(data, forceBottom);
+    if (forceBottom || atBottom) scrollOutputToBottom();
     const badge = $("session-badge");
     badge.className = "badge " + data.state;
     badge.textContent = STATE_LABEL[data.state] || data.state;
@@ -406,6 +424,24 @@ async function refreshSession(forceBottom) {
 
 function isAtBottom(el) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+}
+
+// The padding an overlay adds lets what lies under it be scrolled into
+// view.  It is not part of the conversation's bottom.
+function isOutputAtBottom() {
+  const out = $("output");
+  return out.scrollHeight - past.overlay - out.scrollTop - out.clientHeight < 40;
+}
+
+function scrollOutputToBottom() {
+  const out = $("output");
+  out.scrollTop = out.scrollHeight - past.overlay - out.clientHeight;
+}
+
+function setOverlay(height) {
+  if (height === past.overlay) return;
+  past.overlay = height;
+  $("output").style.paddingBottom = height ? height + 18 + "px" : "";
 }
 
 // A session has no transcript until its first prompt.
@@ -425,27 +461,48 @@ function applyNewHistory(data) {
   if (data.messages.length) renderHistoryBar();
 }
 
-function renderPanel(data, forceBottom) {
-  const panel = $("panel");
-  const text = $("panel-text");
-  const atBottom = isAtBottom(text);
-  const shape = data.panel || { start: 0, block: null, dialog: true };
-  const lines = data.output.split("\n");
-  const showBlock = data.state === "busy" && shape.block !== null
-    && !isInTranscript(lines.slice(shape.block, shape.start));
-  const content = compactScreen(lines.slice(showBlock ? shape.block : shape.start));
-  if (text.textContent !== content) text.textContent = content;
-  const dialog = shape.dialog && data.state !== "busy";
-  panel.classList.toggle("dialog", dialog);
-  $("panel-label").textContent = dialog ? "Waiting on you" : "Live";
-  if (forceBottom || atBottom) text.scrollTop = text.scrollHeight;
+function renderScreenState(data, forceBottom) {
+  const state = data.screen || {};
+  const running = data.state === "busy" || state.running === true;
+  const status = running ? state.status || "Working…" : state.mode || "";
+  if ($("status-text").textContent !== status) $("status-text").textContent = status;
+  renderWriting(running && hasTranscript() ? state.writing : null);
+  renderCard(hasTranscript() ? state.card : null, forceBottom);
+}
+
+// Text the transcript does not hold yet ends the conversation as one more
+// message, until the real one takes its place.
+function renderWriting(text) {
+  const shown = text && !isInTranscript(text) ? text : null;
+  if (shown === past.writing) return;
+  past.writing = shown;
+  const box = $("writing");
+  box.replaceChildren();
+  if (shown) box.append(messageElement({ role: "assistant", text: shown }));
+}
+
+function renderCard(text, forceBottom) {
+  const card = $("card");
+  const body = $("card-text");
+  const atBottom = isAtBottom(body);
+  const content = text ? compactScreen(text.split("\n")) : "";
+  if (body.textContent !== content) body.textContent = content;
+  card.classList.toggle("open", !!text);
+  if (text && (forceBottom || atBottom)) body.scrollTop = body.scrollHeight;
+  setOverlay(text ? card.offsetHeight : 0);
+}
+
+// Android's fonts lack these, which would show as empty boxes.
+function safeGlyphs(text) {
+  const map = { "⏵": ">", "⏴": "<", "⏸": "||", "⏹": "[]", "⏺": "●" };
+  return text.replace(/[⏵⏴⏸⏹⏺]/g, (glyph) => map[glyph]);
 }
 
 // Fits terminal lines to a phone without losing text: a full-width rule
 // would wrap to several lines, right-aligned text to a line of spaces,
 // and screens pad with blank lines.
 function compactScreen(lines) {
-  return lines.map((line) => line.trimEnd()
+  return lines.map((line) => safeGlyphs(line).trimEnd()
                    .replace(/^[─▔╌]{20,}/, (rule) => rule.slice(0, 30))
                    .replace(/^[ \u00a0]{20,}/, "  "))
     .join("\n")
@@ -457,8 +514,8 @@ function compactScreen(lines) {
 // screen.  Rendering rewraps and restyles text, so only letters and
 // digits are compared, and a message that does not match is shown again
 // rather than risk hiding what is still being written.
-function isInTranscript(lines) {
-  const head = comparable(lines.join(" ")).slice(0, 40);
+function isInTranscript(text) {
+  const head = comparable(text).slice(0, 40);
   if (!head) return true;
   return [...$("messages").children].slice(-6)
     .some((el) => comparable(el.textContent).includes(head));
@@ -1111,7 +1168,7 @@ function alertError(e) {
   const text = "[agent-remote] " + e.message;
   if (past && hasTranscript()) {
     $("messages").append(messageElement({ role: "tool", text }));
-    $("output").scrollTop = $("output").scrollHeight;
+    scrollOutputToBottom();
   } else {
     $("live").textContent += "\n\n" + text;
   }
