@@ -695,10 +695,12 @@ The command @code{agent-act-on-linear-issue} routes a Linear issue mirrored by
 showing it, such as one in the list @code{org-linear-my-issues} builds. @samp{org-linear}
 writes each issue as an org TODO heading filed under a level-1 heading named
 after its Linear project, with the issue's URL in a @samp{LINEAR_URL} property, so
-the issue is routed as the org TODO it is: its heading and body are submitted
-to a session started for it, and the heading moves to
+the issue is routed as the org TODO it is, except that its heading and body
+are typed into the prompt of the session started for it rather than submitted,
+since an issue is written for the people tracking it rather than as a prompt and
+usually wants editing first. The heading moves to
 @code{agent-todo-in-progress-keyword}, which @samp{org-linear} then pushes to Linear as
-a state change. Three things are added. When the account has a project whose
+a state change. Three more things are added. When the account has a project whose
 directory is named like the Linear project, ignoring case and separators, so
 that @samp{White glove} finds @samp{white-glove}, that directory is suggested, so the
 project reader opens on it and a bare @samp{RET} starts there, as a Forge topic's
@@ -720,7 +722,7 @@ Recognizing the thing, choosing the session, and delivering the payload are thre
 
 A running session already has a directory, so on that path the core tells the extractor not to resolve one, and an extractor that has to work for its directory leaves it out. That saves what the work costs: routing a backtrace to a running session asks no model which packages it implicates and prompts for none, and routing a Forge topic there no longer refuses a repository that was never cloned locally. The extractors that carry only text are unaffected, since the project they would otherwise pick is chosen after the session is, and only for a new one.
 
-What each kind sends differs, because the payloads differ. A Slack permalink, a Forge topic URL and an email's maildir path are references to something the agent should read, so they arrive unsubmitted and you type the request next to them. A backtrace, an org TODO and a Linear issue already are the request, so they submit.
+What each kind sends differs, because the payloads differ. A Slack permalink, a Forge topic URL and an email's maildir path are references to something the agent should read, so they arrive unsubmitted and you type the request next to them. A backtrace and an org TODO already are the request, so they submit. A Linear issue is a request too, but one written for the people tracking it, so it arrives unsubmitted for you to edit.
 
 A payload marked @samp{:submit} reaches a @strong{new} session as its initial prompt, handed to the backend at launch rather than typed into the terminal afterwards. Claude passes it on the CLI's command line, and Codex does too except when it is resuming a session or running through its app server, where it sends the prompt itself once the session is up. Either way the payload never races the terminal: nothing sequences typed input against a session whose process has only just been spawned, and these sessions often start in a directory the CLI has never opened, where it greets the user with a trust prompt that the typed text would answer instead of the model. A payload the context does not submit is typed in on both paths, since it is meant to sit in the prompt for the user to edit. A submitted payload reaching an already-running session is typed in and then submitted, because that session is past its startup and needs no hand-off at launch.
 
@@ -815,12 +817,25 @@ duration. @code{agent-exit-without-skills} is the only exit command that bypasse
 the skill hook; it still runs other before-exit functions.
 
 The chain is driven by session stop events and guarded by a watchdog. Each
-submitted skill gets up to @code{agent-before-exit-timeout} seconds (default 600) to
-finish; the watchdog restarts when the next skill begins. If the current skill
-exceeds that interval, the watchdog warns but keeps the exit request armed. The
-chain checks the result when the skill eventually finishes instead of losing
-the requested exit because the skill ran for more than ten minutes. A gated
-entry still needs an accepted receipt at that point.
+submitted skill gets @code{agent-before-exit-timeout} seconds (default 600) before
+the watchdog looks at it, and the watchdog restarts when the next skill begins.
+If the current skill exceeds that interval, the watchdog warns but keeps the
+exit request armed and looks again after another interval. The chain checks the
+result when the skill eventually finishes instead of losing the requested exit
+because the skill ran for more than ten minutes. A gated entry still needs an
+accepted receipt at that point.
+
+A stop event can be lost, and a chain that waited only for it would then stall
+with the session sitting idle. So each time the watchdog fires it also asks
+whether the skill has in fact finished. A running chain advances only when two
+independent sources agree: the backend's @code{:idle-p} probe, which for Claude reads
+the screen, and its @code{:reported-idle-p} source, which for Claude is a current
+@samp{idle} reading from @samp{claude agents --json}. A session Claude Code reports as
+@samp{waiting} does not count, since it is blocked on the user, as at a permission
+dialog. A backend without both sources, such as Codex, keeps waiting for its stop
+event. Advancing this way goes through the same step as a real stop event, so a
+gated entry with no receipt at that point stops the chain with a warning and
+keeps the session open rather than closing it.
 
 Backends can veto that automatic close while the submitted skill invocation is
 still visible as unaccepted prompt input. Codex uses this to avoid closing a
@@ -976,7 +991,7 @@ When @code{agent-restart} operates on a Codex session, it resumes codex.el's can
 @findex agent-kill-session-buffer
 The function @code{agent-register-backend} registers an AI tool by constructing an @code{agent-backend} struct from keyword arguments. Backend modules call it at load time. Keywords are validated against the struct's slot names, and the required slots @code{:buffer-p}, @code{:find-all-buffers}, and @code{:start-session} are checked so the shared session layer can rely on a consistent interface.
 
-The full slot set is: identity and presentation (@code{name}, @code{label}, @code{icon}, @code{program}), buffer discovery (@code{buffer-p}, @code{find-all-buffers}, @code{find-buffers-for-dir}), session lifecycle (@code{start-session}, @code{session-identity}, @code{restart-options}), send primitives (@code{send-string}, @code{send-return}, @code{submit}), session state probes (@code{waiting-p}, @code{busy-p}, @code{background-tasks-p}, @code{status-unknown-p}, @code{display-name-suffix}, @code{notify}), accounts (@code{account-env-var}, @code{accounts}, @code{account-file}, @code{shared-config-items}, @code{canonical-home}, @code{account-init}, @code{credential-file}, @code{login-args}, @code{usage-fetch}), skills (@code{run-prompt}, @code{exec-prompt}, @code{skill-roots}, @code{skill-command-prefix}), session history (@code{session-headers}, @code{session-prompt}, @code{resume}, @code{prepare-fork}), integration hooks (@code{sync-theme}), and exit safety (@code{before-exit-ready-to-close-p}, @code{before-kill-check}, @code{idle-p}).
+The full slot set is: identity and presentation (@code{name}, @code{label}, @code{icon}, @code{program}), buffer discovery (@code{buffer-p}, @code{find-all-buffers}, @code{find-buffers-for-dir}), session lifecycle (@code{start-session}, @code{session-identity}, @code{restart-options}), send primitives (@code{send-string}, @code{send-return}, @code{submit}), session state probes (@code{waiting-p}, @code{busy-p}, @code{background-tasks-p}, @code{status-unknown-p}, @code{display-name-suffix}, @code{notify}), accounts (@code{account-env-var}, @code{accounts}, @code{account-file}, @code{shared-config-items}, @code{canonical-home}, @code{account-init}, @code{credential-file}, @code{login-args}, @code{usage-fetch}), skills (@code{run-prompt}, @code{exec-prompt}, @code{skill-roots}, @code{skill-command-prefix}), session history (@code{session-headers}, @code{session-prompt}, @code{resume}, @code{prepare-fork}), integration hooks (@code{sync-theme}), and exit safety (@code{before-exit-ready-to-close-p}, @code{before-kill-check}, @code{idle-p}, @code{reported-idle-p}).
 
 The @code{:start-session} slot starts a new session parameterized by an @code{agent-session} identity struct, optionally with an initial prompt or a resume id. The @code{:session-identity} slot returns a live session buffer's CLI session id, used by @code{agent-restart} to resume in place. @code{agent-start-session} is the core dispatcher that starts a session through its backend's @code{:start-session} function, passing any extra backend-specific options through. The @code{:send-string} slot inserts text into a session's prompt without submitting it, @code{:send-return} submits the pending prompt, and @code{:submit} atomically inserts and submits; the core wrappers @code{agent-send-string}, @code{agent-send-return}, and @code{agent-submit} dispatch through these slots and emit the corresponding session events.
 

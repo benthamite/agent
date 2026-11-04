@@ -729,12 +729,25 @@ duration. ~agent-exit-without-skills~ is the only exit command that bypasses
 the skill hook; it still runs other before-exit functions.
 
 The chain is driven by session stop events and guarded by a watchdog. Each
-submitted skill gets up to ~agent-before-exit-timeout~ seconds (default 600) to
-finish; the watchdog restarts when the next skill begins. If the current skill
-exceeds that interval, the watchdog warns but keeps the exit request armed. The
-chain checks the result when the skill eventually finishes instead of losing
-the requested exit because the skill ran for more than ten minutes. A gated
-entry still needs an accepted receipt at that point.
+submitted skill gets ~agent-before-exit-timeout~ seconds (default 600) before
+the watchdog looks at it, and the watchdog restarts when the next skill begins.
+If the current skill exceeds that interval, the watchdog warns but keeps the
+exit request armed and looks again after another interval. The chain checks the
+result when the skill eventually finishes instead of losing the requested exit
+because the skill ran for more than ten minutes. A gated entry still needs an
+accepted receipt at that point.
+
+A stop event can be lost, and a chain that waited only for it would then stall
+with the session sitting idle. So each time the watchdog fires it also asks
+whether the skill has in fact finished. A running chain advances only when two
+independent sources agree: the backend's ~:idle-p~ probe, which for Claude reads
+the screen, and its ~:reported-idle-p~ source, which for Claude is a current
+=idle= reading from =claude agents --json=. A session Claude Code reports as
+=waiting= does not count, since it is blocked on the user, as at a permission
+dialog. A backend without both sources, such as Codex, keeps waiting for its stop
+event. Advancing this way goes through the same step as a real stop event, so a
+gated entry with no receipt at that point stops the chain with a warning and
+keeps the session open rather than closing it.
 
 Backends can veto that automatic close while the submitted skill invocation is
 still visible as unaccepted prompt input. Codex uses this to avoid closing a
@@ -901,7 +914,7 @@ When ~agent-restart~ operates on a Codex session, it resumes codex.el's canonica
 #+findex: agent-kill-session-buffer
 The function ~agent-register-backend~ registers an AI tool by constructing an ~agent-backend~ struct from keyword arguments. Backend modules call it at load time. Keywords are validated against the struct's slot names, and the required slots ~:buffer-p~, ~:find-all-buffers~, and ~:start-session~ are checked so the shared session layer can rely on a consistent interface.
 
-The full slot set is: identity and presentation (~name~, ~label~, ~icon~, ~program~), buffer discovery (~buffer-p~, ~find-all-buffers~, ~find-buffers-for-dir~), session lifecycle (~start-session~, ~session-identity~, ~restart-options~), send primitives (~send-string~, ~send-return~, ~submit~), session state probes (~waiting-p~, ~busy-p~, ~background-tasks-p~, ~status-unknown-p~, ~display-name-suffix~, ~notify~), accounts (~account-env-var~, ~accounts~, ~account-file~, ~shared-config-items~, ~canonical-home~, ~account-init~, ~credential-file~, ~login-args~, ~usage-fetch~), skills (~run-prompt~, ~exec-prompt~, ~skill-roots~, ~skill-command-prefix~), session history (~session-headers~, ~session-prompt~, ~resume~, ~prepare-fork~), integration hooks (~sync-theme~), and exit safety (~before-exit-ready-to-close-p~, ~before-kill-check~, ~idle-p~).
+The full slot set is: identity and presentation (~name~, ~label~, ~icon~, ~program~), buffer discovery (~buffer-p~, ~find-all-buffers~, ~find-buffers-for-dir~), session lifecycle (~start-session~, ~session-identity~, ~restart-options~), send primitives (~send-string~, ~send-return~, ~submit~), session state probes (~waiting-p~, ~busy-p~, ~background-tasks-p~, ~status-unknown-p~, ~display-name-suffix~, ~notify~), accounts (~account-env-var~, ~accounts~, ~account-file~, ~shared-config-items~, ~canonical-home~, ~account-init~, ~credential-file~, ~login-args~, ~usage-fetch~), skills (~run-prompt~, ~exec-prompt~, ~skill-roots~, ~skill-command-prefix~), session history (~session-headers~, ~session-prompt~, ~resume~, ~prepare-fork~), integration hooks (~sync-theme~), and exit safety (~before-exit-ready-to-close-p~, ~before-kill-check~, ~idle-p~, ~reported-idle-p~).
 
 The ~:start-session~ slot starts a new session parameterized by an ~agent-session~ identity struct, optionally with an initial prompt or a resume id. The ~:session-identity~ slot returns a live session buffer's CLI session id, used by ~agent-restart~ to resume in place. ~agent-start-session~ is the core dispatcher that starts a session through its backend's ~:start-session~ function, passing any extra backend-specific options through. The ~:send-string~ slot inserts text into a session's prompt without submitting it, ~:send-return~ submits the pending prompt, and ~:submit~ atomically inserts and submits; the core wrappers ~agent-send-string~, ~agent-send-return~, and ~agent-submit~ dispatch through these slots and emit the corresponding session events.
 

@@ -247,6 +247,7 @@ Source: lobehub/lobe-icons (MIT).")
   :background-tasks-p #'agent-claude--reported-background-p
   :status-unknown-p #'agent-claude--status-unknown-p
   :idle-p #'agent-claude--terminal-waiting-p
+  :reported-idle-p #'agent-claude--reported-idle-p
   :display-name-suffix #'agent-claude--branch-suffix
   :label "Claude Code"
   :run-prompt #'agent-claude-run-prompt
@@ -1471,6 +1472,16 @@ is not shown waiting on the strength of an earlier reading."
   (when-let* ((reported (agent-claude--reported-status buffer)))
     (and (plist-get reported :current)
          (member (plist-get reported :status) '("idle" "waiting")))))
+
+(defun agent-claude--reported-idle-p (buffer)
+  "Return non-nil when Claude Code reports session BUFFER idle.
+Registered as the backend's `:reported-idle-p'.  Unlike
+`agent-claude--reported-waiting-p', a session reported waiting does not
+count: it is blocked on the user mid-turn, as at a permission dialog,
+so its skill has not finished.  Only a result current for BUFFER counts."
+  (when-let* ((reported (agent-claude--reported-status buffer)))
+    (and (plist-get reported :current)
+         (equal (plist-get reported :status) "idle"))))
 
 (defun agent-claude--reported-background-p (buffer)
   "Return non-nil when Claude Code reports session BUFFER busy.

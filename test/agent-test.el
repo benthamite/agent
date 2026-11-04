@@ -2854,13 +2854,138 @@ session's account and id, and `synced' the synced selections."
           (should watchdog)
           (apply (car watchdog) (cdr watchdog))
           (should (eq (plist-get agent--before-exit :state) 'running))
-          (should-not (plist-get agent--before-exit :timer))
           (should-not exited)
           (should (cl-some (lambda (m) (string-match-p "timed out" m))
                            messages))
           (should (agent--before-exit-transition buf 'step))
           (should exited)
           (should (eq (plist-get agent--before-exit :state) 'closing)))))))
+
+;; A chain whose Stop hook was lost: `fire' runs the armed watchdog, and
+;; `idle' and `reported' are what the two idle sources currently answer.
+(defmacro agent-test--with-armed-chain (skills &rest body)
+  "Run BODY with a chain of SKILLS armed in a stub Claude session.
+Bind `buf', the session buffer; `sent', the commands submitted; `idle' and
+`reported', which set the backend's two idle sources; `exited', non-nil once
+the session exits; `armed', the number of watchdogs started; and `fire',
+a function that runs the latest watchdog."
+  (declare (indent 1) (debug t))
+  `(let ((agent-backends nil)
+         (agent-before-exit-skill-names ,skills)
+         (agent-before-exit-skill-name nil)
+         (agent-before-exit-skill-directories nil)
+         (agent-before-exit-timeout 600)
+         (idle nil) (reported nil) (sent nil) (exited nil) (armed 0)
+         (watchdog nil))
+     (with-temp-buffer
+       (let* ((buf (current-buffer))
+              (fire (lambda () (apply (car watchdog) (cdr watchdog)))))
+         (ignore fire)
+         (apply #'agent-register-backend
+                'claude-code
+                (agent-test--backend
+                 :buffer-p (lambda (candidate) (eq candidate buf))
+                 :skill-command-prefix "/"
+                 :idle-p (lambda (_buffer) idle)
+                 :reported-idle-p (lambda (_buffer) reported)
+                 :submit (lambda (cmd &optional _buffer) (push cmd sent))))
+         (agent--set-session
+          buf (agent-session-create :backend 'claude-code :id "s1"))
+         (cl-letf (((symbol-function 'agent--exit-session)
+                    (lambda (_buffer) (setq exited t)))
+                   ((symbol-function 'run-at-time)
+                    (lambda (time _repeat function &rest args)
+                      (if (zerop time)
+                          (apply function args)
+                        (setq armed (1+ armed)
+                              watchdog (cons function args))
+                        'agent-test-timer)))
+                   ((symbol-function 'cancel-timer) #'ignore)
+                   ((symbol-function 'display-warning) #'ignore))
+           (unwind-protect
+               (progn ,@body)
+             (agent--before-exit-reset)))))))
+
+(ert-deftest agent-test-before-exit-watchdog-advances-when-both-sources-agree ()
+  "A lost stop advances a running chain once screen and report say idle."
+  (agent-test--with-armed-chain '("capture" "update-log")
+    (agent-run-skill-before-exit 'claude-code buf)
+    (should (equal sent '("/capture")))
+    (setq idle t reported t)
+    (funcall fire)
+    (should (equal sent '("/update-log" "/capture")))
+    (should (eq (plist-get agent--before-exit :state) 'running))
+    (should (= armed 2))
+    (funcall fire)
+    (should exited)
+    (should (eq (plist-get agent--before-exit :state) 'closing))
+    (should (= armed 2))))
+
+(ert-deftest agent-test-before-exit-watchdog-needs-both-sources ()
+  "Either idle source alone leaves a running chain waiting, and re-arms."
+  (dolist (answers '((t nil) (nil t) (nil nil)))
+    (agent-test--with-armed-chain '("capture" "update-log")
+      (agent-run-skill-before-exit 'claude-code buf)
+      (setq idle (car answers) reported (cadr answers))
+      (funcall fire)
+      (should (equal sent '("/capture")))
+      (should (eq (plist-get agent--before-exit :state) 'running))
+      (should-not exited)
+      (should (plist-get agent--before-exit :timer))
+      (should (= armed 2)))))
+
+(ert-deftest agent-test-before-exit-watchdog-keeps-checking-until-idle ()
+  "A skill that outlasts the first watchdog still advances on a later one."
+  (agent-test--with-armed-chain '("capture" "update-log")
+    (agent-run-skill-before-exit 'claude-code buf)
+    (funcall fire)
+    (funcall fire)
+    (should (equal sent '("/capture")))
+    (should (= armed 3))
+    (setq idle t reported t)
+    (funcall fire)
+    (should (equal sent '("/update-log" "/capture")))))
+
+(ert-deftest agent-test-before-exit-watchdog-without-report-keeps-waiting ()
+  "A backend with no second source never advances a running chain itself."
+  (agent-test--with-armed-chain '("capture")
+    (setf (agent-backend-reported-idle-p (agent-backend 'claude-code)) nil)
+    (agent-run-skill-before-exit 'claude-code buf)
+    (setq idle t reported t)
+    (funcall fire)
+    (should-not exited)
+    (should (eq (plist-get agent--before-exit :state) 'running))
+    (should (= armed 2))))
+
+(ert-deftest agent-test-before-exit-watchdog-missing-receipt-stops-chain ()
+  "A lost stop on a receipt-gated skill with no receipt never closes."
+  (agent-test--with-armed-chain '(("update-log" :receipt t))
+    (agent-run-skill-before-exit 'claude-code buf)
+    (setq idle t reported t)
+    (cl-letf* ((messages nil)
+               ((symbol-function 'message)
+                (lambda (fmt &rest args)
+                  (push (apply #'format fmt args) messages))))
+      (funcall fire)
+      (should-not exited)
+      (should-not agent--before-exit)
+      (should (= armed 1))
+      (should-not (cl-some (lambda (m) (string-match-p "timed out" m))
+                           messages)))))
+
+(ert-deftest agent-test-before-exit-watchdog-re-arms-waiting-for-idle ()
+  "A chain still waiting for idle is checked again, and starts once idle."
+  (agent-test--with-armed-chain '("capture")
+    (agent-session-event buf 'submit)
+    (agent-run-skill-before-exit 'claude-code buf)
+    (should (eq (plist-get agent--before-exit :state) 'waiting-for-idle))
+    (funcall fire)
+    (should-not sent)
+    (should (= armed 2))
+    (setq idle t)
+    (funcall fire)
+    (should (equal sent '("/capture")))
+    (should (eq (plist-get agent--before-exit :state) 'running))))
 
 (ert-deftest agent-test-run-skill-before-exit-submits-in-matching-directory ()
   "Submit a Codex skill in explicitly configured directories."

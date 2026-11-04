@@ -2541,6 +2541,20 @@ STARTED defaults to now; STATUS nil leaves s1 out."
     (when status (puthash "s1" (list :status status) sessions))
     (list :started (or started (float-time)) :sessions sessions)))
 
+(ert-deftest agent-claude-test-reported-idle-means-a-current-idle-reading ()
+  "Only a current reading of idle counts, not waiting, busy or a stale one."
+  (agent-claude-test--with-reported-status
+      (agent-claude-test--result "idle") 'busy
+    (should (agent-claude--reported-idle-p (current-buffer)))
+    (setq agent-claude--status-event-at (+ (float-time) 60))
+    (should-not (agent-claude--reported-idle-p (current-buffer))))
+  (dolist (status '("waiting" "busy" nil))
+    (agent-claude-test--with-reported-status
+        (agent-claude-test--result status) 'busy
+      (should-not (agent-claude--reported-idle-p (current-buffer)))))
+  (agent-claude-test--with-reported-status nil 'busy
+    (should-not (agent-claude--reported-idle-p (current-buffer)))))
+
 (ert-deftest agent-claude-test-parse-agents-json-keeps-interactive ()
   "Only interactive sessions are kept, keyed by session id."
   (let ((table (agent-claude--parse-agents-json

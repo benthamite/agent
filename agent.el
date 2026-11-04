@@ -112,11 +112,13 @@ When nil, run a configured skill before exiting every session.  An entry in
   :group 'agent)
 
 (defcustom agent-before-exit-timeout 600
-  "Seconds before an unfinished before-exit skill raises a warning.
-The watchdog restarts whenever the chain advances to another
-skill.  If the current skill runs this long without finishing,
-the watchdog warns but keeps the exit request armed so that the
-session closes when the skill eventually finishes."
+  "Seconds between checks on an unfinished before-exit skill.
+The watchdog restarts whenever the chain advances to another skill.
+Each time the current skill runs this long without finishing, the
+watchdog checks whether its stop event was lost, and advances the chain
+if so; see `agent--before-exit-timeout'.  Otherwise it warns and keeps
+the exit request armed, so that the session closes when the skill
+eventually finishes."
   :type 'number
   :group 'agent)
 
@@ -150,7 +152,7 @@ chain only once.  Only
   run-prompt exec-prompt skill-roots skill-command-prefix
   session-headers session-prompt prepare-fork
   sync-theme
-  before-exit-ready-to-close-p before-kill-check idle-p)
+  before-exit-ready-to-close-p before-kill-check idle-p reported-idle-p)
 
 (defvar agent-backends nil
   "Alist of registered AI backends.
@@ -200,6 +202,14 @@ returning the directory a session started from the current buffer
 would run in when no directory is given.  `agent-start-session' uses
 it to know a session's directory before resolving its account, so
 `agent-account-directory-rules' can apply.
+
+The optional `:idle-p' key is a function of a session buffer returning
+non-nil when the session's own display shows it idle.  The optional
+`:reported-idle-p' key is a function of a session buffer returning
+non-nil when a source independent of that display reports the session
+idle, with nothing left for the user to answer.  A running before-exit
+chain whose stop event was lost advances only when both agree; see
+`agent--before-exit-timeout'.
 
 Multi-account backends provide the optional account keys read by
 `agent-account': `:account-env-var' (environment variable naming
@@ -2696,20 +2706,41 @@ Return nil."
                    (agent--before-exit-start-watchdog buffer))))
 
 (defun agent--before-exit-timeout (buffer)
-  "Advance or warn when BUFFER's before-exit watchdog fires.
-A chain still waiting for idle whose backend now affirms the
-session is idle missed its stop event, so the watchdog advances it
-instead of warning."
+  "Advance BUFFER's before-exit chain if it missed a stop, or keep waiting.
+When `agent--before-exit-missed-stop-p' holds, take the step the stop
+event would have taken, so a receipt-gated entry is still judged by its
+receipt.  A chain that is still armed afterwards warns, unless the step
+started the next skill, and is checked again after another
+`agent-before-exit-timeout' seconds, since a lost stop may be the reason
+it is still waiting."
   (when agent--before-exit
     (setq agent--before-exit
           (plist-put agent--before-exit :timer nil))
-    (or (and (eq (plist-get agent--before-exit :state) 'waiting-for-idle)
-             (agent--backend-affirms-idle-p (agent--detect-backend buffer)
-                                            buffer)
-             (agent--before-exit-step buffer))
+    (unless (and (agent--before-exit-missed-stop-p buffer)
+                 (agent--before-exit-step buffer))
+      (when (agent--before-exit-awaiting-stop-p)
         (message "agent: before-exit skill timed out in %s; waiting for completion"
-                 (buffer-name buffer)))
+                 (buffer-name buffer))))
+    (when (and (agent--before-exit-awaiting-stop-p)
+               (not (plist-get agent--before-exit :timer)))
+      (agent--before-exit-restart-watchdog buffer))
     t))
+
+(defun agent--before-exit-missed-stop-p (buffer)
+  "Return non-nil when BUFFER's chain seems to have missed its stop event.
+A chain waiting for the turn that preceded it needs only the backend's
+`:idle-p' probe.  A running chain also needs `:reported-idle-p': there a
+wrong answer submits the next skill into a turn still in progress, and
+the screen alone cannot tell, since a permission dialog can look like
+the input prompt."
+  (let ((backend (agent--detect-backend buffer)))
+    (and (agent--backend-affirms-idle-p backend buffer)
+         (or (eq (plist-get agent--before-exit :state) 'waiting-for-idle)
+             (agent--backend-reports-idle-p backend buffer)))))
+
+(defun agent--before-exit-awaiting-stop-p ()
+  "Return non-nil when the current buffer's chain awaits a stop event."
+  (memq (plist-get agent--before-exit :state) '(waiting-for-idle running)))
 
 (defun agent--before-exit-close (buffer backend)
   "Mark BUFFER's chain as closing and schedule BACKEND's exit."
@@ -2830,6 +2861,14 @@ strand the chain, while this probe is consulted only when arming
 and when the watchdog fires."
   (when-let* ((struct (agent-backend backend))
               (fn (agent-backend-idle-p struct)))
+    (funcall fn buffer)))
+
+(defun agent--backend-reports-idle-p (backend buffer)
+  "Return non-nil when BACKEND's `:reported-idle-p' reports BUFFER idle.
+A backend without that source returns nil, so it never advances a
+running chain on the watchdog."
+  (when-let* ((struct (agent-backend backend))
+              (fn (agent-backend-reported-idle-p struct)))
     (funcall fn buffer)))
 
 (defun agent--exit-after-before-exit-skill (_backend buffer)
