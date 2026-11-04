@@ -2207,6 +2207,38 @@ session's account and id, and `synced' the synced selections."
                   :type 'user-error)
     (should-not killed)))
 
+(ert-deftest agent-test-start-session-refuses-id-without-resume-id ()
+  "A session carrying an id must say it means to resume, before any spawn."
+  (let ((agent-backends nil)
+        started)
+    (apply #'agent-register-backend
+           'one
+           (agent-test--backend
+            :start-session (lambda (&rest _) (setq started t))))
+    (should-error
+     (agent-start-session
+      (agent-session-create :backend 'one :directory "/tmp/" :id "x"))
+     :type 'user-error)
+    (should-not started)
+    (agent-start-session
+     (agent-session-create :backend 'one :directory "/tmp/" :id "x")
+     :resume-id "x")
+    (should started)))
+
+(ert-deftest agent-test-handoff-session-drops-source-id ()
+  "A handoff's new session has no id, with or without a new directory."
+  (let ((source (agent-session-create :backend 'one :account "a"
+                                      :directory "/src/" :instance "i"
+                                      :id "source-id")))
+    (dolist (directory '(nil "/dst/"))
+      (let ((target (agent--handoff-target-session source directory)))
+        (should-not (agent-session-id target))
+        (should (equal (agent-session-account target) "a"))
+        (should (equal (agent-session-instance target) "i"))
+        (should (equal (agent-session-directory target)
+                       (or directory "/src/")))))
+    (should (equal (agent-session-id source) "source-id"))))
+
 (ert-deftest agent-test-handoff-carries-source-session ()
   "Start the handoff session with the source buffer's account and directory."
   (let* ((agent-backends nil)

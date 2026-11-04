@@ -360,7 +360,9 @@ Given \"*claude:~/path/to/project/:default*\" or
   (directory nil :documentation "Abbreviated absolute project directory,
 with a trailing slash.")
   (instance nil :documentation "Instance name string, or nil for default.")
-  (id nil :documentation "CLI session id string, or nil until known."))
+  (id nil :documentation "CLI session id string, or nil until known.
+It records an id and never selects a conversation: to resume one, pass
+`:resume-id' to `agent-start-session', which refuses a set id without it."))
 
 (cl-defun agent-start-session (session &rest options
                                        &key initial-prompt resume-id
@@ -368,7 +370,10 @@ with a trailing slash.")
   "Start SESSION through its backend's `start-session' function.
 SESSION is an `agent-session' whose backend, account, directory, and
 instance slots parameterize the new session; nil slots fall back to
-the backend's ambient defaults.  A nil directory slot is filled first
+the backend's ambient defaults.  The id slot does not select a
+conversation, so a SESSION carrying an id without RESUME-ID signals a
+`user-error': pass RESUME-ID to resume, and leave the slot nil to start
+fresh.  A nil directory slot is filled first
 from the backend's `:ambient-directory' function, when it has one, and
 a nil account slot is then filled from `agent-account-resolve' for
 that directory, so `agent-account-directory-rules' apply and the
@@ -392,6 +397,9 @@ the backend would hand back that session's buffer, still running its
 own conversation, and SESSION would overwrite its identity.  Return the
 new session buffer."
   (ignore initial-prompt)
+  (when (and (agent-session-id session) (not resume-id))
+    (user-error "Session id `%s' would start a fresh session; pass :resume-id to resume it"
+                (agent-session-id session)))
   (let* ((backend (agent-session-backend session))
          (directory (or (agent-session-directory session)
                         (setf (agent-session-directory session)
@@ -3141,7 +3149,7 @@ passed as the initial prompt."
           (and requested-directory
                (agent--handoff-resolve-directory requested-directory
                                                  source-directory)))
-         (session (agent--handoff-session-in-directory
+         (session (agent--handoff-target-session
                    source-session resolved-directory)))
     (when (and source
                (not (agent--confirm-no-captured-prompts
@@ -3225,16 +3233,15 @@ part of the prompt."
       (user-error "Handoff target directory does not exist: %s" expanded))
     (agent-session--normalize-directory expanded)))
 
-(defun agent--handoff-session-in-directory (session directory)
-  "Return SESSION copied with DIRECTORY, or SESSION when DIRECTORY is nil."
-  (if (not directory)
-      session
-    (agent-session-create
-     :backend (agent-session-backend session)
-     :account (agent-session-account session)
-     :directory directory
-     :instance (agent-session-instance session)
-     :id (agent-session-id session))))
+(defun agent--handoff-target-session (session directory)
+  "Return a new session for a handoff from SESSION, without its id.
+A handoff starts a fresh conversation, so the source's id does not carry
+over.  DIRECTORY replaces SESSION's directory when non-nil."
+  (agent-session-create
+   :backend (agent-session-backend session)
+   :account (agent-session-account session)
+   :directory (or directory (agent-session-directory session))
+   :instance (agent-session-instance session)))
 
 (defun agent--kill-handoff-source (backend source dir)
   "Kill SOURCE, or the single existing BACKEND buffer in DIR.
