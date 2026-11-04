@@ -4855,6 +4855,11 @@ when it is not installed."
     (user-error "Package `agent-log' is required for history browsing"))
   (call-interactively #'agent-log-menu))
 
+;; A key here must not be a prefix of another, or the whole menu fails to
+;; open with "Wrong type argument: command, (keymap ...)".  These keys are
+;; prefixes, so none can be bound on its own: a b g m p t -.  Do not check
+;; with `transient-get-suffix', which reports a prefix key as free.
+;; `agent-test-menu-keys-are-not-prefixes-of-each-other' guards this.
 ;;;###autoload (autoload 'agent-menu "agent" nil t)
 (transient-define-prefix agent-menu ()
   "Dispatch AI session commands."

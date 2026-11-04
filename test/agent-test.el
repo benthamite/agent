@@ -4437,6 +4437,47 @@ Groups are vectors of (CLASS PLIST CHILDREN) and suffixes are lists of
       (funcall walk (get 'agent-menu 'transient--layout)))
     (nreverse keys)))
 
+(defun agent-test--key-prefix-clashes (keys)
+  "Return (PREFIX . KEY) for each of KEYS that is a proper prefix of another.
+Keys are compared as event sequences, so \"p\" clashes with \"p c\", and
+\"-\" with \"-c\", which is the two events - and c."
+  (let (clashes)
+    (dolist (prefix keys)
+      (dolist (key keys)
+        (let ((short (append (kbd prefix) nil))
+              (long (append (kbd key) nil)))
+          (when (and (< (length short) (length long))
+                     (equal short (take (length short) long)))
+            (push (cons prefix key) clashes)))))
+    (nreverse clashes)))
+
+(ert-deftest agent-test-key-prefix-clashes-finds-them ()
+  "The check catches both a spaced prefix and a dashed one."
+  (should (equal (agent-test--key-prefix-clashes '("p c" "p" "x"))
+                 '(("p" . "p c"))))
+  (should (equal (agent-test--key-prefix-clashes '("-" "-c"))
+                 '(("-" . "-c"))))
+  (should-not (agent-test--key-prefix-clashes '("p c" "p i" "-c" "x"))))
+
+(ert-deftest agent-test-menu-keys-are-not-prefixes-of-each-other ()
+  "No `agent-menu' key is a proper prefix of another.
+Such a key breaks the whole menu when it opens, not at definition."
+  (let ((keys (agent-test--menu-keys)))
+    (should (> (length keys) 20))
+    (should-not (agent-test--key-prefix-clashes keys))))
+
+(ert-deftest agent-test-menu-reserved-prefixes-are-as-documented ()
+  "The prefixes the comment on `agent-menu' lists are the real ones."
+  (should (equal (sort (delete-dups
+                        (delq nil
+                              (mapcar (lambda (key)
+                                        (let ((events (append (kbd key) nil)))
+                                          (when (cdr events)
+                                            (string (car events)))))
+                                      (agent-test--menu-keys))))
+                       #'string<)
+                 '("-" "a" "b" "g" "m" "p" "t"))))
+
 (ert-deftest agent-test-menu-has-no-backend-column ()
   "Build the whole menu statically, with no per-backend group."
   (should-not (fboundp 'agent-menu--backend-children))

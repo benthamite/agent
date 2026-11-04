@@ -974,6 +974,8 @@ The Claude and Codex status helpers are intended for modeline integrations such 
 
 In the Options group, =-c= selects an account. It acts on the current or prompted backend, while its value shows every registered backend's current account at once, so one entry replaces the per-backend account selectors the menu used to carry. The infix shares its implementation with the per-backend account commands in =agent-account.el=, and syncs the selected account's config home as soon as the selection is made.
 
+The keys =a=, =b=, =g=, =m=, =p=, =t= and =-= are prefixes of the two-key entries, so to extend the menu with ~transient-append-suffix~ or the like, do not bind any of them on its own. A key that is a prefix of another makes the whole menu fail to open, with =Wrong type argument: command, (keymap ...)=, and ~transient-get-suffix~ cannot warn of it, since it reports such a key as free.
+
 Boolean menu infixes use a shared transient class that toggles the bound variable each time it is invoked. The theme-sync infix additionally calls ~agent-sync-theme-now~ when enabling theme sync, so backend configuration files are updated immediately.
 
 * Indices
