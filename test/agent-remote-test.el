@@ -374,6 +374,66 @@ BODY can refer to the transcript as `file'."
                          "GET" (concat "/api/output?id="
                                        (url-hexify-string (buffer-name buffer)))))))))))
 
+(ert-deftest agent-remote-test-output-with-after-brings-what-is-new ()
+  "A poll with `after' carries only what the transcript gained."
+  (agent-remote-test--with-history buffer
+    (let* ((size (string-bytes agent-remote-test--transcript))
+           (path (concat "/api/output?id=" (url-hexify-string (buffer-name buffer))))
+           (quiet (agent-remote-test--json
+                   (agent-remote-test--http "GET" (format "%s&after=%d" path size))))
+           (history (alist-get 'history quiet)))
+      (should (null (alist-get 'messages history)))
+      (should (= (alist-get 'after history) size))
+      (with-temp-buffer
+        (insert "{\"type\":\"user\",\"message\":{\"content\":\"new one\"}}\n")
+        (write-region nil nil file t 'silent))
+      (let ((grown (alist-get 'history
+                              (agent-remote-test--json
+                               (agent-remote-test--http
+                                "GET" (format "%s&after=%d" path size))))))
+        (should (equal (mapcar (lambda (m) (alist-get 'text m))
+                               (alist-get 'messages grown))
+                       '("new one")))
+        (should (> (alist-get 'after grown) size))))))
+
+(ert-deftest agent-remote-test-output-survives-a-failing-reader ()
+  "A failing transcript read leaves the poll's screen intact."
+  (agent-remote-test--with-session buffer
+    (with-current-buffer buffer (insert "screen"))
+    (cl-letf (((symbol-function 'agent-backend)
+               (lambda (_) (agent-backend--create
+                            :session-history
+                            (lambda (&rest _) (error "Read failed"))))))
+      (let ((data (agent-remote--output
+                   (list :query (list (list "id" (buffer-name buffer))
+                                      (list "after" "10"))))))
+        (should (equal (plist-get data :output) "screen"))
+        (should-not (plist-member data :history))))))
+
+(ert-deftest agent-remote-test-output-carries-the-panel ()
+  "The backend's panel reaches the page, and only if it has one."
+  (agent-remote-test--with-session buffer
+    (with-current-buffer buffer (insert "screen"))
+    (let ((path (concat "/api/output?id=" (url-hexify-string (buffer-name buffer)))))
+      (cl-letf (((symbol-function 'agent-backend)
+                 (lambda (_) (agent-backend--create
+                              :screen-panel
+                              (lambda (text)
+                                (should (equal text "screen"))
+                                (list :start 3 :block nil :dialog t))))))
+        (agent-remote-test--with-server
+          (let ((panel (alist-get 'panel
+                                  (agent-remote-test--json
+                                   (agent-remote-test--http "GET" path)))))
+            (should (= (alist-get 'start panel) 3))
+            (should (eq (alist-get 'dialog panel) t)))))
+      (cl-letf (((symbol-function 'agent-backend)
+                 (lambda (_) (agent-backend--create))))
+        (agent-remote-test--with-server
+          (should-not (alist-get 'panel
+                                 (agent-remote-test--json
+                                  (agent-remote-test--http "GET" path)))))))))
+
 (ert-deftest agent-remote-test-history-message-redacts ()
   "Message text goes through the redactor, and is hidden if that fails."
   (let ((message '(:role "user" :text "secret" :time "t")))

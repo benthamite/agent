@@ -46,12 +46,29 @@
   .back { background: var(--panel-2); border-radius: 10px; padding: 8px 12px;
     font-size: 18px; }
   /* Scroll anchoring would double the correction loadOlder makes. */
-  #output { flex: 1; overflow: auto; overflow-anchor: none; padding: 10px 12px;
-    background: var(--bg); }
-  #live { margin: 0;
+  #output { flex: 1; min-height: 0; overflow: auto; overflow-anchor: none;
+    padding: 10px 12px; background: var(--bg); }
+  .screen { margin: 0;
     font: 12px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     white-space: pre-wrap; word-break: break-word; }
-  #live.nowrap { white-space: pre; word-break: normal; }
+  .nowrap .screen { white-space: pre; word-break: normal; }
+  #panel { display: none; flex: 0 0 auto; flex-direction: column; min-height: 0;
+    max-height: 45%; background: var(--panel); border-top: 1px solid var(--line); }
+  #panel.dialog { max-height: 70%; border-top: 3px solid var(--waiting); }
+  #panel-bar { display: flex; align-items: center; gap: 10px; padding: 4px 12px;
+    font-size: 13px; color: var(--muted); }
+  #panel.dialog #panel-label { color: var(--waiting); font-weight: 600; }
+  #panel-label { flex: 1; }
+  #full { background: var(--panel-2); color: var(--text); border-radius: 10px;
+    padding: 8px 12px; font-size: 13px; }
+  #panel-text { overflow: auto; padding: 0 12px 6px; flex: 0 1 auto; min-height: 0; }
+  /* With a transcript it is the main view, above a panel of the screen's
+     last lines; Full screen swaps it for the whole screen.  Without one,
+     the whole screen is the only view. */
+  #session-view.transcript #panel, #session-view.screen-full #panel { display: flex; }
+  #session-view.transcript #live, #session-view.screen-full #messages,
+  #session-view.screen-full #history-bar, #session-view.screen-full #panel-text
+    { display: none; }
   #history-bar { display: none; align-items: center; gap: 10px; padding-bottom: 8px;
     font-size: 13px; color: var(--muted); }
   #history-bar.shown { display: flex; }
@@ -64,9 +81,6 @@
   .msg.user { background: var(--panel-2); border-radius: 12px; padding: 8px 10px; }
   .msg.tool { font-size: 12px; color: var(--muted); }
   .msg .when { font-size: 11px; color: var(--muted); }
-  #live-rule { display: none; border-top: 1px solid var(--line); margin: 12px 0 8px;
-    padding-top: 4px; font-size: 12px; color: var(--muted); }
-  #live-rule.shown { display: block; }
   .keys { display: flex; gap: 14px; padding: 8px 10px 0; overflow-x: auto;
     background: var(--panel); border-top: 1px solid var(--line); }
   .key-group { display: flex; flex: 0 0 auto; gap: 2px; }
@@ -147,8 +161,14 @@
       <button id="older">Load older</button>
     </div>
     <div id="messages"></div>
-    <div id="live-rule">Live screen</div>
-    <pre id="live"></pre>
+    <pre id="live" class="screen"></pre>
+  </div>
+  <div id="panel">
+    <div id="panel-bar">
+      <span id="panel-label"></span>
+      <button id="full">Full screen</button>
+    </div>
+    <pre id="panel-text" class="screen"></pre>
   </div>
   <div class="keys" id="keys"></div>
   <div class="compose">
@@ -304,17 +324,46 @@ function openSession(s) {
   resetSessionView();
   show("session-view");
   history.pushState({ session: s.id }, "");
-  refreshSession(true).then(loadOlder);
+  loadOlder().then(() => refreshSession(true));
   schedule();
 }
 
 function resetSessionView() {
   past = { before: null, after: null, size: 0, loading: false, available: true,
-           failed: false, redacted: true, atBottom: true };
+           failed: false, redacted: true, session: null, polls: 0,
+           fullScreen: false, transcriptTop: 0 };
   $("live").textContent = "";
+  $("panel-text").textContent = "";
   $("messages").replaceChildren();
-  $("live-rule").classList.remove("shown");
   $("history-bar").classList.remove("shown");
+  applyViewMode();
+}
+
+function hasTranscript() {
+  return past.available && past.after !== null;
+}
+
+function applyViewMode() {
+  const view = $("session-view");
+  view.classList.toggle("transcript", hasTranscript() && !past.fullScreen);
+  view.classList.toggle("screen-full", hasTranscript() && past.fullScreen);
+  $("full").textContent = past.fullScreen ? "Transcript" : "Full screen";
+}
+
+// Each view keeps its own place: the transcript where it was left, the
+// whole screen at its bottom, where a prompt is.
+function toggleFullScreen() {
+  const out = $("output");
+  if (past.fullScreen) {
+    past.fullScreen = false;
+    applyViewMode();
+    out.scrollTop = past.transcriptTop;
+  } else {
+    past.transcriptTop = out.scrollTop;
+    past.fullScreen = true;
+    applyViewMode();
+    out.scrollTop = out.scrollHeight;
+  }
 }
 
 function closeSession() {
@@ -328,18 +377,31 @@ function closeSession() {
 async function refreshSession(forceBottom) {
   if (!current) return;
   const id = current;
+  const state = past;
+  const after = hasTranscript() ? state.after : null;
   try {
-    const data = await api("/api/output?id=" + encodeURIComponent(id));
-    if (id !== current) return;
+    const query = "/api/output?id=" + encodeURIComponent(id)
+      + (after === null ? "" : "&after=" + after);
+    const data = await api(query);
+    if (id !== current || state !== past) return;
     $("session-title").textContent = data.name;
     const out = $("output");
-    const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
+    const atBottom = isAtBottom(out);
     const live = $("live");
     if (live.textContent !== data.output) live.textContent = data.output;
+    const session = data.history && data.history.session;
+    if (session && state.session && session !== state.session) {
+      resetSessionView();
+      loadOlder();
+      return;
+    }
+    if (data.history && after === state.after) applyNewHistory(data.history);
+    renderPanel(data, forceBottom);
     if (forceBottom || atBottom) out.scrollTop = out.scrollHeight;
     const badge = $("session-badge");
     badge.className = "badge " + data.state;
     badge.textContent = STATE_LABEL[data.state] || data.state;
+    retryIfUnavailable();
   } catch (e) {
     if (id !== current) return;
     // An exited session disappears; go back to the list.
@@ -348,6 +410,70 @@ async function refreshSession(forceBottom) {
     badge.className = "badge";
     badge.textContent = "offline";
   }
+}
+
+function isAtBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+}
+
+// A session has no transcript until its first prompt.
+function retryIfUnavailable() {
+  if (past.available || ++past.polls % 10) return;
+  past.available = true;
+  past.before = null;
+  loadOlder();
+}
+
+function applyNewHistory(data) {
+  appendMessages(data.messages, data.gap);
+  if (data.gap) past.before = data.before;
+  past.after = data.after;
+  past.size = data.size;
+  past.redacted = data.redacted;
+  if (data.messages.length) renderHistoryBar();
+}
+
+function renderPanel(data, forceBottom) {
+  const panel = $("panel");
+  const text = $("panel-text");
+  const atBottom = isAtBottom(text);
+  const shape = data.panel || { start: 0, block: null, dialog: true };
+  const lines = data.output.split("\n");
+  const showBlock = data.state === "busy" && shape.block !== null
+    && !isInTranscript(lines.slice(shape.block, shape.start));
+  const content = compactScreen(lines.slice(showBlock ? shape.block : shape.start));
+  if (text.textContent !== content) text.textContent = content;
+  const dialog = shape.dialog && data.state !== "busy";
+  panel.classList.toggle("dialog", dialog);
+  $("panel-label").textContent = dialog ? "Waiting on you" : "Live";
+  if (forceBottom || atBottom) text.scrollTop = text.scrollHeight;
+}
+
+// Fits terminal lines to a phone without losing text: a full-width rule
+// would wrap to several lines, right-aligned text to a line of spaces,
+// and screens pad with blank lines.
+function compactScreen(lines) {
+  return lines.map((line) => line.trimEnd()
+                   .replace(/^[─▔╌]{20,}/, (rule) => rule.slice(0, 30))
+                   .replace(/^[ \u00a0]{20,}/, "  "))
+    .join("\n")
+    .replace(/^\n+/, "")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+// Reports whether the transcript already holds a message shown on the
+// screen.  Rendering rewraps and restyles text, so only letters and
+// digits are compared, and a message that does not match is shown again
+// rather than risk hiding what is still being written.
+function isInTranscript(lines) {
+  const head = comparable(lines.join(" ")).slice(0, 40);
+  if (!head) return true;
+  return [...$("messages").children].slice(-6)
+    .some((el) => comparable(el.textContent).includes(head));
+}
+
+function comparable(text) {
+  return text.replace(/[^\p{L}\p{N}]/gu, "");
 }
 
 // Stop asking after this many stretches of a transcript with no text,
@@ -396,8 +522,10 @@ async function loadOlder() {
       if (!data.available) { state.available = false; break; }
       state.before = data.before;
       if (state.after === null) state.after = data.after;
+      state.session = data.session;
       state.size = data.size;
       state.redacted = data.redacted;
+      applyViewMode();
       if (data.messages.length) { prependMessages(data.messages); break; }
       if (state.before === 0) break;
     }
@@ -412,7 +540,6 @@ async function loadOlder() {
 function prependMessages(messages) {
   keepingView(() => {
     $("messages").prepend(messageElements(messages));
-    $("live-rule").classList.add("shown");
   });
 }
 
@@ -426,44 +553,10 @@ function keepingView(change) {
   out.scrollTop = top + out.scrollHeight - height;
 }
 
-// Fetches what the session added since the history was loaded, which the
-// screen may no longer show.  More than one stretch behind, it starts
-// over from the newest stretch rather than leave a hole.
-async function catchUp() {
-  const state = past;
-  if (!current || !state || state.loading || state.after === null) return;
-  const id = current;
-  state.loading = true;
-  try {
-    const data = await fetchPast(id, { after: state.after });
-    if (state !== past) return;
-    if (data.available) {
-      appendMessages(data.messages, data.gap);
-      if (data.gap) state.before = data.before;
-      state.after = data.after;
-      state.size = data.size;
-      state.redacted = data.redacted;
-    }
-  } catch (e) {
-    // The next scroll up tries again from the same offset.
-  }
-  state.loading = false;
-  renderHistoryBar();
-}
-
-// Content touching the live screen stays put; content higher up is
-// already unaffected by what is added below it.
 function appendMessages(messages, replace) {
-  const out = $("output");
   const box = $("messages");
-  const change = () => {
-    if (replace) box.replaceChildren();
-    box.append(messageElements(messages));
-    $("live-rule").classList.add("shown");
-  };
-  const seesLive = out.scrollTop + out.clientHeight
-    > box.offsetTop + box.offsetHeight;
-  if (seesLive) keepingView(change); else change();
+  if (replace) box.replaceChildren();
+  box.append(messageElements(messages));
 }
 
 function renderHistoryBar() {
@@ -489,11 +582,8 @@ function historyNote(state) {
 }
 
 function onOutputScroll() {
-  const out = $("output");
-  const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
-  if (past && past.atBottom && !atBottom) catchUp();
-  if (past) past.atBottom = atBottom;
-  if (out.scrollTop < 300 && past && !past.failed) loadOlder();
+  if (past && !past.fullScreen && !past.failed
+      && $("output").scrollTop < 300) loadOlder();
 }
 
 function schedule() {
@@ -592,7 +682,7 @@ function followSession(id) {
   closeSheets();
   current = id;
   resetSessionView();
-  setTimeout(() => refreshSession(true).then(loadOlder), 1500);
+  setTimeout(() => loadOlder().then(() => refreshSession(true)), 1500);
 }
 
 async function openNew() {
@@ -666,7 +756,13 @@ function alertError(e) {
   const badge = $("session-badge");
   badge.className = "badge";
   badge.textContent = "error";
-  $("live").textContent += "\n\n[agent-remote] " + e.message;
+  const text = "[agent-remote] " + e.message;
+  if (past && hasTranscript()) {
+    $("messages").append(messageElement({ role: "tool", text }));
+    $("output").scrollTop = $("output").scrollHeight;
+  } else {
+    $("live").textContent += "\n\n" + text;
+  }
 }
 
 function autosize() {
@@ -690,7 +786,8 @@ for (const keys of KEY_GROUPS) {
 $("send").addEventListener("click", sendText);
 $("text").addEventListener("input", autosize);
 $("back").addEventListener("click", () => history.back());
-$("wrap").addEventListener("click", () => $("live").classList.toggle("nowrap"));
+$("wrap").addEventListener("click", () => $("session-view").classList.toggle("nowrap"));
+$("full").addEventListener("click", toggleFullScreen);
 $("older").addEventListener("click", loadOlder);
 $("output").addEventListener("scroll", onOutputScroll, { passive: true });
 $("restart").addEventListener("click", openRestart);

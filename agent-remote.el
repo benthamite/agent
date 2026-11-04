@@ -390,11 +390,41 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
           :snoozed (if (agent-session-snoozed-p buffer) t :false))))
 
 (defun agent-remote--output (request)
-  "Return the session summary and recent output named by REQUEST."
+  "Return the session summary and recent output named by REQUEST.
+`panel' says which of the output's lines the transcript cannot show,
+for a backend that can tell.  When REQUEST has `after', `history' is
+what the session's transcript gained since that byte offset; the phone
+page polls this, so polling costs one file status check while nothing
+is new."
   (let* ((buffer (agent-remote--session-buffer
                   (agent-remote--query-param request "id")))
-         (summary (agent-remote--session-summary buffer)))
-    (append summary (list :output (agent-remote--buffer-tail buffer)))))
+         (after (agent-remote--offset-param request "after"))
+         (backend (agent-backend (agent--detect-backend buffer)))
+         (output (agent-remote--buffer-tail buffer)))
+    (append (agent-remote--session-summary buffer)
+            (list :output output)
+            (agent-remote--output-panel backend output)
+            (and after (agent-remote--output-history backend buffer after)))))
+
+(defun agent-remote--output-panel (backend output)
+  "Return a plist with `:panel' for screen text OUTPUT, or nil.
+BACKEND is the session's backend struct, or nil.  Without a panel the
+page shows the whole screen, so a failure here is safe to swallow."
+  (when-let* ((function (and backend (agent-backend-screen-panel backend)))
+              (panel (ignore-errors (funcall function output))))
+    (list :panel (list :start (plist-get panel :start)
+                       :block (plist-get panel :block)
+                       :dialog (if (plist-get panel :dialog) t :false)))))
+
+(defun agent-remote--output-history (backend buffer after)
+  "Return a plist with `:history' from byte offset AFTER, or nil.
+BACKEND and BUFFER are the session's.  A failure leaves the poll's other
+fields intact, and the next poll asks again from the same offset."
+  (when-let* ((reader (and backend (agent-backend-session-history backend)))
+              (history (ignore-errors
+                         (funcall reader buffer agent-remote-history-bytes
+                                  nil after))))
+    (list :history (agent-remote--history-response history))))
 
 (defun agent-remote--query-param (request name)
   "Return the UTF-8 decoded query parameter NAME of REQUEST, or nil."
@@ -448,6 +478,7 @@ HISTORY is a plist as `agent-claude-cli-transcript-history' returns.
 when they were not."
   (let ((redactor (agent-remote--redactor)))
     (list :available t
+          :session (plist-get history :session)
           :redacted (if redactor t :false)
           :messages (vconcat
                      (mapcar (lambda (message)
