@@ -2524,13 +2524,16 @@ non-nil when the chain consumed the event."
   "Start the before-exit skill chain in BUFFER.
 Return non-nil when a chain started and the exit must wait.
 An existing chain also returns non-nil so a repeated exit request
-cannot bypass it.  Return nil when no skill applies or nothing
-could be submitted."
-  (if agent--before-exit
-      (progn
-        (message "Before-exit chain already armed (%s); use `agent-exit-without-skills' to bypass it"
-                 (plist-get agent--before-exit :state))
-        t)
+cannot bypass it.  Return nil when no skill applies, nothing could
+be submitted, or `agent--session-unstarted-p' holds, since a skill has
+no conversation to work on there and its text could land in a picker."
+  (cond
+   (agent--before-exit
+    (message "Before-exit chain already armed (%s); use `agent-exit-without-skills' to bypass it"
+             (plist-get agent--before-exit :state))
+    t)
+   ((agent--session-unstarted-p buffer) nil)
+   (t
     (let* ((backend (agent--detect-backend buffer))
            (queue (agent--before-exit-skill-queue backend buffer))
            (busy (and (eq (agent-session-display-state buffer backend) 'busy)
@@ -2552,7 +2555,20 @@ could be submitted."
           (if (agent--before-exit-submit-next buffer)
               t
             (agent--before-exit-reset)
-            nil))))))
+            nil)))))))
+
+(defun agent--session-unstarted-p (buffer)
+  "Return non-nil when session BUFFER shows no sign of a conversation.
+That is when its session has no native id and no session event has ever
+reached it, as while a CLI started with a bare `--resume' shows its
+picker, where submitted text would become search text.  Both conditions
+are needed: a real session whose first status poll is merely slow has
+already had an event from the prompt that started its turn, so it keeps
+its before-exit skills.  A session that reached this state has run no
+turn, so skipping its skills loses nothing."
+  (when-let* ((session (agent-session buffer)))
+    (and (null (agent-session-id session))
+         (eq (buffer-local-value 'agent--session-state buffer) 'unknown))))
 
 (defun agent--before-exit-step (buffer &optional completion)
   "Advance BUFFER's running before-exit chain on a stop event.
@@ -3910,8 +3926,16 @@ has already confirmed the exit."
     (agent--exit-confirmed backend buffer)))
 
 (defun agent--exit-session (buffer)
-  "Submit `/exit' to session BUFFER without re-running before-exit hooks."
-  (agent-submit "/exit" buffer))
+  "Exit session BUFFER without re-running before-exit hooks.
+Submit `/exit', unless `agent--session-unstarted-p' holds: BUFFER may
+be showing a picker that would take the text as a search, so kill its
+process instead."
+  (if (agent--session-unstarted-p buffer)
+      (progn
+        (message "agent: %s has no conversation; killing it"
+                 (buffer-name buffer))
+        (agent--force-kill-buffer buffer))
+    (agent-submit "/exit" buffer)))
 
 ;;;###autoload
 (defun agent-restart ()

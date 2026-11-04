@@ -728,6 +728,17 @@ the turn ends.
 duration. ~agent-exit-without-skills~ is the only exit command that bypasses
 the skill hook; it still runs other before-exit functions.
 
+A session with no native id on which no session event has ever arrived has not
+started a conversation. That is what a CLI started with a bare =--resume= looks
+like while it shows its picker, which would take submitted text as a search and
+never exit. Both exit commands therefore submit nothing to such a session: the
+chain does not start, and the process is killed instead of receiving =/exit=.
+Both conditions are required, so a real session whose first status poll is slow
+keeps its skills, because the prompt that started its turn has already raised an
+event. Only one narrow case goes the other way: pressing =RET= in the picker
+counts as a prompt, so if that leaves the picker on screen, the session is treated
+as started.
+
 The chain is driven by session stop events and guarded by a watchdog. Each
 submitted skill gets ~agent-before-exit-timeout~ seconds (default 600) before
 the watchdog looks at it, and the watchdog restarts when the next skill begins.

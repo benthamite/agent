@@ -1650,6 +1650,7 @@ sentinel has run."
           :submit (lambda (command _buffer) (push command submitted))
           :skill-command-prefix "$"))
         (add-hook 'agent-before-exit-functions #'agent-run-skill-before-exit)
+        (setq-local agent--session-state 'awaiting-input)
         (should-not (boundp 'agent-before-exit-skill-min-duration-seconds))
         (unwind-protect
             (progn
@@ -1677,6 +1678,7 @@ sentinel has run."
         (add-hook 'agent-before-exit-functions
                   (lambda (_backend _buffer) (setq other-ran t)))
         (setq-local agent--before-exit '(:queue ("update-log") :state running))
+        (setq-local agent--session-state 'awaiting-input)
         (agent-exit-without-skills)
         (should (equal submitted '("/exit")))
         (should other-ran)
@@ -2697,7 +2699,9 @@ session's account and id, and `synced' the synced selections."
                         ((symbol-function 'run-at-time)
                          (lambda (_time _repeat function &rest args)
                            (apply function args))))
-                (with-current-buffer buf (agent-exit))
+                (with-current-buffer buf
+                  (setq-local agent--session-state 'awaiting-input)
+                  (agent-exit))
                 (should (window-live-p window))
                 (set-window-buffer window other)
                 (should (agent--before-exit-transition buf 'step))
@@ -2734,7 +2738,8 @@ session's account and id, and `synced' the synced selections."
                           (display-buffer buffer))))
               (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
                          (lambda (_buffer) nil)))
-                (with-current-buffer buf (agent-exit))
+                (with-current-buffer buf (setq-local agent--session-state 'awaiting-input)
+                  (agent-exit))
                 (setq busy nil)
                 (should (agent--before-exit-transition buf 'step))
                 (should (equal submitted '("/update-log")))
@@ -2987,6 +2992,77 @@ a function that runs the latest watchdog."
     (should (equal sent '("/capture")))
     (should (eq (plist-get agent--before-exit :state) 'running))))
 
+;; A CLI started with a bare `--resume' shows its picker with no session id
+;; and raises no session event, so text submitted to it becomes search text.
+(defmacro agent-test--with-exit-session (id state &rest body)
+  "Run BODY with a stub session having ID and STATE and one configured skill.
+Bind `buf', the session buffer; `sent', the commands submitted; and
+`killed', the buffers killed by force."
+  (declare (indent 2) (debug t))
+  `(let ((agent-backends nil)
+         (agent-before-exit-functions (list #'agent-run-skill-before-exit))
+         (agent-before-exit-skill-names '("capture"))
+         (agent-before-exit-skill-name nil)
+         (agent-before-exit-skill-directories nil)
+         (sent nil) (killed nil))
+     (with-temp-buffer
+       (let ((buf (current-buffer)))
+         (apply #'agent-register-backend
+                'claude-code
+                (agent-test--backend
+                 :buffer-p (lambda (candidate) (eq candidate buf))
+                 :skill-command-prefix "/"
+                 :submit (lambda (cmd &optional _buffer) (push cmd sent))))
+         (agent--set-session
+          buf (agent-session-create :backend 'claude-code :id ,id))
+         (setq-local agent--session-state ,state)
+         (cl-letf (((symbol-function 'agent--force-kill-buffer)
+                    (lambda (buffer) (push buffer killed)))
+                   ((symbol-function 'agent--before-exit-start-watchdog)
+                    #'ignore)
+                   ((symbol-function 'agent-toggle-snooze) #'ignore))
+           (unwind-protect
+               (progn ,@body)
+             (agent--before-exit-reset)))))))
+
+(ert-deftest agent-test-exit-in-picker-kills-without-submitting ()
+  "`agent-exit' sends a session in a picker no skill and no `/exit' text."
+  (agent-test--with-exit-session nil 'unknown
+    (agent-exit)
+    (should-not sent)
+    (should-not agent--before-exit)
+    (should (equal killed (list buf)))))
+
+(ert-deftest agent-test-exit-without-skills-in-picker-kills-without-submitting ()
+  "`agent-exit-without-skills' sends a session in a picker no `/exit' text."
+  (agent-test--with-exit-session nil 'unknown
+    (agent-exit-without-skills)
+    (should-not sent)
+    (should (equal killed (list buf)))))
+
+(ert-deftest agent-test-exit-with-slow-first-poll-keeps-its-skills ()
+  "A session with a turn behind it runs its skills before its id is known."
+  (dolist (state '(busy awaiting-input))
+    (agent-test--with-exit-session nil state
+      (agent-exit)
+      (should-not killed)
+      (should agent--before-exit))))
+
+(ert-deftest agent-test-exit-with-known-id-keeps-its-skills ()
+  "A session whose id is known runs its skills before any session event."
+  (agent-test--with-exit-session "s1" 'unknown
+    (agent-exit)
+    (should (equal sent '("/capture")))
+    (should-not killed)))
+
+(ert-deftest agent-test-exit-session-submits-exit-to-a-started-session ()
+  "A started session gets `/exit', and a chain's close is never a kill."
+  (dolist (state '(busy awaiting-input closing))
+    (agent-test--with-exit-session nil state
+      (agent--exit-session buf)
+      (should (equal sent '("/exit")))
+      (should-not killed))))
+
 (ert-deftest agent-test-run-skill-before-exit-submits-in-matching-directory ()
   "Submit a Codex skill in explicitly configured directories."
   (let ((agent-backends nil)
@@ -3005,7 +3081,7 @@ a function that runs the latest watchdog."
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
         (agent--set-session
-         buf (agent-session-create :backend 'codex :directory dir))
+         buf (agent-session-create :backend 'codex :directory dir :id "s1"))
         (should-not (agent-run-skill-before-exit 'codex buf))
         (should (equal (nreverse events)
                        '((command "$session-retro") return)))))))
@@ -3049,7 +3125,7 @@ a function that runs the latest watchdog."
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
         (agent--set-session
-         buf (agent-session-create :backend 'claude-code :directory dir))
+         buf (agent-session-create :backend 'claude-code :directory dir :id "s1"))
         (should-not (agent-run-skill-before-exit 'claude-code buf))
         (should (equal (nreverse events)
                        '((command "/session-retro") return)))))))
@@ -3091,7 +3167,7 @@ a function that runs the latest watchdog."
                           (push (list 'command cmd) events))
           :send-return (lambda (&optional _buffer) (push 'return events))))
         (agent--set-session
-         buf (agent-session-create :backend 'codex :directory dir))
+         buf (agent-session-create :backend 'codex :directory dir :id "s1"))
         (should-not (agent-run-skill-before-exit 'codex buf))
         (should (equal (nreverse events)
                        '((command "$session-retro") return)))))))
