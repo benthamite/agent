@@ -298,13 +298,18 @@ class RemotePageTest(unittest.TestCase):
     def test_session_without_a_transcript_keeps_the_whole_screen(self):
         self.page.go_back()
         self.history = {"available": False}
-        self.output = dict(SESSION, output="whole screen ⏵ here")
+        self.output = dict(SESSION, output="whole screen ⏵ here " + "wide " * 40)
         self.page.wait_for_selector(".card")
         self.page.click(".card")
         self.page.wait_for_function("document.getElementById('live').textContent.includes('whole')")
         self.page.evaluate("clearInterval(timer)")
         self.assertTrue(self.visible("#live"))
         self.assertIn("> here", self.text("#live"))
+        self.assertEqual(self.page.evaluate("""() => {
+          const o = document.getElementById('output');
+          return [getComputedStyle(document.getElementById('live')).whiteSpace,
+                  o.scrollWidth <= o.clientWidth,
+                  !!document.getElementById('wrap')]; }"""), ["pre-wrap", True, False])
         self.assertFalse(self.visible("#card"))
         self.assertTrue(self.visible("#status"))
         self.assertEqual(self.page.evaluate("document.querySelectorAll('.msg').length"), 0)

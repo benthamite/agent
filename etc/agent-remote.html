@@ -51,7 +51,6 @@
   .screen { margin: 0;
     font: 12px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     white-space: pre-wrap; word-break: break-word; }
-  .nowrap .screen { white-space: pre; word-break: normal; }
   /* One conversation: nothing around it changes its size.  A card lies
      over its bottom, and the status line is always there at one height. */
   #conversation { flex: 1; min-height: 0; display: flex; position: relative; }
@@ -185,7 +184,6 @@
       <span id="session-badge" class="badge"></span>
     </div>
     <div class="actions-bar">
-      <button class="toggle" id="wrap">Wrap</button>
       <button class="toggle" id="new">New</button>
       <button class="toggle" id="restart">Restart</button>
       <button class="toggle danger" id="exit">Exit</button>
@@ -1255,7 +1253,6 @@ $("more-toggle").addEventListener("click", toggleMore);
 $("send").addEventListener("click", sendText);
 $("text").addEventListener("input", autosize);
 $("back").addEventListener("click", () => history.back());
-$("wrap").addEventListener("click", () => $("session-view").classList.toggle("nowrap"));
 $("older").addEventListener("click", loadOlder);
 $("output").addEventListener("scroll", onOutputScroll, { passive: true });
 $("restart").addEventListener("click", openRestart);
