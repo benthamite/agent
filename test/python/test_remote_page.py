@@ -224,6 +224,77 @@ class RemotePageTest(unittest.TestCase):
         self.assertEqual(self.page.evaluate("document.getElementById('card-text').children.length"), 0)
         self.assertIn("**not bold** >> mode", self.text("#card-text"))
 
+    def labels(self, selector):
+        return self.page.evaluate(
+            "(s) => [...document.querySelectorAll(s + ' button')]"
+            ".filter(b => b.offsetParent).map(b => b.textContent)", selector)
+
+    def test_no_keys_at_the_input_box(self):
+        self.poll()
+        self.assertEqual(self.labels("#session-view #conversation"), [])
+        self.assertEqual(self.labels("#status"), ["···"])
+        self.assertTrue(self.visible(".compose"))
+
+    def test_stop_while_a_turn_runs(self):
+        self.poll(output("busy", {"status": "Forging…", "running": True}))
+        self.assertEqual(self.labels("#status"), ["Stop", "···"])
+        self.page.click("#stop")
+        self.page.wait_for_timeout(100)
+        self.assertEqual(self.keys, ["esc"])
+        self.poll(output("waiting", {}))
+        self.assertEqual(self.labels("#status"), ["···"])
+
+    def test_dialog_keys_with_the_options_on_screen(self):
+        self.poll(output("waiting", {"card": "A dialog", "options": ["1", "2", "3"]}))
+        self.assertEqual(self.labels("#card"), ["1", "2", "3", "↑", "↓", "Enter", "Esc"])
+        self.page.click("#card-keys button:has-text('2')")
+        self.page.wait_for_timeout(100)
+        self.assertEqual(self.keys, ["2"])
+        before = self.page.query_selector("#card-keys button")
+        self.poll(output("waiting", {"card": "A dialog", "options": ["1", "2", "3"]}))
+        self.assertTrue(before.evaluate("b => b.isConnected"))
+        self.poll(output("waiting", {"card": "A notice", "options": ["1", "0"]}))
+        self.assertEqual(self.labels("#card"), ["1", "0", "↑", "↓", "Enter", "Esc"])
+
+    def test_more_keys_are_always_there_and_shift_nothing(self):
+        self.scroll_to(1000)
+        self.poll()
+        before = self.geometry()
+        self.assertFalse(self.visible("#more"))
+        self.page.click("#more-toggle")
+        self.assertTrue(self.visible("#more"))
+        labels = self.labels("#more")
+        for key in ["^C", "y", "n", "Shift Tab", "Tab", "Esc", "↑", "↓", "Enter"]:
+            self.assertIn(key, labels)
+        self.assertEqual(self.geometry(), before)
+        self.page.click("#more button:has-text('^C')")
+        self.page.wait_for_timeout(350)
+        self.assertEqual(self.keys, ["ctrl-c"])
+        self.assertEqual(self.geometry(), before)
+        self.page.click("#more-toggle")
+        self.assertFalse(self.visible("#more"))
+        self.assertEqual(self.geometry(), before)
+
+    def test_keys_do_not_jump_the_view(self):
+        self.scroll_to(1000)
+        self.poll(output("waiting", {"card": "A dialog", "options": ["1"]}))
+        before = self.geometry()
+        self.page.click("#card-keys button:has-text('Esc')")
+        self.page.wait_for_timeout(400)
+        self.assertEqual(self.geometry(), before)
+
+    def test_send_still_works(self):
+        self.page.fill("#text", "hello")
+        self.page.click("#send")
+        self.page.wait_for_timeout(100)
+        self.assertEqual(self.sent, ["hello"])
+
+    def test_no_glyph_a_phone_font_lacks(self):
+        page = self.page.evaluate("document.getElementById('session-view').textContent"
+                                  " + MORE_KEYS.flat(2).join() + CARD_KEYS.flat().join()")
+        for glyph in "⏵⏸⇧⋯":
+            self.assertNotIn(glyph, page)
+
     def test_session_without_a_transcript_keeps_the_whole_screen(self):
         self.page.go_back()
         self.history = {"available": False}
@@ -237,6 +308,12 @@ class RemotePageTest(unittest.TestCase):
         self.assertFalse(self.visible("#card"))
         self.assertTrue(self.visible("#status"))
         self.assertEqual(self.page.evaluate("document.querySelectorAll('.msg').length"), 0)
+        self.assertTrue(self.visible("#more"))
+        self.assertIn("^C", self.labels("#more"))
+        self.page.click("#more-toggle")
+        self.assertFalse(self.visible("#more"))
+        self.poll()
+        self.assertFalse(self.visible("#more"))
 
 
 if __name__ == "__main__":

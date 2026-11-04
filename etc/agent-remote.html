@@ -104,8 +104,21 @@
   .msg table { border-collapse: collapse; font-size: 14px; }
   .msg th, .msg td { border: 1px solid var(--line); padding: 4px 8px;
     overflow-wrap: normal; min-width: 4em; max-width: 22em; vertical-align: top; }
-  .keys { display: flex; gap: 14px; padding: 8px 10px 0; overflow-x: auto;
-    background: var(--panel); border-top: 1px solid var(--line); }
+  /* More keys lie over the conversation too, above any card. */
+  #more { display: none; position: absolute; z-index: 6; left: 0; right: 0; bottom: 0;
+    flex-wrap: wrap; gap: 8px 14px; padding: 8px 10px; background: var(--panel);
+    border-top: 1px solid var(--line); }
+  #more.open { display: flex; }
+  #card-keys { display: flex; flex: 0 0 auto; gap: 2px; padding: 6px 8px 8px;
+    overflow-x: auto; border-top: 1px solid var(--line); }
+  #stop { display: none; flex: 0 0 auto; height: 32px; padding: 0 14px;
+    background: var(--panel-2); border-radius: 10px; color: var(--error);
+    font-size: 14px; font-weight: 600; }
+  #stop.shown { display: block; }
+  #more-toggle { flex: 0 0 auto; height: 32px; min-width: 44px; padding: 0 10px;
+    background: var(--panel-2); border-radius: 10px; font-size: 16px;
+    letter-spacing: 1px; }
+  #more-toggle.open { background: var(--line); }
   .key-group { display: flex; flex: 0 0 auto; gap: 2px; }
   .key { flex: 0 0 auto; min-width: 44px; height: 44px; padding: 0 10px;
     background: var(--panel-2); font-size: 16px; }
@@ -191,10 +204,15 @@
     <div id="card">
       <div id="card-label">Waiting on you</div>
       <pre id="card-text" class="screen"></pre>
+      <div id="card-keys"></div>
     </div>
+    <div id="more"></div>
   </div>
-  <div id="status"><span id="status-text"></span></div>
-  <div class="keys" id="keys"></div>
+  <div id="status">
+    <span id="status-text"></span>
+    <button id="stop">Stop</button>
+    <button id="more-toggle" aria-label="More keys">···</button>
+  </div>
   <div class="compose">
     <textarea id="text" rows="1" placeholder="Reply…"></textarea>
     <button class="send" id="send">Send</button>
@@ -244,15 +262,16 @@
 
 <script>
 "use strict";
-// Grouped by purpose: interrupt, move through a menu, pick an option
-// by number or letter, and cycle modes.
-const KEY_GROUPS = [
+// The way out of anything the page did not recognize, behind the ··· button.
+const MORE_KEYS = [
   [["esc", "Esc"], ["ctrl-c", "^C"]],
   [["up", "↑"], ["down", "↓"], ["enter", "Enter"]],
   [["1", "1"], ["2", "2"], ["3", "3"]],
   [["y", "y"], ["n", "n"]],
-  [["shift-tab", "⇧Tab"], ["tab", "Tab"]]
+  [["shift-tab", "Shift Tab"], ["tab", "Tab"]]
 ];
+// What a dialog or picker takes, besides the digits of its options.
+const CARD_KEYS = [["up", "↑"], ["down", "↓"], ["enter", "Enter"], ["esc", "Esc"]];
 const STATE_LABEL = { "waiting": "waiting", "background-waiting": "bg work",
                       "busy": "busy", "unknown": "?" };
 const STATE_ORDER = { "waiting": 0, "background-waiting": 1, "unknown": 2, "busy": 3 };
@@ -355,11 +374,12 @@ function openSession(s) {
 function resetSessionView() {
   past = { before: null, after: null, size: 0, loading: false, available: true,
            failed: false, redacted: true, session: null, polls: 0, writing: null,
-           overlay: 0 };
+           overlay: 0, known: false, moreChosen: null, cardOptions: null };
   $("live").textContent = "";
   $("card-text").textContent = "";
   $("card").classList.remove("open");
   $("status-text").textContent = "";
+  $("stop").classList.remove("shown");
   $("writing").replaceChildren();
   $("output").style.paddingBottom = "";
   $("messages").replaceChildren();
@@ -373,6 +393,27 @@ function hasTranscript() {
 
 function applyViewMode() {
   $("session-view").classList.toggle("transcript", hasTranscript());
+  renderMore();
+}
+
+// Open by default only where there is no transcript, once that is known.
+function renderMore() {
+  const open = past.moreChosen ?? (past.known && !hasTranscript());
+  $("more").classList.toggle("open", open);
+  $("more-toggle").classList.toggle("open", open);
+  updateOverlay();
+}
+
+function toggleMore() {
+  past.moreChosen = !$("more").classList.contains("open");
+  renderMore();
+}
+
+function updateOverlay() {
+  const card = $("card");
+  const more = $("more");
+  setOverlay(Math.max(card.classList.contains("open") ? card.offsetHeight : 0,
+                      more.classList.contains("open") ? more.offsetHeight : 0));
 }
 
 function closeSession() {
@@ -467,7 +508,8 @@ function renderScreenState(data, forceBottom) {
   const status = running ? state.status || "Working…" : state.mode || "";
   if ($("status-text").textContent !== status) $("status-text").textContent = status;
   renderWriting(running && hasTranscript() ? state.writing : null);
-  renderCard(hasTranscript() ? state.card : null, forceBottom);
+  renderCard(hasTranscript() ? state.card : null, state.options || [], forceBottom);
+  $("stop").classList.toggle("shown", running);
 }
 
 // Text the transcript does not hold yet ends the conversation as one more
@@ -481,15 +523,34 @@ function renderWriting(text) {
   if (shown) box.append(messageElement({ role: "assistant", text: shown }));
 }
 
-function renderCard(text, forceBottom) {
+function renderCard(text, options, forceBottom) {
   const card = $("card");
   const body = $("card-text");
   const atBottom = isAtBottom(body);
   const content = text ? compactScreen(text.split("\n")) : "";
   if (body.textContent !== content) body.textContent = content;
   card.classList.toggle("open", !!text);
+  renderCardKeys(options);
   if (text && (forceBottom || atBottom)) body.scrollTop = body.scrollHeight;
-  setOverlay(text ? card.offsetHeight : 0);
+  updateOverlay();
+}
+
+// Rebuilt only when the options change, so a poll cannot swallow a tap.
+function renderCardKeys(options) {
+  const wanted = options.join();
+  if (past.cardOptions === wanted) return;
+  past.cardOptions = wanted;
+  $("card-keys").replaceChildren(
+    ...options.map((digit) => keyButton(digit, digit)),
+    ...CARD_KEYS.map(([key, label]) => keyButton(key, label)));
+}
+
+function keyButton(key, label) {
+  const b = document.createElement("button");
+  b.className = "key";
+  b.textContent = label;
+  b.addEventListener("click", () => sendKey(key));
+  return b;
 }
 
 // Android's fonts lack these, which would show as empty boxes.
@@ -929,7 +990,8 @@ async function loadOlder() {
       const data = await fetchPast(
         id, state.before === null ? {} : { before: state.before });
       if (state !== past) return;
-      if (!data.available) { state.available = false; break; }
+      state.known = true;
+      if (!data.available) { state.available = false; applyViewMode(); break; }
       state.before = data.before;
       if (state.after === null) state.after = data.after;
       state.session = data.session;
@@ -942,6 +1004,8 @@ async function loadOlder() {
   } catch (e) {
     if (state !== past) return;
     state.failed = true;
+    state.known = true;
+    applyViewMode();
   }
   state.loading = false;
   renderHistoryBar();
@@ -1006,7 +1070,7 @@ async function sendKey(key) {
   if (!current) return;
   try {
     await api("/api/key", { id: current, key });
-    setTimeout(() => refreshSession(true), 300);
+    setTimeout(() => refreshSession(false), 300);
   } catch (e) { alertError(e); }
 }
 
@@ -1180,18 +1244,14 @@ function autosize() {
   area.style.height = area.scrollHeight + "px";
 }
 
-for (const keys of KEY_GROUPS) {
+for (const keys of MORE_KEYS) {
   const group = document.createElement("div");
   group.className = "key-group";
-  for (const [key, label] of keys) {
-    const b = document.createElement("button");
-    b.className = "key";
-    b.textContent = label;
-    b.addEventListener("click", () => sendKey(key));
-    group.appendChild(b);
-  }
-  $("keys").appendChild(group);
+  group.append(...keys.map(([key, label]) => keyButton(key, label)));
+  $("more").appendChild(group);
 }
+$("stop").addEventListener("click", () => sendKey("esc"));
+$("more-toggle").addEventListener("click", toggleMore);
 $("send").addEventListener("click", sendText);
 $("text").addEventListener("input", autosize);
 $("back").addEventListener("click", () => history.back());

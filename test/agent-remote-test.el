@@ -525,6 +525,12 @@ BODY can refer to the transcript as `file'."
         (agent-remote--send-key buffer "esc")
         (should (eq called-in buffer))))))
 
+(ert-deftest agent-remote-test-every-digit-is-a-key ()
+  "A dialog's option or a notice's can have any digit."
+  (dolist (digit (number-sequence 0 9))
+    (should (equal (cdr (assoc (number-to-string digit) agent-remote--keys))
+                   (number-to-string digit)))))
+
 (ert-deftest agent-remote-test-unknown-key-rejected ()
   "A key name outside the allowed set is refused."
   (agent-remote-test--with-session buffer
