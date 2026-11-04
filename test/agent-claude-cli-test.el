@@ -428,6 +428,160 @@ CONTENT is written as UTF-8."
             (should-not (agent-claude-cli--session-file id))))
       (delete-directory root t))))
 
+;;;; Screen panel
+;; The screens below follow real captures of Claude Code 2.1.318 under eat.
+
+(defconst agent-claude-cli-test--rule (make-string 60 ?─))
+
+(defun agent-claude-cli-test--screen (&rest lines)
+  "Return a screen from LINES, where `rule' stands for a full-width rule."
+  (mapconcat (lambda (line)
+               (if (eq line 'rule) agent-claude-cli-test--rule line))
+             lines "\n"))
+
+(defun agent-claude-cli-test--panel-lines (screen)
+  "Return the lines of SCREEN from where its panel starts."
+  (nthcdr (plist-get (agent-claude-cli-screen-panel screen) :start)
+          (split-string screen "\n")))
+
+(ert-deftest agent-claude-cli-test-panel-idle-input-box ()
+  "At rest the panel starts at the status line above the input box."
+  (let ((screen (agent-claude-cli-test--screen
+                 "⏺ The answer is here" "  and goes on." ""
+                 "✻ Worked for 34s · done 17:34" "        "
+                 'rule "❯ " 'rule "" "  ⏵⏵ auto mode on")))
+    (should (equal (car (agent-claude-cli-test--panel-lines screen))
+                   "✻ Worked for 34s · done 17:34"))
+    (should-not (plist-get (agent-claude-cli-screen-panel screen) :dialog))
+    (should-not (plist-get (agent-claude-cli-screen-panel screen) :block))))
+
+(ert-deftest agent-claude-cli-test-panel-keeps-what-follows-the-box ()
+  "The mode line and the agent list stay in the panel."
+  (let ((lines (agent-claude-cli-test--panel-lines
+                (agent-claude-cli-test--screen
+                 "✻ Symbioting… (48s)" "  " 'rule "❯ " 'rule ""
+                 "  ⏵⏵ auto mode on" "" "  ⏺ main"
+                 "  ◯ general-purpose  Some task"))))
+    (should (member "  ◯ general-purpose  Some task" lines))
+    (should (member "❯ " lines))))
+
+(ert-deftest agent-claude-cli-test-panel-input-box-variants ()
+  "A bare prompt, a titled rule and multi-line input all count as the box."
+  (dolist (screen (list
+                   (agent-claude-cli-test--screen
+                    "⏺ Text" "" "✻ Done" "" 'rule "❯" 'rule "  mode")
+                   (agent-claude-cli-test--screen
+                    "⏺ Text" "" "✻ Done" ""
+                    (concat agent-claude-cli-test--rule " make-cup-of-tea ─")
+                    "❯" 'rule "  mode")
+                   (agent-claude-cli-test--screen
+                    "⏺ Text" "" "✻ Done" ""
+                    'rule "❯ first line" "  second line" 'rule "  mode")))
+    (should-not (plist-get (agent-claude-cli-screen-panel screen) :dialog))
+    (should (equal (car (agent-claude-cli-test--panel-lines screen)) "✻ Done"))))
+
+(ert-deftest agent-claude-cli-test-panel-keeps-a-notice-with-options ()
+  "A notice above the box that offers options stays in the panel."
+  (let ((lines (agent-claude-cli-test--panel-lines
+                (agent-claude-cli-test--screen
+                 "⏺ Compacted" "" "✦ Heads up · Something new"
+                 "  1: Learn more   2: Knew this   0: Dismiss" "   "
+                 'rule "❯ " 'rule "  mode"))))
+    (should (equal (car lines) "✦ Heads up · Something new"))
+    (should (member "  1: Learn more   2: Knew this   0: Dismiss" lines))))
+
+(ert-deftest agent-claude-cli-test-panel-keeps-notice-under-filled-blank ()
+  "Right-aligned text filling the blank lines does not lose a notice."
+  (let ((lines (agent-claude-cli-test--panel-lines
+                (agent-claude-cli-test--screen
+                 "⏺ Compacted while idle" "                     [-]"
+                 "✦ Heads up · Something new" "  1: Learn more   0: Dismiss"
+                 "            Restart to update"
+                 'rule "❯" 'rule "  mode"))))
+    (should (equal (car lines) "✦ Heads up · Something new"))
+    (should (member "  1: Learn more   0: Dismiss" lines))))
+
+(ert-deftest agent-claude-cli-test-panel-sees-status-past-effort-line ()
+  "The right-aligned effort line does not hide the status line above it."
+  (let ((screen (agent-claude-cli-test--screen
+                 "  ⎿  Interrupted" "" "✻ Brewed for 1s" "" "" ""
+                 "        ◐ medium · /effort" 'rule "❯" 'rule "  mode")))
+    (should (equal (car (agent-claude-cli-test--panel-lines screen))
+                   "✻ Brewed for 1s"))))
+
+(ert-deftest agent-claude-cli-test-panel-marks-text-being-written ()
+  "The message running up to the panel is offered while it is written."
+  (let* ((screen (agent-claude-cli-test--screen
+                  "❯ Write about tea" ""
+                  "⏺ Tea asks for patience" "  and it suits the pace." ""
+                  "  Its history runs longer." "  than most realize."
+                  "        ◐ medium · /effort" 'rule "❯" 'rule "  mode"))
+         (panel (agent-claude-cli-screen-panel screen)))
+    (should (= (plist-get panel :block) 2))
+    (should (> (plist-get panel :start) 2)))
+  (let ((panel (agent-claude-cli-screen-panel
+                (agent-claude-cli-test--screen
+                 "⏺ Old" "" "✻ Done" "" "❯ New prompt" ""
+                 "· Slithering…" "" 'rule "❯" 'rule "  mode"))))
+    (should-not (plist-get panel :block))))
+
+(ert-deftest agent-claude-cli-test-panel-bash-dialog-shows-whole-dialog ()
+  "A permission dialog appears whole, with its inner rules and options."
+  (let* ((screen (agent-claude-cli-test--screen
+                  "⏺ Earlier text" "" "❯ Run it" ""
+                  "  Creating empty file" "  ⎿  $ touch x" ""
+                  'rule " Bash command" " Create empty file"
+                  (make-string 60 ?╌) " touch x" (make-string 60 ?╌)
+                  " Do you want to proceed?" " ❯ 1. Yes" "   2. No" ""
+                  " Esc to cancel · Tab to amend"))
+         (panel (agent-claude-cli-screen-panel screen))
+         (lines (agent-claude-cli-test--panel-lines screen)))
+    (should (plist-get panel :dialog))
+    (should (member " Bash command" lines))
+    (should (member " ❯ 1. Yes" lines))
+    (should (equal (car lines) ""))
+    (should-not (member "⏺ Earlier text" lines))))
+
+(ert-deftest agent-claude-cli-test-panel-question-dialog-with-inner-rule ()
+  "An option at the margin and a rule inside the dialog do not cut it."
+  (let* ((screen (agent-claude-cli-test--screen
+                  "✻ Sautéed" "" "❯ Ask me" "  please." 'rule " ☐ Drink" ""
+                  "Do you prefer tea or coffee?" "" "❯ 1. Tea" "  2. Coffee"
+                  'rule "  4. Chat about this" ""
+                  "Enter to select · Esc to cancel"))
+         (lines (agent-claude-cli-test--panel-lines screen)))
+    (should (plist-get (agent-claude-cli-screen-panel screen) :dialog))
+    (should (member "Do you prefer tea or coffee?" lines))
+    (should (member " ☐ Drink" lines))
+    (should (member "❯ 1. Tea" lines))))
+
+(ert-deftest agent-claude-cli-test-panel-picker-with-block-rule ()
+  "A picker opening with an upper-block rule and effort text is a dialog."
+  (let* ((screen (agent-claude-cli-test--screen
+                  "⏺ Declined" "  ⎿  Tea or coffee?" "" "✻ Sautéed for 1s"
+                  (concat (make-string 50 ?▔) " ◐ medium · /effort")
+                  "   Select model" "   ❯ 5.  Haiku" "   Esc to cancel"))
+         (lines (agent-claude-cli-test--panel-lines screen)))
+    (should (plist-get (agent-claude-cli-screen-panel screen) :dialog))
+    (should (member "   Select model" lines))
+    (should-not (member "✻ Sautéed for 1s" lines))))
+
+(ert-deftest agent-claude-cli-test-panel-unrecognized-shows-everything ()
+  "With nothing to go by the panel is the whole screen."
+  (dolist (screen '("just some text\nand more" "" "⏺ No rules here\nat all"))
+    (let ((panel (agent-claude-cli-screen-panel screen)))
+      (should (= (plist-get panel :start) 0))
+      (should (plist-get panel :dialog))))
+  (let ((screen (agent-claude-cli-test--screen
+                 " a dialog taller" " than the screen" 'rule " ❯ 1. Yes")))
+    (should (= (plist-get (agent-claude-cli-screen-panel screen) :start) 0))))
+
+(ert-deftest agent-claude-cli-test-panel-past-prompt-is-not-the-box ()
+  "A rule followed by a past prompt, with a space, is not an input box."
+  (let ((screen (agent-claude-cli-test--screen
+                 'rule "❯ Earlier prompt" 'rule " ❯ 1. Yes" " Esc to cancel")))
+    (should (plist-get (agent-claude-cli-screen-panel screen) :dialog))))
+
 ;;;; Claude JSON
 
 (ert-deftest agent-claude-cli-test-read-claude-json-retries-mid-write ()

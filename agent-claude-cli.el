@@ -543,6 +543,128 @@ it was called more than once."
           :time (plist-get (car run) :time))))
 
 
+;;;; Screen panel
+;; CLI convention: the bottom of the screen shows what a transcript
+;; cannot.  At rest it reads, from the top: a status line such as
+;; "✻ Worked for 34s" or a notice with its own options, a rule, the input
+;; line "❯" with a no-break space or nothing after it, more input lines,
+;; a rule, then the mode line and any agent list.  A rule is full width,
+;; and may carry a session name or effort indicator.  A dialog or picker
+;; replaces the input box, opens with a rule of its own, may hold further
+;; rules, and marks its options "❯ 1." with an ordinary space, as earlier
+;; prompts in the conversation are also marked.
+;; Last verified against Claude Code 2.1.318 on 2026-11-04.
+
+(defconst agent-claude-cli--screen-rule-regexp "\\`[─▔]\\{20,\\}"
+  "Regexp matching a full-width rule on a Claude Code screen.")
+
+(defconst agent-claude-cli--screen-input-regexp "\\`[❯>]\\(?: \\|[ \t]*\\'\\)"
+  "Regexp matching the first line of Claude Code's input box.")
+
+(defconst agent-claude-cli--screen-message-regexp "\\`⏺[  ]"
+  "Regexp matching the first line of a message on a Claude Code screen.")
+
+(defconst agent-claude-cli--screen-prompt-regexp "\\`❯ [^0-9]"
+  "Regexp matching a past prompt on a Claude Code screen, not a numbered option.")
+
+(defconst agent-claude-cli--screen-done-regexp "\\`✻ "
+  "Regexp matching the line Claude Code prints when a turn has ended.")
+
+(defun agent-claude-cli-screen-panel (screen)
+  "Return which trailing lines of SCREEN the transcript cannot show.
+SCREEN is the text of a Claude Code screen.  Return a plist.  `:start' is
+the index of the first such line.  `:block' is the index of the message
+just above them, which the transcript lacks while it is still being
+written, or nil.  `:dialog' is non-nil when SCREEN shows no input box,
+which means a dialog, a picker or something unrecognized.  In that case
+`:start' errs towards more lines: the whole screen if nothing marks
+where the dialog can begin."
+  (let* ((lines (vconcat (split-string screen "\n")))
+         (rules (agent-claude-cli--screen-rules lines))
+         (last-rule (car rules))
+         (box-rule (cadr rules)))
+    (if (and box-rule
+             (string-match-p agent-claude-cli--screen-input-regexp
+                             (aref lines (1+ box-rule))))
+        (let ((start (agent-claude-cli--screen-status-start lines box-rule)))
+          (list :start start
+                :block (agent-claude-cli--screen-message-above lines start)
+                :dialog nil))
+      (list :start (if last-rule
+                       (agent-claude-cli--screen-dialog-start lines last-rule)
+                     0)
+            :block nil
+            :dialog t))))
+
+(defun agent-claude-cli--screen-rules (lines)
+  "Return the indices of the rules in vector LINES, last first."
+  (let (rules)
+    (dotimes (index (length lines))
+      (when (string-match-p agent-claude-cli--screen-rule-regexp
+                            (aref lines index))
+        (push index rules)))
+    rules))
+
+(defun agent-claude-cli--screen-status-start (lines rule)
+  "Return the index where the status above the input box at RULE starts.
+LINES is the screen as a vector.  Go up to the first line at the margin,
+which is what a status or notice opens with.  Lines above it stay out,
+as does a message or past prompt, which is conversation even when
+right-aligned text fills the blank line under it.  Failing that, stop
+after two blocks of indented lines."
+  (let ((start rule) (index (1- rule)) (blocks 0) (in-block nil) (done nil))
+    (while (and (not done) (>= index 0))
+      (let ((line (aref lines index)))
+        (cond ((string-blank-p line)
+               (when in-block
+                 (setq in-block nil
+                       blocks (1+ blocks)
+                       done (= blocks 2))))
+              ((agent-claude-cli--screen-conversation-p line)
+               (setq done t))
+              (t
+               (setq start index
+                     in-block t
+                     done (not (string-prefix-p " " line))))))
+      (setq index (1- index)))
+    start))
+
+(defun agent-claude-cli--screen-conversation-p (line)
+  "Return non-nil when screen LINE opens a message or a past prompt."
+  (or (string-match-p agent-claude-cli--screen-message-regexp line)
+      (string-match-p agent-claude-cli--screen-prompt-regexp line)))
+
+(defun agent-claude-cli--screen-message-above (lines start)
+  "Return the index of the message that runs up to line START of LINES, or nil.
+Nil when a past prompt or an ended turn comes first, at START or above
+it, since then nothing is still being written."
+  (let ((index start) (found nil) (done nil))
+    (while (and (not done) (>= index 0))
+      (let ((line (aref lines index)))
+        (cond ((string-match-p agent-claude-cli--screen-message-regexp line)
+               (setq found index done t))
+              ((or (string-match-p agent-claude-cli--screen-prompt-regexp line)
+                   (string-match-p agent-claude-cli--screen-done-regexp line))
+               (setq done t))))
+      (setq index (1- index)))
+    found))
+
+(defun agent-claude-cli--screen-dialog-start (lines rule)
+  "Return the index where a dialog whose last rule is RULE should show from.
+LINES is the screen as a vector.  Go up to the nearest message, kept for
+the tool call it may name, or past the nearest prompt or ended turn.
+With neither on the screen, show all of it."
+  (let ((index (1- rule)) (start nil))
+    (while (and (not start) (>= index 0))
+      (let ((line (aref lines index)))
+        (cond ((string-match-p agent-claude-cli--screen-message-regexp line)
+               (setq start index))
+              ((or (string-match-p agent-claude-cli--screen-prompt-regexp line)
+                   (string-match-p agent-claude-cli--screen-done-regexp line))
+               (setq start (1+ index)))))
+      (setq index (1- index)))
+    (or start 0)))
+
 ;;;; .claude.json merge engine
 
 ;; CLI convention: `~/.claude.json' (or `<CLAUDE_CONFIG_DIR>/.claude.json')

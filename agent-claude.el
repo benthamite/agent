@@ -261,6 +261,7 @@ Source: lobehub/lobe-icons (MIT).")
   :session-headers #'agent-claude--session-headers
   :session-prompt #'agent-claude--session-prompt
   :session-history #'agent-claude--session-history
+  :screen-panel #'agent-claude-cli-screen-panel
   :prepare-fork #'agent-claude--prepare-fork
   :resume #'claude-code-resume)
 
@@ -1545,11 +1546,17 @@ id to look up.  Start a query when the result is missing or older than
   (when-let* ((session (agent-session buffer)))
     (agent-session-id session)))
 
+(defvar-local agent-claude--searched-transcript nil
+  "Cons of a session id and the transcript file a search found for it.")
+
 (defun agent-claude--session-history (buffer bytes &optional before after)
   "Return past conversation of Claude session BUFFER, or nil if it has none.
-BYTES, BEFORE and AFTER are as in `agent-claude-cli-transcript-history'."
+BYTES, BEFORE and AFTER are as in `agent-claude-cli-transcript-history',
+and the plist returned has `:session' as well, the session id, so a
+reader can tell when the session moved to another transcript."
   (when-let* ((file (agent-claude--session-transcript buffer)))
-    (agent-claude-cli-transcript-history file bytes before after)))
+    (append (list :session (file-name-base file))
+            (agent-claude-cli-transcript-history file bytes before after))))
 
 (defun agent-claude--session-transcript (buffer)
   "Return the transcript file of Claude session BUFFER, or nil.
@@ -1569,7 +1576,19 @@ session id holds can lead outside the account's projects directory."
                            projects))))
       (if (and expected (file-exists-p expected))
           expected
-        (agent-claude-cli--session-file id projects)))))
+        (agent-claude--searched-transcript buffer id projects)))))
+
+(defun agent-claude--searched-transcript (buffer id projects)
+  "Return the transcript of session ID found by searching PROJECTS, or nil.
+The search lists every project, and the phone page asks on every poll,
+so BUFFER remembers what it found."
+  (with-current-buffer buffer
+    (let ((known agent-claude--searched-transcript))
+      (if (and (equal (car known) id) (file-exists-p (cdr known)))
+          (cdr known)
+        (when-let* ((file (agent-claude-cli--session-file id projects)))
+          (setq agent-claude--searched-transcript (cons id file))
+          file)))))
 
 (defun agent-claude--session-config-dir (buffer)
   "Return the Claude config directory session BUFFER runs under."

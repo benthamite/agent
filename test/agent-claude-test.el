@@ -2924,4 +2924,36 @@ sentinel those nested without bound and froze Emacs."
     (should (eq (agent-backend-session-history (agent-backend 'claude-code))
                 #'agent-claude--session-history))))
 
+(ert-deftest agent-claude-test-session-history-names-the-session ()
+  "The result names the session, so a reader sees a change of transcript."
+  (agent-claude-test--with-transcripts config
+    (setq-local agent--session
+                (agent-session-create :backend 'claude-code :id "abc-123"
+                                      :directory "/p/"))
+    (agent-claude-test--write-transcript config "-p" "abc-123")
+    (should (equal (plist-get (agent-claude--session-history
+                               (current-buffer) 1000)
+                              :session)
+                   "abc-123"))))
+
+(ert-deftest agent-claude-test-searched-transcript-is-remembered ()
+  "A search result is reused for that session id while the file exists."
+  (agent-claude-test--with-transcripts config
+    (setq-local agent--session
+                (agent-session-create :backend 'claude-code :id "abc-123"
+                                      :directory "/p/"))
+    (let ((file (agent-claude-test--write-transcript config "-other" "abc-123"))
+          (searches 0)
+          (original (symbol-function 'agent-claude-cli--session-file)))
+      (cl-letf (((symbol-function 'agent-claude-cli--session-file)
+                 (lambda (&rest args)
+                   (setq searches (1+ searches))
+                   (apply original args))))
+        (should (equal (agent-claude--session-transcript (current-buffer)) file))
+        (should (equal (agent-claude--session-transcript (current-buffer)) file))
+        (should (= searches 1))
+        (delete-file file)
+        (should-not (agent-claude--session-transcript (current-buffer)))
+        (should (= searches 2))))))
+
 ;;; agent-claude-test.el ends here

@@ -153,7 +153,7 @@ chain only once.  Only
   session-headers session-prompt prepare-fork
   sync-theme
   before-exit-ready-to-close-p before-kill-check idle-p reported-idle-p
-  session-history)
+  session-history screen-panel)
 
 (defvar agent-backends nil
   "Alist of registered AI backends.
@@ -199,8 +199,11 @@ directory to run in another), and `:session-history' (read a bounded
 stretch of a session's past conversation, called with a session buffer,
 a byte limit, and optional BEFORE and AFTER byte offsets, returning nil
 when the session has no transcript yet, else a plist as
-`agent-claude-cli-transcript-history' documents).  A backend that omits
-a key does not support the commands that dispatch on it.
+`agent-claude-cli-transcript-history' documents), and `:screen-panel'
+(tell which trailing lines of a session's screen the transcript cannot
+show, called with the screen's text, returning a plist as
+`agent-claude-cli-screen-panel' documents).  A backend that omits a key
+does not support the commands that dispatch on it.
 
 The optional `:ambient-directory' key is a function of no arguments
 returning the directory a session started from the current buffer
