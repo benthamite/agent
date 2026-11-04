@@ -63,6 +63,15 @@
 
 ;;;; Variables
 
+(defvar agent-inhibit-prompts nil
+  "Non-nil means session start paths never ask a question in the minibuffer.
+Bind it around calls from Lisp that nobody is watching, such as
+`emacsclient --eval', where a prompt would block Emacs.  A question with
+a default takes it: an unset account selection falls to the backend's
+default account, and is not persisted.  A question with none signals a
+`user-error': the choice among several registered backends, and the name
+of a second session in a directory.  Interactive use leaves it nil.")
+
 (defvar agent-account--starting nil
   "Backend and account of the session currently being started.
 A cons of (BACKEND . ACCOUNT) let-bound by `agent-start-session'
@@ -242,8 +251,8 @@ Resolution order: the in-flight `agent-account--starting' binding
 when it belongs to BACKEND, then the rule in
 `agent-account-directory-rules' matching DIRECTORY when DIRECTORY is
 non-nil, then the persisted current selection, then -- only when
-PROMPT-P is non-nil -- an interactive prompt whose choice is
-persisted.  A selection naming a pool is routed to one of its members
+PROMPT-P is non-nil and `agent-inhibit-prompts' is nil -- an
+interactive prompt whose choice is persisted.  A selection naming a pool is routed to one of its members
 with `agent-account-route', so the result is always a concrete
 account name.  Returns nil when BACKEND has no accounts configured."
   (when (agent-account-list backend)
@@ -527,13 +536,15 @@ cache and the backend's account file.  Returns ACCOUNT."
   "Prompt for one of BACKEND's accounts or pools and return its name.
 Pools are listed before the accounts and annotated with their
 members.  Returns the single account without prompting when only
-one exists, and nil when the prompt is quit."
+one exists, and nil when the prompt is quit or when several exist and
+`agent-inhibit-prompts' is non-nil."
   (when-let* ((names (agent-account-selection-names backend)))
-    (if (= (length names) 1)
-        (car names)
-      (completing-read (format "%s account: " backend)
-                       (agent-account--selection-table backend names)
-                       nil t))))
+    (cond
+     ((= (length names) 1) (car names))
+     (agent-inhibit-prompts nil)
+     (t (completing-read (format "%s account: " backend)
+                         (agent-account--selection-table backend names)
+                         nil t)))))
 
 (defun agent-account--prompt-account (backend)
   "Prompt for one of BACKEND's accounts, never a pool, and return it.

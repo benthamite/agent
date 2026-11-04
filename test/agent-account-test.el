@@ -41,6 +41,35 @@ account cache and the starting binding."
     (let ((agent-account--starting '(stub . "work")))
       (should (equal (agent-account-resolve 'stub) "work")))))
 
+(ert-deftest agent-account-test-prompt-asks-when-not-inhibited ()
+  "Ask for an unset account selection, and persist the answer."
+  (agent-account-test--with-backend
+      (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "work"))
+              ((symbol-function 'agent-account--save) #'ignore))
+      (should (equal (agent-account-resolve 'stub t) "work"))
+      (should (equal (agent-account-current 'stub) "work")))))
+
+(ert-deftest agent-account-test-inhibit-prompts-falls-to-default-account ()
+  "With prompts inhibited, an unset selection stays unset and nothing asks."
+  (agent-account-test--with-backend
+      (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+    (let ((agent-inhibit-prompts t))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (ert-fail "prompted")))
+                ((symbol-function 'agent-account--save)
+                 (lambda (&rest _) (ert-fail "persisted"))))
+        (should-not (agent-account-resolve 'stub t))))))
+
+(ert-deftest agent-account-test-inhibit-prompts-keeps-persisted-selection ()
+  "With prompts inhibited, a persisted selection still applies."
+  (agent-account-test--with-backend
+      (list :accounts '(("work" . "/tmp/w") ("personal" . "/tmp/p")))
+    (puthash 'stub "personal" agent-account--current)
+    (let ((agent-inhibit-prompts t))
+      (should (equal (agent-account-resolve 'stub t) "personal")))))
+
 (ert-deftest agent-account-test-resolve-ignores-foreign-starting-binding ()
   "Ignore a starting binding that belongs to another backend."
   (agent-account-test--with-backend

@@ -2207,6 +2207,76 @@ session's account and id, and `synced' the synced selections."
                   :type 'user-error)
     (should-not killed)))
 
+(defmacro agent-test--with-two-backends (&rest body)
+  "Run BODY with backends `one' and `two' registered and prompts forbidden.
+Bind `started', the backends started; any completion prompt fails the test."
+  (declare (debug t))
+  `(let ((agent-backends nil)
+         (agent-inhibit-prompts t)
+         (started nil))
+     (dolist (name '(one two))
+       (apply #'agent-register-backend
+              name
+              (agent-test--backend
+               :start-session (lambda (session &rest _)
+                                (push (agent-session-backend session) started)))))
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (&rest _) (ert-fail "prompted"))))
+       ,@body)))
+
+(ert-deftest agent-test-inhibit-prompts-refuses-a-backend-choice ()
+  "No backend is the default, so an inhibited choice signals, naming the way out."
+  (agent-test--with-two-backends
+   (let ((err (should-error (agent-start-new-session) :type 'user-error)))
+     (should (string-search "agent-start-session" (cadr err))))
+   (with-temp-buffer
+     (should-error (agent--resolve-backend) :type 'user-error))
+   (should-not started)))
+
+(ert-deftest agent-test-inhibit-prompts-starts-a-lone-backend ()
+  "A single registered backend needs no question, inhibited or not."
+  (agent-test--with-two-backends
+   (setq agent-backends (list (assq 'one agent-backends)))
+   (agent-start-new-session)
+   (should (equal started '(one)))))
+
+(ert-deftest agent-test-backend-choice-still-asks-when-not-inhibited ()
+  "Without the variable, several backends still prompt."
+  (agent-test--with-two-backends
+   (let ((agent-inhibit-prompts nil)
+         asked)
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (&rest _) (setq asked t) "Test")))
+       (agent-start-new-session))
+     (should asked)
+     (should started))))
+
+(ert-deftest agent-test-inhibit-prompts-refuses-an-instance-prompt ()
+  "A second session in a directory must be named, not asked for."
+  (agent-test--with-two-backends
+   (cl-letf (((symbol-function 'agent--instance-holders)
+              (lambda (_backend _directory)
+                (list (cons "default" (current-buffer))))))
+     (should-error
+      (agent-start-session
+       (agent-session-create :backend 'one :directory "/tmp/"))
+      :type 'user-error)
+     (should-not started)
+     (agent-start-session
+      (agent-session-create :backend 'one :directory "/tmp/" :instance "free"))
+     (should (equal started '(one)))
+     (let ((agent-inhibit-prompts nil))
+       (agent-start-session
+        (agent-session-create :backend 'one :directory "/tmp/")))
+     (should (equal started '(one one))))))
+
+(ert-deftest agent-test-inhibit-prompts-starts-the-first-session-in-a-directory ()
+  "No session in the directory means no instance question."
+  (agent-test--with-two-backends
+   (agent-start-session
+    (agent-session-create :backend 'one :directory "/nonexistent-agent-test/"))
+   (should (equal started '(one)))))
+
 (ert-deftest agent-test-start-session-refuses-id-without-resume-id ()
   "A session carrying an id must say it means to resume, before any spawn."
   (let ((agent-backends nil)

@@ -394,8 +394,13 @@ per `agent-account-logged-in-p', since the backend would only produce
 authentication failures.  Signal a `user-error' too when SESSION names
 an instance that a live session in the same directory already holds:
 the backend would hand back that session's buffer, still running its
-own conversation, and SESSION would overwrite its identity.  Return the
-new session buffer."
+own conversation, and SESSION would overwrite its identity.
+
+This is the entry point for starting sessions from Lisp.  Nothing here
+prompts for an account.  The one question left is the instance name of a
+second session in a directory, which the backend asks when SESSION names
+none; bind `agent-inhibit-prompts' to get a `user-error' instead.  Return
+the new session buffer."
   (ignore initial-prompt)
   (when (and (agent-session-id session) (not resume-id))
     (user-error "Session id `%s' would start a fresh session; pass :resume-id to resume it"
@@ -413,6 +418,8 @@ new session buffer."
                                (agent--instance-holders backend directory))))
       (user-error "Instance `%s' in %s is already taken by %s"
                   instance directory (buffer-name (cdr holder))))
+    (unless (agent-session-instance session)
+      (agent--refuse-instance-prompt backend directory))
     (agent-check-session-start backend account)
     (when (and resume-id (not (plist-get options :fork)))
       (setf (agent-session-id session) resume-id))
@@ -421,6 +428,17 @@ new session buffer."
     (let ((agent-account--starting (and account (cons backend account))))
       (apply (agent-backend-start-session (agent-backend backend))
              session options))))
+
+(defun agent--refuse-instance-prompt (backend directory)
+  "Signal a `user-error' if a BACKEND start in DIRECTORY would need to prompt.
+The backend asks for an instance name when a session already runs in
+DIRECTORY and none was given.  Call this only for a session naming no
+instance.  Do nothing unless `agent-inhibit-prompts' is non-nil."
+  (when-let* ((agent-inhibit-prompts)
+              ((stringp directory))
+              (holder (car (agent--instance-holders backend directory))))
+    (user-error "%s already runs in %s and `agent-inhibit-prompts' forbids asking for an instance name; give the session an instance"
+                (buffer-name (cdr holder)) directory)))
 
 (defun agent--ambient-directory (backend)
   "Return the directory a new BACKEND session would run in, or nil.
@@ -1175,6 +1193,7 @@ Signal a user error when no sessions are active."
      ((= (length backends) 1)
       (agent--start-new-session-for-backend (caar backends)))
      (t
+      (agent--refuse-backend-prompt)
       (let* ((names (mapcar (lambda (e)
                               (cons (or (agent-backend-label (cdr e))
                                         (symbol-name (car e)))
@@ -1187,13 +1206,20 @@ Signal a user error when no sessions are active."
 (defun agent--start-new-session-for-backend (backend)
   "Start a new BACKEND session in its ambient directory.
 The account is the one `agent-account-resolve' picks for that
-directory, prompting for a selection when none is persisted."
+directory, prompting for a selection when none is persisted, unless
+`agent-inhibit-prompts' is non-nil."
   (let ((directory (agent--ambient-directory backend)))
     (agent-start-session
      (agent-session-create :backend backend
                            :directory directory
                            :account (agent-account-resolve
                                      backend t directory)))))
+
+(defun agent--refuse-backend-prompt ()
+  "Signal a `user-error' if asking for a backend is inhibited.
+No backend is the default, so `agent-inhibit-prompts' cannot pick one."
+  (when agent-inhibit-prompts
+    (user-error "Several backends are registered and `agent-inhibit-prompts' forbids asking; name one with `agent-start-session'")))
 
 (defun agent-start-session-beside (buffer backend)
   "Start a new BACKEND session in the directory of session BUFFER.
@@ -2522,10 +2548,12 @@ the payload is bound for a session that is already running.")
 (defun agent--resolve-backend ()
   "Return the backend for the current context.
 If in a session buffer, use that backend.  If only one backend is
-registered, use it.  Otherwise, prompt."
+registered, use it.  Otherwise, prompt, or signal a `user-error' when
+`agent-inhibit-prompts' is non-nil."
   (or (agent--detect-backend)
       (if (= (length agent-backends) 1)
           (caar agent-backends)
+        (agent--refuse-backend-prompt)
         (let* ((entries (mapcar (lambda (e)
                                   (cons (or (agent-backend-label (cdr e))
                                             (symbol-name (car e)))
