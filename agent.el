@@ -833,6 +833,15 @@ Inherits the face of keys in the session switcher, so that a session
 reads in the tab bar as it does in the menu."
   :group 'agent)
 
+(defface agent-current-session
+  '((((class color) (background dark)) :background "gray30")
+    (((class color) (background light)) :background "gray85")
+    (t :inverse-video t))
+  "Face marking the frame's current session in `agent-tab-bar-mode'.
+It lies behind the state faces, so it should set a background and leave
+the foreground to them."
+  :group 'agent)
+
 ;;;; State variables
 
 (defconst agent--home-row-keys '("a" "s" "d" "f" "j" "k" "l" ";")
@@ -1731,7 +1740,8 @@ Sessions with reported background work are distinguished from idle ones."
 
 (defvar agent--tab-bar-signature nil
   "What the sessions segment of the tab bar last showed.
-Compared by `agent--tab-bar-refresh' against the current sessions, so
+A cons of `agent--tab-bar-sessions' and `agent--tab-bar-current-buffers'.
+Compared by `agent--tab-bar-refresh' against their current values, so
 that the tab bar is re-rendered only when something visible changed.")
 
 (defvar agent--tab-bar-added-align-right nil
@@ -1745,13 +1755,19 @@ Sessions appear in the order and with the faces of
 input, `agent-waiting-with-background' for one waiting while
 background work runs, `agent-unknown' for one never observed,
 `agent-snoozed' for a snoozed one, and no state face for a busy one.
-Clicking a session switches to it.  The segment is inserted into
-`tab-bar-format' before any right-aligned entries."
+The session a frame's selected window shows also carries
+`agent-current-session' in that frame.  Clicking a session switches to
+it.  The segment is inserted into `tab-bar-format' before any
+right-aligned entries."
   :global t
   :group 'agent
   (if agent-tab-bar-mode
       (progn
         (agent--tab-bar-insert-format)
+        (add-hook 'window-selection-change-functions
+                  #'agent--tab-bar-selection-changed)
+        (add-hook 'window-buffer-change-functions
+                  #'agent--tab-bar-selection-changed)
         (setq agent--tab-bar-timer
               (run-with-timer agent-tab-bar-refresh-interval
                               agent-tab-bar-refresh-interval
@@ -1759,6 +1775,10 @@ Clicking a session switches to it.  The segment is inserted into
     (when agent--tab-bar-timer
       (cancel-timer agent--tab-bar-timer)
       (setq agent--tab-bar-timer nil))
+    (remove-hook 'window-selection-change-functions
+                 #'agent--tab-bar-selection-changed)
+    (remove-hook 'window-buffer-change-functions
+                 #'agent--tab-bar-selection-changed)
     (agent--tab-bar-remove-format))
   (setq agent--tab-bar-signature nil)
   (force-mode-line-update t))
@@ -1802,27 +1822,68 @@ when it has none."
 (defun agent-tab-bar-format-sessions ()
   "Return tab-bar items for every AI session, colored by state.
 Each item shows the session's switcher key, in `agent-tab-bar-key',
-before its name.  For use in `tab-bar-format'; see
-`agent-tab-bar-mode'."
-  (let ((sessions (agent--tab-bar-sessions)))
-    (setq agent--tab-bar-signature sessions)
+before its name, and the session this frame's selected window shows
+carries `agent-current-session' behind those faces.  Redisplay selects
+the frame whose tab bar it renders, so each frame marks its own session.
+For use in `tab-bar-format'; see `agent-tab-bar-mode'."
+  (let ((sessions (agent--tab-bar-sessions))
+        (current (agent--tab-bar-current-buffer)))
+    (setq agent--tab-bar-signature
+          (cons sessions (agent--tab-bar-current-buffers)))
     (seq-map-indexed
      (lambda (session index)
        (pcase-let ((`(,key ,buf ,name ,face) session))
          (list (intern (format "agent-session-%d" index))
                'menu-item
-               (concat " "
-                       (propertize key 'face 'agent-tab-bar-key)
-                       " "
-                       (propertize name 'face face)
-                       " ")
+               (agent--tab-bar-label key name face (eq buf current))
                (lambda () (interactive) (switch-to-buffer buf))
                :help (format "Switch to %s" name))))
      sessions)))
 
+(defun agent--tab-bar-label (key name face current)
+  "Return the tab-bar label of a session with KEY, NAME and state FACE.
+With CURRENT non-nil, the whole label carries `agent-current-session'."
+  (let ((label (concat " "
+                       (propertize key 'face 'agent-tab-bar-key)
+                       " "
+                       (propertize name 'face face)
+                       " ")))
+    (when current
+      (add-face-text-property 0 (length label) 'agent-current-session t label))
+    label))
+
+(defun agent--tab-bar-current-buffer (&optional frame)
+  "Return the buffer the selected window of FRAME shows.
+While that window is the minibuffer, return the buffer of the window the
+minibuffer was entered from, so a prompt does not unmark the session."
+  (let ((window (frame-selected-window frame)))
+    (window-buffer (or (and (window-minibuffer-p window)
+                            (minibuffer-selected-window))
+                       window))))
+
+(defun agent--tab-bar-current-buffers ()
+  "Return the current buffer of each frame, for `agent--tab-bar-signature'.
+Frames can show different sessions, and each renders the shared segment
+for itself, so the signature must not depend on which frame rendered
+last."
+  (mapcar #'agent--tab-bar-current-buffer (frame-list)))
+
 (defun agent--tab-bar-refresh ()
   "Re-render the tab bar if any session changed since it was last shown."
-  (unless (equal (agent--tab-bar-sessions) agent--tab-bar-signature)
+  (unless (equal (cons (agent--tab-bar-sessions)
+                       (agent--tab-bar-current-buffers))
+                 agent--tab-bar-signature)
+    (force-mode-line-update t)))
+
+(defun agent--tab-bar-selection-changed (_frame)
+  "Re-render the tab bar if a frame's current buffer changed.
+Member of `window-selection-change-functions' and
+`window-buffer-change-functions', so the marker moves at once rather
+than on the next `agent--tab-bar-refresh'.  Only the frames' current
+buffers are compared, so this stays cheap enough to run on every
+selection change."
+  (unless (equal (agent--tab-bar-current-buffers)
+                 (cdr agent--tab-bar-signature))
     (force-mode-line-update t)))
 
 ;;;; Snoozing

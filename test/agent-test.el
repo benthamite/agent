@@ -693,6 +693,124 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
         (agent--tab-bar-refresh)
         (should (= redraws 1))))))
 
+(defun agent-test--tab-bar-item-face (buffer items)
+  "Return the face at the end of BUFFER's tab-bar item among ITEMS."
+  (let* ((name (agent-display-name buffer))
+         (item (seq-find (lambda (item)
+                           (string-search name (substring-no-properties
+                                                (nth 2 item))))
+                         items)))
+    (get-text-property (1- (length (nth 2 item))) 'face (nth 2 item))))
+
+(ert-deftest agent-test-tab-bar-marks-the-current-session ()
+  "Mark the selected window's session, keeping each state face in front."
+  (agent-test--with-two-sessions
+    (with-current-buffer b
+      (setq-local agent--session-state 'awaiting-input))
+    (save-window-excursion
+      (set-window-buffer (selected-window) b)
+      (let* ((items (agent-tab-bar-format-sessions))
+             (b-item (nth 2 (seq-find (lambda (item)
+                                        (string-search
+                                         (agent-display-name b)
+                                         (substring-no-properties (nth 2 item))))
+                                      items))))
+        (should (equal (get-text-property 3 'face b-item)
+                       '(agent-waiting agent-current-session)))
+        (should (equal (get-text-property 1 'face b-item)
+                       '(agent-tab-bar-key agent-current-session)))
+        (should (eq (agent-test--tab-bar-item-face b items)
+                    'agent-current-session))
+        (should-not (agent-test--tab-bar-item-face a items))))))
+
+(ert-deftest agent-test-tab-bar-marks-no-session-elsewhere ()
+  "Mark nothing while the selected window shows a non-session buffer."
+  (agent-test--with-two-sessions
+    (with-temp-buffer
+      (save-window-excursion
+        (set-window-buffer (selected-window) (current-buffer))
+        (let ((items (agent-tab-bar-format-sessions)))
+          (should-not (agent-test--tab-bar-item-face a items))
+          (should-not (agent-test--tab-bar-item-face b items)))))))
+
+(ert-deftest agent-test-tab-bar-current-buffer-looks-past-the-minibuffer ()
+  "A prompt does not unmark the session it was entered from."
+  (with-temp-buffer
+    (let ((origin (current-buffer)))
+      (save-window-excursion
+        (set-window-buffer (selected-window) origin)
+        (let ((window (selected-window)))
+          (cl-letf (((symbol-function 'frame-selected-window)
+                     (lambda (&optional _frame) (minibuffer-window)))
+                    ((symbol-function 'minibuffer-selected-window)
+                     (lambda () window)))
+            (should (eq (agent--tab-bar-current-buffer) origin))))))))
+
+(ert-deftest agent-test-tab-bar-selection-change-redraws-only-on-change ()
+  "A selection change redraws only when a frame's current buffer changed."
+  (agent-test--with-two-sessions
+    (let ((redraws 0))
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&optional _all) (setq redraws (1+ redraws)))))
+        (save-window-excursion
+          (set-window-buffer (selected-window) a)
+          (agent-tab-bar-format-sessions)
+          (agent--tab-bar-selection-changed (selected-frame))
+          (agent--tab-bar-refresh)
+          (should (= redraws 0))
+          (set-window-buffer (selected-window) b)
+          (agent--tab-bar-selection-changed (selected-frame))
+          (should (= redraws 1))
+          (agent--tab-bar-refresh)
+          (should (= redraws 2)))))))
+
+(ert-deftest agent-test-tab-bar-frames-showing-different-sessions-settle ()
+  "Two frames marking different sessions do not redraw each other forever."
+  (agent-test--with-two-sessions
+    (let* ((redraws 0)
+           (rendering 'one)
+           (shown (list (cons 'one a) (cons 'two b)))
+           marked)
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&optional _all) (setq redraws (1+ redraws))))
+                ((symbol-function 'frame-list) (lambda () '(one two)))
+                ((symbol-function 'agent--tab-bar-current-buffer)
+                 (lambda (&optional frame)
+                   (alist-get (or frame rendering) shown))))
+        (dolist (frame '(one two))
+          (setq rendering frame)
+          (let ((items (agent-tab-bar-format-sessions)))
+            (push (cons frame
+                        (seq-filter
+                         (lambda (buffer)
+                           (agent-test--tab-bar-item-face buffer items))
+                         (list a b)))
+                  marked))
+          (agent--tab-bar-refresh)
+          (should (= redraws 0)))
+        (should (equal (alist-get 'one marked) (list a)))
+        (should (equal (alist-get 'two marked) (list b)))))))
+
+(ert-deftest agent-test-tab-bar-mode-tracks-selection-changes-while-on ()
+  "The mode watches selection and buffer changes only while it is on."
+  (let ((tab-bar-format '(tab-bar-format-global))
+        (agent-tab-bar-mode nil)
+        (window-selection-change-functions nil)
+        (window-buffer-change-functions nil))
+    (unwind-protect
+        (progn
+          (agent-tab-bar-mode 1)
+          (should (memq #'agent--tab-bar-selection-changed
+                        window-selection-change-functions))
+          (should (memq #'agent--tab-bar-selection-changed
+                        window-buffer-change-functions))
+          (agent-tab-bar-mode -1)
+          (should-not (memq #'agent--tab-bar-selection-changed
+                            window-selection-change-functions))
+          (should-not (memq #'agent--tab-bar-selection-changed
+                            window-buffer-change-functions)))
+      (agent-tab-bar-mode -1))))
+
 (ert-deftest agent-test-tab-bar-mode-places-segment-before-right-alignment ()
   "Insert the segment before right-aligned entries and remove it again."
   (let ((tab-bar-format '(tab-bar-format-global tab-bar-format-align-right
