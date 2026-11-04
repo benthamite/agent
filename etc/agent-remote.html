@@ -55,20 +55,13 @@
   #panel { display: none; flex: 0 0 auto; flex-direction: column; min-height: 0;
     max-height: 45%; background: var(--panel); border-top: 1px solid var(--line); }
   #panel.dialog { max-height: 70%; border-top: 3px solid var(--waiting); }
-  #panel-bar { display: flex; align-items: center; gap: 10px; padding: 4px 12px;
-    font-size: 13px; color: var(--muted); }
+  #panel-label { padding: 4px 12px; font-size: 13px; color: var(--muted); }
   #panel.dialog #panel-label { color: var(--waiting); font-weight: 600; }
-  #panel-label { flex: 1; }
-  #full { background: var(--panel-2); color: var(--text); border-radius: 10px;
-    padding: 8px 12px; font-size: 13px; }
   #panel-text { overflow: auto; padding: 0 12px 6px; flex: 0 1 auto; min-height: 0; }
   /* With a transcript it is the main view, above a panel of the screen's
-     last lines; Full screen swaps it for the whole screen.  Without one,
-     the whole screen is the only view. */
-  #session-view.transcript #panel, #session-view.screen-full #panel { display: flex; }
-  #session-view.transcript #live, #session-view.screen-full #messages,
-  #session-view.screen-full #history-bar, #session-view.screen-full #panel-text
-    { display: none; }
+     last lines.  Without one, the whole screen is the only view. */
+  #session-view.transcript #panel { display: flex; }
+  #session-view.transcript #live { display: none; }
   #history-bar { display: none; align-items: center; gap: 10px; padding-bottom: 8px;
     font-size: 13px; color: var(--muted); }
   #history-bar.shown { display: flex; }
@@ -164,10 +157,7 @@
     <pre id="live" class="screen"></pre>
   </div>
   <div id="panel">
-    <div id="panel-bar">
-      <span id="panel-label"></span>
-      <button id="full">Full screen</button>
-    </div>
+    <div id="panel-label"></div>
     <pre id="panel-text" class="screen"></pre>
   </div>
   <div class="keys" id="keys"></div>
@@ -330,8 +320,7 @@ function openSession(s) {
 
 function resetSessionView() {
   past = { before: null, after: null, size: 0, loading: false, available: true,
-           failed: false, redacted: true, session: null, polls: 0,
-           fullScreen: false, transcriptTop: 0 };
+           failed: false, redacted: true, session: null, polls: 0 };
   $("live").textContent = "";
   $("panel-text").textContent = "";
   $("messages").replaceChildren();
@@ -344,26 +333,7 @@ function hasTranscript() {
 }
 
 function applyViewMode() {
-  const view = $("session-view");
-  view.classList.toggle("transcript", hasTranscript() && !past.fullScreen);
-  view.classList.toggle("screen-full", hasTranscript() && past.fullScreen);
-  $("full").textContent = past.fullScreen ? "Transcript" : "Full screen";
-}
-
-// Each view keeps its own place: the transcript where it was left, the
-// whole screen at its bottom, where a prompt is.
-function toggleFullScreen() {
-  const out = $("output");
-  if (past.fullScreen) {
-    past.fullScreen = false;
-    applyViewMode();
-    out.scrollTop = past.transcriptTop;
-  } else {
-    past.transcriptTop = out.scrollTop;
-    past.fullScreen = true;
-    applyViewMode();
-    out.scrollTop = out.scrollHeight;
-  }
+  $("session-view").classList.toggle("transcript", hasTranscript());
 }
 
 function closeSession() {
@@ -582,8 +552,7 @@ function historyNote(state) {
 }
 
 function onOutputScroll() {
-  if (past && !past.fullScreen && !past.failed
-      && $("output").scrollTop < 300) loadOlder();
+  if (past && !past.failed && $("output").scrollTop < 300) loadOlder();
 }
 
 function schedule() {
@@ -787,7 +756,6 @@ $("send").addEventListener("click", sendText);
 $("text").addEventListener("input", autosize);
 $("back").addEventListener("click", () => history.back());
 $("wrap").addEventListener("click", () => $("session-view").classList.toggle("nowrap"));
-$("full").addEventListener("click", toggleFullScreen);
 $("older").addEventListener("click", loadOlder);
 $("output").addEventListener("scroll", onOutputScroll, { passive: true });
 $("restart").addEventListener("click", openRestart);
