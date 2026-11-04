@@ -74,6 +74,28 @@
   .msg.user { background: var(--panel-2); border-radius: 12px; padding: 8px 10px; }
   .msg.tool { font-size: 12px; color: var(--muted); }
   .msg .when { font-size: 11px; color: var(--muted); }
+  .msg p, .msg ul, .msg ol, .msg blockquote, .msg h3, .msg h4, .msg h5, .msg hr,
+  .msg .md-scroll { margin: 0 0 8px; }
+  .msg > :last-child, .msg li > :last-child, .msg blockquote > :last-child
+    { margin-bottom: 0; }
+  .msg h3 { font-size: 18px; } .msg h4 { font-size: 16px; } .msg h5 { font-size: 15px; }
+  .msg ul, .msg ol { padding-left: 22px; }
+  .msg blockquote { border-left: 3px solid var(--line); padding-left: 10px;
+    color: var(--muted); }
+  .msg hr { border: 0; border-top: 1px solid var(--line); }
+  .msg a { color: var(--accent); }
+  .msg .md-url { font-size: 12px; color: var(--muted); }
+  .msg code { font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: var(--line); border-radius: 4px; padding: 1px 4px; }
+  /* Wide code and tables scroll by themselves; the page stays phone width. */
+  .msg .md-scroll { overflow-x: auto; }
+  .msg pre { margin: 0; padding: 8px 10px; white-space: pre; overflow-wrap: normal;
+    background: var(--line); border-radius: 8px; }
+  .msg pre code { background: none; padding: 0; }
+  .msg .md-lang { font-size: 11px; color: var(--muted); }
+  .msg table { border-collapse: collapse; font-size: 14px; }
+  .msg th, .msg td { border: 1px solid var(--line); padding: 4px 8px;
+    overflow-wrap: normal; min-width: 4em; max-width: 22em; vertical-align: top; }
   .keys { display: flex; gap: 14px; padding: 8px 10px 0; overflow-x: auto;
     background: var(--panel); border-top: 1px solid var(--line); }
   .key-group { display: flex; flex: 0 0 auto; gap: 2px; }
@@ -465,9 +487,370 @@ function messageElement(m) {
       [], { dateStyle: "short", timeStyle: "short" });
     el.appendChild(when);
   }
-  // Never innerHTML: a transcript holds arbitrary text.
-  el.append(m.text);
+  el.append(m.role === "tool" ? m.text : renderMarkdown(m.text));
   return el;
+}
+
+// Markdown.  Every node is built with createElement and text nodes, never
+// from markup: a transcript holds arbitrary text.  What is not well formed
+// stays as text, and past these sizes, where some scans would turn
+// quadratic, so does everything.
+const MD_MAX_MESSAGE = 200000;
+const MD_MAX_INLINE = 20000;
+const MD_MAX_DEPTH = 8;
+const MD_FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const MD_HEADING = /^ {0,3}(#{1,6})[ \t]+(.*)$/;
+const MD_RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+const MD_QUOTE = /^ {0,3}> ?(.*)$/;
+const MD_LIST = /^( *)([-*+]|\d{1,9}[.)])( +)(.*)$/;
+const MD_TABLE_RULE = /^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+
+function node(tag, ...children) {
+  const el = document.createElement(tag);
+  el.append(...children);
+  return el;
+}
+
+function renderMarkdown(text) {
+  const fragment = document.createDocumentFragment();
+  if (text.length > MD_MAX_MESSAGE) { fragment.append(text); return fragment; }
+  try {
+    renderBlocks(text.split(/\r?\n/), fragment, 0);
+  } catch (e) {
+    fragment.replaceChildren(text);
+  }
+  return fragment;
+}
+
+function renderBlocks(lines, parent, depth) {
+  if (depth > MD_MAX_DEPTH) { parent.append(lines.join("\n")); return; }
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    let m;
+    if (!line.trim()) {
+      i++;
+    } else if ((m = line.match(MD_FENCE)) && !(m[1][0] === "`" && m[2].includes("`"))) {
+      i = renderFence(lines, i, m, parent);
+    } else if ((m = line.match(MD_HEADING))) {
+      const heading = node("h" + Math.min(m[1].length + 2, 5));
+      renderInline(m[2], heading, 0);
+      parent.append(heading);
+      i++;
+    } else if (MD_RULE.test(line)) {
+      parent.append(node("hr"));
+      i++;
+    } else if (MD_QUOTE.test(line)) {
+      const inner = [];
+      for (; i < lines.length && (m = lines[i].match(MD_QUOTE)); i++) inner.push(m[1]);
+      const quote = node("blockquote");
+      renderBlocks(inner, quote, depth + 1);
+      parent.append(quote);
+    } else if (MD_LIST.test(line)) {
+      i = renderList(lines, i, parent, depth);
+    } else if (isTableStart(lines, i)) {
+      i = renderTable(lines, i, parent);
+    } else {
+      const start = i++;
+      while (i < lines.length && lines[i].trim() && !startsBlock(lines, i)) i++;
+      const paragraph = node("p");
+      renderInline(lines.slice(start, i).join("\n"), paragraph, 0);
+      parent.append(paragraph);
+    }
+  }
+}
+
+function startsBlock(lines, i) {
+  const line = lines[i];
+  return MD_FENCE.test(line) || MD_HEADING.test(line) || MD_RULE.test(line)
+    || MD_QUOTE.test(line) || MD_LIST.test(line) || isTableStart(lines, i);
+}
+
+// An unclosed fence runs to the end of the message.
+function renderFence(lines, start, open, parent) {
+  const close = new RegExp("^ {0,3}" + open[1][0] + "{" + open[1].length + ",}[ \\t]*$");
+  let end = start + 1;
+  while (end < lines.length && !close.test(lines[end])) end++;
+  const language = open[2].trim();
+  if (language) parent.append(node("div", language));
+  if (language) parent.lastChild.className = "md-lang";
+  const scroll = node("div", node("pre", node("code", lines.slice(start + 1, end).join("\n"))));
+  scroll.className = "md-scroll";
+  parent.append(scroll);
+  return end + 1;
+}
+
+function renderList(lines, start, parent, depth) {
+  const first = lines[start].match(MD_LIST);
+  const ordered = /\d/.test(first[2]);
+  const list = node(ordered ? "ol" : "ul");
+  if (ordered) list.start = parseInt(first[2], 10);
+  const indent = first[1].length;
+  let i = start;
+  while (i < lines.length) {
+    const m = lines[i].match(MD_LIST);
+    if (!m || MD_RULE.test(lines[i]) || m[1].length < indent
+        || /\d/.test(m[2]) !== ordered) break;
+    const body = [m[4]];
+    const content = m[1].length + m[2].length + (m[3].length > 4 ? 1 : m[3].length);
+    i++;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (!line.trim()) {
+        let next = i + 1;
+        while (next < lines.length && !lines[next].trim()) next++;
+        if (next === lines.length || leadingSpaces(lines[next]) < content) break;
+        body.push("");
+      } else if (leadingSpaces(line) >= content) {
+        body.push(line.slice(content));
+      } else if (startsBlock(lines, i)) {
+        break;
+      } else {
+        body.push(line.trim());
+      }
+      i++;
+    }
+    const item = node("li");
+    renderBlocks(body, item, depth + 1);
+    list.append(item);
+    while (i < lines.length && !lines[i].trim()) i++;
+  }
+  parent.append(list);
+  return i;
+}
+
+function leadingSpaces(line) {
+  return line.length - line.trimStart().length;
+}
+
+function isTableStart(lines, i) {
+  return i + 1 < lines.length && lines[i].includes("|")
+    && MD_TABLE_RULE.test(lines[i + 1])
+    && splitRow(lines[i]).length === splitRow(lines[i + 1]).length;
+}
+
+function renderTable(lines, start, parent) {
+  const aligns = splitRow(lines[start + 1]).map((cell) =>
+    /^:-+:$/.test(cell) ? "center" : /-:$/.test(cell) ? "right" : "");
+  const row = (line, tag) => {
+    const tr = node("tr");
+    splitRow(line).forEach((text, column) => {
+      const cell = node(tag);
+      if (aligns[column]) cell.style.textAlign = aligns[column];
+      renderInline(text, cell, 0);
+      tr.append(cell);
+    });
+    return tr;
+  };
+  const body = node("tbody");
+  let i = start + 2;
+  for (; i < lines.length && lines[i].trim() && lines[i].includes("|"); i++)
+    body.append(row(lines[i], "td"));
+  const scroll = node("div", node("table", node("thead", row(lines[start], "th")), body));
+  scroll.className = "md-scroll";
+  parent.append(scroll);
+  return i;
+}
+
+// Splits on pipes that are neither escaped nor in a code span.
+function splitRow(line) {
+  const text = line.trim().replace(/^\|/, "");
+  const cells = [];
+  let cell = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") {
+      cell += ch + (text[i + 1] ?? "");
+      i++;
+    } else if (ch === "`") {
+      const end = codeSpanEnd(text, i);
+      if (end === -1) { cell += ch; continue; }
+      cell += text.slice(i, end);
+      i = end - 1;
+    } else if (ch === "|") {
+      cells.push(cell.trim());
+      cell = "";
+    } else {
+      cell += ch;
+    }
+  }
+  if (cell.trim() || !text.endsWith("|")) cells.push(cell.trim());
+  return cells;
+}
+
+// Returns the index just past the code span opening at START, or -1.
+function codeSpanEnd(text, start) {
+  let open = start;
+  while (text[open] === "`") open++;
+  const run = open - start;
+  let i = open;
+  while ((i = text.indexOf("`", i)) !== -1) {
+    let end = i;
+    while (text[end] === "`") end++;
+    if (end - i === run) return end;
+    i = end;
+  }
+  return -1;
+}
+
+const MD_ALNUM = /[\p{L}\p{N}]/u;
+const MD_ESCAPABLE = /[!-\/:-@\[-`{-~]/;
+const MD_BARE_URL = /https?:\/\/[^\s<>]+/iy;
+
+function renderInline(text, parent, depth, inLink) {
+  if (text.length > MD_MAX_INLINE || depth > MD_MAX_DEPTH) { parent.append(text); return; }
+  // A failed search for a closer would fail again from further on, so each
+  // kind of marker is searched for in vain at most once.
+  const unclosed = new Set();
+  let plain = "";
+  const flush = () => { if (plain) parent.append(plain); plain = ""; };
+  const add = (el, next) => { flush(); parent.append(el); return next; };
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    let next = -1;
+    if (ch === "\\" && MD_ESCAPABLE.test(text[i + 1] ?? "")) {
+      plain += text[i + 1];
+      next = i + 2;
+    } else if (ch === "`") {
+      const end = codeSpanEnd(text, i);
+      if (end !== -1) next = add(codeElement(text, i, end), end);
+      // An unclosed run stays literal, as does each of its backticks.
+      else while (text[i + 1] === "`") { plain += ch; i++; }
+    } else if (ch === "*" || ch === "_") {
+      next = renderEmphasis(text, i, ch, parent, depth, inLink, unclosed, flush);
+    } else if (!inLink && ch === "[" && !unclosed.has("[")) {
+      next = renderLink(text, i, parent, depth, unclosed, flush);
+    } else if (!inLink && ch === "<") {
+      const end = text.indexOf(">", i);
+      const url = end === -1 ? null : safeUrl(text.slice(i + 1, end));
+      if (url) next = add(linkElement(url, text.slice(i + 1, end)), end + 1);
+    } else if (!inLink && (ch === "h" || ch === "H") && !MD_ALNUM.test(text[i - 1] ?? "")) {
+      MD_BARE_URL.lastIndex = i;
+      const m = MD_BARE_URL.exec(text);
+      const raw = m && trimUrl(m[0]);
+      const url = raw && safeUrl(raw);
+      if (url) next = add(linkElement(url, raw), i + raw.length);
+    }
+    if (next === -1) { plain += ch; next = i + 1; }
+    i = next;
+  }
+  flush();
+}
+
+function codeElement(text, start, end) {
+  let run = 0;
+  while (text[start + run] === "`") run++;
+  let code = text.slice(start + run, end - run);
+  if (/^ .*[^ ].* $|^ [^ ] $/s.test(code)) code = code.slice(1, -1);
+  return node("code", code);
+}
+
+// Renders the emphasis opening at START and returns where it ends, or -1.
+function renderEmphasis(text, start, ch, parent, depth, inLink, unclosed, flush) {
+  const token = text[start + 1] === ch ? ch + ch : ch;
+  if (unclosed.has(token)) return -1;
+  const after = text[start + token.length] ?? "";
+  if (!after || /\s/.test(after)) return -1;
+  if (ch === "_" && MD_ALNUM.test(text[start - 1] ?? "")) return -1;
+  const close = findCloser(text, start + token.length, token, ch);
+  if (close === -1) { unclosed.add(token); return -1; }
+  const el = node(token.length === 2 ? "strong" : "em");
+  renderInline(text.slice(start + token.length, close), el, depth + 1, inLink);
+  flush();
+  parent.append(el);
+  return close + token.length;
+}
+
+function findCloser(text, from, token, ch) {
+  for (let i = from; i < text.length; i++) {
+    if (text[i] === "\\") { i++; continue; }
+    if (text[i] === "`") {
+      const end = codeSpanEnd(text, i);
+      if (end !== -1) { i = end - 1; continue; }
+      while (text[i + 1] === "`") i++;
+      continue;
+    }
+    if (!text.startsWith(token, i) || i === from) continue;
+    // In a run such as "***", the closer is its last characters.
+    while (text[i + token.length] === ch) i++;
+    if (/\s/.test(text[i - 1])) continue;
+    if (ch === "_" && MD_ALNUM.test(text[i + token.length] ?? "")) continue;
+    return i;
+  }
+  return -1;
+}
+
+// Renders "[label](url)" at START and returns where it ends, or -1.  With
+// a URL other than http(s), all of it stays as text.
+function renderLink(text, start, parent, depth, unclosed, flush) {
+  let level = 0;
+  let i = start;
+  for (; i < text.length; i++) {
+    if (text[i] === "\\") { i++; continue; }
+    if (text[i] === "`") {
+      const end = codeSpanEnd(text, i);
+      if (end !== -1) i = end - 1;
+      continue;
+    }
+    if (text[i] === "[") level++;
+    if (text[i] === "]" && --level === 0) break;
+  }
+  if (i >= text.length) { unclosed.add("["); return -1; }
+  if (text[i + 1] !== "(") return -1;
+  let parens = 0;
+  let end = i + 1;
+  for (; end < text.length; end++) {
+    if (/\s/.test(text[end])) return -1;
+    if (text[end] === "(") parens++;
+    if (text[end] === ")" && --parens === 0) break;
+  }
+  if (end >= text.length) return -1;
+  const raw = text.slice(i + 2, end);
+  const url = safeUrl(raw);
+  if (!url) return -1;
+  const label = text.slice(start + 1, i);
+  flush();
+  parent.append(...linkNodes(url, raw, label, depth));
+  return end + 1;
+}
+
+function linkElement(url, raw) {
+  const fragment = document.createDocumentFragment();
+  fragment.append(...linkNodes(url, raw, raw, 0));
+  return fragment;
+}
+
+// The Android app cancels navigation to other origins, so there a link
+// cannot be followed and its address is the only way to reach it.
+function linkNodes(url, raw, label, depth) {
+  const link = node("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  renderInline(label, link, depth + 1, true);
+  if (label === raw || !/; wv\)/.test(navigator.userAgent)) return [link];
+  const address = node("span", " (" + raw + ")");
+  address.className = "md-url";
+  return [link, address];
+}
+
+function safeUrl(raw) {
+  if (!/^https?:\/\/[^\s\u0000-\u001f]+$/i.test(raw)) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Leaves sentence punctuation and an unopened bracket out of a bare URL.
+function trimUrl(raw) {
+  let url = raw.replace(/[.,;:!?'"]+$/, "");
+  while (url.endsWith(")") && url.split(")").length > url.split("(").length)
+    url = url.slice(0, -1).replace(/[.,;:!?'"]+$/, "");
+  return url;
 }
 
 function messageElements(messages) {
