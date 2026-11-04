@@ -28,7 +28,8 @@
 ;; AI sessions.  `agent-remote-mode' serves a touch-friendly page and a
 ;; JSON API on the machine's Tailscale address: the page lists every
 ;; session with its state and account, shows a session's recent
-;; output, sends typed replies and single keys to it, restarts it
+;; output and, on request, its past conversation from the session's
+;; transcript, sends typed replies and single keys to it, restarts it
 ;; under another account when it has run out of usage, starts a new
 ;; session beside it, and exits it.  Because it
 ;; drives the session buffers themselves, it reaches Claude and Codex
@@ -52,6 +53,8 @@
 ;;;; Forward declarations
 
 (defvar eat-terminal)
+(defvar agent-log-redact-enabled)
+(declare-function agent-log-redact-text "agent-log-redact" (text))
 (declare-function eat-term-send-string "eat" (terminal string))
 (declare-function claude-code-send-escape "claude-code" ())
 
@@ -98,6 +101,14 @@ Connections from any other address are closed without a response."
 
 (defcustom agent-remote-output-lines 300
   "Maximum number of trailing lines of session output sent to the phone."
+  :type 'natnum
+  :group 'agent-remote)
+
+(defcustom agent-remote-history-bytes (* 4 1024 1024)
+  "Most bytes of a session's transcript that one history request reads.
+A request runs on Emacs's main thread, at roughly 12 ms per MiB, so
+this bounds how long it can hold Emacs up.  Most of a transcript is not
+conversation: expect 2 to 15 KiB of text per MiB read."
   :type 'natnum
   :group 'agent-remote)
 
@@ -313,6 +324,8 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
           (agent-remote--json (list :sessions (agent-remote--sessions))))
          ((and (equal method "GET") (equal path "/api/output"))
           (agent-remote--json (agent-remote--output request)))
+         ((and (equal method "GET") (equal path "/api/history"))
+          (agent-remote--json (agent-remote--history request)))
          ((and (equal method "GET") (equal path "/api/accounts"))
           (agent-remote--json (agent-remote--accounts request)))
          ((and (equal method "GET") (equal path "/api/backends"))
@@ -399,6 +412,74 @@ are dropped."
       (let ((end (point)))
         (forward-line (- 1 agent-remote-output-lines))
         (buffer-substring-no-properties (point) end)))))
+
+(defun agent-remote--history (request)
+  "Return a bounded stretch of the past conversation of REQUEST's session.
+The session comes from REQUEST's `id', and its transcript from the
+session buffer alone; `before' and `after' are only byte offsets into
+it.  The stretch holds at most `agent-remote-history-bytes' bytes.  A
+session whose backend keeps no transcript, or which has none yet, gets
+`available' false, and its phone page shows just the screen."
+  (let* ((buffer (agent-remote--session-buffer
+                  (agent-remote--query-param request "id")))
+         (before (agent-remote--offset-param request "before"))
+         (after (agent-remote--offset-param request "after"))
+         (backend (agent-backend (agent--detect-backend buffer)))
+         (reader (and backend (agent-backend-session-history backend)))
+         (history (and reader
+                       (funcall reader buffer agent-remote-history-bytes
+                                before after))))
+    (if history
+        (agent-remote--history-response history)
+      (list :available :false))))
+
+(defun agent-remote--offset-param (request name)
+  "Return query parameter NAME of REQUEST as a byte offset, or nil if absent.
+Signal a user error when it is not a natural number."
+  (when-let* ((value (agent-remote--query-param request name)))
+    (unless (string-match-p "\\`[0-9]+\\'" value)
+      (user-error "Bad offset: %s" name))
+    (string-to-number value)))
+
+(defun agent-remote--history-response (history)
+  "Return the response describing HISTORY, with its text redacted.
+HISTORY is a plist as `agent-claude-cli-transcript-history' returns.
+`redacted' says whether secrets were looked for, so the page can warn
+when they were not."
+  (let ((redactor (agent-remote--redactor)))
+    (list :available t
+          :redacted (if redactor t :false)
+          :messages (vconcat
+                     (mapcar (lambda (message)
+                               (agent-remote--history-message message redactor))
+                             (plist-get history :messages)))
+          :before (plist-get history :before)
+          :after (plist-get history :after)
+          :size (plist-get history :size)
+          :gap (if (plist-get history :gap) t :false))))
+
+(defun agent-remote--redactor ()
+  "Return the function that redacts secrets from text, or nil if there is none.
+`agent-log' is optional, so there is none when it is not installed, when
+it fails to load, or when `agent-log-redact-enabled' is nil.  Loading
+`agent-log-redact' also turns on its redaction of rendered logs."
+  (when (and (ignore-errors (require 'agent-log-redact nil t))
+             agent-log-redact-enabled)
+    #'agent-log-redact-text))
+
+(defun agent-remote--history-message (message redactor)
+  "Return a copy of history MESSAGE whose text went through REDACTOR.
+A nil REDACTOR leaves the text as it is.  When REDACTOR fails, as a
+regexp can on very long text, hide the text rather than serve it
+unredacted."
+  (let ((text (plist-get message :text)))
+    (list :role (plist-get message :role)
+          :time (plist-get message :time)
+          :text (if redactor
+                    (condition-case nil
+                        (funcall redactor text)
+                      (error "[hidden: secret redaction failed]"))
+                  text))))
 
 (defun agent-remote--send (request)
   "Submit the text in REQUEST's JSON body to the session it names."

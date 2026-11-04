@@ -45,10 +45,28 @@
   .empty { color: var(--muted); text-align: center; margin-top: 40px; }
   .back { background: var(--panel-2); border-radius: 10px; padding: 8px 12px;
     font-size: 18px; }
-  #output { flex: 1; overflow: auto; margin: 0; padding: 10px 12px;
+  /* Scroll anchoring would double the correction loadOlder makes. */
+  #output { flex: 1; overflow: auto; overflow-anchor: none; padding: 10px 12px;
+    background: var(--bg); }
+  #live { margin: 0;
     font: 12px/1.35 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    white-space: pre-wrap; word-break: break-word; background: var(--bg); }
-  #output.nowrap { white-space: pre; word-break: normal; }
+    white-space: pre-wrap; word-break: break-word; }
+  #live.nowrap { white-space: pre; word-break: normal; }
+  #history-bar { display: none; align-items: center; gap: 10px; padding-bottom: 8px;
+    font-size: 13px; color: var(--muted); }
+  #history-bar.shown { display: flex; }
+  #history-note { flex: 1; min-width: 0; }
+  #older { flex: 0 0 auto; background: var(--panel-2); border-radius: 10px;
+    padding: 8px 12px; font-size: 13px; }
+  #older:disabled { opacity: .5; }
+  .msg { font-size: 15px; line-height: 1.4; margin: 0 0 10px; white-space: pre-wrap;
+    overflow-wrap: anywhere; }
+  .msg.user { background: var(--panel-2); border-radius: 12px; padding: 8px 10px; }
+  .msg.tool { font-size: 12px; color: var(--muted); }
+  .msg .when { font-size: 11px; color: var(--muted); }
+  #live-rule { display: none; border-top: 1px solid var(--line); margin: 12px 0 8px;
+    padding-top: 4px; font-size: 12px; color: var(--muted); }
+  #live-rule.shown { display: block; }
   .keys { display: flex; gap: 14px; padding: 8px 10px 0; overflow-x: auto;
     background: var(--panel); border-top: 1px solid var(--line); }
   .key-group { display: flex; flex: 0 0 auto; gap: 2px; }
@@ -123,7 +141,15 @@
       <button class="toggle danger" id="exit">Exit</button>
     </div>
   </header>
-  <pre id="output"></pre>
+  <div id="output">
+    <div id="history-bar">
+      <span id="history-note"></span>
+      <button id="older">Load older</button>
+    </div>
+    <div id="messages"></div>
+    <div id="live-rule">Live screen</div>
+    <pre id="live"></pre>
+  </div>
   <div class="keys" id="keys"></div>
   <div class="compose">
     <textarea id="text" rows="1" placeholder="Reply…"></textarea>
@@ -188,6 +214,8 @@ const STATE_LABEL = { "waiting": "waiting", "background-waiting": "bg work",
 const STATE_ORDER = { "waiting": 0, "background-waiting": 1, "unknown": 2, "busy": 3 };
 let current = null;
 let timer = null;
+// The conversation loaded above the live screen, reset per session.
+let past = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -273,11 +301,20 @@ function show(viewId) {
 function openSession(s) {
   current = s.id;
   $("session-title").textContent = s.name;
-  $("output").textContent = "";
+  resetSessionView();
   show("session-view");
   history.pushState({ session: s.id }, "");
-  refreshSession(true);
+  refreshSession(true).then(loadOlder);
   schedule();
+}
+
+function resetSessionView() {
+  past = { before: null, after: null, size: 0, loading: false, available: true,
+           failed: false, redacted: true, atBottom: true };
+  $("live").textContent = "";
+  $("messages").replaceChildren();
+  $("live-rule").classList.remove("shown");
+  $("history-bar").classList.remove("shown");
 }
 
 function closeSession() {
@@ -297,7 +334,8 @@ async function refreshSession(forceBottom) {
     $("session-title").textContent = data.name;
     const out = $("output");
     const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
-    if (out.textContent !== data.output) out.textContent = data.output;
+    const live = $("live");
+    if (live.textContent !== data.output) live.textContent = data.output;
     if (forceBottom || atBottom) out.scrollTop = out.scrollHeight;
     const badge = $("session-badge");
     badge.className = "badge " + data.state;
@@ -310,6 +348,152 @@ async function refreshSession(forceBottom) {
     badge.className = "badge";
     badge.textContent = "offline";
   }
+}
+
+// Stop asking after this many stretches of a transcript with no text,
+// which is what a long run of tool output looks like.
+const MAX_EMPTY_STRETCHES = 8;
+
+async function fetchPast(id, params) {
+  const query = new URLSearchParams({ id, ...params });
+  return api("/api/history?" + query);
+}
+
+function messageElement(m) {
+  const el = document.createElement("div");
+  el.className = "msg " + m.role;
+  if (m.role === "user" && m.time) {
+    const when = document.createElement("div");
+    when.className = "when";
+    when.textContent = new Date(m.time).toLocaleString(
+      [], { dateStyle: "short", timeStyle: "short" });
+    el.appendChild(when);
+  }
+  // Never innerHTML: a transcript holds arbitrary text.
+  el.append(m.text);
+  return el;
+}
+
+function messageElements(messages) {
+  const fragment = document.createDocumentFragment();
+  for (const m of messages) fragment.appendChild(messageElement(m));
+  return fragment;
+}
+
+async function loadOlder() {
+  const state = past;
+  if (!current || !state || state.loading || !state.available
+      || state.before === 0) return;
+  const id = current;
+  state.loading = true;
+  state.failed = false;
+  renderHistoryBar();
+  try {
+    for (let i = 0; i < MAX_EMPTY_STRETCHES; i++) {
+      const data = await fetchPast(
+        id, state.before === null ? {} : { before: state.before });
+      if (state !== past) return;
+      if (!data.available) { state.available = false; break; }
+      state.before = data.before;
+      if (state.after === null) state.after = data.after;
+      state.size = data.size;
+      state.redacted = data.redacted;
+      if (data.messages.length) { prependMessages(data.messages); break; }
+      if (state.before === 0) break;
+    }
+  } catch (e) {
+    if (state !== past) return;
+    state.failed = true;
+  }
+  state.loading = false;
+  renderHistoryBar();
+}
+
+function prependMessages(messages) {
+  keepingView(() => {
+    $("messages").prepend(messageElements(messages));
+    $("live-rule").classList.add("shown");
+  });
+}
+
+// Runs CHANGE, which adds content above the view, leaving what is on
+// screen where it is.
+function keepingView(change) {
+  const out = $("output");
+  const height = out.scrollHeight;
+  const top = out.scrollTop;
+  change();
+  out.scrollTop = top + out.scrollHeight - height;
+}
+
+// Fetches what the session added since the history was loaded, which the
+// screen may no longer show.  More than one stretch behind, it starts
+// over from the newest stretch rather than leave a hole.
+async function catchUp() {
+  const state = past;
+  if (!current || !state || state.loading || state.after === null) return;
+  const id = current;
+  state.loading = true;
+  try {
+    const data = await fetchPast(id, { after: state.after });
+    if (state !== past) return;
+    if (data.available) {
+      appendMessages(data.messages, data.gap);
+      if (data.gap) state.before = data.before;
+      state.after = data.after;
+      state.size = data.size;
+      state.redacted = data.redacted;
+    }
+  } catch (e) {
+    // The next scroll up tries again from the same offset.
+  }
+  state.loading = false;
+  renderHistoryBar();
+}
+
+// Content touching the live screen stays put; content higher up is
+// already unaffected by what is added below it.
+function appendMessages(messages, replace) {
+  const out = $("output");
+  const box = $("messages");
+  const change = () => {
+    if (replace) box.replaceChildren();
+    box.append(messageElements(messages));
+    $("live-rule").classList.add("shown");
+  };
+  const seesLive = out.scrollTop + out.clientHeight
+    > box.offsetTop + box.offsetHeight;
+  if (seesLive) keepingView(change); else change();
+}
+
+function renderHistoryBar() {
+  const state = past;
+  const older = $("older");
+  keepingView(() => {
+    $("history-bar").classList.toggle(
+      "shown", state.failed || (state.available && state.before !== null));
+    older.hidden = state.before === 0;
+    older.disabled = state.loading;
+    older.textContent = state.failed ? "Retry" : "Load older";
+    $("history-note").textContent = historyNote(state);
+  });
+}
+
+function historyNote(state) {
+  if (state.failed) return "Could not load the history.";
+  const warning = state.redacted ? "" : "Secrets are not redacted. ";
+  if (state.before === 0) return warning + "Start of the conversation.";
+  const percent = Math.max(1, Math.round(
+    100 * (state.size - state.before) / state.size));
+  return warning + "Showing the last " + percent + "% of the transcript.";
+}
+
+function onOutputScroll() {
+  const out = $("output");
+  const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
+  if (past && past.atBottom && !atBottom) catchUp();
+  if (past) past.atBottom = atBottom;
+  if (out.scrollTop < 300 && past && !past.failed) loadOlder();
 }
 
 function schedule() {
@@ -407,8 +591,8 @@ function closeSheets() {
 function followSession(id) {
   closeSheets();
   current = id;
-  $("output").textContent = "";
-  setTimeout(() => refreshSession(true), 1500);
+  resetSessionView();
+  setTimeout(() => refreshSession(true).then(loadOlder), 1500);
 }
 
 async function openNew() {
@@ -482,7 +666,7 @@ function alertError(e) {
   const badge = $("session-badge");
   badge.className = "badge";
   badge.textContent = "error";
-  $("output").textContent += "\n\n[agent-remote] " + e.message;
+  $("live").textContent += "\n\n[agent-remote] " + e.message;
 }
 
 function autosize() {
@@ -506,7 +690,9 @@ for (const keys of KEY_GROUPS) {
 $("send").addEventListener("click", sendText);
 $("text").addEventListener("input", autosize);
 $("back").addEventListener("click", () => history.back());
-$("wrap").addEventListener("click", () => $("output").classList.toggle("nowrap"));
+$("wrap").addEventListener("click", () => $("live").classList.toggle("nowrap"));
+$("older").addEventListener("click", loadOlder);
+$("output").addEventListener("scroll", onOutputScroll, { passive: true });
 $("restart").addEventListener("click", openRestart);
 $("restart-cancel").addEventListener("click", closeSheets);
 $("restart-go").addEventListener("click", doRestart);

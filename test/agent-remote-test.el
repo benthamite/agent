@@ -10,6 +10,7 @@
                            (file-name-directory (or load-file-name buffer-file-name))))
 (require 'cl-lib)
 (require 'agent-remote)
+(require 'agent-claude-cli)
 
 ;;;; Helpers
 
@@ -242,6 +243,177 @@ HOST overrides the Host header, which defaults to the server's own."
     (with-current-buffer buffer (insert "a\nb\nc\nd"))
     (let ((agent-remote-output-lines 2))
       (should (equal (agent-remote--buffer-tail buffer) "c\nd")))))
+
+;;;; History
+
+(defconst agent-remote-test--transcript
+  (concat
+   "{\"type\":\"user\",\"timestamp\":\"2026-11-04T10:00:00Z\",\"message\":{\"content\":\"older question\"}}\n"
+   "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{}}]}}\n"
+   "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"older ñ answer\"}]}}\n")
+  "A fixture transcript.")
+
+(defmacro agent-remote-test--with-history (buffer &rest body)
+  "Run BODY with session BUFFER reading history from a fixture transcript.
+BODY can refer to the transcript as `file'."
+  (declare (indent 1))
+  `(let ((file (make-temp-file "agent-remote-transcript-" nil ".jsonl")))
+     (unwind-protect
+         (let ((coding-system-for-write 'utf-8-unix)
+               (backend (agent-backend--create
+                         :session-history
+                         (lambda (_buffer bytes &optional before after)
+                           (agent-claude-cli-transcript-history
+                            file bytes before after)))))
+           (write-region agent-remote-test--transcript nil file nil 'silent)
+           (agent-remote-test--with-session ,buffer
+             (cl-letf (((symbol-function 'agent-backend) (lambda (_) backend))
+                       ((symbol-function 'agent-remote--redactor) #'ignore))
+               (agent-remote-test--with-server ,@body))))
+       (delete-file file))))
+
+(defun agent-remote-test--history-path (buffer &optional query)
+  "Return the history path for session BUFFER, with extra QUERY text."
+  (concat "/api/history?id=" (url-hexify-string (buffer-name buffer))
+          (or query "")))
+
+(ert-deftest agent-remote-test-history-returns-conversation ()
+  "The history endpoint returns the messages and how much there is."
+  (agent-remote-test--with-history buffer
+    (let* ((response (agent-remote-test--http
+                      "GET" (agent-remote-test--history-path buffer)))
+           (data (agent-remote-test--json response)))
+      (should (= (agent-remote-test--status response) 200))
+      (should (eq (alist-get 'available data) t))
+      (should (equal (mapcar (lambda (m) (alist-get 'role m))
+                             (alist-get 'messages data))
+                     '("user" "tool" "assistant")))
+      (should (equal (alist-get 'text (car (alist-get 'messages data)))
+                     "older question"))
+      (should (equal (alist-get 'text (nth 2 (alist-get 'messages data)))
+                     "older ñ answer"))
+      (should (= (alist-get 'before data) 0))
+      (should (= (alist-get 'size data)
+                 (string-bytes agent-remote-test--transcript)))
+      (should (eq (alist-get 'redacted data) :false)))))
+
+(ert-deftest agent-remote-test-history-is-bounded-by-the-option ()
+  "A request reads no more than `agent-remote-history-bytes'."
+  (agent-remote-test--with-history buffer
+    (let* ((agent-remote-history-bytes 60)
+           (data (agent-remote-test--json
+                  (agent-remote-test--http
+                   "GET" (agent-remote-test--history-path buffer)))))
+      (should (> (alist-get 'before data) 0)))))
+
+(ert-deftest agent-remote-test-history-takes-offsets-only ()
+  "Offsets must be numbers, and nothing in a request can name a file."
+  (agent-remote-test--with-history buffer
+    (should (= 400 (agent-remote-test--status
+                    (agent-remote-test--http
+                     "GET" (agent-remote-test--history-path
+                            buffer "&before=../../etc/passwd")))))
+    (should (= 400 (agent-remote-test--status
+                    (agent-remote-test--http
+                     "GET" (agent-remote-test--history-path buffer "&after=-1")))))
+    (let ((other (make-temp-file "agent-remote-other-" nil ".jsonl"
+                                 "{\"type\":\"user\",\"message\":{\"content\":\"other file\"}}\n")))
+      (unwind-protect
+          (let ((response (agent-remote-test--http
+                           "GET" (agent-remote-test--history-path
+                                  buffer (concat "&file=" other "&path=" other)))))
+            (should-not (string-search "other file" response))
+            (should (string-search "older question" response))
+            (should-not (string-search (file-name-nondirectory file) response)))
+        (delete-file other)))))
+
+(ert-deftest agent-remote-test-history-requires-a-session-and-the-right-host ()
+  "History obeys the same session and authority checks as the rest."
+  (agent-remote-test--with-history buffer
+    (should (= 400 (agent-remote-test--status
+                    (agent-remote-test--http "GET" "/api/history?id=nope"))))
+    (should (= 400 (agent-remote-test--status
+                    (agent-remote-test--http "GET" "/api/history"))))
+    (should (= 421 (agent-remote-test--status
+                    (agent-remote-test--http
+                     "GET" (agent-remote-test--history-path buffer)
+                     nil nil "evil.example:80"))))))
+
+(ert-deftest agent-remote-test-history-unavailable-without-a-reader ()
+  "A backend with no transcript support, like Codex, gets `available' false."
+  (agent-remote-test--with-session buffer
+    (cl-letf (((symbol-function 'agent-backend)
+               (lambda (_) (agent-backend--create))))
+      (agent-remote-test--with-server
+        (let ((data (agent-remote-test--json
+                     (agent-remote-test--http
+                      "GET" (agent-remote-test--history-path buffer)))))
+          (should (eq (alist-get 'available data) :false)))))))
+
+(ert-deftest agent-remote-test-history-unavailable-without-a-transcript ()
+  "A session with no transcript yet gets `available' false."
+  (agent-remote-test--with-session buffer
+    (cl-letf (((symbol-function 'agent-backend)
+               (lambda (_) (agent-backend--create :session-history #'ignore))))
+      (agent-remote-test--with-server
+        (let ((data (agent-remote-test--json
+                     (agent-remote-test--http
+                      "GET" (agent-remote-test--history-path buffer)))))
+          (should (eq (alist-get 'available data) :false)))))))
+
+(ert-deftest agent-remote-test-output-never-reads-history ()
+  "The polled output endpoint does not touch the transcript."
+  (agent-remote-test--with-session buffer
+    (cl-letf (((symbol-function 'agent-backend)
+               (lambda (_) (agent-backend--create
+                            :session-history
+                            (lambda (&rest _) (error "History was read"))))))
+      (agent-remote-test--with-server
+        (should (= 200 (agent-remote-test--status
+                        (agent-remote-test--http
+                         "GET" (concat "/api/output?id="
+                                       (url-hexify-string (buffer-name buffer)))))))))))
+
+(ert-deftest agent-remote-test-history-message-redacts ()
+  "Message text goes through the redactor, and is hidden if that fails."
+  (let ((message '(:role "user" :text "secret" :time "t")))
+    (should (equal (agent-remote--history-message message #'upcase)
+                   '(:role "user" :time "t" :text "SECRET")))
+    (should (equal (plist-get (agent-remote--history-message
+                               message (lambda (_) (error "Stack overflow")))
+                              :text)
+                   "[hidden: secret redaction failed]"))
+    (should (equal (plist-get (agent-remote--history-message message nil) :text)
+                   "secret"))))
+
+(ert-deftest agent-remote-test-history-reports-redaction ()
+  "The response says whether a redactor ran."
+  (should (eq (plist-get (cl-letf (((symbol-function 'agent-remote--redactor)
+                                    (lambda () #'identity)))
+                           (agent-remote--history-response '(:messages nil)))
+                         :redacted)
+              t))
+  (should (eq (plist-get (cl-letf (((symbol-function 'agent-remote--redactor)
+                                    #'ignore))
+                           (agent-remote--history-response '(:messages nil)))
+                         :redacted)
+              :false)))
+
+(ert-deftest agent-remote-test-redactor-absent-without-agent-log ()
+  "Without `agent-log' there is no redactor, and no error."
+  (let ((load-path nil)
+        (features (remq 'agent-log-redact features)))
+    (should-not (agent-remote--redactor))))
+
+(ert-deftest agent-remote-test-redactor-uses-agent-log ()
+  "With `agent-log' installed, a token in the history is redacted."
+  (skip-unless (locate-library "agent-log-redact"))
+  (let ((redactor (agent-remote--redactor))
+        (token (concat "ghp_" (make-string 40 ?a))))
+    (should (eq redactor 'agent-log-redact-text))
+    (should-not (string-search token (funcall redactor (concat "x " token))))
+    (let ((agent-log-redact-enabled nil))
+      (should-not (agent-remote--redactor)))))
 
 (ert-deftest agent-remote-test-send-submits-text ()
   "The send endpoint submits the text to the named session."
