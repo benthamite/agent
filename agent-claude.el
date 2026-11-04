@@ -260,6 +260,7 @@ Source: lobehub/lobe-icons (MIT).")
   :sync-theme #'agent-claude--sync-theme
   :session-headers #'agent-claude--session-headers
   :session-prompt #'agent-claude--session-prompt
+  :session-history #'agent-claude--session-history
   :prepare-fork #'agent-claude--prepare-fork
   :resume #'claude-code-resume)
 
@@ -1543,6 +1544,32 @@ id to look up.  Start a query when the result is missing or older than
   "Return the Claude session id of BUFFER, or nil when not yet known."
   (when-let* ((session (agent-session buffer)))
     (agent-session-id session)))
+
+(defun agent-claude--session-history (buffer bytes &optional before after)
+  "Return past conversation of Claude session BUFFER, or nil if it has none.
+BYTES, BEFORE and AFTER are as in `agent-claude-cli-transcript-history'."
+  (when-let* ((file (agent-claude--session-transcript buffer)))
+    (agent-claude-cli-transcript-history file bytes before after)))
+
+(defun agent-claude--session-transcript (buffer)
+  "Return the transcript file of Claude session BUFFER, or nil.
+The file is derived only from the session's own id, directory and
+account.  An id that could not name a file is refused, so nothing a
+session id holds can lead outside the account's projects directory."
+  (when-let* ((session (agent-session buffer))
+              (id (agent-session-id session))
+              ((string-match-p "\\`[A-Za-z0-9_-]+\\'" id)))
+    (let* ((projects (expand-file-name
+                      "projects/" (agent-claude--session-config-dir buffer)))
+           (directory (agent-session-directory session))
+           (expected (and (stringp directory)
+                          (expand-file-name
+                           (concat (agent-claude-cli-encode-project-cwd directory)
+                                   "/" id ".jsonl")
+                           projects))))
+      (if (and expected (file-exists-p expected))
+          expected
+        (agent-claude-cli--session-file id projects)))))
 
 (defun agent-claude--session-config-dir (buffer)
   "Return the Claude config directory session BUFFER runs under."

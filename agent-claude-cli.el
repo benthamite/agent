@@ -319,12 +319,15 @@ preferring the original file to any symlink of it, and read the first
   (when-let* ((file (agent-claude-cli--session-file session-id)))
     (agent-claude-cli--transcript-cwd file)))
 
-(defun agent-claude-cli--session-file (session-id)
+(defun agent-claude-cli--session-file (session-id &optional projects-directory)
   "Return the transcript file for SESSION-ID, or nil when there is none.
-An original file is preferred to a symlink of it."
+Look under PROJECTS-DIRECTORY, by default
+`agent-claude-cli-projects-directory'.  An original file is preferred to
+a symlink of it."
   (let ((files (file-expand-wildcards
                 (expand-file-name (concat "*/" session-id ".jsonl")
-                                  agent-claude-cli-projects-directory))))
+                                  (or projects-directory
+                                      agent-claude-cli-projects-directory)))))
     (or (seq-find (lambda (file) (not (file-symlink-p file))) files)
         (car files))))
 
@@ -341,6 +344,204 @@ An original file is preferred to a symlink of it."
             (setq cwd (plist-get json :cwd))))
         (forward-line 1))
       cwd)))
+
+;;;; Transcript history
+;; CLI convention: a transcript is JSONL, and most of its bytes are not
+;; conversation.  What a person said is a `user' line whose
+;; `message.content' is a string or an array of blocks; what the model
+;; said is an `assistant' line with one block per line.  A prompt typed
+;; while the model works is a `queued_command' attachment.  `isMeta',
+;; `isCompactSummary' and `isSidechain' mark text the CLI injected or a
+;; subagent's own conversation.  User text the CLI injected also opens
+;; with one of the tags in `agent-claude-cli--injected-text-regexp'.
+;; Last verified against the transcripts of Claude Code on 2026-11-04.
+
+(defconst agent-claude-cli--injected-text-regexp
+  "\\`[ \t\n]*<\\(?:local-command-[a-z]+\\|task-notification\\|teammate-message\\|system-reminder\\|bash-[a-z]+\\|user-prompt-submit-hook\\)[ >]"
+  "Regexp matching user text that the CLI wrote rather than the user.")
+
+(defun agent-claude-cli-transcript-history (file bytes &optional before after)
+  "Return the conversation in at most BYTES bytes of transcript FILE.
+The stretch read ends at byte offset BEFORE, or at the end of FILE, and
+starts no earlier than offset AFTER.  FILE is never read whole, however
+long.  Only complete lines count, so a line cut by either end of the
+stretch, or still being written, is left out, and one longer than BYTES
+is never shown.
+
+Return a plist.  `:messages' lists the conversation oldest first, each a
+plist of `:role' (\"user\", \"assistant\" or \"tool\"), `:text' and
+`:time'.  `:before' is the offset to pass as BEFORE for the preceding
+stretch, 0 once the start of FILE is reached.  `:after' is the offset to
+pass as AFTER for what follows.  `:size' is FILE's size in bytes.
+`:gap' is non-nil when more than BYTES bytes followed AFTER, so the
+lines between AFTER and this stretch were not read."
+  (let* ((truename (file-truename file))
+         (size (file-attribute-size (file-attributes truename)))
+         (end (min (or before size) size))
+         (floor (min (or after 0) end))
+         (start (max floor (- end bytes))))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert-file-contents-literally truename nil start end)
+      (let* ((last (agent-claude-cli--last-line-end))
+             (first (agent-claude-cli--first-line-start last (> start floor))))
+        (list :messages (agent-claude-cli--merge-tool-messages
+                         (agent-claude-cli--parse-transcript-text
+                          (decode-coding-string
+                           (buffer-substring-no-properties first last)
+                           'utf-8-unix t)))
+              :before (if (= first last) start (+ start first -1))
+              :after (+ start last -1)
+              :size size
+              :gap (and after (> start floor)))))))
+
+(defun agent-claude-cli--last-line-end ()
+  "Return the position just past the last newline, or `point-min' if none."
+  (goto-char (point-max))
+  (if (search-backward "\n" nil t)
+      (1+ (point))
+    (point-min)))
+
+(defun agent-claude-cli--first-line-start (last cut)
+  "Return the position where the first complete line before LAST starts.
+CUT non-nil means the buffer may open in the middle of a line, which is
+skipped.  Return LAST when no complete line remains."
+  (goto-char (point-min))
+  (cond ((not cut) (point-min))
+        ((and (search-forward "\n" last t) (< (point) last)) (point))
+        (t last)))
+
+(defun agent-claude-cli--parse-transcript-text (text)
+  "Return the messages recorded in the transcript lines of TEXT, oldest first.
+A line that does not parse, which includes invalid UTF-8, or that has a
+shape this code does not expect, is skipped."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (let (messages)
+      (while (not (eobp))
+        (let ((start (point)))
+          (dolist (message (condition-case nil
+                               (agent-claude-cli--entry-messages
+                                (json-parse-buffer :object-type 'plist
+                                                   :null-object nil
+                                                   :false-object nil))
+                             (error nil)))
+            (push message messages))
+          (goto-char start)
+          (forward-line 1)))
+      (nreverse messages))))
+
+(defun agent-claude-cli--entry-messages (entry)
+  "Return the messages transcript line ENTRY records, as a list of plists."
+  (let* ((type (plist-get entry :type))
+         (message (plist-get entry :message))
+         (time (plist-get entry :timestamp)))
+    (unless (or (plist-get entry :isSidechain)
+                (plist-get entry :isMeta)
+                (plist-get entry :isCompactSummary)
+                (not (listp message)))
+      (mapcar (lambda (part)
+                (list :role (car part) :text (cdr part) :time time))
+              (pcase type
+                ("user" (agent-claude-cli--user-parts
+                         (plist-get message :content)))
+                ("assistant" (agent-claude-cli--assistant-parts
+                              (plist-get message :content)))
+                ("attachment" (agent-claude-cli--queued-prompt-parts
+                               (plist-get entry :attachment))))))))
+
+(defun agent-claude-cli--queued-prompt-parts (attachment)
+  "Return (ROLE . TEXT) pairs for a prompt the user typed mid-turn.
+Such a prompt is recorded only as an ATTACHMENT of type `queued_command',
+which also carries background task notifications and messages from other
+sessions, the latter marked `isMeta'."
+  (when (and (equal (plist-get attachment :type) "queued_command")
+             (equal (plist-get attachment :commandMode) "prompt")
+             (not (plist-get attachment :isMeta)))
+    (agent-claude-cli--user-parts (plist-get attachment :prompt))))
+
+(defun agent-claude-cli--user-parts (content)
+  "Return (ROLE . TEXT) pairs for what the user wrote in message CONTENT."
+  (delq nil
+        (mapcar (lambda (block)
+                  (pcase (and (not (stringp block)) (plist-get block :type))
+                    ('nil (agent-claude-cli--user-text-part block))
+                    ("text" (agent-claude-cli--user-text-part
+                             (plist-get block :text)))
+                    ("image" (cons "user" "[image]"))))
+                (if (stringp content) (list content) content))))
+
+(defun agent-claude-cli--user-text-part (text)
+  "Return a (ROLE . TEXT) pair for user TEXT, or nil if the CLI wrote it.
+A slash command is recorded wrapped in tags, and is shown as typed."
+  (when (and (stringp text)
+             (not (string-blank-p text))
+             (not (string-match-p agent-claude-cli--injected-text-regexp text)))
+    (cons "user" (or (agent-claude-cli--slash-command text) text))))
+
+(defun agent-claude-cli--slash-command (text)
+  "Return the slash command recorded in user TEXT as typed, or nil."
+  (when-let* ((name (agent-claude-cli--tag-content text "command-name")))
+    (string-trim (concat name " " (agent-claude-cli--tag-content
+                                   text "command-args")))))
+
+(defun agent-claude-cli--tag-content (text tag)
+  "Return what the first element named TAG holds in TEXT, or nil."
+  (when-let* ((open (concat "<" tag ">"))
+              (start (string-search open text))
+              (beg (+ start (length open)))
+              (end (string-search (concat "</" tag ">") text beg)))
+    (substring text beg end)))
+
+(defun agent-claude-cli--assistant-parts (content)
+  "Return (ROLE . TEXT) pairs for the text and tool calls in message CONTENT.
+Thinking is left out, and a tool call is reduced to the tool's name."
+  (delq nil
+        (mapcar (lambda (block)
+                  (pcase (and (not (stringp block)) (plist-get block :type))
+                    ('nil (agent-claude-cli--assistant-text-part block))
+                    ("text" (agent-claude-cli--assistant-text-part
+                             (plist-get block :text)))
+                    ("tool_use" (cons "tool" (plist-get block :name)))))
+                (if (stringp content) (list content) content))))
+
+(defun agent-claude-cli--assistant-text-part (text)
+  "Return a (ROLE . TEXT) pair for assistant TEXT, or nil if it is blank."
+  (when (and (stringp text) (not (string-blank-p text)))
+    (cons "assistant" text)))
+
+(defun agent-claude-cli--merge-tool-messages (messages)
+  "Return MESSAGES with each run of tool calls merged into one line."
+  (let (merged run)
+    (dolist (message messages)
+      (if (equal (plist-get message :role) "tool")
+          (push message run)
+        (when run
+          (push (agent-claude-cli--tool-run-message (nreverse run)) merged)
+          (setq run nil))
+        (push message merged)))
+    (when run
+      (push (agent-claude-cli--tool-run-message (nreverse run)) merged))
+    (nreverse merged)))
+
+(defun agent-claude-cli--tool-run-message (run)
+  "Return one tool message summing up RUN, a list of tool messages.
+Its text names each tool once, in order of first use, with a count when
+it was called more than once."
+  (let* ((names (mapcar (lambda (message) (plist-get message :text)) run))
+         (summary (mapcar (lambda (name)
+                            (let ((count (seq-count (lambda (other)
+                                                      (equal other name))
+                                                    names)))
+                              (if (> count 1)
+                                  (format "%s ×%d" name count)
+                                name)))
+                          (seq-uniq names))))
+    (list :role "tool"
+          :text (string-join summary ", ")
+          :time (plist-get (car run) :time))))
+
 
 ;;;; .claude.json merge engine
 

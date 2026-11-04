@@ -2844,4 +2844,84 @@ sentinel those nested without bound and froze Emacs."
     (should (plist-get result :error))
     (should (= (funcall count) before))))
 
+;;;; Session transcript
+
+(defmacro agent-claude-test--with-transcripts (config &rest body)
+  "Run BODY in a session buffer with CONFIG bound to a config directory."
+  (declare (indent 1))
+  `(let ((,config (file-name-as-directory
+                   (make-temp-file "agent-claude-config-" t))))
+     (unwind-protect
+         (with-temp-buffer
+           (cl-letf (((symbol-function 'agent-claude--session-config-dir)
+                      (lambda (_) ,config)))
+             ,@body))
+       (delete-directory ,config t))))
+
+(defun agent-claude-test--write-transcript (config project id)
+  "Write a one-line transcript for ID under PROJECT in CONFIG; return its path."
+  (let* ((directory (expand-file-name (concat "projects/" project) config))
+         (file (expand-file-name (concat id ".jsonl") directory)))
+    (make-directory directory t)
+    (with-temp-file file
+      (insert "{\"type\":\"user\",\"message\":{\"content\":\"hello\"}}\n"))
+    file))
+
+(ert-deftest agent-claude-test-session-transcript-uses-session-directory ()
+  "The transcript is looked for first where the session's directory says."
+  (agent-claude-test--with-transcripts config
+    (setq-local agent--session
+                (agent-session-create :backend 'claude-code :id "abc-123"
+                                      :directory "/some/project/"))
+    (agent-claude-test--write-transcript config "-other" "abc-123")
+    (let ((expected (agent-claude-test--write-transcript
+                     config "-some-project" "abc-123")))
+      (should (equal (agent-claude--session-transcript (current-buffer))
+                     expected)))))
+
+(ert-deftest agent-claude-test-session-transcript-searches-account-projects ()
+  "A transcript under another project of the account is still found."
+  (agent-claude-test--with-transcripts config
+    (setq-local agent--session
+                (agent-session-create :backend 'claude-code :id "abc-123"
+                                      :directory "/some/project/"))
+    (let ((expected (agent-claude-test--write-transcript
+                     config "-other" "abc-123")))
+      (should (equal (agent-claude--session-transcript (current-buffer))
+                     expected)))))
+
+(ert-deftest agent-claude-test-session-transcript-refuses-odd-ids ()
+  "An id that could name another file finds nothing."
+  (agent-claude-test--with-transcripts config
+    (agent-claude-test--write-transcript config "-p" "secret")
+    (dolist (id '("../-p/secret" "*" "sec*" "a/b" ""))
+      (setq-local agent--session
+                  (agent-session-create :backend 'claude-code :id id
+                                        :directory "/p/"))
+      (should-not (agent-claude--session-transcript (current-buffer))))))
+
+(ert-deftest agent-claude-test-session-history-nil-without-a-transcript ()
+  "No id, or no file yet, means no history rather than an error."
+  (agent-claude-test--with-transcripts _config
+    (setq-local agent--session
+                (agent-session-create :backend 'claude-code :directory "/p/"))
+    (should-not (agent-claude--session-history (current-buffer) 1000))
+    (setq-local agent--session
+                (agent-session-create :backend 'claude-code :id "unwritten"
+                                      :directory "/p/"))
+    (should-not (agent-claude--session-history (current-buffer) 1000))))
+
+(ert-deftest agent-claude-test-session-history-reads-the-transcript ()
+  "The backend reads the conversation from the session's transcript."
+  (agent-claude-test--with-transcripts config
+    (setq-local agent--session
+                (agent-session-create :backend 'claude-code :id "abc-123"
+                                      :directory "/p/"))
+    (agent-claude-test--write-transcript config "-p" "abc-123")
+    (let ((history (agent-claude--session-history (current-buffer) 1000)))
+      (should (equal (plist-get (car (plist-get history :messages)) :text)
+                     "hello")))
+    (should (eq (agent-backend-session-history (agent-backend 'claude-code))
+                #'agent-claude--session-history))))
+
 ;;; agent-claude-test.el ends here
