@@ -1845,7 +1845,9 @@ Remember the entry after the segment, for `agent--tab-bar-insert-format'."
         (cadr (memq 'agent-tab-bar-format-sessions tab-bar-format)))
   (setq tab-bar-format (delq 'agent-tab-bar-format-sessions
                              (copy-sequence tab-bar-format)))
-  (when agent--tab-bar-added-align-right
+  ;; Entries added after the alignment since then rely on it, so it stays.
+  (when (and agent--tab-bar-added-align-right
+             (eq (car (last tab-bar-format)) 'tab-bar-format-align-right))
     (setq tab-bar-format (delq 'tab-bar-format-align-right tab-bar-format)
           agent--tab-bar-added-align-right nil)))
 

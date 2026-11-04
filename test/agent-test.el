@@ -855,6 +855,32 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
                            tab-bar-format-align-right))))
       (agent-tab-bar-mode -1))))
 
+(ert-deftest agent-test-tab-bar-mode-toggle-keeps-entries-right-aligned ()
+  "Turning the mode off and on keeps a later entry on the right."
+  (let ((tab-bar-format '(tab-bar-format-global))
+        (agent--tab-bar-added-align-right nil)
+        (agent--tab-bar-format-successor nil)
+        (agent--tab-bar-timer nil)
+        (agent-tab-bar-mode nil)
+        (expected '(tab-bar-format-global
+                    agent-tab-bar-format-sessions
+                    tab-bar-format-align-right
+                    tab-bar-format-spofy)))
+    (unwind-protect
+        (progn
+          (agent-tab-bar-mode 1)
+          ;; A package such as spofy adds itself after the alignment.
+          (setq tab-bar-format (append tab-bar-format '(tab-bar-format-spofy)))
+          (should (equal tab-bar-format expected))
+          (agent-tab-bar-mode -1)
+          (should (equal tab-bar-format
+                         '(tab-bar-format-global
+                           tab-bar-format-align-right
+                           tab-bar-format-spofy)))
+          (agent-tab-bar-mode 1)
+          (should (equal tab-bar-format expected)))
+      (agent-tab-bar-mode -1))))
+
 (ert-deftest agent-test-tab-bar-mode-adds-and-removes-its-own-alignment ()
   "Add right alignment after the segment when none exists, then drop it."
   (let ((tab-bar-format '(tab-bar-format-global))
