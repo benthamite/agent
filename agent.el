@@ -1778,6 +1778,9 @@ A cons of `agent--tab-bar-sessions' and `agent--tab-bar-current-buffers'.
 Compared by `agent--tab-bar-refresh' against their current values, so
 that the tab bar is re-rendered only when something visible changed.")
 
+(defvar agent--tab-bar-format-successor nil
+  "The `tab-bar-format' entry that followed the sessions segment when removed.")
+
 (defvar agent--tab-bar-added-align-right nil
   "Non-nil when `agent-tab-bar-mode' added `tab-bar-format-align-right'.")
 
@@ -1818,22 +1821,28 @@ right-aligned entries."
   (force-mode-line-update t))
 
 (defun agent--tab-bar-insert-format ()
-  "Insert `agent-tab-bar-format-sessions' before right-aligned entries.
-When `tab-bar-format' has no `tab-bar-format-align-right', add one
-after the segment, so that the entries it is pushed against stay on
-the right."
+  "Insert `agent-tab-bar-format-sessions' into `tab-bar-format'.
+The segment goes back before the entry it preceded when the mode was
+last turned off, so that turning the mode off and on keeps the order;
+otherwise it goes before any right-aligned entries.  When
+`tab-bar-format' has no `tab-bar-format-align-right', add one at the
+end, so that the entries it is pushed against stay on the right."
   (unless (memq 'agent-tab-bar-format-sessions tab-bar-format)
-    (let* ((tail (memq 'tab-bar-format-align-right tab-bar-format))
+    (let* ((tail (or (memq agent--tab-bar-format-successor tab-bar-format)
+                     (memq 'tab-bar-format-align-right tab-bar-format)))
            (head (take (- (length tab-bar-format) (length tail))
                        tab-bar-format)))
-      (unless tail
+      (unless (memq 'tab-bar-format-align-right tab-bar-format)
         (setq agent--tab-bar-added-align-right t
-              tail '(tab-bar-format-align-right)))
+              tail (append tail '(tab-bar-format-align-right))))
       (setq tab-bar-format
             (append head '(agent-tab-bar-format-sessions) tail)))))
 
 (defun agent--tab-bar-remove-format ()
-  "Remove the sessions segment, and any alignment it added, from the tab bar."
+  "Remove the sessions segment, and any alignment it added, from the tab bar.
+Remember the entry after the segment, for `agent--tab-bar-insert-format'."
+  (setq agent--tab-bar-format-successor
+        (cadr (memq 'agent-tab-bar-format-sessions tab-bar-format)))
   (setq tab-bar-format (delq 'agent-tab-bar-format-sessions
                              (copy-sequence tab-bar-format)))
   (when agent--tab-bar-added-align-right
