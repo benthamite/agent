@@ -25,13 +25,34 @@
   .status.error { color: var(--error); }
   #list { flex: 1; overflow-y: auto; padding: 12px; display: flex;
     flex-direction: column; gap: 10px; }
-  .card { display: flex; align-items: center; gap: 12px; width: 100%;
-    text-align: left; background: var(--panel); border-radius: 14px;
+  .list-section { display: flex; flex-direction: column; gap: 10px; }
+  .list-divider { width: 100%; margin: 6px 0; border: 0;
+    border-top: 1px solid var(--line); }
+  /* Long-pressing a card drags it, so it must not select text.  pan-y leaves
+     vertical scrolling to the browser and horizontal swipes to the page. */
+  .slot { position: relative; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; touch-action: pan-y; }
+  .slot.dragging { z-index: 2; }
+  .slot.dragging .card { background: var(--panel-2);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .55); }
+  .reveal { display: none; position: absolute; inset: 0; align-items: center;
+    padding: 0 18px; border-radius: 14px; background: var(--panel-2);
+    color: var(--muted); font-weight: 600; }
+  .slot.swipe-right .reveal { display: flex; justify-content: flex-start; }
+  .slot.swipe-left .reveal { display: flex; justify-content: flex-end; }
+  .slot.armed.swipe-left .reveal { background: var(--accent); color: #fff; }
+  .slot.armed.swipe-right .reveal { background: var(--error); color: #1a1200; }
+  .card { position: relative; display: flex; align-items: center; gap: 12px;
+    width: 100%; text-align: left; background: var(--panel); border-radius: 14px;
     padding: 16px 14px; border-left: 6px solid var(--unknown); min-height: 72px; }
+  .card.settling { transition: transform .15s; }
   .card:active { background: var(--panel-2); }
   .card.waiting { border-left-color: var(--waiting); }
   .card.background-waiting { border-left-color: var(--bg-waiting); }
   .card.busy { border-left-color: var(--busy); }
+  .card.snoozed { border-left-color: var(--line); }
+  .card.snoozed .main, .card.snoozed .badge { opacity: .55; }
+  .card.snoozed .badge { background: var(--panel-2); color: var(--muted); }
   .card .main { flex: 1; min-width: 0; }
   .card .name { font-size: 17px; font-weight: 600; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
@@ -314,6 +335,21 @@ const STATE_LABEL = { "waiting": "waiting", "background-waiting": "bg work",
 const STATE_ORDER = { "waiting": 0, "background-waiting": 1, "unknown": 2, "busy": 3 };
 let current = null;
 let timer = null;
+const ORDER_KEY = "agent-remote-order";
+const LONG_PRESS_MS = 400;
+const TOUCH_SLOP = 10;
+const SWIPE_EDGE = 24;
+const SWIPE_FRACTION = 0.3;
+const DRAG_SCROLL_ZONE = 48;
+const DRAG_SCROLL_STEP = 8;
+// The session list as last rendered.
+let listSessions = [];
+// The touch on a card in progress; the list is not rendered during one.
+let touch = null;
+// Counts changes made here, so that a poll begun before one cannot undo it.
+let listChanges = 0;
+// The session the exit sheet would exit.
+let exitTarget = null;
 // The conversation loaded above the live screen, reset per session.
 let past = null;
 // The folder the new-session sheet shows, and the latest request for one.
@@ -362,26 +398,82 @@ function setStatus(id, text, isError) {
 }
 
 async function refreshList() {
+  const changes = listChanges;
   try {
     const { sessions } = await api("/api/sessions");
     sessions.sort((a, b) =>
       (STATE_ORDER[a.state] ?? 9) - (STATE_ORDER[b.state] ?? 9) ||
       (b.changed || 0) - (a.changed || 0));
-    const list = $("list");
-    list.replaceChildren();
-    if (!sessions.length) {
-      list.innerHTML = '<p class="empty">No sessions running.</p>';
-    }
-    for (const s of sessions) list.appendChild(card(s));
+    if (changes !== listChanges) return;
+    listSessions = sessions;
+    if (!touch) renderSessions();
     setStatus("list-status", "");
   } catch (e) {
     setStatus("list-status", "Offline", true);
   }
 }
 
+function renderSessions() {
+  const list = $("list");
+  list.replaceChildren();
+  if (!listSessions.length) {
+    list.innerHTML = '<p class="empty">No sessions running.</p>';
+    return;
+  }
+  const saved = savedOrder();
+  const active = listSessions.filter((s) => !s.snoozed);
+  const snoozed = listSessions.filter((s) => s.snoozed);
+  if (active.length) {
+    list.appendChild(listSection("active", inSavedOrder(active, saved.active)));
+  }
+  if (active.length && snoozed.length) {
+    const divider = document.createElement("hr");
+    divider.className = "list-divider";
+    list.appendChild(divider);
+  }
+  if (snoozed.length) {
+    list.appendChild(listSection("snoozed", inSavedOrder(snoozed, saved.snoozed)));
+  }
+}
+
+function savedOrder() {
+  try {
+    return JSON.parse(localStorage.getItem(ORDER_KEY)) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+// A section never dragged has no saved order and stays as sorted.  In one
+// that has, sessions it has not placed yet come first.
+function inSavedOrder(sessions, saved) {
+  if (!saved) return sessions;
+  const placed = sessions.filter((s) => saved.includes(s.id));
+  placed.sort((a, b) => saved.indexOf(a.id) - saved.indexOf(b.id));
+  return sessions.filter((s) => !saved.includes(s.id)).concat(placed);
+}
+
+function listSection(name, sessions) {
+  const section = document.createElement("div");
+  section.className = "list-section";
+  section.dataset.section = name;
+  for (const s of sessions) section.appendChild(slot(s));
+  return section;
+}
+
+function slot(s) {
+  const el = document.createElement("div");
+  el.className = "slot";
+  el.session = s;
+  const reveal = document.createElement("div");
+  reveal.className = "reveal";
+  el.append(reveal, card(s));
+  return el;
+}
+
 function card(s) {
   const button = document.createElement("button");
-  button.className = "card " + s.state;
+  button.className = "card " + s.state + (s.snoozed ? " snoozed" : "");
   const main = document.createElement("div");
   main.className = "main";
   const name = document.createElement("div");
@@ -389,7 +481,7 @@ function card(s) {
   name.textContent = s.name;
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.textContent = [s.backend, s.account, age(s.changed), s.snoozed ? "snoozed" : ""]
+  meta.textContent = [s.backend, s.account, age(s.changed)]
     .filter(Boolean).join(" · ");
   main.append(name, meta);
   const badge = document.createElement("span");
@@ -398,6 +490,163 @@ function card(s) {
   button.append(main, badge);
   button.addEventListener("click", () => openSession(s));
   return button;
+}
+
+// A touch on a card is a tap, a scroll, a swipe or, after a long press, a
+// drag.  It starts as pending until it moves or is held long enough.
+function onListTouchStart(e) {
+  const el = e.target.closest(".slot");
+  if (!el || touch || e.touches.length > 1) return;
+  const t = e.touches[0];
+  touch = { slot: el, id: t.identifier, x: t.clientX, y: t.clientY,
+            lastY: t.clientY, mode: "pending",
+            timer: setTimeout(startDrag, LONG_PRESS_MS) };
+}
+
+function onListTouchMove(e) {
+  if (!touch) return;
+  const t = [...e.changedTouches].find((c) => c.identifier === touch.id);
+  if (!t) return;
+  const dx = t.clientX - touch.x;
+  const dy = t.clientY - touch.y;
+  touch.lastY = t.clientY;
+  if (touch.mode === "pending") {
+    if (Math.hypot(dx, dy) < TOUCH_SLOP) return;
+    clearTimeout(touch.timer);
+    touch.mode = Math.abs(dx) > Math.abs(dy) && !startsAtScreenEdge(touch.x)
+      ? "swipe" : "scroll";
+  }
+  if (touch.mode === "scroll") return;
+  if (e.cancelable) e.preventDefault();
+  if (touch.mode === "swipe") moveSwipe(dx);
+  else placeDragged();
+}
+
+// Android keeps a swipe from the screen's edge for its back gesture.
+function startsAtScreenEdge(x) {
+  return x < SWIPE_EDGE || x > window.innerWidth - SWIPE_EDGE;
+}
+
+function onListTouchEnd(e) {
+  if (!touch || ![...e.changedTouches].some((c) => c.identifier === touch.id)) return;
+  const ended = touch;
+  touch = null;
+  clearTimeout(ended.timer);
+  // Stops the tap that would otherwise open the session.
+  if (e.cancelable && (ended.mode === "swipe" || ended.mode === "drag")) e.preventDefault();
+  const cancelled = e.type === "touchcancel";
+  if (ended.mode === "swipe") finishSwipe(ended, cancelled);
+  else if (ended.mode === "drag") finishDrag(ended);
+}
+
+function startDrag() {
+  touch.mode = "drag";
+  const el = touch.slot;
+  touch.grab = touch.lastY - el.getBoundingClientRect().top;
+  touch.before = sectionIds(el.parentElement);
+  el.classList.add("dragging");
+  requestAnimationFrame(scrollDuringDrag);
+}
+
+function sectionIds(section) {
+  return [...section.children].map((el) => el.session.id);
+}
+
+// Keep the list moving while the finger is held near its top or bottom.
+function scrollDuringDrag() {
+  if (!touch || touch.mode !== "drag") return;
+  const list = $("list");
+  const box = list.getBoundingClientRect();
+  const before = list.scrollTop;
+  if (touch.lastY < box.top + DRAG_SCROLL_ZONE) list.scrollTop -= DRAG_SCROLL_STEP;
+  else if (touch.lastY > box.bottom - DRAG_SCROLL_ZONE) list.scrollTop += DRAG_SCROLL_STEP;
+  if (list.scrollTop !== before) placeDragged();
+  requestAnimationFrame(scrollDuringDrag);
+}
+
+// Put the dragged card among its section's cards where its middle is, and
+// draw it under the finger, but never outside its section.
+function placeDragged() {
+  const el = touch.slot;
+  const section = el.parentElement;
+  el.style.transform = "";
+  const height = el.offsetHeight;
+  const top = touch.lastY - touch.grab;
+  const middle = top + height / 2;
+  const next = [...section.children].find((other) => {
+    if (other === el) return false;
+    const box = other.getBoundingClientRect();
+    return middle < box.top + box.height / 2;
+  });
+  if (el.nextElementSibling !== (next || null)) section.insertBefore(el, next || null);
+  const box = section.getBoundingClientRect();
+  const clamped = Math.min(Math.max(top, box.top), box.bottom - height);
+  el.style.transform = `translateY(${clamped - el.getBoundingClientRect().top}px)`;
+}
+
+function finishDrag(ended) {
+  const el = ended.slot;
+  el.classList.remove("dragging");
+  el.style.transform = "";
+  const section = el.parentElement;
+  const ids = sectionIds(section);
+  if (ids.join("\n") !== ended.before.join("\n")) {
+    const saved = savedOrder();
+    saved[section.dataset.section] = ids;
+    localStorage.setItem(ORDER_KEY, JSON.stringify(saved));
+  }
+  renderSessions();
+}
+
+function moveSwipe(dx) {
+  const el = touch.slot;
+  const button = el.querySelector(".card");
+  const s = el.session;
+  el.classList.toggle("swipe-left", dx < 0);
+  el.classList.toggle("swipe-right", dx > 0);
+  el.classList.toggle("armed", swipeArmed(button, dx));
+  el.querySelector(".reveal").textContent =
+    dx > 0 ? "Exit" : s.snoozed ? "Unsnooze" : "Snooze";
+  touch.dx = dx;
+  button.style.transform = `translateX(${dx}px)`;
+}
+
+function swipeArmed(button, dx) {
+  return Math.abs(dx) >= button.offsetWidth * SWIPE_FRACTION;
+}
+
+function finishSwipe(ended, cancelled) {
+  const el = ended.slot;
+  const s = el.session;
+  const button = el.querySelector(".card");
+  const armed = !cancelled && swipeArmed(button, ended.dx || 0);
+  if (armed && ended.dx < 0) {
+    setSnoozed(s, !s.snoozed);
+    return;
+  }
+  if (armed) openExitFor(s);
+  button.classList.add("settling");
+  button.style.transform = "";
+  button.addEventListener("transitionend", renderUnlessTouched, { once: true });
+}
+
+function renderUnlessTouched() {
+  if (!touch) renderSessions();
+}
+
+async function setSnoozed(s, snoozed) {
+  listChanges++;
+  s.snoozed = snoozed;
+  renderSessions();
+  try {
+    await api("/api/snooze", { id: s.id, snoozed });
+    listChanges++;
+    refreshList();
+  } catch (e) {
+    // The next poll puts the card back where the session really is.
+    listChanges++;
+    setStatus("list-status", "Error: " + e.message, true);
+  }
 }
 
 function show(viewId) {
@@ -1376,8 +1625,12 @@ async function doNew(choice, button) {
 }
 
 function openExit() {
-  if (!current) return;
-  $("exit-note").textContent = $("session-title").textContent;
+  if (current) openExitFor({ id: current, name: $("session-title").textContent });
+}
+
+function openExitFor(s) {
+  exitTarget = s.id;
+  $("exit-note").textContent = s.name;
   $("exit-skills").disabled = $("exit-plain").disabled = false;
   $("exit-sheet").classList.add("open");
 }
@@ -1385,9 +1638,9 @@ function openExit() {
 async function doExit(skills) {
   $("exit-skills").disabled = $("exit-plain").disabled = true;
   try {
-    await api("/api/exit", { id: current, skills });
+    await api("/api/exit", { id: exitTarget, skills });
     closeSheets();
-    setTimeout(() => refreshSession(true), 800);
+    setTimeout(() => current ? refreshSession(true) : refreshList(), 800);
   } catch (e) {
     $("exit-note").textContent = "Error: " + e.message;
     $("exit-skills").disabled = $("exit-plain").disabled = false;
@@ -1475,6 +1728,13 @@ document.addEventListener("visibilitychange", () => {
   schedule();
   if (!document.hidden) current ? refreshSession(false) : refreshList();
 });
+for (const [event, handler] of [["touchstart", onListTouchStart],
+                                ["touchmove", onListTouchMove],
+                                ["touchend", onListTouchEnd],
+                                ["touchcancel", onListTouchEnd]]) {
+  $("list").addEventListener(event, handler, { passive: false });
+}
+$("list").addEventListener("contextmenu", (e) => e.preventDefault());
 refreshList();
 schedule();
 </script>

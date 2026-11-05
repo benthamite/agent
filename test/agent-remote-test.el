@@ -799,6 +799,28 @@ BODY can refer to the transcript as `file'."
         (should (equal (reverse calls) (list (list buffer nil)
                                              (list buffer t))))))))
 
+(ert-deftest agent-remote-test-snooze-sets-the-requested-state ()
+  "The snooze endpoint toggles only when the session is in the other state."
+  (agent-remote-test--with-session buffer
+    (let (snoozed calls)
+      (cl-letf (((symbol-function 'agent-session-snoozed-p)
+                 (lambda (_) snoozed))
+                ((symbol-function 'agent-toggle-snooze)
+                 (lambda (buf &optional hours)
+                   (push (list buf hours) calls)
+                   (setq snoozed (not snoozed)))))
+        (agent-remote-test--with-server
+          (dolist (wanted '(t t :false :false))
+            (should (= (agent-remote-test--status
+                        (agent-remote-test--http
+                         "POST" "/api/snooze"
+                         (json-serialize (list :id (buffer-name buffer)
+                                               :snoozed wanted))
+                         '("X-Agent-Remote: 1")))
+                       200))
+            (should (eq snoozed (eq wanted t)))))
+        (should (equal calls (list (list buffer nil) (list buffer nil))))))))
+
 (ert-deftest agent-remote-test-connections-are-cleaned-up ()
   "Closed client connections do not accumulate as processes."
   (agent-remote-test--with-server

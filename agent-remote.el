@@ -31,7 +31,7 @@
 ;; output and, on request, its past conversation from the session's
 ;; transcript, sends typed replies, images and single keys to it, restarts it
 ;; under another account when it has run out of usage, starts a new
-;; session in any folder it lets the phone browse to, and exits it.
+;; session in any folder it lets the phone browse to, snoozes it and exits it.
 ;; Because it drives the session buffers themselves, it reaches Claude and Codex
 ;; sessions under every account alike.
 ;;
@@ -353,6 +353,8 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
           (agent-remote--json (agent-remote--new request)))
          ((equal path "/api/exit")
           (agent-remote--json (agent-remote--exit request)))
+         ((equal path "/api/snooze")
+          (agent-remote--json (agent-remote--snooze request)))
          (t (agent-remote--error "404 Not Found" "Not found"))))
     (user-error (agent-remote--error "400 Bad Request" (cadr err)))
     (error (agent-remote--error "500 Internal Server Error"
@@ -704,6 +706,18 @@ The body's `skills' is false to skip the before-exit skills."
   (let* ((args (agent-remote--json-body request))
          (buffer (agent-remote--session-buffer (alist-get 'id args))))
     (agent-exit-buffer buffer (eq (alist-get 'skills args) :false))
+    (list :ok t)))
+
+(defun agent-remote--snooze (request)
+  "Snooze or unsnooze the session named in REQUEST's JSON body.
+The body's `snoozed' is true to snooze and false to unsnooze, so that a
+repeated request cannot undo the first.  A snooze from the phone is
+indefinite."
+  (let* ((args (agent-remote--json-body request))
+         (buffer (agent-remote--session-buffer (alist-get 'id args)))
+         (wanted (eq (alist-get 'snoozed args) t)))
+    (unless (eq wanted (and (agent-session-snoozed-p buffer) t))
+      (agent-toggle-snooze buffer))
     (list :ok t)))
 
 (defun agent-remote--json-body (request)
