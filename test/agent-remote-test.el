@@ -610,6 +610,22 @@ BODY can refer to the transcript as `file'."
                                    (alist-get 'choices data))
                            '("claude" "Codex")))))))))
 
+(ert-deftest agent-remote-test-history-says-when-transcript-is-pending ()
+  "A backend that keeps transcripts promises one a new session lacks."
+  (agent-remote-test--with-session buffer
+    (dolist (case '((t . t) (nil . :false)))
+      (let ((backend (agent-backend--create
+                      :session-history (and (car case) #'ignore))))
+        (cl-letf (((symbol-function 'agent-backend) (lambda (_) backend)))
+          (agent-remote-test--with-server
+            (let ((data (agent-remote-test--json
+                         (agent-remote-test--http
+                          "GET" (concat "/api/history?id="
+                                        (url-hexify-string
+                                         (buffer-name buffer)))))))
+              (should (eq (alist-get 'available data) :false))
+              (should (eq (alist-get 'pending data) (cdr case))))))))))
+
 (ert-deftest agent-remote-test-backends-without-session-starts-at-home ()
   "Opened from the session list, the sheet starts in the home directory."
   (let ((agent-backends (list (cons 'claude (agent-backend--create)))))

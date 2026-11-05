@@ -69,6 +69,8 @@
   #card-text { flex: 0 1 auto; min-height: 0; overflow: auto; padding: 0 12px 8px; }
   /* Without a transcript the whole screen is the only view. */
   #session-view.transcript #live { display: none; }
+  #session-view.fresh #messages:empty::before { content: "No messages yet.";
+    color: var(--muted); font-size: 14px; }
   #history-bar { display: none; align-items: center; gap: 10px; padding-bottom: 8px;
     font-size: 13px; color: var(--muted); }
   #history-bar.shown { display: flex; }
@@ -398,7 +400,8 @@ function openSession(s) {
 function resetSessionView() {
   past = { before: null, after: null, size: 0, loading: false, available: true,
            failed: false, redacted: true, session: null, polls: 0, writing: null,
-           overlay: 0, known: false, moreChosen: null, cardOptions: null };
+           overlay: 0, known: false, fresh: false, moreChosen: null,
+           cardOptions: null };
   $("live").textContent = "";
   $("card-text").textContent = "";
   $("card").classList.remove("open");
@@ -415,14 +418,21 @@ function hasTranscript() {
   return past.available && past.after !== null;
 }
 
+// A session whose transcript is still to come looks like one with a
+// transcript, only empty.
+function showsConversation() {
+  return hasTranscript() || past.fresh;
+}
+
 function applyViewMode() {
-  $("session-view").classList.toggle("transcript", hasTranscript());
+  $("session-view").classList.toggle("transcript", showsConversation());
+  $("session-view").classList.toggle("fresh", past.fresh && !hasTranscript());
   renderMore();
 }
 
 // Open by default only where there is no transcript, once that is known.
 function renderMore() {
-  const open = past.moreChosen ?? (past.known && !hasTranscript());
+  const open = past.moreChosen ?? (past.known && !showsConversation());
   $("more").classList.toggle("open", open);
   $("more-toggle").classList.toggle("open", open);
   updateOverlay();
@@ -509,9 +519,10 @@ function setOverlay(height) {
   $("output").style.paddingBottom = height ? height + 18 + "px" : "";
 }
 
-// A session has no transcript until its first prompt.
+// A session has no transcript until its first prompt, and the first
+// reply should show soon after it is sent.
 function retryIfUnavailable() {
-  if (past.available || ++past.polls % 10) return;
+  if (past.available || ++past.polls % (past.fresh ? 2 : 10)) return;
   past.available = true;
   past.before = null;
   loadOlder();
@@ -531,8 +542,8 @@ function renderScreenState(data, forceBottom) {
   const running = data.state === "busy" || state.running === true;
   const status = running ? state.status || "Working…" : state.mode || "";
   if ($("status-text").textContent !== status) $("status-text").textContent = status;
-  renderWriting(running && hasTranscript() ? state.writing : null);
-  renderCard(hasTranscript() ? state.card : null, state.options || [], forceBottom);
+  renderWriting(running && showsConversation() ? state.writing : null);
+  renderCard(showsConversation() ? state.card : null, state.options || [], forceBottom);
   $("stop").classList.toggle("shown", running);
 }
 
@@ -1005,7 +1016,13 @@ async function loadOlder() {
         id, state.before === null ? {} : { before: state.before });
       if (state !== past) return;
       state.known = true;
-      if (!data.available) { state.available = false; applyViewMode(); break; }
+      if (!data.available) {
+        state.available = false;
+        state.fresh = data.pending === true;
+        applyViewMode();
+        break;
+      }
+      state.fresh = false;
       state.before = data.before;
       if (state.after === null) state.after = data.after;
       state.session = data.session;
@@ -1293,7 +1310,7 @@ function alertError(e) {
   badge.className = "badge";
   badge.textContent = "error";
   const text = "[agent-remote] " + e.message;
-  if (past && hasTranscript()) {
+  if (past && showsConversation()) {
     $("messages").append(messageElement({ role: "tool", text }));
     scrollOutputToBottom();
   } else {

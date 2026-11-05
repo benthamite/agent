@@ -454,8 +454,10 @@ are dropped."
 The session comes from REQUEST's `id', and its transcript from the
 session buffer alone; `before' and `after' are only byte offsets into
 it.  The stretch holds at most `agent-remote-history-bytes' bytes.  A
-session whose backend keeps no transcript, or which has none yet, gets
-`available' false, and its phone page shows just the screen."
+session without a transcript gets `available' false.  When its backend
+keeps transcripts, `pending' true says one is still to come, as it is
+for a session with no prompt yet, and its phone page shows an empty
+conversation.  Otherwise the page shows just the screen."
   (let* ((buffer (agent-remote--session-buffer
                   (agent-remote--query-param request "id")))
          (before (agent-remote--offset-param request "before"))
@@ -467,7 +469,7 @@ session whose backend keeps no transcript, or which has none yet, gets
                                 before after))))
     (if history
         (agent-remote--history-response history)
-      (list :available :false))))
+      (list :available :false :pending (if reader t :false)))))
 
 (defun agent-remote--offset-param (request name)
   "Return query parameter NAME of REQUEST as a byte offset, or nil if absent.
