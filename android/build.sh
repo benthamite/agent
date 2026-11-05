@@ -57,7 +57,7 @@ EOF
   -I "$android_jar" \
   --manifest "$here/AndroidManifest.xml" \
   --min-sdk-version "$min_sdk" --target-sdk-version "$target_sdk" \
-  --version-code 2 --version-name 1.1 \
+  --version-code 3 --version-name 1.2 \
   --java "$out/gen" \
   "$out/compiled/res.zip" "$out/compiled/res-gen.zip"
 

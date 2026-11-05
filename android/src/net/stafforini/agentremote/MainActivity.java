@@ -1,6 +1,8 @@
 package net.stafforini.agentremote;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Insets;
 import android.net.Uri;
@@ -29,14 +31,14 @@ import android.window.OnBackInvokedDispatcher;
 
 /**
  * Shows the single page at the server address the user entered, and
- * nothing else.
+ * no other page.
  *
  * <p>The address is asked for on first launch, pre-filled with
  * {@link BuildConfig#BASE_URL} when the build named one, and must be a
  * Tailscale address, since the page is served over plain HTTP that only
- * the tailnet encrypts.  Navigation to any other origin is silently
- * dropped, never handed to another app, so the WebView cannot be used
- * as a general browser.
+ * the tailnet encrypts.  The WebView cannot be used as a general browser:
+ * a tapped http or https link to another origin goes to the browser, and
+ * any other navigation away from the page is silently dropped.
  */
 public class MainActivity extends Activity {
   private static final String PREFS = "agent-remote";
@@ -407,12 +409,31 @@ public class MainActivity extends Activity {
         && effectivePort(base) == effectivePort(u);
   }
 
+  /** Hand URI to the browser if it is an http or https address. */
+  private void openInBrowser(Uri uri) {
+    String scheme = String.valueOf(uri.getScheme());
+    if (!scheme.equalsIgnoreCase("http") && !scheme.equalsIgnoreCase("https")) {
+      return;
+    }
+    try {
+      startActivity(new Intent(Intent.ACTION_VIEW, uri)
+          .addCategory(Intent.CATEGORY_BROWSABLE));
+    } catch (ActivityNotFoundException e) {
+      // Nothing can open it, so the tap does nothing.
+    }
+  }
+
   private class Client extends WebViewClient {
     @Override
     public boolean shouldOverrideUrlLoading(WebView view,
                                             WebResourceRequest req) {
-      // Returning true cancels the navigation; nothing else is launched.
-      return !sameOrigin(req.getUrl());
+      if (sameOrigin(req.getUrl())) {
+        return false;
+      }
+      if (req.isForMainFrame() && req.hasGesture()) {
+        openInBrowser(req.getUrl());
+      }
+      return true;
     }
 
     @Override

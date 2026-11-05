@@ -91,7 +91,6 @@
     color: var(--muted); }
   .msg hr { border: 0; border-top: 1px solid var(--line); }
   .msg a { color: var(--accent); }
-  .msg .md-url { font-size: 12px; color: var(--muted); }
   .msg code { font: 13px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     background: var(--line); border-radius: 4px; padding: 1px 4px; }
   /* Wide code and tables scroll by themselves; the page stays phone width. */
@@ -840,13 +839,13 @@ function renderInline(text, parent, depth, inLink) {
     } else if (!inLink && ch === "<") {
       const end = text.indexOf(">", i);
       const url = end === -1 ? null : safeUrl(text.slice(i + 1, end));
-      if (url) next = add(linkElement(url, text.slice(i + 1, end)), end + 1);
+      if (url) next = add(linkElement(url, text.slice(i + 1, end), depth), end + 1);
     } else if (!inLink && (ch === "h" || ch === "H") && !MD_ALNUM.test(text[i - 1] ?? "")) {
       MD_BARE_URL.lastIndex = i;
       const m = MD_BARE_URL.exec(text);
       const raw = m && trimUrl(m[0]);
       const url = raw && safeUrl(raw);
-      if (url) next = add(linkElement(url, raw), i + raw.length);
+      if (url) next = add(linkElement(url, raw, depth), i + raw.length);
     }
     if (next === -1) { plain += ch; next = i + 1; }
     i = next;
@@ -927,28 +926,17 @@ function renderLink(text, start, parent, depth, unclosed, flush) {
   if (!url) return -1;
   const label = text.slice(start + 1, i);
   flush();
-  parent.append(...linkNodes(url, raw, label, depth));
+  parent.append(linkElement(url, label, depth));
   return end + 1;
 }
 
-function linkElement(url, raw) {
-  const fragment = document.createDocumentFragment();
-  fragment.append(...linkNodes(url, raw, raw, 0));
-  return fragment;
-}
-
-// The Android app cancels navigation to other origins, so there a link
-// cannot be followed and its address is the only way to reach it.
-function linkNodes(url, raw, label, depth) {
+function linkElement(url, label, depth) {
   const link = node("a");
   link.href = url;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   renderInline(label, link, depth + 1, true);
-  if (label === raw || !/; wv\)/.test(navigator.userAgent)) return [link];
-  const address = node("span", " (" + raw + ")");
-  address.className = "md-url";
-  return [link, address];
+  return link;
 }
 
 function safeUrl(raw) {

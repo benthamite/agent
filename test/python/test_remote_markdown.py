@@ -11,7 +11,6 @@ except ImportError:
 
 PAGE = Path(__file__).resolve().parents[2] / "etc/agent-remote.html"
 TOKEN = "[REDACTED:github-token:d47c5563]"
-WEBVIEW_UA = "Mozilla/5.0 (Linux; Android 14; wv) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
 
 
 @unittest.skipIf(sync_playwright is None, "playwright is not installed")
@@ -28,11 +27,8 @@ class RemoteMarkdownTest(unittest.TestCase):
         cls.playwright.stop()
 
     @classmethod
-    def open_page(cls, user_agent=None):
-        options = {"viewport": {"width": 390, "height": 780}}
-        if user_agent:
-            options["user_agent"] = user_agent
-        page = cls.browser.new_context(**options).new_page()
+    def open_page(cls):
+        page = cls.browser.new_context(viewport={"width": 390, "height": 780}).new_page()
         page.route("**/api/**", lambda route: route.fulfill(
             json={"sessions": []}))
         page.route("http://phone.test/", lambda route: route.fulfill(
@@ -214,17 +210,12 @@ class RemoteMarkdownTest(unittest.TestCase):
                 self.assertLess(took, 1500)
                 self.assertGreater(kept, 0)
 
+    def test_a_link_shows_only_its_label(self):
+        self.assertEqual(self.text("[label](https://x.org/p)"), "label")
+
     def test_tool_lines_are_plain(self):
         self.assertEqual(self.page.evaluate(
             "messageElement({role: 'tool', text: '**Bash**'}).innerHTML"), "**Bash**")
-
-    def test_webview_shows_the_address(self):
-        page = self.open_page(WEBVIEW_UA)
-        self.assertIn("(https://x.org/p)", page.evaluate(
-            "(t) => show(t).textContent", "[label](https://x.org/p)"))
-        self.assertEqual(page.evaluate(
-            "(t) => show(t).textContent", "https://x.org/p"), "https://x.org/p")
-        self.assertEqual(self.text("[label](https://x.org/p)"), "label")
 
 
 if __name__ == "__main__":
