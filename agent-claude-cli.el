@@ -345,6 +345,65 @@ a symlink of it."
         (forward-line 1))
       cwd)))
 
+;; CLI convention: continuing a session in a background session gives the
+;; successor its own transcript and records a `continued-in' line in the
+;; original.  The successor holds only title records until it runs a turn,
+;; and resuming it then shows an empty conversation.
+;;
+;; Last verified against the transcripts of Claude Code on 2026-11-05.
+
+(defconst agent-claude-cli-empty-transcript-limit 65536
+  "Size in bytes above which a transcript is taken to hold a conversation.")
+
+(defun agent-claude-cli-conversation-session (session-id &optional seen)
+  "Return the id of the session holding the conversation of SESSION-ID.
+That is SESSION-ID itself, unless its transcript records no messages and
+another session in the same project continued in it.  That session is
+then followed in turn.  SEEN lists the ids already followed."
+  (if-let* (((not (member session-id seen)))
+            (file (agent-claude-cli--session-file session-id))
+            ((agent-claude-cli--transcript-empty-p file))
+            (origin (agent-claude-cli--continued-from session-id file)))
+      (agent-claude-cli-conversation-session origin (cons session-id seen))
+    session-id))
+
+(defun agent-claude-cli--transcript-empty-p (file)
+  "Return non-nil if transcript FILE records no messages.
+A line that does not parse counts as a message, so that doubt leaves the
+session as it is."
+  (and (<= (file-attribute-size (file-attributes file))
+           agent-claude-cli-empty-transcript-limit)
+       (with-temp-buffer
+         (let ((coding-system-for-read 'utf-8))
+           (insert-file-contents file))
+         (goto-char (point-min))
+         (let ((empty t))
+           (while (and empty (not (eobp)))
+             (unless (looking-at-p "[ \t]*$")
+               (let ((type (plist-get (agent-claude-cli--parse-jsonl-line)
+                                      :type)))
+                 (setq empty (and type (not (member type '("user" "assistant")))))))
+             (forward-line 1))
+           empty))))
+
+(defun agent-claude-cli--continued-from (session-id file)
+  "Return the id of the session that continued in SESSION-ID, or nil.
+Search the project directory of FILE, the transcript of SESSION-ID.  The
+text searched for has unescaped quotes, so a conversation that merely
+mentions the record does not match.  When several sessions match, return
+the one whose transcript changed last."
+  (let* ((directory (file-name-directory file))
+         (record (format "\"continuedInSessionId\":\"%s\"" session-id))
+         (origins (seq-filter
+                   (lambda (candidate)
+                     (equal (file-name-directory candidate) directory))
+                   (process-lines-ignore-status
+                    "grep" "-rlF" "--include=*.jsonl" "--"
+                    record (directory-file-name directory)))))
+    (when origins
+      (file-name-base
+       (car (sort origins #'file-newer-than-file-p))))))
+
 ;;;; Transcript history
 ;; CLI convention: a transcript is JSONL, and most of its bytes are not
 ;; conversation.  What a person said is a `user' line whose

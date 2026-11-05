@@ -2079,13 +2079,19 @@ environment hooks see it at spawn time.
 
 A resume without FORK of a session that is still running in the
 background attaches to it instead, since the CLI refuses to resume a
-live session; INITIAL-PROMPT is then not sent."
+live session; INITIAL-PROMPT is then not sent.  Otherwise, a RESUME-ID
+whose transcript records no messages resumes the session it continued,
+which holds the conversation.  SESSION then carries that id."
   (setf (agent-session-directory session)
         (agent--session-source-directory
          (or (agent-session-directory session) (claude-code--directory))))
   (let* ((attach-id (and resume-id (not fork)
                          (agent-claude--background-attach-id
                           resume-id (agent-session-directory session))))
+         (resume-id (if attach-id
+                        resume-id
+                      (agent-claude--conversation-resume-id session resume-id
+                                                            fork)))
          (switches (if attach-id
                        (list "attach" attach-id)
                      (append (when resume-id (list "--resume" resume-id))
@@ -2101,6 +2107,19 @@ live session; INITIAL-PROMPT is then not sent."
       (message "Attached to running session %s; prompt not sent" attach-id))
     (agent--set-session buffer session)
     buffer))
+
+(defun agent-claude--conversation-resume-id (session resume-id fork)
+  "Return the id to resume for RESUME-ID, recording it in SESSION.
+That is the session holding the conversation of RESUME-ID.  FORK non-nil
+means SESSION does not take the id.  Say so when it differs from RESUME-ID."
+  (when resume-id
+    (let ((id (agent-claude-cli-conversation-session resume-id)))
+      (unless (equal id resume-id)
+        (message "Session %s has no conversation; resuming %s, which it continued"
+                 resume-id id)
+        (unless fork
+          (setf (agent-session-id session) id)))
+      id)))
 
 (defun agent-claude--background-attach-id (session-id dir)
   "Return the attach id of SESSION-ID if it runs in the background, or nil.

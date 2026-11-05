@@ -428,6 +428,93 @@ CONTENT is written as UTF-8."
             (should-not (agent-claude-cli--session-file id))))
       (delete-directory root t))))
 
+;;;; Sessions continued elsewhere
+
+(defconst agent-claude-cli-test--stub
+  "{\"type\":\"ai-title\",\"aiTitle\":\"T\",\"sessionId\":\"stub\"}
+{\"type\":\"agent-name\",\"agentName\":\"T\",\"sessionId\":\"stub\"}
+"
+  "A transcript holding only title records.")
+
+(defun agent-claude-cli-test--continued-in (id)
+  "Return a conversation transcript that continued in session ID."
+  (format "{\"type\":\"user\",\"cwd\":\"/p\"}
+{\"type\":\"continued-in\",\"continuedInSessionId\":\"%s\"}
+" id))
+
+(defmacro agent-claude-cli-test--with-transcripts (transcripts &rest body)
+  "Run BODY with TRANSCRIPTS, an alist of id to text, in one project."
+  (declare (indent 1))
+  `(let* ((root (make-temp-file "agent-projects-" t))
+          (agent-claude-cli-projects-directory (file-name-as-directory root))
+          (project (expand-file-name "-p/" root)))
+     (unwind-protect
+         (progn
+           (make-directory project)
+           (pcase-dolist (`(,id . ,text) ,transcripts)
+             (with-temp-file (expand-file-name (concat id ".jsonl") project)
+               (insert text)))
+           ,@body)
+       (delete-directory root t))))
+
+(ert-deftest agent-claude-cli-test-conversation-session-follows-empty-successor ()
+  "A session with only titles leads to the session that continued in it."
+  (agent-claude-cli-test--with-transcripts
+      `(("stub" . ,agent-claude-cli-test--stub)
+        ("real" . ,(agent-claude-cli-test--continued-in "stub")))
+    (should (equal (agent-claude-cli-conversation-session "stub") "real"))))
+
+(ert-deftest agent-claude-cli-test-conversation-session-follows-a-chain ()
+  "Several empty successors in a row all lead to the conversation."
+  (agent-claude-cli-test--with-transcripts
+      `(("late" . ,agent-claude-cli-test--stub)
+        ("early" . ,(concat agent-claude-cli-test--stub
+                            "{\"type\":\"continued-in\",\"continuedInSessionId\":\"late\"}\n"))
+        ("real" . ,(agent-claude-cli-test--continued-in "early")))
+    (should (equal (agent-claude-cli-conversation-session "late") "real"))))
+
+(ert-deftest agent-claude-cli-test-conversation-session-keeps-a-conversation ()
+  "A successor that ran a turn is the conversation itself."
+  (agent-claude-cli-test--with-transcripts
+      `(("next" . ,(concat agent-claude-cli-test--stub
+                           "{\"type\":\"assistant\"}\n"))
+        ("real" . ,(agent-claude-cli-test--continued-in "next")))
+    (should (equal (agent-claude-cli-conversation-session "next") "next"))))
+
+(ert-deftest agent-claude-cli-test-conversation-session-keeps-unknown-cases ()
+  "No transcript, no origin and an unparsable line all keep the given id."
+  (agent-claude-cli-test--with-transcripts
+      `(("alone" . ,agent-claude-cli-test--stub)
+        ("broken" . "not json\n")
+        ("real" . ,(agent-claude-cli-test--continued-in "broken")))
+    (should (equal (agent-claude-cli-conversation-session "absent") "absent"))
+    (should (equal (agent-claude-cli-conversation-session "alone") "alone"))
+    (should (equal (agent-claude-cli-conversation-session "broken") "broken"))))
+
+(ert-deftest agent-claude-cli-test-conversation-session-ignores-a-mention ()
+  "A conversation quoting the record, escaped, is not the origin."
+  (agent-claude-cli-test--with-transcripts
+      `(("stub" . ,agent-claude-cli-test--stub)
+        ("chat" . ,(concat "{\"type\":\"user\",\"text\":\"grep "
+                           "\\\"continuedInSessionId\\\":\\\"stub\\\"\"}\n")))
+    (should (equal (agent-claude-cli-conversation-session "stub") "stub"))))
+
+(ert-deftest agent-claude-cli-test-conversation-session-survives-a-cycle ()
+  "Two empty sessions naming each other do not loop."
+  (agent-claude-cli-test--with-transcripts
+      '(("a" . "{\"type\":\"continued-in\",\"continuedInSessionId\":\"b\"}\n")
+        ("b" . "{\"type\":\"continued-in\",\"continuedInSessionId\":\"a\"}\n"))
+    (should (member (agent-claude-cli-conversation-session "a") '("a" "b")))))
+
+(ert-deftest agent-claude-cli-test-conversation-session-other-project ()
+  "A session in another project is not the origin."
+  (agent-claude-cli-test--with-transcripts
+      `(("stub" . ,agent-claude-cli-test--stub))
+    (make-directory (expand-file-name "-q/" root))
+    (with-temp-file (expand-file-name "-q/real.jsonl" root)
+      (insert (agent-claude-cli-test--continued-in "stub")))
+    (should (equal (agent-claude-cli-conversation-session "stub") "stub"))))
+
 ;;;; Screen panel
 ;; The screens below follow real captures of Claude Code 2.1.318 under eat.
 

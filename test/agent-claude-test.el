@@ -2030,6 +2030,52 @@ Run the hook as session UUID with state files in STATUS-DIR."
             (should (equal captured-program-switches '("--chrome")))))
       (kill-buffer buffer))))
 
+;;;; Resuming a session with no conversation
+
+(defun agent-claude-test--resume-switches (id live &rest options)
+  "Return the switches and session id after resuming ID with OPTIONS.
+LIVE is the id running in the background, if any.  Session `empty' has no
+conversation of its own and continued `real'."
+  (let ((buffer (generate-new-buffer " *claude-test-session*"))
+        (session (agent-session-create :backend 'claude-code
+                                       :directory "/tmp/project/"))
+        captured)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-account-sync) #'ignore)
+                  ((symbol-function 'agent-claude--background-attach-id)
+                   (lambda (session-id _dir)
+                     (and (equal session-id live) session-id)))
+                  ((symbol-function 'agent-claude-cli-conversation-session)
+                   (lambda (session-id)
+                     (if (equal session-id "empty") "real" session-id)))
+                  ((symbol-function 'claude-code--start)
+                   (lambda (_arg switches &optional _force-prompt _force-switch)
+                     (setq captured switches)
+                     buffer)))
+          (apply #'agent-start-session session :resume-id id options)
+          (list captured (agent-session-id session)))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-claude-test-start-session-resumes-the-conversation ()
+  "A resumed session with no conversation resumes the one it continued."
+  (should (equal (agent-claude-test--resume-switches "empty" nil)
+                 '(("--resume" "real") "real"))))
+
+(ert-deftest agent-claude-test-start-session-attaches-a-live-empty-session ()
+  "An empty session still running in the background is attached to."
+  (should (equal (car (agent-claude-test--resume-switches "empty" "empty"))
+                 '("attach" "empty"))))
+
+(ert-deftest agent-claude-test-start-session-forks-the-conversation ()
+  "A fork of an empty session forks the conversation and takes no id."
+  (should (equal (agent-claude-test--resume-switches "empty" nil :fork t)
+                 '(("--resume" "real" "--fork-session") nil))))
+
+(ert-deftest agent-claude-test-start-session-keeps-a-real-conversation ()
+  "A session holding its own conversation resumes under its own id."
+  (should (equal (agent-claude-test--resume-switches "real" nil)
+                 '(("--resume" "real") "real"))))
+
 ;;;; Minor mode
 
 (ert-deftest agent-claude-test-snippet-start-hook-function-is-autoloaded ()
