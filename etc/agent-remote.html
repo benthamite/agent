@@ -164,6 +164,21 @@
     background: var(--panel-2); font-weight: 600; }
   .sheet .actions .go { background: var(--accent); color: #fff; }
   .sheet .actions .go:disabled { opacity: .5; }
+  #new-sheet .panel { height: 80vh; overflow: hidden; }
+  #new-path { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+  #folder-bar { display: flex; gap: 6px; }
+  #folder-bar button:disabled { opacity: .45; }
+  #new-note:empty { display: none; }
+  #folders { flex: 1; min-height: 0; overflow-y: auto; display: flex;
+    flex-direction: column; gap: 2px; }
+  .folder { flex: 0 0 auto; display: block; width: 100%; min-height: 44px;
+    padding: 10px 12px; text-align: left; background: var(--panel-2);
+    border-radius: 10px; overflow-wrap: anywhere; }
+  .folder:active { background: var(--line); }
+  #backends { display: flex; gap: 8px; }
+  #backends button { flex: 1; min-height: 48px; border-radius: 12px;
+    background: var(--accent); color: #fff; font-weight: 600; }
+  #backends button:disabled { opacity: .5; }
 </style>
 </head>
 <body>
@@ -171,6 +186,7 @@
   <header>
     <h1>Sessions</h1>
     <span id="list-status" class="status"></span>
+    <button class="toggle" id="list-new">New</button>
   </header>
   <div id="list"></div>
 </section>
@@ -231,7 +247,14 @@
 <div class="sheet" id="new-sheet">
   <div class="panel">
     <h2>New session</h2>
+    <p id="new-path"></p>
+    <div id="folder-bar">
+      <button class="toggle" id="folder-up">‹ Up</button>
+      <button class="toggle" id="folder-home">Home</button>
+      <button class="toggle" id="folder-hidden">Show hidden</button>
+    </div>
     <p class="note" id="new-note"></p>
+    <div id="folders"></div>
     <div id="backends"></div>
     <div class="actions">
       <button class="cancel">Cancel</button>
@@ -276,6 +299,10 @@ let current = null;
 let timer = null;
 // The conversation loaded above the live screen, reset per session.
 let past = null;
+// The folder the new-session sheet shows, and the latest request for one.
+let browsing = null;
+let browseRequest = 0;
+let showHidden = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -1146,35 +1173,84 @@ function followSession(id) {
 }
 
 async function openNew() {
-  if (!current) return;
+  browsing = null;
   $("backends").replaceChildren();
+  renderFolders();
   $("new-note").textContent = "Loading…";
   $("new-sheet").classList.add("open");
   try {
-    const data = await api("/api/backends?id=" + encodeURIComponent(current));
-    $("new-note").textContent = "In " + data.directory;
+    const query = current ? "?id=" + encodeURIComponent(current) : "";
+    const data = await api("/api/backends" + query);
     for (const c of data.choices) {
       const b = document.createElement("button");
-      b.className = "choice";
-      b.textContent = c.label;
+      b.textContent = "Start " + c.label + " here";
+      b.disabled = true;
       b.addEventListener("click", () => doNew(c, b));
       $("backends").appendChild(b);
     }
+    await browse(data.directory);
   } catch (e) {
     $("new-note").textContent = "Error: " + e.message;
   }
 }
 
+// A failed step keeps the folder on show, so there is always a way on.
+async function browse(path) {
+  const request = ++browseRequest;
+  try {
+    const data = await api("/api/directories?path=" + encodeURIComponent(path));
+    if (request !== browseRequest) return;
+    browsing = data;
+    $("new-note").textContent = "";
+    renderFolders();
+    $("folders").scrollTop = 0;
+  } catch (e) {
+    if (request === browseRequest)
+      $("new-note").textContent = "Error: " + e.message;
+  }
+}
+
+function renderFolders() {
+  $("new-path").textContent = browsing ? browsing.path : "";
+  $("folder-up").disabled = !(browsing && browsing.parent);
+  $("folder-hidden").textContent = showHidden ? "Hide hidden" : "Show hidden";
+  for (const b of $("backends").children) b.disabled = !browsing;
+  const folders = browsing ? browsing.folders : [];
+  const shown = folders.filter((name) => showHidden || !name.startsWith("."));
+  $("folders").replaceChildren(...shown.map((name) => {
+    const b = document.createElement("button");
+    b.className = "folder";
+    b.textContent = name;
+    b.addEventListener("click", () => browse(browsing.path + name + "/"));
+    return b;
+  }));
+  if (browsing && !shown.length) {
+    const empty = document.createElement("p");
+    empty.className = "note";
+    empty.textContent = "No folders here.";
+    $("folders").append(empty);
+  }
+}
+
 async function doNew(choice, button) {
   for (const b of $("backends").children) b.disabled = true;
-  button.textContent = "Starting " + choice.label + "…";
+  const label = button.textContent;
+  button.textContent = "Starting…";
   try {
-    const data = await api("/api/new", { id: current, backend: choice.name });
-    history.replaceState({ session: data.id }, "");
+    const data = await api("/api/new",
+                           { directory: browsing.path, backend: choice.name });
+    if (current) {
+      history.replaceState({ session: data.id }, "");
+    } else {
+      history.pushState({ session: data.id }, "");
+      show("session-view");
+    }
+    $("session-title").textContent = data.name;
     followSession(data.id);
+    schedule();
   } catch (e) {
     $("new-note").textContent = "Error: " + e.message;
-    button.textContent = choice.label;
+    button.textContent = label;
     for (const b of $("backends").children) b.disabled = false;
   }
 }
@@ -1248,6 +1324,13 @@ $("restart").addEventListener("click", openRestart);
 $("restart-cancel").addEventListener("click", closeSheets);
 $("restart-go").addEventListener("click", doRestart);
 $("new").addEventListener("click", openNew);
+$("list-new").addEventListener("click", openNew);
+$("folder-up").addEventListener("click", () => browse(browsing.parent));
+$("folder-home").addEventListener("click", () => browse("~/"));
+$("folder-hidden").addEventListener("click", () => {
+  showHidden = !showHidden;
+  renderFolders();
+});
 $("exit").addEventListener("click", openExit);
 $("exit-skills").addEventListener("click", () => doExit(true));
 $("exit-plain").addEventListener("click", () => doExit(false));

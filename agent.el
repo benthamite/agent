@@ -1231,20 +1231,25 @@ No backend is the default, so `agent-inhibit-prompts' cannot pick one."
 
 (defun agent-start-session-beside (buffer backend)
   "Start a new BACKEND session in the directory of session BUFFER.
-Never prompts: the account is the one `agent-account-resolve' picks
-for that directory without prompting, and when a BACKEND session
-already runs there the new one gets the first free instance name of
-the form \"new-N\".  Return the new session buffer."
-  (let* ((session (or (agent-session buffer)
-                      (user-error "Not an AI session buffer: %s" buffer)))
-         (directory (agent-session-directory session)))
-    (unless (assq backend agent-backends)
-      (user-error "No AI backend named `%s'" backend))
-    (agent-start-session
-     (agent-session-create
-      :backend backend
-      :directory directory
-      :instance (agent--free-instance-name backend directory "new")))))
+Behave as `agent-start-session-in' does for that directory.  Return the
+new session buffer."
+  (let ((session (or (agent-session buffer)
+                     (user-error "Not an AI session buffer: %s" buffer))))
+    (agent-start-session-in (agent-session-directory session) backend)))
+
+(defun agent-start-session-in (directory backend)
+  "Start a new BACKEND session in DIRECTORY.
+Never prompts: the account is the one `agent-account-resolve' picks for
+DIRECTORY without prompting, and when a BACKEND session already runs
+there the new one gets the first free instance name of the form
+\"new-N\".  Return the new session buffer."
+  (unless (assq backend agent-backends)
+    (user-error "No AI backend named `%s'" backend))
+  (agent-start-session
+   (agent-session-create
+    :backend backend
+    :directory directory
+    :instance (agent--free-instance-name backend directory "new"))))
 
 (defun agent--free-instance-name (backend directory prefix)
   "Return an instance name no live BACKEND session in DIRECTORY uses.

@@ -610,22 +610,118 @@ BODY can refer to the transcript as `file'."
                                    (alist-get 'choices data))
                            '("claude" "Codex")))))))))
 
-(ert-deftest agent-remote-test-new-starts-session-beside ()
-  "The new endpoint starts a session beside the named one and returns it."
+(ert-deftest agent-remote-test-backends-without-session-starts-at-home ()
+  "Opened from the session list, the sheet starts in the home directory."
+  (let ((agent-backends (list (cons 'claude (agent-backend--create)))))
+    (agent-remote-test--with-server
+      (let ((data (agent-remote-test--json
+                   (agent-remote-test--http "GET" "/api/backends"))))
+        (should (equal (alist-get 'directory data) "~/"))
+        (should (equal (mapcar (lambda (c) (alist-get 'name c))
+                               (alist-get 'choices data))
+                       '("claude")))))))
+
+(ert-deftest agent-remote-test-directories-lists-folders ()
+  "The directories endpoint lists folders and links to them, and no files."
+  (let ((root (file-name-as-directory
+               (file-truename (make-temp-file "agent-remote" t)))))
+    (unwind-protect
+        (progn
+          (dolist (name '("beta" "Alpha" ".hidden"))
+            (make-directory (expand-file-name name root)))
+          (write-region "" nil (expand-file-name "file.txt" root))
+          (make-symbolic-link (expand-file-name "beta" root)
+                              (expand-file-name "link" root))
+          (make-symbolic-link (expand-file-name "missing" root)
+                              (expand-file-name "broken" root))
+          (make-symbolic-link (expand-file-name "file.txt" root)
+                              (expand-file-name "file-link" root))
+          (agent-remote-test--with-server
+            (let ((data (agent-remote-test--json
+                         (agent-remote-test--http
+                          "GET" (concat "/api/directories?path="
+                                        (url-hexify-string root))))))
+              (should (equal (alist-get 'path data)
+                             (abbreviate-file-name root)))
+              (should (equal (alist-get 'parent data)
+                             (abbreviate-file-name
+                              (file-name-directory
+                               (directory-file-name root)))))
+              (should (equal (alist-get 'folders data)
+                             '(".hidden" "Alpha" "beta" "link"))))))
+      (delete-directory root t))))
+
+(ert-deftest agent-remote-test-directories-root-has-no-parent ()
+  "The file system's root has no folder above it."
+  (agent-remote-test--with-server
+    (let ((data (agent-remote-test--json
+                 (agent-remote-test--http
+                  "GET" "/api/directories?path=%2F"))))
+      (should (equal (alist-get 'path data) "/"))
+      (should (eq (alist-get 'parent data) :null)))))
+
+(ert-deftest agent-remote-test-directories-refuses-non-folders ()
+  "A missing path, a missing folder and a file are client errors."
+  (let ((file (make-temp-file "agent-remote")))
+    (unwind-protect
+        (agent-remote-test--with-server
+          (dolist (query (list ""
+                               "?path=%2Fno%2Fsuch%2Ffolder"
+                               (concat "?path=" (url-hexify-string file))))
+            (should (= (agent-remote-test--status
+                        (agent-remote-test--http
+                         "GET" (concat "/api/directories" query)))
+                       400))))
+      (delete-file file))))
+
+(ert-deftest agent-remote-test-directories-never-opens-a-remote-path ()
+  "A remote-looking path is an ordinary missing folder, with no handler run."
+  (let ((file-name-handler-alist
+         (cons (cons "\\`/fake:" (lambda (&rest _) (error "Handler ran")))
+               file-name-handler-alist)))
+    (agent-remote-test--with-server
+      (should (= (agent-remote-test--status
+                  (agent-remote-test--http
+                   "GET" "/api/directories?path=%2Ffake%3Ahost%3A%2F"))
+                 400)))))
+
+(ert-deftest agent-remote-test-new-starts-session-in-directory ()
+  "The new endpoint starts a session in the chosen folder and returns it."
   (agent-remote-test--with-session buffer
-    (let (called)
-      (cl-letf (((symbol-function 'agent-start-session-beside)
-                 (lambda (buf backend) (setq called (list buf backend)) buf)))
+    (let ((directory (file-name-as-directory temporary-file-directory))
+          called)
+      (cl-letf (((symbol-function 'agent-start-session-in)
+                 (lambda (dir backend) (setq called (list dir backend)) buffer)))
         (agent-remote-test--with-server
           (let ((response (agent-remote-test--http
                            "POST" "/api/new"
-                           (json-serialize (list :id (buffer-name buffer)
+                           (json-serialize (list :directory directory
                                                  :backend "codex"))
                            '("X-Agent-Remote: 1"))))
             (should (= (agent-remote-test--status response) 200))
             (should (equal (alist-get 'id (agent-remote-test--json response))
                            (buffer-name buffer)))
-            (should (equal called (list buffer 'codex)))))))))
+            (should (equal (alist-get 'name (agent-remote-test--json response))
+                           (agent-display-name buffer)))
+            (should (equal called
+                           (list (abbreviate-file-name
+                                  (expand-file-name directory))
+                                 'codex)))))))))
+
+(ert-deftest agent-remote-test-new-refuses-missing-folder ()
+  "The new endpoint starts nothing in a folder that does not exist."
+  (let (called)
+    (cl-letf (((symbol-function 'agent-start-session-in)
+               (lambda (&rest _) (setq called t))))
+      (agent-remote-test--with-server
+        (should (= (agent-remote-test--status
+                    (agent-remote-test--http
+                     "POST" "/api/new"
+                     (json-serialize (list :directory "/no/such/folder"
+                                           :backend "claude"))
+                     '("X-Agent-Remote: 1")))
+                   400))
+        (should-not called)))))
 
 (ert-deftest agent-remote-test-exit-passes-skills-choice ()
   "The exit endpoint skips the before-exit skills only when told to."

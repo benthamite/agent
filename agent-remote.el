@@ -31,8 +31,8 @@
 ;; output and, on request, its past conversation from the session's
 ;; transcript, sends typed replies and single keys to it, restarts it
 ;; under another account when it has run out of usage, starts a new
-;; session beside it, and exits it.  Because it
-;; drives the session buffers themselves, it reaches Claude and Codex
+;; session in any folder it lets the phone browse to, and exits it.
+;; Because it drives the session buffers themselves, it reaches Claude and Codex
 ;; sessions under every account alike.
 ;;
 ;; The server closes every connection that does not come from
@@ -331,6 +331,8 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
           (agent-remote--json (agent-remote--accounts request)))
          ((and (equal method "GET") (equal path "/api/backends"))
           (agent-remote--json (agent-remote--backends request)))
+         ((and (equal method "GET") (equal path "/api/directories"))
+          (agent-remote--json (agent-remote--directories request)))
          ((not (equal method "POST"))
           (agent-remote--error "405 Method Not Allowed" "Method not allowed"))
          ((not (assoc "x-agent-remote" (plist-get request :headers)))
@@ -589,13 +591,17 @@ Return the name of the new session buffer, which the phone follows."
           :id (buffer-name (agent-restart-with-account buffer account)))))
 
 (defun agent-remote--backends (request)
-  "Return the backends a new session beside REQUEST's session can use.
-The session's own backend comes first."
-  (let* ((buffer (agent-remote--session-buffer
-                  (agent-remote--query-param request "id")))
-         (own (agent--detect-backend buffer))
+  "Return what the new-session sheet opened from REQUEST starts with.
+REQUEST's `id', when given, names the session the sheet was opened
+from: the browser then starts in its directory and its backend comes
+first.  Without one the browser starts in the home directory."
+  (let* ((id (agent-remote--query-param request "id"))
+         (buffer (and id (agent-remote--session-buffer id)))
+         (own (and buffer (agent--detect-backend buffer)))
          (backends (mapcar #'car agent-backends)))
-    (list :directory (agent-session-directory (agent-session buffer))
+    (list :directory (if buffer
+                         (agent-session-directory (agent-session buffer))
+                       "~/")
           :choices (vconcat
                     (mapcar (lambda (backend)
                               (list :name (symbol-name backend)
@@ -606,18 +612,61 @@ The session's own backend comes first."
                                 (cons own (delq own backends))
                               backends))))))
 
+(defun agent-remote--directories (request)
+  "Return the folder that REQUEST's `path' names and the folders in it.
+File name handlers stay off, so that no path a client sends can make
+Emacs open a remote connection on its main thread."
+  (let* ((file-name-handler-alist nil)
+         (directory (agent-remote--directory
+                     (agent-remote--query-param request "path")))
+         (parent (file-name-directory (directory-file-name directory))))
+    (list :path (abbreviate-file-name directory)
+          :parent (unless (equal parent directory)
+                    (abbreviate-file-name parent))
+          :folders (vconcat (agent-remote--subdirectories directory)))))
+
+(defun agent-remote--directory (path)
+  "Return PATH as an absolute directory name, relative to home.
+Signal a user error unless PATH names an existing directory."
+  (let ((directory (and (stringp path)
+                        (file-name-as-directory
+                         (expand-file-name path "~/")))))
+    (unless (and directory (file-directory-p directory))
+      (user-error "Not a folder: %s" path))
+    directory))
+
+(defun agent-remote--subdirectories (directory)
+  "Return the names of DIRECTORY's subdirectories, sorted ignoring case.
+A symbolic link counts when it leads to a directory."
+  (sort (seq-keep
+         (lambda (entry)
+           (let ((type (file-attribute-type (cdr entry))))
+             (when (or (eq type t)
+                       (and (stringp type)
+                            (file-directory-p
+                             (expand-file-name (car entry) directory))))
+               (car entry))))
+         (directory-files-and-attributes
+          directory nil directory-files-no-dot-files-regexp t))
+        :key #'downcase :in-place t))
+
 (defun agent-remote--new (request)
-  "Start a session beside the one named in REQUEST's JSON body.
-The body's `backend' names the new session's backend.  Return the name
-of the new session buffer, which the phone follows."
+  "Start a session as REQUEST's JSON body says.
+The body's `directory' is where it runs and its `backend' names its
+backend.  Return the new session buffer's name and display name, which
+the phone follows."
   (let* ((args (agent-remote--json-body request))
-         (buffer (agent-remote--session-buffer (alist-get 'id args)))
+         (directory (let ((file-name-handler-alist nil))
+                      (agent-remote--directory (alist-get 'directory args))))
          (name (alist-get 'backend args))
          (backend (and (stringp name) (intern-soft name))))
     (unless backend
       (user-error "No backend given"))
-    (list :ok t
-          :id (buffer-name (agent-start-session-beside buffer backend)))))
+    (let ((buffer (agent-start-session-in
+                   (abbreviate-file-name directory) backend)))
+      (list :ok t
+            :id (buffer-name buffer)
+            :name (agent-display-name buffer)))))
 
 (defun agent-remote--exit (request)
   "Exit the session named in REQUEST's JSON body.

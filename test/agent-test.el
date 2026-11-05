@@ -1784,6 +1784,20 @@ sentinel has run."
       (should (equal (agent--free-instance-name 'two "~/b/" "new") "new-1"))
       (should-not (agent--free-instance-name 'two "~/a/" "new")))))
 
+(ert-deftest agent-test-start-session-in-uses-directory ()
+  "`agent-start-session-in' starts BACKEND in DIRECTORY, unprompted."
+  (let ((agent-backends nil)
+        started)
+    (apply #'agent-register-backend 'one (agent-test--backend))
+    (cl-letf (((symbol-function 'agent-start-session)
+               (lambda (session &rest _) (setq started session) 'buffer)))
+      (should (eq (agent-start-session-in "~/somewhere/" 'one) 'buffer))
+      (should-error (agent-start-session-in "~/somewhere/" 'nope)
+                    :type 'user-error))
+    (should (eq (agent-session-backend started) 'one))
+    (should (equal (agent-session-directory started) "~/somewhere/"))
+    (should-not (agent-session-instance started))))
+
 (ert-deftest agent-test-start-session-beside-uses-session-directory ()
   "`agent-start-session-beside' starts in the session's directory."
   (let ((agent-backends nil)
