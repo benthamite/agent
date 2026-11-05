@@ -2,6 +2,7 @@ package net.stafforini.agentremote;
 
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Insets;
@@ -435,10 +436,25 @@ public class MainActivity extends Activity {
   protected void onActivityResult(int request, int result, Intent data) {
     super.onActivityResult(request, result, data);
     if (request == REQUEST_FILES && filesCallback != null) {
-      filesCallback.onReceiveValue(
-          WebChromeClient.FileChooserParams.parseResult(result, data));
+      filesCallback.onReceiveValue(pickedFiles(result, data));
       filesCallback = null;
     }
+  }
+
+  /**
+   * Returns the files a picker chose.  A picker allowing several files
+   * returns them as clip data, which {@code parseResult} does not read.
+   */
+  private static Uri[] pickedFiles(int result, Intent data) {
+    ClipData clip = data == null ? null : data.getClipData();
+    if (result != RESULT_OK || clip == null) {
+      return WebChromeClient.FileChooserParams.parseResult(result, data);
+    }
+    Uri[] files = new Uri[clip.getItemCount()];
+    for (int i = 0; i < files.length; i++) {
+      files[i] = clip.getItemAt(i).getUri();
+    }
+    return files;
   }
 
   /** Opens the system picker for the page's file inputs. */
