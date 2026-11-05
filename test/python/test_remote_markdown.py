@@ -213,6 +213,19 @@ class RemoteMarkdownTest(unittest.TestCase):
     def test_a_link_shows_only_its_label(self):
         self.assertEqual(self.text("[label](https://x.org/p)"), "label")
 
+    def test_user_messages_stay_as_typed(self):
+        typed = "**not bold** `x`\n# not a heading\n  - indented  [a](https://b.c)\n\n<img src=x>"
+        result = self.page.evaluate("""(t) => {
+          const el = messageElement({role: 'user', text: t});
+          document.getElementById('list').replaceChildren(el);
+          return [el.textContent, el.children.length, getComputedStyle(el).whiteSpace]; }""", typed)
+        self.assertEqual(result, [typed, 0, "pre-wrap"])
+
+    def test_assistant_messages_render(self):
+        self.assertEqual(self.page.evaluate(
+            "messageElement({role: 'assistant', text: '**bold**'}).querySelector('strong').textContent"),
+            "bold")
+
     def test_tool_lines_are_plain(self):
         self.assertEqual(self.page.evaluate(
             "messageElement({role: 'tool', text: '**Bash**'}).innerHTML"), "**Bash**")

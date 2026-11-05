@@ -602,7 +602,8 @@ function messageElement(m) {
       [], { dateStyle: "short", timeStyle: "short" });
     el.appendChild(when);
   }
-  el.append(m.role === "tool" ? m.text : renderMarkdown(m.text));
+  // Only the model writes Markdown; what a person typed shows as typed.
+  el.append(m.role === "assistant" ? renderMarkdown(m.text) : m.text);
   return el;
 }
 
