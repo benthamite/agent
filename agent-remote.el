@@ -29,7 +29,7 @@
 ;; JSON API on the machine's Tailscale address: the page lists every
 ;; session with its state and account, shows a session's recent
 ;; output and, on request, its past conversation from the session's
-;; transcript, sends typed replies and single keys to it, restarts it
+;; transcript, sends typed replies, images and single keys to it, restarts it
 ;; under another account when it has run out of usage, starts a new
 ;; session in any folder it lets the phone browse to, and exits it.
 ;; Because it drives the session buffers themselves, it reaches Claude and Codex
@@ -113,6 +113,10 @@ conversation: expect 2 to 15 KiB of text per MiB read."
   :group 'agent-remote)
 
 ;;;; Internal state
+
+(defconst agent-remote--attachment-limit (* 16 1024 1024)
+  "Most characters of base64 one image attachment may take.
+The page shrinks images well below this before sending them.")
 
 (defconst agent-remote--package-directory
   (file-name-directory
@@ -339,6 +343,8 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
           (agent-remote--error "403 Forbidden" "Missing X-Agent-Remote header"))
          ((equal path "/api/send")
           (agent-remote--json (agent-remote--send request)))
+         ((equal path "/api/attach")
+          (agent-remote--json (agent-remote--attach request)))
          ((equal path "/api/key")
           (agent-remote--json (agent-remote--key request)))
          ((equal path "/api/restart")
@@ -529,6 +535,28 @@ unredacted."
       (user-error "Nothing to send"))
     (agent-submit text buffer)
     (list :ok t)))
+
+(defun agent-remote--attach (request)
+  "Save the base64 image in REQUEST's JSON body and return its file name.
+The body's `data' holds a JPEG or PNG image, which goes to a temporary
+file only this user can read.  A reply naming the file gives it to the
+session.  The system's temporary-file cleanup removes the file."
+  (let* ((data (alist-get 'data (agent-remote--json-body request)))
+         (bytes (and (stringp data)
+                     (<= (length data) agent-remote--attachment-limit)
+                     (ignore-errors (base64-decode-string data))))
+         (extension (and bytes (agent-remote--image-extension bytes))))
+    (unless extension
+      (user-error "Not a JPEG or PNG image of a usable size"))
+    (let ((file (make-temp-file "agent-remote-" nil extension))
+          (coding-system-for-write 'binary))
+      (write-region bytes nil file nil 'silent)
+      (list :ok t :path file))))
+
+(defun agent-remote--image-extension (bytes)
+  "Return the file extension for image BYTES, or nil if not a known image."
+  (cond ((string-prefix-p "\xff\xd8\xff" bytes) ".jpg")
+        ((string-prefix-p "\x89PNG\r\n\x1a\n" bytes) ".png")))
 
 (defun agent-remote--key (request)
   "Send the key named in REQUEST's JSON body to the session it names."

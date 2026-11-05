@@ -133,6 +133,18 @@
     background: var(--bg); color: var(--text); border: 1px solid var(--line);
     border-radius: 12px; padding: 10px 12px; font: inherit; }
   textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .attach { flex: 0 0 44px; height: 44px; border-radius: 12px;
+    background: var(--panel-2); font-size: 22px; }
+  #attachments { display: none; gap: 8px; padding: 8px 10px 0; overflow-x: auto;
+    background: var(--panel); }
+  #attachments.shown { display: flex; }
+  .thumb { position: relative; flex: 0 0 auto; }
+  .thumb img { display: block; width: 64px; height: 64px; object-fit: cover;
+    border-radius: 8px; }
+  .thumb.uploading img { opacity: .4; }
+  .thumb button { position: absolute; top: 2px; right: 2px; width: 24px;
+    height: 24px; border-radius: 12px; background: rgba(0,0,0,.7); color: #fff;
+    font-size: 14px; line-height: 1; }
   .send { height: 44px; padding: 0 18px; border-radius: 12px;
     background: var(--accent); color: #fff; font-weight: 600; }
   .send:disabled { opacity: .5; }
@@ -228,7 +240,10 @@
     <button id="stop">Stop</button>
     <button id="more-toggle" aria-label="More keys">···</button>
   </div>
+  <div id="attachments"></div>
   <div class="compose">
+    <button class="attach" id="attach" aria-label="Attach image">+</button>
+    <input type="file" id="attach-file" accept="image/*" multiple hidden>
     <textarea id="text" rows="1" placeholder="Reply…"></textarea>
     <button class="send" id="send">Send</button>
   </div>
@@ -305,6 +320,9 @@ let past = null;
 let browsing = null;
 let browseRequest = 0;
 let showHidden = false;
+// Images chosen for the next reply; each has its file's path once saved.
+let attachments = [];
+const MAX_IMAGE_SIDE = 2048;
 
 const $ = (id) => document.getElementById(id);
 
@@ -402,6 +420,7 @@ function resetSessionView() {
            failed: false, redacted: true, session: null, polls: 0, writing: null,
            overlay: 0, known: false, fresh: false, moreChosen: null,
            cardOptions: null };
+  clearAttachments();
   $("live").textContent = "";
   $("card-text").textContent = "";
   $("card").classList.remove("open");
@@ -1107,19 +1126,103 @@ async function sendKey(key) {
 
 async function sendText() {
   const area = $("text");
-  const text = area.value;
-  if (!current || !text.trim()) return;
+  const typed = area.value.trim() ? [area.value] : [];
+  const parts = typed.concat(attachments.map((a) => a.path));
+  if (!current || !parts.length) return;
   $("send").disabled = true;
   try {
-    await api("/api/send", { id: current, text });
+    await api("/api/send", { id: current, text: parts.join(" ") });
     area.value = "";
     autosize();
+    clearAttachments();
     setTimeout(() => refreshSession(true), 400);
   } catch (e) {
     alertError(e);
   } finally {
-    $("send").disabled = false;
+    updateSendButton();
   }
+}
+
+function updateSendButton() {
+  $("send").disabled = attachments.some((a) => !a.path);
+}
+
+// Images go to the server as soon as they are chosen, and a reply names
+// the files they were saved in.
+async function attachImage(file) {
+  const entry = { path: null, url: null };
+  try {
+    const blob = await shrunkImage(file);
+    entry.url = URL.createObjectURL(blob);
+    attachments.push(entry);
+    renderAttachments();
+    const data = await api("/api/attach", { data: await base64(blob) });
+    entry.path = data.path;
+    renderAttachments();
+  } catch (e) {
+    removeAttachment(entry);
+    alertError(new Error("Could not attach " + file.name + ": " + e.message));
+  }
+}
+
+async function shrunkImage(file) {
+  const image = await createImageBitmap(file);
+  const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(image.width, image.height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(image.width * scale);
+  canvas.height = Math.round(image.height * scale);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  image.close();
+  return new Promise((resolve, reject) => canvas.toBlob(
+    (blob) => blob ? resolve(blob) : reject(new Error("the image would not convert")),
+    "image/jpeg", 0.9));
+}
+
+function base64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function renderAttachments() {
+  $("attachments").classList.toggle("shown", attachments.length > 0);
+  $("attachments").replaceChildren(...attachments.map((entry) => {
+    const thumb = document.createElement("div");
+    thumb.className = "thumb" + (entry.path ? "" : " uploading");
+    const image = document.createElement("img");
+    image.src = entry.url;
+    image.alt = "Attached image";
+    const remove = document.createElement("button");
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", "Remove image");
+    remove.addEventListener("click", () => removeAttachment(entry));
+    thumb.append(image, remove);
+    return thumb;
+  }));
+  updateSendButton();
+}
+
+function removeAttachment(entry) {
+  if (!attachments.includes(entry)) return;
+  attachments = attachments.filter((a) => a !== entry);
+  URL.revokeObjectURL(entry.url);
+  renderAttachments();
+}
+
+function clearAttachments() {
+  for (const entry of attachments) URL.revokeObjectURL(entry.url);
+  attachments = [];
+  renderAttachments();
+}
+
+function imagesIn(files) {
+  return [...files].filter((file) => file.type.startsWith("image/"));
 }
 
 let picked = null;
@@ -1334,6 +1437,17 @@ $("stop").addEventListener("click", () => sendKey("esc"));
 $("more-toggle").addEventListener("click", toggleMore);
 $("send").addEventListener("click", sendText);
 $("text").addEventListener("input", autosize);
+$("text").addEventListener("paste", (e) => {
+  const images = imagesIn(e.clipboardData.files);
+  if (!images.length) return;
+  e.preventDefault();
+  images.forEach(attachImage);
+});
+$("attach").addEventListener("click", () => $("attach-file").click());
+$("attach-file").addEventListener("change", (e) => {
+  imagesIn(e.target.files).forEach(attachImage);
+  e.target.value = "";
+});
 $("back").addEventListener("click", () => history.back());
 $("older").addEventListener("click", loadOlder);
 $("output").addEventListener("scroll", onOutputScroll, { passive: true });

@@ -739,6 +739,48 @@ BODY can refer to the transcript as `file'."
                    400))
         (should-not called)))))
 
+(ert-deftest agent-remote-test-attach-saves-image ()
+  "The attach endpoint saves an image byte for byte in a private file."
+  (let ((bytes (concat "\xff\xd8\xff" (unibyte-string 0 200 255 10 13))))
+    (agent-remote-test--with-server
+      (let* ((response (agent-remote-test--http
+                        "POST" "/api/attach"
+                        (json-serialize
+                         (list :data (base64-encode-string bytes t)))
+                        '("X-Agent-Remote: 1")))
+             (file (alist-get 'path (agent-remote-test--json response))))
+        (unwind-protect
+            (progn
+              (should (= (agent-remote-test--status response) 200))
+              (should (string-suffix-p ".jpg" file))
+              (should (= (file-modes file) #o600))
+              (should (equal (with-temp-buffer
+                               (set-buffer-multibyte nil)
+                               (insert-file-contents-literally file)
+                               (buffer-string))
+                             bytes)))
+          (delete-file file))))))
+
+(ert-deftest agent-remote-test-attach-recognizes-png ()
+  "A PNG signature gets a PNG file name."
+  (should (equal (agent-remote--image-extension "\x89PNG\r\n\x1a\nrest") ".png")))
+
+(ert-deftest agent-remote-test-attach-refuses-other-data ()
+  "Anything but a JPEG or PNG image, of a usable size, is refused."
+  (cl-letf (((symbol-function 'make-temp-file)
+             (lambda (&rest _) (error "A file was created"))))
+    (agent-remote-test--with-server
+      (dolist (data (list (base64-encode-string "#!/bin/sh\n" t)
+                          "not base64!"
+                          7
+                          (make-string (1+ agent-remote--attachment-limit) ?A)))
+        (should (= (agent-remote-test--status
+                    (agent-remote-test--http
+                     "POST" "/api/attach"
+                     (json-serialize (list :data data))
+                     '("X-Agent-Remote: 1")))
+                   400))))))
+
 (ert-deftest agent-remote-test-exit-passes-skills-choice ()
   "The exit endpoint skips the before-exit skills only when told to."
   (agent-remote-test--with-session buffer

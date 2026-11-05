@@ -15,6 +15,8 @@ import android.view.WindowInsets;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -54,6 +56,11 @@ public class MainActivity extends Activity {
    * so without this the WebView waits minutes for TCP to give up.
    */
   private static final long LOAD_TIMEOUT_MS = 15_000;
+
+  private static final int REQUEST_FILES = 1;
+
+  /** Awaits the files the system picker returns, while it is open. */
+  private ValueCallback<Uri[]> filesCallback;
 
   private WebView web;
   private View errorView;
@@ -95,6 +102,7 @@ public class MainActivity extends Activity {
     s.setSupportZoom(false);
     web.setDownloadListener((url, ua, disposition, mime, length) -> { });
     web.setWebViewClient(new Client());
+    web.setWebChromeClient(new FilePicker());
     root.addView(web);
 
     errorView = buildErrorView();
@@ -420,6 +428,35 @@ public class MainActivity extends Activity {
           .addCategory(Intent.CATEGORY_BROWSABLE));
     } catch (ActivityNotFoundException e) {
       // Nothing can open it, so the tap does nothing.
+    }
+  }
+
+  @Override
+  protected void onActivityResult(int request, int result, Intent data) {
+    super.onActivityResult(request, result, data);
+    if (request == REQUEST_FILES && filesCallback != null) {
+      filesCallback.onReceiveValue(
+          WebChromeClient.FileChooserParams.parseResult(result, data));
+      filesCallback = null;
+    }
+  }
+
+  /** Opens the system picker for the page's file inputs. */
+  private class FilePicker extends WebChromeClient {
+    @Override
+    public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
+                                     FileChooserParams params) {
+      if (filesCallback != null) {
+        filesCallback.onReceiveValue(null);
+      }
+      filesCallback = callback;
+      try {
+        startActivityForResult(params.createIntent(), REQUEST_FILES);
+      } catch (ActivityNotFoundException e) {
+        filesCallback = null;
+        return false;
+      }
+      return true;
     }
   }
 
