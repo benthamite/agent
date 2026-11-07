@@ -5134,11 +5134,11 @@ when it is not installed."
 (transient-define-prefix agent-menu ()
   "Dispatch AI session commands."
   [["Sessions"
-    ("n" "new session" agent-start-new-session)
-    ("r" "resume session" agent-resume)
-    ("s" "select session" agent-select-session)
-    ("w" "jump to waiting" agent-jump-to-waiting)
-    ("l" "open log" agent-history)
+    ("n" "new" agent-start-new-session)
+    ("o" "open" agent-resume)
+    ("s" "select" agent-select-session)
+    ("w" "waiting" agent-jump-to-waiting)
+    ("l" "log" agent-history)
     ""
     "Session groups"
     ("g s" "save" agent-save-session-group)
@@ -5148,7 +5148,7 @@ when it is not installed."
     ("b" "branch" agent-create-branch)
     ("z" agent-toggle-snooze :description agent--snooze-description)
     ("h" "handoff" agent-handoff)
-    ("R" "restart" agent-restart)
+    ("r" "restart" agent-restart)
     ("x" "exit" agent-exit)
     ("X" "exit immediately" agent-exit-without-skills)
     ;; Display-only lines stand in for the "" and heading strings,

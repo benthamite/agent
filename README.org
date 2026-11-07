@@ -394,11 +394,12 @@ The executable =bin/agent-send= submits a message, read from standard input, to 
 #+findex: agent-snippet-tab
 The command ~agent-menu~ opens the unified transient menu. Every entry in it works with either backend: session switching, waiting-session jumps, resuming a past session, creating a branch of the current session, switching between branches, handoff, restart, exit, history browsing, skill execution, one dispatcher that acts on the thing at point, and a Prompts section beneath Tools in the same column for prompt capture, captured prompt insertion, and batch TODO processing.
 
-The Sessions section holds general session management: new session (=n=),
-resume session (=r=), select session (=s=), jump to waiting, and open log.
+The Sessions section holds general session management: new (=n=), open a
+past session (=o=), select (=s=), jump to the waiting session (=w=), and log
+(=l=).
 The Account section beneath Options holds login (=a l=) and usage (=a u=).
 The Current session column holds branch (=b=), snooze or unsnooze (=z=), handoff,
-restart (=R=), and exit commands, and beneath them a Monitor section for
+restart (=r=), and exit commands, and beneath them a Monitor section for
 tools outside Emacs that act on sessions: toggle monitor (=m m=), open
 review file (=m f=) and process review file (=m p=). Such a tool sets
 ~agent-review-file-function~, and the Monitor section appears only while
@@ -870,7 +871,7 @@ A branch is a session forked from another one: it starts with the parent's whole
 
 A branch is an ordinary session: select an open one with ~agent-select-session~ and resume a closed one with ~agent-resume~. The obsolete ~agent-switch-branch~, no longer in the menu, shows every session sharing a fork ancestor with the current one as an indented tree, each entry carrying its first prompt and its timestamp and the session you are in marked with an asterisk, and switches to the selected session: to its live buffer when it still has one, and otherwise by resuming it in a new buffer. It reports that there is nothing to navigate when the current session has no relatives.
 
-~agent-resume~, bound to =R=, resumes a past session of the current backend, or of a backend it asks for when no session buffer names one, and passes its prefix argument through to the backend, where it means the most recent session. A Claude session whose terminal closed while it was working keeps running in the background, and the CLI refuses to resume it; every non-fork Claude resume therefore checks =claude agents --json= first and, when the session is still running in the background, opens the buffer with =claude attach= instead. An attached session receives no initial prompt and none of ~claude-code-program-switches~, which the running session already has and which would otherwise precede the subcommand.
+~agent-resume~, bound to =o=, resumes a past session of the current backend, or of a backend it asks for when no session buffer names one, and passes its prefix argument through to the backend, where it means the most recent session. A Claude session whose terminal closed while it was working keeps running in the background, and the CLI refuses to resume it; every non-fork Claude resume therefore checks =claude agents --json= first and, when the session is still running in the background, opens the buffer with =claude attach= instead. An attached session receives no initial prompt and none of ~claude-code-program-switches~, which the running session already has and which would otherwise precede the subcommand.
 
 Both backends supply the lineage these commands read, through the ~:session-headers~ slot, and each derives it from what its CLI already records. Claude Code writes one transcript per session inside a per-project directory, so the scan reads the first line of each transcript in the project the current session belongs to. That line is read whole however long it is, since a session started with a queued prompt records the entire prompt there. Codex writes one rollout file per session, all under a single sessions directory, so the scan reads the ~session_meta~ record opening each rollout, keeps the ones whose recorded working directory matches, and takes the parent from ~forked_from_id~. Because that directory holds every Codex session on the machine, the scan is bounded by a start timestamp when the caller only needs one session's descendants.
 
