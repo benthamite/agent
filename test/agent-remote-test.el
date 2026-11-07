@@ -610,6 +610,16 @@ BODY can refer to the transcript as `file'."
                                    (alist-get 'choices data))
                            '("claude" "Codex")))))))))
 
+(ert-deftest agent-remote-test-icons-maps-backends-to-their-svg ()
+  "The icons endpoint gives each backend's SVG and skips one without it."
+  (let ((agent-backends
+         (list (cons 'codex (agent-backend--create :icon-svg "<svg>c</svg>"))
+               (cons 'claude (agent-backend--create)))))
+    (agent-remote-test--with-server
+      (should (equal (agent-remote-test--json
+                      (agent-remote-test--http "GET" "/api/icons"))
+                     '((codex . "<svg>c</svg>")))))))
+
 (ert-deftest agent-remote-test-history-says-when-transcript-is-pending ()
   "A backend that keeps transcripts promises one a new session lacks."
   (agent-remote-test--with-session buffer

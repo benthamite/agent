@@ -153,7 +153,10 @@ chain only once.  Only
   session-headers session-prompt prepare-fork
   sync-theme
   before-exit-ready-to-close-p before-kill-check idle-p reported-idle-p
-  session-history screen-state)
+  session-history screen-state
+  ;; New slots go last: a running Emacs that reloads this file keeps its
+  ;; registered backends, and earlier slots must stay where they were.
+  icon-svg)
 
 (defvar agent-backends nil
   "Alist of registered AI backends.
@@ -204,6 +207,9 @@ when the session has no transcript yet, else a plist as
 with the screen's text, returning a plist as
 `agent-claude-cli-screen-state' documents).  A backend that omits a key
 does not support the commands that dispatch on it.
+
+The optional `:icon-svg' key is the SVG source of the backend's icon,
+for displays outside Emacs such as the phone page of `agent-remote'.
 
 The optional `:ambient-directory' key is a function of no arguments
 returning the directory a session started from the current buffer

@@ -333,6 +333,8 @@ RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
           (agent-remote--json (agent-remote--history request)))
          ((and (equal method "GET") (equal path "/api/accounts"))
           (agent-remote--json (agent-remote--accounts request)))
+         ((and (equal method "GET") (equal path "/api/icons"))
+          (agent-remote--json (agent-remote--icons)))
          ((and (equal method "GET") (equal path "/api/backends"))
           (agent-remote--json (agent-remote--backends request)))
          ((and (equal method "GET") (equal path "/api/directories"))
@@ -621,6 +623,15 @@ Return the name of the new session buffer, which the phone follows."
       (user-error "No account given"))
     (list :ok t
           :id (buffer-name (agent-restart-with-account buffer account)))))
+
+(defun agent-remote--icons ()
+  "Return a table of each backend's name to its icon's SVG source.
+A backend without an icon is left out, and the page names it in text."
+  (let ((icons (make-hash-table :test #'equal)))
+    (pcase-dolist (`(,name . ,backend) agent-backends)
+      (when-let* ((svg (agent-backend-icon-svg backend)))
+        (puthash (symbol-name name) svg icons)))
+    icons))
 
 (defun agent-remote--backends (request)
   "Return what the new-session sheet opened from REQUEST starts with.

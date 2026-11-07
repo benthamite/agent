@@ -236,6 +236,7 @@ Source: lobehub/lobe-icons (MIT).")
   :icon (lambda (&optional face)
           (let ((svg (agent-svg-icon agent-claude-icon-svg face)))
             (if (string-empty-p svg) "CC" svg)))
+  :icon-svg agent-claude-icon-svg
   :account-env-var "CLAUDE_CONFIG_DIR"
   :accounts 'agent-claude-accounts
   :account-file 'agent-claude-account-file

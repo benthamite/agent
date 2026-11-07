@@ -57,6 +57,9 @@
   .card .name { font-size: 17px; font-weight: 600; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
   .card .meta { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .card .icon { display: inline-block; width: 18px; height: 18px;
+    margin-right: 6px; vertical-align: -2px; }
+  .card .icon svg { width: 100%; height: 100%; display: block; }
   .badge { font-size: 12px; font-weight: 700; text-transform: uppercase;
     letter-spacing: .04em; padding: 4px 8px; border-radius: 8px;
     background: var(--panel-2); color: var(--muted); white-space: nowrap; }
@@ -382,6 +385,19 @@ async function api(path, body) {
   return data;
 }
 
+// Each backend's icon, as SVG source from Emacs, keyed by backend name.
+// A session whose backend has none, or whose icons failed to load, shows
+// the backend's name instead.
+let icons = {};
+
+async function loadIcons() {
+  try {
+    icons = await api("/api/icons");
+  } catch (e) {
+    icons = {};
+  }
+}
+
 function age(changed) {
   if (!changed) return "";
   const s = Math.max(0, Math.floor(Date.now() / 1000 - changed));
@@ -478,10 +494,17 @@ function card(s) {
   main.className = "main";
   const name = document.createElement("div");
   name.className = "name";
-  name.textContent = s.name;
+  const icon = icons[s.backend];
+  if (icon) {
+    const mark = document.createElement("span");
+    mark.className = "icon";
+    mark.innerHTML = icon;
+    name.append(mark);
+  }
+  name.append(s.name);
   const meta = document.createElement("div");
   meta.className = "meta";
-  meta.textContent = [s.backend, s.account, age(s.changed)]
+  meta.textContent = [icon ? "" : s.backend, s.account, age(s.changed)]
     .filter(Boolean).join(" · ");
   main.append(name, meta);
   const badge = document.createElement("span");
@@ -1735,7 +1758,7 @@ for (const [event, handler] of [["touchstart", onListTouchStart],
   $("list").addEventListener(event, handler, { passive: false });
 }
 $("list").addEventListener("contextmenu", (e) => e.preventDefault());
-refreshList();
+loadIcons().then(refreshList);
 schedule();
 </script>
 </body>

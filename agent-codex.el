@@ -159,6 +159,7 @@ Source: SVG Repo (CC0).")
   :icon (lambda (&optional face)
           (let ((svg (agent-svg-icon agent-codex-icon-svg face)))
             (if (string-empty-p svg) "CX" svg)))
+  :icon-svg agent-codex-icon-svg
   :account-env-var "CODEX_HOME"
   :accounts 'agent-codex-accounts
   :account-file 'agent-codex-account-file
