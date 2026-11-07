@@ -5145,8 +5145,8 @@ when it is not installed."
     ("g r" "restore" agent-restore-sessions)
     ("g d" "delete" agent-delete-session-group)]
    ["Current session"
-    ("b n" "new branch" agent-create-branch)
-    ("z" "toggle snooze" agent-toggle-snooze)
+    ("b" "new branch" agent-create-branch)
+    ("z" agent-toggle-snooze :description agent--snooze-description)
     ("h" "handoff" agent-handoff)
     ("R" "restart" agent-restart)
     ("x" "exit" agent-exit)
@@ -5178,6 +5178,20 @@ when it is not installed."
     "Account"
     ("a l" "login" agent-account-login)
     ("a u" "usage" agent-usage-show)]])
+
+(defvar transient--original-buffer)
+
+(defun agent--snooze-description ()
+  "Return what `z' in `agent-menu' does to the current session.
+That is \"unsnooze\" when the buffer the menu was opened from is a
+snoozed session, and \"snooze\" otherwise."
+  (let ((buffer (or (bound-and-true-p transient--original-buffer)
+                    (current-buffer))))
+    (if (and (buffer-live-p buffer)
+             (agent--detect-backend buffer)
+             (agent-session-snoozed-p buffer))
+        "unsnooze"
+      "snooze")))
 
 (defun agent--monitor-menu-p ()
   "Return non-nil when `agent-menu' should show its Monitor section.

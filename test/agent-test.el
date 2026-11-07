@@ -4694,7 +4694,7 @@ Such a key breaks the whole menu when it opens, not at definition."
                                             (string (car events)))))
                                       (agent-test--menu-keys))))
                        #'string<)
-                 '("-" "a" "b" "g" "m" "p" "t"))))
+                 '("-" "a" "g" "m" "p" "t"))))
 
 (ert-deftest agent-test-menu-has-no-backend-column ()
   "Build the whole menu statically, with no per-backend group."
@@ -4706,12 +4706,12 @@ Such a key breaks the whole menu when it opens, not at definition."
 (ert-deftest agent-test-menu-binds-the-unified-commands ()
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
-    (dolist (key '("l" "r" "R" "s" "b n" "a l" "a u" "n" "X" "-a" "-c" "-w"
+    (dolist (key '("l" "r" "R" "s" "b" "a l" "a u" "n" "X" "-a" "-c" "-w"
                    "g s" "g r" "g d"
                    "t ." "t r" "p c" "p i" "p b"))
       (should (member key keys)))
     (dolist (key '("O" "b s" "H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
-                   "." "e" "N" "B" "L" "u" "a" "c" "o" "p" "i" "b"
+                   "." "e" "N" "B" "L" "u" "a" "c" "o" "p" "i" "b n"
                    "t a" "t c" "t o"))
       (should-not (member key keys))))
   (dolist (binding '(("r" . agent-resume)
@@ -5850,6 +5850,19 @@ is itself a kind of `error' and nothing here should special-case it."
           (should (equal (plist-get (agent--read-session-registry) :previous)
                          (list :saved 100.0 :sessions (list bad)))))
       (delete-file agent-session-registry-file))))
+
+(ert-deftest agent-test-menu-snooze-label-follows-session ()
+  "The `z' entry says what it will do to the session the menu came from."
+  (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+    (let ((transient--original-buffer buf)
+          (snoozed nil))
+      (cl-letf (((symbol-function 'agent-session-snoozed-p)
+                 (lambda (_) snoozed)))
+        (should (equal (agent--snooze-description) "snooze"))
+        (setq snoozed t)
+        (should (equal (agent--snooze-description) "unsnooze"))))
+    (let ((transient--original-buffer (get-buffer-create " *not a session*")))
+      (should (equal (agent--snooze-description) "snooze")))))
 
 ;;;; Restore choices
 
