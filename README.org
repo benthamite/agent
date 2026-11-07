@@ -396,7 +396,7 @@ The command ~agent-menu~ opens the unified transient menu. Every entry in it wor
 The Sessions section holds general session management: new (=n=), select
 (=s=), open a past session (=o=), jump to the waiting session (=w=), and log
 (=l=).
-The Account section beneath Options holds login (=a l=) and usage (=a u=).
+The Account section, at the bottom of the Options column, holds login (=a l=) and usage (=a u=).
 The Current session column holds branch (=b=), snooze or unsnooze (=z=), handoff,
 restart (=r=), and exit commands, and beneath them a Monitor section for
 tools outside Emacs that act on sessions: toggle monitor (=m m=), open

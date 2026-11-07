@@ -5172,7 +5172,12 @@ when it is not installed."
     ("-w" agent--infix-warn-kill-with-branches)
     ("-a" agent--infix-alert-on-ready)
     ("-t" agent--infix-sync-theme)
+    ;; Blank lines push Account down to the menu's last line: one for the
+    ;; Session groups column, one more when Monitor makes Current session
+    ;; the tallest column.
     ""
+    ""
+    (:info "" :format "%d" :if agent--monitor-menu-p)
     "Account"
     ("a l" "login" agent-account-login)
     ("a u" "usage" agent-usage-show)]])
