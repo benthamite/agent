@@ -5145,7 +5145,7 @@ when it is not installed."
     ("g r" "restore" agent-restore-sessions)
     ("g d" "delete" agent-delete-session-group)]
    ["Current session"
-    ("b" "new branch" agent-create-branch)
+    ("b" "branch" agent-create-branch)
     ("z" agent-toggle-snooze :description agent--snooze-description)
     ("h" "handoff" agent-handoff)
     ("R" "restart" agent-restart)
