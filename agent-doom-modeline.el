@@ -114,9 +114,11 @@ otherwise read it as a construct."
            "Describe the AI session of the current buffer."
            (agent-doom-modeline-session-status))
         t)
+  ;; No major mode or process segments: every session buffer is a
+  ;; terminal or a Codex buffer, so they would say the same thing in all.
   (doom-modeline-def-modeline 'ai-session
     '(bar agent-session)
-    '(misc-info major-mode process time)))
+    '(misc-info time)))
 
 (agent-doom-modeline-setup)
 
