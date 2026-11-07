@@ -1824,6 +1824,8 @@ right-aligned entries."
                   #'agent--tab-bar-selection-changed)
         (add-hook 'window-buffer-change-functions
                   #'agent--tab-bar-selection-changed)
+        (when (timerp agent--tab-bar-timer)
+          (cancel-timer agent--tab-bar-timer))
         (setq agent--tab-bar-timer
               (run-with-timer agent-tab-bar-refresh-interval
                               agent-tab-bar-refresh-interval

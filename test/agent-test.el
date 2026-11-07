@@ -881,6 +881,27 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
           (should (equal tab-bar-format expected)))
       (agent-tab-bar-mode -1))))
 
+(ert-deftest agent-test-tab-bar-mode-reenable-keeps-one-timer ()
+  "Enabling the mode while it is on leaves a single refresh timer."
+  (let ((tab-bar-format '(tab-bar-format-global))
+        (agent--tab-bar-added-align-right nil)
+        (agent--tab-bar-format-successor nil)
+        (agent--tab-bar-timer nil)
+        (agent-tab-bar-mode nil)
+        (count-timers
+         (lambda ()
+           (seq-count (lambda (timer)
+                        (eq (timer--function timer) #'agent--tab-bar-refresh))
+                      timer-list))))
+    (unwind-protect
+        (progn
+          (agent-tab-bar-mode 1)
+          (agent-tab-bar-mode 1)
+          (should (= (funcall count-timers) 1))
+          (agent-tab-bar-mode -1)
+          (should (= (funcall count-timers) 0)))
+      (agent-tab-bar-mode -1))))
+
 (ert-deftest agent-test-tab-bar-mode-adds-and-removes-its-own-alignment ()
   "Add right alignment after the segment when none exists, then drop it."
   (let ((tab-bar-format '(tab-bar-format-global))
