@@ -3174,6 +3174,22 @@ Signals an error if the status file is missing or incomplete."
     agent-claude--register-session-teardown)
   "Functions `agent-claude-mode' adds to `claude-code-start-hook'.")
 
+(defconst agent-claude--event-hook-functions
+  '(agent-claude--handle-notification
+    agent-claude--handle-stop
+    agent-claude--handle-session-state
+    agent-claude--refresh-status-on-event)
+  "Functions `agent-claude-mode' adds to `claude-code-event-hook'.
+Each returns nil, so none of them hides an event from the others.")
+
+(defconst agent-claude--event-hook-depth -90
+  "Depth at which `agent-claude-mode' adds its `claude-code-event-hook' functions.
+Claude Code runs that hook until a function returns non-nil, so a
+function from another package that returns a value would hide every
+later event.  Running first keeps the session state from depending on
+that.  The 2026-11-07 case: agent-log's scrubber returned its timer on
+every stop event, so sessions never learned that a turn had ended.")
+
 ;;;###autoload
 (define-minor-mode agent-claude-mode
   "Global minor mode wiring `claude-code' sessions into agent.
@@ -3195,10 +3211,8 @@ symmetrically and restores `claude-code-notification-function'."
   (setq agent-claude--saved-notification-function
         claude-code-notification-function)
   (setq claude-code-notification-function #'claude-code-default-notification)
-  (add-hook 'claude-code-event-hook #'agent-claude--handle-notification)
-  (add-hook 'claude-code-event-hook #'agent-claude--handle-stop)
-  (add-hook 'claude-code-event-hook #'agent-claude--handle-session-state)
-  (add-hook 'claude-code-event-hook #'agent-claude--refresh-status-on-event)
+  (dolist (fn agent-claude--event-hook-functions)
+    (add-hook 'claude-code-event-hook fn agent-claude--event-hook-depth))
   (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
   (dolist (fn agent-claude--start-hook-functions)
     (add-hook 'claude-code-start-hook fn))
@@ -3244,10 +3258,8 @@ symmetrically and restores `claude-code-notification-function'."
   "Remove Claude backend hooks, advice, and timers."
   (setq claude-code-notification-function
         agent-claude--saved-notification-function)
-  (remove-hook 'claude-code-event-hook #'agent-claude--handle-notification)
-  (remove-hook 'claude-code-event-hook #'agent-claude--handle-stop)
-  (remove-hook 'claude-code-event-hook #'agent-claude--handle-session-state)
-  (remove-hook 'claude-code-event-hook #'agent-claude--refresh-status-on-event)
+  (dolist (fn agent-claude--event-hook-functions)
+    (remove-hook 'claude-code-event-hook fn))
   (unless (bound-and-true-p agent-codex-mode)
     (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer)
     (agent-scroll-keys-global-mode -1))

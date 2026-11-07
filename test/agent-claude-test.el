@@ -2087,6 +2087,30 @@ conversation of its own and continued `real'."
                 agent-claude--start-hook-functions))
   (should (fboundp 'agent-setup-snippet-keys)))
 
+(ert-deftest agent-claude-test-mode-runs-event-handlers-first ()
+  "Run the state handlers ahead of other packages' event functions.
+`claude-code-event-hook' stops at the first non-nil return, so a
+function added by another package that returns a value must not hide
+stop events from agent."
+  (let ((claude-code-notification-function #'ignore)
+        (claude-code-start-hook nil)
+        (claude-code-event-hook nil)
+        (claude-code-process-environment-functions nil)
+        (agent-scroll-keys-global-mode nil)
+        (kill-buffer-query-functions kill-buffer-query-functions)
+        seen)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude--handle-stop)
+                   (lambda (message) (setq seen (plist-get message :type)) nil)))
+          (add-hook 'claude-code-event-hook (lambda (_message) 'added-before))
+          (agent-claude-mode 1)
+          (add-hook 'claude-code-event-hook (lambda (_message) 'added-after))
+          (run-hook-with-args-until-success
+           'claude-code-event-hook
+           '(:type stop :buffer-name "*agent-claude-test-no-such-buffer*"))
+          (should (eq seen 'stop)))
+      (agent-claude-mode -1))))
+
 (ert-deftest agent-claude-test-mode-symmetric ()
   "Enabling then disabling the mode leaves global state untouched."
   (let ((claude-code-notification-function #'ignore)
