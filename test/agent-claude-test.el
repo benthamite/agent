@@ -764,7 +764,8 @@ while every Stop lists it as running."
                         (lambda (session &key resume-id &allow-other-keys)
                           (setq captured-account
                                 (agent-session-account session))
-                          (setq captured-resume-id resume-id)))))
+                          (setq captured-resume-id resume-id)
+                          (current-buffer)))))
               (agent-restart))))
       (delete-directory agent-prompt-capture-directory t)
       (delete-directory dir t))

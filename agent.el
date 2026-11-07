@@ -922,19 +922,20 @@ Only `agent-session-event' may set this variable.")
 A snoozed session is one the user has set aside as not actionable for
 now: it keeps its key and stays reachable, but the switcher lists it
 last and dimmed, `agent-jump-to-waiting' skips it, and it fires no
-ready alert.  Set only by `agent-toggle-snooze', and cleared by it or
-by `agent--snooze-expire' when a timed snooze runs out.")
+ready alert.  Set only by `agent--set-snoozed', and cleared by it or by
+`agent--snooze-expire' when a timed snooze runs out.")
 
 (defvar-local agent--accepts-wake-ups nil
   "Non-nil when this AI session accepts wake-ups from external tools.
 A wake-up is a prompt that a tool outside Emacs, such as a message
 monitor, submits to an idle session through `agent-submit'.  Off by
-default; set only by `agent-toggle-wake-ups'.")
+default; set only by `agent-toggle-wake-ups' and by
+`agent--apply-session-user-state' when a session is resumed.")
 
 (defvar-local agent--snooze-timer nil
   "Pending timer ending this session's timed snooze, or nil.
-Armed by `agent-toggle-snooze' when the snooze was given a duration in
-hours; an indefinite snooze arms no timer.")
+Armed by `agent--set-snoozed' when the snooze was given a duration; an
+indefinite snooze arms no timer.")
 
 (defvar agent--sync-theme-timer nil
   "Pending timer for deferred theme sync, or nil.")
@@ -1970,26 +1971,42 @@ minibuffer; leave it blank to snooze indefinitely, as a nil HOURS
 does.  A snoozed session is set aside as not actionable for now: the
 switcher lists it last in the `agent-snoozed' face,
 `agent-jump-to-waiting' skips it, and it fires no ready alert, while
-its key and its buffer stay as they were.  Snoozing is a property of
-the buffer, so it ends with the session."
+its key and its buffer stay as they were.  The snooze, with what is
+left of its duration, survives `agent-restart' and is recorded by
+`agent-save-session-group' and the session registry, so restoring the
+session restores it too."
   (interactive
    (let ((buf (agent--resolve-session-buffer
                (and current-prefix-arg (agent--read-session-buffer)))))
      (list buf (unless (agent-session-snoozed-p buf)
                  (agent--read-snooze-hours)))))
-  (let ((buf (agent--resolve-session-buffer buffer)))
-    (with-current-buffer buf
-      (agent--cancel-snooze-timer)
-      (setq agent--snoozed (not agent--snoozed))
-      (when (and agent--snoozed hours)
-        (setq agent--snooze-timer
-              (run-at-time (* hours 3600) nil #'agent--snooze-expire buf)))
-      (message "%s %s" (agent-display-name buf)
-               (cond ((and agent--snoozed hours)
-                      (format "snoozed for %s hour%s" hours
-                              (if (= hours 1) "" "s")))
-                     (agent--snoozed "snoozed")
-                     (t "unsnoozed"))))))
+  (let* ((buf (agent--resolve-session-buffer buffer))
+         (snoozed (not (agent-session-snoozed-p buf))))
+    (agent--set-snoozed buf snoozed (and snoozed hours (* hours 3600)))
+    (message "%s %s" (agent-display-name buf)
+             (cond ((and snoozed hours)
+                    (format "snoozed for %s hour%s" hours
+                            (if (= hours 1) "" "s")))
+                   (snoozed "snoozed")
+                   (t "unsnoozed")))))
+
+(defun agent--set-snoozed (buffer snoozed &optional seconds)
+  "Snooze session BUFFER when SNOOZED is non-nil, and unsnooze it otherwise.
+A snooze given SECONDS ends by itself after that many seconds; without
+them it is indefinite.  Any pending expiry is cancelled first."
+  (with-current-buffer buffer
+    (agent--cancel-snooze-timer)
+    (setq agent--snoozed (and snoozed t))
+    (when (and snoozed seconds)
+      (setq agent--snooze-timer
+            (run-at-time seconds nil #'agent--snooze-expire buffer))))
+  (agent--schedule-session-registry-save))
+
+(defun agent--snooze-remaining (buffer)
+  "Return the seconds left in session BUFFER's timed snooze, or nil.
+Return nil when BUFFER is not snoozed or its snooze is indefinite."
+  (when-let* ((timer (buffer-local-value 'agent--snooze-timer buffer)))
+    (- (timer-until timer nil))))
 
 (defun agent--read-snooze-hours ()
   "Read a snooze duration in hours, or nil for an indefinite snooze."
@@ -2016,6 +2033,7 @@ session is waiting for input."
     (with-current-buffer buffer
       (setq agent--snoozed nil)
       (setq agent--snooze-timer nil))
+    (agent--schedule-session-registry-save)
     (when (agent--session-waiting-p buffer)
       (agent--session-notify-ready buffer))))
 
@@ -2032,8 +2050,8 @@ before waking BUFFER."
   "Let external tools wake session BUFFER, or stop letting them.
 BUFFER defaults to the current session buffer, and is prompted for
 when the current buffer is not a session or with a prefix argument.
-Sessions accept no wake-ups until this turns them on.  Like snoozing,
-the setting is a property of the buffer, so it ends with the session."
+Sessions accept no wake-ups until this turns them on.  Like a snooze,
+the setting survives `agent-restart' and restoring the session."
   (interactive
    (list (agent--resolve-session-buffer
           (and current-prefix-arg (agent--read-session-buffer)))))
@@ -2041,6 +2059,7 @@ the setting is a property of the buffer, so it ends with the session."
     (with-current-buffer buf
       (setq agent--accepts-wake-ups (not agent--accepts-wake-ups))
       (force-mode-line-update)
+      (agent--schedule-session-registry-save)
       (message "%s %s wake-ups" (agent-display-name buf)
                (if agent--accepts-wake-ups "accepts" "no longer accepts")))))
 
@@ -4127,12 +4146,15 @@ restartable, and returns the account to resume under."
          (extra-options
           (when-let* ((fn (and struct (agent-backend-restart-options struct))))
             (funcall fn buffer)))
-         (account (funcall account-fn)))
+         (account (funcall account-fn))
+         (state (agent--session-user-state buffer)))
     (agent-check-session-start backend account)
     (setf (agent-session-account session) account)
     (agent--force-kill-buffer buffer)
-    (apply #'agent-start-session session
-           :resume-id session-id extra-options)))
+    (let ((new (apply #'agent-start-session session
+                      :resume-id session-id extra-options)))
+      (agent--restore-session-user-states (list (cons new state)))
+      new)))
 
 (defun agent-restart--account (backend session-account &optional directory)
   "Return the account to restart a BACKEND session with.
@@ -4236,24 +4258,75 @@ that fail to resume stay recorded, so the command can be run again."
 (defun agent--restore-session-entries (entries)
   "Resume each registry entry in ENTRIES.
 An entry whose instance name another live session took in the meantime
-resumes under the first free name derived from it.  Return a list of
+resumes under the first free name derived from it.  Each resumed
+session gets back the state recorded in the entry's `:state', as
+`agent--restore-session-user-states' restores it.  Return a list of
 \(ENTRY . ERROR-MESSAGE) for the entries that failed."
-  (let (failed)
+  (let (failed resumed)
     (dolist (entry entries)
       (condition-case err
-          (apply #'agent-start-session
-                 (agent-session-create
-                  :backend (plist-get entry :backend)
-                  :account (plist-get entry :account)
-                  :directory (plist-get entry :directory)
-                  :instance (agent--free-entry-instance entry))
-                 :resume-id (plist-get entry :id)
-                 (plist-get entry :options))
+          (push (cons (apply #'agent-start-session
+                             (agent-session-create
+                              :backend (plist-get entry :backend)
+                              :account (plist-get entry :account)
+                              :directory (plist-get entry :directory)
+                              :instance (agent--free-entry-instance entry))
+                             :resume-id (plist-get entry :id)
+                             (plist-get entry :options))
+                      (plist-get entry :state))
+                resumed)
         (error
          (push (cons entry (format "%s: %s" (plist-get entry :directory)
                                    (error-message-string err)))
                failed))))
+    (agent--restore-session-user-states (nreverse resumed))
     (nreverse failed)))
+
+(defun agent--session-user-state (buffer)
+  "Return the state the user set on session BUFFER, as a plist.
+`:snoozed' is non-nil when BUFFER is snoozed, and `:snooze-until' is the
+`float-time' at which a timed snooze ends.  `:wake-ups' is non-nil when
+BUFFER accepts wake-ups, and `:key' is its switcher key.  A resumed
+session gets this state back from `agent--restore-session-user-states'."
+  (let ((remaining (agent--snooze-remaining buffer)))
+    (list :snoozed (agent-session-snoozed-p buffer)
+          :snooze-until (and remaining (+ (float-time) remaining))
+          :wake-ups (agent-session-accepts-wake-ups-p buffer)
+          :key (gethash buffer agent--session-keys))))
+
+(defun agent--restore-session-user-states (pairs)
+  "Give resumed sessions back their recorded user state.
+PAIRS is a list of (BUFFER . STATE), STATE being a plist that
+`agent--session-user-state' returned for the session before it was
+resumed, or nil when none was recorded.  A timed snooze resumes with
+the time it had left, and one whose time ran out in the meantime is
+not restored.  Every recorded key is released first and then reclaimed
+by its buffer when no other session holds it, so resumed sessions can
+trade keys among themselves; a buffer whose key is taken gets the first
+free one."
+  (dolist (pair pairs)
+    (agent--apply-session-user-state (car pair) (cdr pair))
+    (when (plist-get (cdr pair) :key)
+      (remhash (car pair) agent--session-keys)))
+  (agent--purge-dead-session-keys)
+  (dolist (pair pairs)
+    (when-let* ((key (plist-get (cdr pair) :key))
+                ((not (member key (hash-table-values agent--session-keys)))))
+      (agent--record-session-key (car pair) key)))
+  (dolist (pair pairs)
+    (with-current-buffer (car pair)
+      (agent--assign-session-key))))
+
+(defun agent--apply-session-user-state (buffer state)
+  "Set session BUFFER's snooze and wake-ups as the plist STATE records.
+STATE has the form `agent--session-user-state' returns."
+  (let ((until (plist-get state :snooze-until)))
+    (when (and (plist-get state :snoozed)
+               (or (null until) (> until (float-time))))
+      (agent--set-snoozed buffer t (and until (- until (float-time))))))
+  (with-current-buffer buffer
+    (setq agent--accepts-wake-ups (and (plist-get state :wake-ups) t))
+    (force-mode-line-update)))
 
 (defun agent--free-entry-instance (entry)
   "Return the instance name to resume registry ENTRY under.
@@ -4332,7 +4405,8 @@ Compare the process start time too, because a reboot reuses pids."
 (defun agent--session-registry-entry (buffer)
   "Return the registry entry for session BUFFER, or nil.
 A session is recorded only while it is live and its native id is known,
-because only then can it be resumed."
+because only then can it be resumed.  The entry's `:state' records what
+the user set on the session, as `agent--session-user-state' returns it."
   (when-let* (((not (buffer-local-value 'agent--teardown-done buffer)))
               (session (agent-session buffer))
               (id (agent-session-id session)))
@@ -4344,7 +4418,8 @@ because only then can it be resumed."
           :options (when-let* ((struct (agent-backend
                                         (agent-session-backend session)))
                                (fn (agent-backend-restart-options struct)))
-                     (funcall fn buffer)))))
+                     (funcall fn buffer))
+          :state (agent--session-user-state buffer))))
 
 (defun agent--read-session-registry ()
   "Return the registry stored in `agent-session-registry-file', or nil."

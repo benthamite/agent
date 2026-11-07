@@ -998,6 +998,58 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
         (should-not (agent-session-snoozed-p a))
         (should-not alerts)))))
 
+;;;; Session user state across resumes
+
+(ert-deftest agent-test-user-state-round-trips-onto-a-resumed-buffer ()
+  "Give a resumed session its snooze, remaining time, wake-ups and key."
+  (agent-test--with-two-sessions
+    (agent-toggle-snooze a 2)
+    (agent-toggle-wake-ups a)
+    (let ((state (agent--session-user-state a)))
+      (agent--set-snoozed a nil)
+      (with-current-buffer a (setq agent--accepts-wake-ups nil))
+      (remhash a agent--session-keys)
+      (puthash a "d" agent--session-keys)
+      (agent--restore-session-user-states (list (cons a state)))
+      (unwind-protect
+          (progn
+            (should (agent-session-snoozed-p a))
+            (should (< (- (* 2 3600) 60) (agent--snooze-remaining a)
+                       (1+ (* 2 3600))))
+            (should (agent-session-accepts-wake-ups-p a))
+            (should (equal (gethash a agent--session-keys) "a")))
+        (agent--set-snoozed a nil)))))
+
+(ert-deftest agent-test-indefinite-snooze-is-restored-without-a-timer ()
+  "Restore an indefinite snooze as indefinite."
+  (agent-test--with-two-sessions
+    (agent--restore-session-user-states
+     (list (cons a (list :snoozed t :snooze-until nil))))
+    (should (agent-session-snoozed-p a))
+    (should-not (buffer-local-value 'agent--snooze-timer a))))
+
+(ert-deftest agent-test-expired-snooze-is-not-restored ()
+  "Leave a session unsnoozed when its recorded snooze ran out meanwhile."
+  (agent-test--with-two-sessions
+    (agent--restore-session-user-states
+     (list (cons a (list :snoozed t :snooze-until (- (float-time) 10)))))
+    (should-not (agent-session-snoozed-p a))))
+
+(ert-deftest agent-test-restored-sessions-trade-keys ()
+  "Let resumed sessions reclaim keys that other resumed sessions took."
+  (agent-test--with-two-sessions
+    (agent--restore-session-user-states
+     (list (cons a (list :key "s")) (cons b (list :key "a"))))
+    (should (equal (gethash a agent--session-keys) "s"))
+    (should (equal (gethash b agent--session-keys) "a"))))
+
+(ert-deftest agent-test-restored-session-yields-a-key-held-outside ()
+  "Give a resumed session a free key when a session outside the set holds its own."
+  (agent-test--with-two-sessions
+    (agent--restore-session-user-states (list (cons a (list :key "s"))))
+    (should (equal (gethash b agent--session-keys) "s"))
+    (should (equal (gethash a agent--session-keys) "a"))))
+
 ;;;; Switcher annotations
 
 (defun agent-test--switcher-label (buffer)
@@ -1976,9 +2028,10 @@ sentinel has run."
       (delete-directory agent-prompt-capture-directory t))))
 
 (ert-deftest agent-test-restart-resumes-with-session-identity ()
-  "Restart kills the buffer and resumes the exact session id."
+  "Restart resumes the exact session id, still snoozed if it was."
   (let ((agent-backends nil)
         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        (new (generate-new-buffer " *agent-restarted*"))
         killed
         resumed)
     (unwind-protect
@@ -1999,10 +2052,14 @@ sentinel has run."
                         (lambda (session &key initial-prompt resume-id)
                           (ignore initial-prompt)
                           (setq resumed (list (agent-session-backend session)
-                                              resume-id))))))
+                                              resume-id))
+                          new))))
+              (agent-toggle-snooze buf)
               (agent-restart))
             (should killed)
-            (should (equal resumed '(one "sid-123")))))
+            (should (equal resumed '(one "sid-123")))
+            (should (agent-session-snoozed-p new))))
+      (kill-buffer new)
       (delete-directory agent-prompt-capture-directory t))))
 
 (ert-deftest agent-test-restart-without-identity-does-not-kill ()
@@ -2172,7 +2229,8 @@ and globally persisting -- an account the session never had."
                          (list (agent-session-account session)
                                (agent-session-directory session)
                                (agent-session-instance session)
-                               (plist-get options :resume-id))))))
+                               (plist-get options :resume-id)))
+                   (current-buffer))))
         (agent-restart))
       (should killed)
       (should (equal resumed '("e1" "~/repo/" "test" "sid-123"))))))
@@ -2196,7 +2254,8 @@ and globally persisting -- an account the session never had."
                        (lambda (_backend _account _directory) nil))
                       ((symbol-function 'agent-start-session)
                        (lambda (_session &rest options)
-                         (setq captured options))))
+                         (setq captured options)
+                         buf)))
               (agent-restart))
             (should (equal captured '(:resume-id "sid-123")))))
       (delete-directory agent-prompt-capture-directory t))))
@@ -2242,7 +2301,7 @@ session's account and id, and `synced' the synced selections."
                         (setq resumed
                               (list (agent-session-account session)
                                     (plist-get options :resume-id)))
-                        'new-buffer)))
+                        (current-buffer))))
              ,@body))
        (delete-directory agent-prompt-capture-directory t))))
 
@@ -2250,7 +2309,7 @@ session's account and id, and `synced' the synced selections."
   "Restarting with an account selects it and resumes the session under it."
   (agent-test--with-restartable-session
     (should (eq (agent-restart-with-account (current-buffer) "personal")
-                'new-buffer))
+                (current-buffer)))
     (should killed)
     (should (equal resumed '("personal" "sid-123")))
     (should (equal (agent-account-current 'one) "personal"))
@@ -5673,7 +5732,9 @@ is itself a kind of `error' and nothing here should special-case it."
                        '(:backend one :account "acct"
                                   :directory "~/repo/project/"
                                   :instance "default" :id "sid-1"
-                                  :options (:terminal-backend eat))))
+                                  :options (:terminal-backend eat)
+                                  :state (:snoozed nil :snooze-until nil
+                                                   :wake-ups nil :key nil))))
         (setq agent--teardown-done t)
         (should-not (agent--session-registry-entry buf))))))
 
@@ -5702,8 +5763,10 @@ is itself a kind of `error' and nothing here should special-case it."
                        (when (equal (agent-session-directory session) "~/bad/")
                          (error "Boom"))
                        (push (cons (agent-session-account session) options)
-                             started))))
-            (agent-restore-sessions))
+                             started)
+                       (current-buffer))))
+            (with-temp-buffer
+              (agent-restore-sessions)))
           (should (equal started '(("a" :resume-id "sid-ok" :x 1))))
           (should (equal (plist-get (agent--read-session-registry) :previous)
                          (list :saved 100.0 :sessions (list bad)))))
@@ -5791,8 +5854,10 @@ is itself a kind of `error' and nothing here should special-case it."
                     ((symbol-function 'agent-start-session)
                      (lambda (session &rest options)
                        (push (cons (agent-session-directory session) options)
-                             started))))
-            (agent-restore-session-group "work")
+                             started)
+                       (current-buffer))))
+            (with-temp-buffer
+              (agent-restore-session-group "work"))
             (should-error (agent-restore-session-group "missing")
                           :type 'user-error))
           (should (equal started '(("~/ok/" :resume-id "sid-ok" :x 1))))
@@ -5826,10 +5891,32 @@ is itself a kind of `error' and nothing here should special-case it."
                          (lambda (session &rest options)
                            (push (cons (agent-session-instance session)
                                        options)
-                                 started))))
-                (agent-restore-session-group "work"))
+                                 started)
+                           (current-buffer))))
+                (with-temp-buffer
+                  (agent-restore-session-group "work")))
               (should (equal started '(("default-1" :resume-id "sid-old")))))
           (delete-file agent-session-groups-file))))))
+
+(ert-deftest agent-test-restore-session-group-restores-snooze ()
+  "Restoring a group snoozes again the sessions that were snoozed when saved."
+  (let ((agent-session-groups-file (make-temp-file "agent-groups"))
+        (entry '(:backend one :account "a" :directory "~/ok/" :instance nil
+                          :id "sid-ok" :options nil
+                          :state (:snoozed t :snooze-until nil :wake-ups t))))
+    (unwind-protect
+        (with-temp-buffer
+          (agent--write-session-groups
+           (list (cons "work" (list :saved 1.0 :sessions (list entry)))))
+          (let ((resumed (current-buffer)))
+            (cl-letf (((symbol-function 'agent--buffer-for-session-id)
+                       #'ignore)
+                      ((symbol-function 'agent-start-session)
+                       (lambda (_session &rest _options) resumed)))
+              (agent-restore-session-group "work"))
+            (should (agent-session-snoozed-p resumed))
+            (should (agent-session-accepts-wake-ups-p resumed))))
+      (delete-file agent-session-groups-file))))
 
 (ert-deftest agent-test-start-session-refuses-taken-instance ()
   "Refuse to start under an instance a live session in the directory holds."
