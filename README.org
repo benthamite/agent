@@ -394,8 +394,8 @@ The executable =bin/agent-send= submits a message, read from standard input, to 
 #+findex: agent-snippet-tab
 The command ~agent-menu~ opens the unified transient menu. Every entry in it works with either backend: session switching, waiting-session jumps, resuming a past session, creating a branch of the current session, switching between branches, handoff, restart, exit, history browsing, skill execution, one dispatcher that acts on the thing at point, and a Prompts section beneath Tools in the same column for prompt capture, captured prompt insertion, and batch TODO processing.
 
-The Sessions section holds general session management: new (=n=), open a
-past session (=o=), select (=s=), jump to the waiting session (=w=), and log
+The Sessions section holds general session management: new (=n=), select
+(=s=), open a past session (=o=), jump to the waiting session (=w=), and log
 (=l=).
 The Account section beneath Options holds login (=a l=) and usage (=a u=).
 The Current session column holds branch (=b=), snooze or unsnooze (=z=), handoff,
@@ -406,7 +406,7 @@ review file (=m f=) and process review file (=m p=). Such a tool sets
 that option is set. It labels
 ~agent-exit~ (=x=) as “exit” and ~agent-exit-without-skills~ (=X=) as “exit immediately”.
 
-Tools use the =t= prefix: act on thing at point (=t .=) and run skill (=t r=).
+Tools use the =t= prefix: run skill (=t r=) and act on thing at point (=t .=).
 Prompts use =p=: capture (=p c=), insert (=p i=), and batch TODOs (=p b=).
 Options put account selection first, then buffer protection and branch warnings,
 followed by ready alerts and theme synchronization.

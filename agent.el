@@ -5135,8 +5135,8 @@ when it is not installed."
   "Dispatch AI session commands."
   [["Sessions"
     ("n" "new" agent-start-new-session)
-    ("o" "open" agent-resume)
     ("s" "select" agent-select-session)
+    ("o" "open" agent-resume)
     ("w" "waiting" agent-jump-to-waiting)
     ("l" "log" agent-history)
     ""
@@ -5161,8 +5161,8 @@ when it is not installed."
     ("m p" "process review file" agent-process-review-file
      :if agent--monitor-menu-p)]
    ["Tools"
-    ("t ." "act on thing at point" agent-act-on-thing-at-point)
     ("t r" "run skill" agent-run-skill)
+    ("t ." "act on thing at point" agent-act-on-thing-at-point)
     ""
     "Prompts"
     ("p c" "capture prompt" agent-capture-prompt)
