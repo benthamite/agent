@@ -636,6 +636,7 @@ A Monitor the agent started, which carries its command, still is."
         (dolist (payload
                  '("{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make\",\"description\":\"Run the test suite\"}}"
                    "{\"agent_id\":\"sub\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/x/y.el\"}}"
+                   "{\"tool_name\":\"ToolSearch\",\"tool_input\":{\"query\":\"todo\"}}"
                    "{\"tool_name\":\"TodoWrite\",\"tool_input\":{\"todos\":[{\"content\":\"Fix\",\"status\":\"in_progress\",\"activeForm\":\"Fixing the parser\"}]}}"))
           (should (zerop (agent-claude-test--run-hook
                           "hooks/record-activity.sh" payload))))

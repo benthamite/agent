@@ -8,7 +8,8 @@
 # item in progress, empty when none is) or `action' (the tool call).
 # Writes from background processes can land out of order; Emacs reads
 # the file with the latest TIME of each kind, so a late older write
-# never replaces a newer one.  Subagents' tool calls are left out.
+# never replaces a newer one.  Subagents' tool calls and tool lookups
+# (ToolSearch) are left out.
 uuid=${AGENT_SESSION_UUID:-}
 payload=$(cat)
 [ -n "$uuid" ] || exit 0
@@ -24,6 +25,8 @@ here=$(dirname "$0")
     exit unless ref $d eq "HASH";
     exit if defined $d->{agent_id} && $d->{agent_id} ne "";
     my $tool = $d->{tool_name} // "";
+    # Loading a tool says nothing about the work.
+    exit if $tool eq "ToolSearch";
     my $in = ref $d->{tool_input} eq "HASH" ? $d->{tool_input} : {};
     sub base { my $f = shift // ""; $f eq "" ? "a file" : basename($f) }
     my ($kind, $text) = ("action", "");
