@@ -46,6 +46,33 @@
           (expand-file-name "one-" temporary-file-directory)
           (agent-capture--file 'one buf)))))))
 
+(ert-deftest agent-capture-test-open-file-leaves-point-below-new-heading ()
+  "A capture buffer already shown in a window ends below the new heading."
+  (let* ((file (make-temp-file "agent-capture" nil ".org"))
+         (agent-prompt-capture-auto-save-delay nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-display-name) (lambda (_) "test")))
+          (save-window-excursion
+            (delete-other-windows)
+            (let ((session (current-buffer))
+                  (capture-window (split-window-right)))
+              (agent-capture--open-file file 'one session)
+              (insert "First prompt")
+              (set-window-point capture-window (point-min))
+              (select-window (next-window capture-window))
+              (switch-to-buffer session)
+              (agent-capture--open-file file 'one session)
+              (should (eq (selected-window) capture-window)))
+            (should (= (window-point (selected-window)) (point-max)))
+            (should (= (point) (point-max)))
+            (should (save-excursion
+                      (forward-line -2)
+                      (looking-at-p ":END:")))))
+      (when-let* ((buffer (find-buffer-visiting file)))
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer))
+      (delete-file file))))
+
 (ert-deftest agent-capture-test-read-captured-prompts-skips-empty-and-inserted ()
   "Read pending nonempty Org prompt capture entries."
   (let ((file (make-temp-file "agent-prompts" nil ".org")))

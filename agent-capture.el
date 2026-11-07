@@ -142,17 +142,21 @@ Return non-nil when ACTION may proceed."
     (prin1-to-string (list backend account directory instance))))
 
 (defun agent-capture--open-file (file backend buffer)
-  "Open FILE and append a prompt entry for BACKEND session BUFFER."
+  "Open FILE and append a prompt entry for BACKEND session BUFFER.
+Leave point below the new heading.  A window already showing FILE keeps
+its own position, so point is moved in the window, not only the buffer."
   (require 'org)
   (make-directory (file-name-directory file) t)
-  (let ((capture-buffer (find-file-noselect file)))
+  (let ((capture-buffer (find-file-noselect file))
+        entry)
     (with-current-buffer capture-buffer
       (org-mode)
       (agent-prompt-capture-mode 1)
       (agent-capture--ensure-header backend buffer)
-      (agent-capture--append-entry)
+      (setq entry (agent-capture--append-entry))
       (save-buffer))
-    (pop-to-buffer capture-buffer)))
+    (pop-to-buffer capture-buffer)
+    (goto-char entry)))
 
 (defun agent-capture--ensure-header (backend buffer)
   "Insert the prompt capture file header for BACKEND session BUFFER."
