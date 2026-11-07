@@ -4707,7 +4707,7 @@ Such a key breaks the whole menu when it opens, not at definition."
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
     (dolist (key '("l" "r" "O" "R" "s" "b n" "b s" "a l" "a u" "n" "X" "-a" "-c" "-w"
-                   "g s" "g r" "g d"
+                   "g s" "g d"
                    "t ." "t r" "p c" "p i" "p b"))
       (should (member key keys)))
     (dolist (key '("H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
@@ -4717,7 +4717,6 @@ Such a key breaks the whole menu when it opens, not at definition."
   (dolist (binding '(("r" . agent-resume)
                      ("O" . agent-restore-sessions)
                      ("g s" . agent-save-session-group)
-                     ("g r" . agent-restore-session-group)
                      ("g d" . agent-delete-session-group)
                      ("R" . agent-restart)
                      ("s" . agent-select-session)))
@@ -5765,16 +5764,25 @@ is itself a kind of `error' and nothing here should special-case it."
                                     :sessions ((:id "mine")))
                              live)))))))
 
-(ert-deftest agent-test-session-registry-keeps-previous-over-empty-dead ()
-  "A dead instance without sessions leaves the previous sessions alone."
+(ert-deftest agent-test-session-registry-empty-dead-clears-previous ()
+  "Only the Emacs that closed last is offered, even when it had no sessions."
   (let ((registry '(:previous (:saved 1.0 :sessions ((:id "old")))
                               :instances ((:pid 3 :start (0 3) :saved 7.0
                                                 :sessions nil)))))
     (cl-letf (((symbol-function 'agent--emacs-instance-live-p) #'ignore))
-      (should (equal (plist-get (agent--session-registry-update
-                                 registry '(:pid 1 :start (0 1)) nil 10.0)
-                                :previous)
-                     '(:saved 1.0 :sessions ((:id "old"))))))))
+      (should-not (plist-get (agent--session-registry-update
+                              registry '(:pid 1 :start (0 1)) nil 10.0)
+                             :previous)))))
+
+(ert-deftest agent-test-session-registry-keeps-previous-within-one-emacs ()
+  "Later saves of the same Emacs keep the previous sessions on offer."
+  (let ((registry '(:previous (:saved 1.0 :sessions ((:id "old")))
+                              :instances ((:pid 1 :start (0 1) :saved 7.0
+                                                :sessions nil)))))
+    (should (equal (plist-get (agent--session-registry-update
+                               registry '(:pid 1 :start (0 1)) nil 10.0)
+                              :previous)
+                   '(:saved 1.0 :sessions ((:id "old")))))))
 
 (ert-deftest agent-test-emacs-instance-live-p-checks-start-time ()
   "A reused pid with a different start time is not the recorded Emacs."
@@ -5829,7 +5837,6 @@ is itself a kind of `error' and nothing here should special-case it."
                      #'ignore)
                     ((symbol-function 'agent--buffer-for-session-id)
                      (lambda (id) (equal id "sid-live")))
-                    ((symbol-function 'y-or-n-p) (lambda (_prompt) t))
                     ((symbol-function 'agent-start-session)
                      (lambda (session &rest options)
                        (when (equal (agent-session-directory session) "~/bad/")
@@ -5838,11 +5845,42 @@ is itself a kind of `error' and nothing here should special-case it."
                              started)
                        (current-buffer))))
             (with-temp-buffer
-              (agent-restore-sessions)))
+              (agent-restore-sessions 'previous)))
           (should (equal started '(("a" :resume-id "sid-ok" :x 1))))
           (should (equal (plist-get (agent--read-session-registry) :previous)
                          (list :saved 100.0 :sessions (list bad)))))
       (delete-file agent-session-registry-file))))
+
+;;;; Restore choices
+
+(ert-deftest agent-test-restore-choice-offers-previous-and-groups ()
+  "The prompt offers the previous Emacs's pending sessions and every group."
+  (let* ((agent-session-registry-file (make-temp-file "agent-sessions"))
+         (agent-session-groups-file (make-temp-file "agent-groups"))
+         offered)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent--session-registry-entries) #'ignore)
+                  ((symbol-function 'agent--buffer-for-session-id)
+                   (lambda (id) (equal id "live")))
+                  ((symbol-function 'completing-read)
+                   (lambda (_prompt table &rest _)
+                     (setq offered (all-completions "" table))
+                     (car offered))))
+          (agent--write-session-groups
+           '(("work" :saved 50.0 :sessions ((:id "w")))))
+          (agent--write-session-registry
+           '(:previous (:saved 100.0 :sessions ((:id "gone") (:id "live")))
+                       :instances nil))
+          (should (eq (agent--read-restore-choice) 'previous))
+          (should (equal offered (list agent--previous-emacs-choice "work")))
+          (agent--write-session-registry
+           '(:previous (:saved 100.0 :sessions ((:id "live"))) :instances nil))
+          (should (equal (agent--read-restore-choice) "work"))
+          (should (equal offered '("work")))
+          (agent--write-session-groups nil)
+          (should-error (agent--read-restore-choice) :type 'user-error))
+      (delete-file agent-session-registry-file)
+      (delete-file agent-session-groups-file))))
 
 ;;;; Named session groups
 
@@ -5929,8 +5967,8 @@ is itself a kind of `error' and nothing here should special-case it."
                              started)
                        (current-buffer))))
             (with-temp-buffer
-              (agent-restore-session-group "work"))
-            (should-error (agent-restore-session-group "missing")
+              (agent-restore-sessions "work"))
+            (should-error (agent-restore-sessions "missing")
                           :type 'user-error))
           (should (equal started '(("~/ok/" :resume-id "sid-ok" :x 1))))
           (should (equal (agent--read-session-groups) groups)))
@@ -5966,7 +6004,7 @@ is itself a kind of `error' and nothing here should special-case it."
                                  started)
                            (current-buffer))))
                 (with-temp-buffer
-                  (agent-restore-session-group "work")))
+                  (agent-restore-sessions "work")))
               (should (equal started '(("default-1" :resume-id "sid-old")))))
           (delete-file agent-session-groups-file))))))
 
@@ -5985,7 +6023,7 @@ is itself a kind of `error' and nothing here should special-case it."
                        #'ignore)
                       ((symbol-function 'agent-start-session)
                        (lambda (_session &rest _options) resumed)))
-              (agent-restore-session-group "work"))
+              (agent-restore-sessions "work"))
             (should (agent-session-snoozed-p resumed))
             (should (agent-session-accepts-wake-ups-p resumed))))
       (delete-file agent-session-groups-file))))

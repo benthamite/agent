@@ -4317,37 +4317,88 @@ sessions of the last Emacs that died."
   "Timer that saves the session registry after sessions change.")
 
 ;;;###autoload
-(defun agent-restore-sessions ()
-  "Resume the sessions that were live when the last Emacs died.
-Whether that Emacs quit, crashed, or went down with the machine, its
-sessions are the ones last recorded in `agent-session-registry-file'.
-Each is resumed with its backend, account, directory, instance, and
-session id; sessions already live in this Emacs are skipped.  Sessions
-that fail to resume stay recorded, so the command can be run again."
-  (interactive)
-  (let* ((previous (plist-get (agent--save-session-registry) :previous))
-         (pending (seq-remove (lambda (entry)
-                                (agent--buffer-for-session-id
-                                 (plist-get entry :id)))
-                              (plist-get previous :sessions))))
+(defconst agent--previous-emacs-choice "Previous Emacs"
+  "Name under which the sessions of the Emacs that closed last are offered.")
+
+(defun agent-restore-sessions (choice)
+  "Resume the saved set of sessions CHOICE.
+Offer the session groups saved with `agent-save-session-group' and the
+sessions that were live when the previous Emacs closed, whether it quit,
+crashed, or went down with the machine.  Those are offered only in the
+Emacs that follows it, until they are resumed, so they do not pile up.
+CHOICE is the name of a group, or the symbol `previous'.  Each session
+is resumed with its backend, account, directory, instance, and session
+id; sessions already live in this Emacs are skipped.  A group is kept,
+so it can be restored again; a previous session that fails to resume
+stays on offer, so the command can be run again."
+  (interactive (list (agent--read-restore-choice)))
+  (if (eq choice 'previous)
+      (agent--restore-previous-sessions)
+    (agent--restore-session-group choice)))
+
+(defun agent--read-restore-choice ()
+  "Read which saved set of sessions to resume.
+Return the name of a session group, or the symbol `previous' for the
+sessions of the Emacs that closed last.  Each candidate is annotated
+with its session count and time."
+  (let* ((previous (agent--previous-sessions))
+         (choices (append
+                   (when (plist-get previous :sessions)
+                     (list (cons agent--previous-emacs-choice
+                                 (append (list :previous t) previous))))
+                   (agent--read-session-groups))))
+    (unless choices
+      (user-error "Nothing to restore: no saved session groups, and no sessions from the previous Emacs"))
+    (let ((name (completing-read
+                 "Restore sessions: "
+                 (lambda (string predicate action)
+                   (if (eq action 'metadata)
+                       `(metadata
+                         (annotation-function
+                          . ,(lambda (name)
+                               (agent--restore-choice-annotation
+                                (cdr (assoc name choices))))))
+                     (complete-with-action action choices string predicate)))
+                 nil t)))
+      (if (plist-get (cdr (assoc name choices)) :previous) 'previous name))))
+
+(defun agent--restore-choice-annotation (set)
+  "Return the annotation of the saved set of sessions SET in the restore prompt."
+  (when set
+    (format "  %d session%s, %s %s"
+            (length (plist-get set :sessions))
+            (if (cdr (plist-get set :sessions)) "s" "")
+            (if (plist-get set :previous) "open when Emacs closed at" "saved")
+            (format-time-string "%F %R" (plist-get set :saved)))))
+
+(defun agent--previous-sessions ()
+  "Return the previous Emacs's sessions that are not live, with their save time.
+The result is a plist with `:saved' and `:sessions'."
+  (let ((previous (plist-get (agent--save-session-registry) :previous)))
+    (list :saved (plist-get previous :saved)
+          :sessions (seq-remove (lambda (entry)
+                                  (agent--buffer-for-session-id
+                                   (plist-get entry :id)))
+                                (plist-get previous :sessions)))))
+
+(defun agent--restore-previous-sessions ()
+  "Resume the sessions that were live when the previous Emacs closed.
+Keep the ones that fail to resume on offer."
+  (let* ((previous (agent--previous-sessions))
+         (pending (plist-get previous :sessions)))
     (unless pending
-      (user-error "No sessions to restore"))
-    (when (y-or-n-p (format "Resume %d session%s last recorded %s? "
-                            (length pending)
-                            (if (cdr pending) "s" "")
-                            (format-time-string
-                             "%F %R" (plist-get previous :saved))))
-      (let ((failed (agent--restore-session-entries pending)))
-        (agent--write-session-registry
-         (plist-put (agent--save-session-registry) :previous
-                    (and failed (list :saved (plist-get previous :saved)
-                                      :sessions (mapcar #'car failed)))))
-        (if failed
-            (message "Resumed %d of %d sessions; failed: %s"
-                     (- (length pending) (length failed)) (length pending)
-                     (mapconcat #'cdr failed "; "))
-          (message "Resumed %d session%s" (length pending)
-                   (if (cdr pending) "s" "")))))))
+      (user-error "No sessions from the previous Emacs to restore"))
+    (let ((failed (agent--restore-session-entries pending)))
+      (agent--write-session-registry
+       (plist-put (agent--save-session-registry) :previous
+                  (and failed (list :saved (plist-get previous :saved)
+                                    :sessions (mapcar #'car failed)))))
+      (if failed
+          (message "Resumed %d of %d sessions; failed: %s"
+                   (- (length pending) (length failed)) (length pending)
+                   (mapconcat #'cdr failed "; "))
+        (message "Resumed %d session%s" (length pending)
+                 (if (cdr pending) "s" ""))))))
 
 (defun agent--restore-session-entries (entries)
   "Resume each registry entry in ENTRIES.
@@ -4456,20 +4507,23 @@ Return the registry written."
   "Return REGISTRY with SELF's live sessions set to ENTRIES as of NOW.
 SELF is a plist with the `:pid' and `:start' of this Emacs.  The
 sessions of every other recorded Emacs that is no longer running become
-the registry's `:previous' sessions, replacing the earlier ones, unless
-none of them had sessions."
-  (let (live dead-sessions dead-saved)
+the registry's `:previous' sessions, replacing the earlier ones even
+when they had none, so only the Emacs that closed last is offered for
+restoring."
+  (let (live dead dead-sessions dead-saved)
     (dolist (instance (plist-get registry :instances))
       (cond
        ((agent--same-emacs-instance-p instance self))
        ((agent--emacs-instance-live-p instance) (push instance live))
-       (t (setq dead-sessions (append dead-sessions
+       (t (setq dead t
+                dead-sessions (append dead-sessions
                                       (plist-get instance :sessions))
                 dead-saved (max (or dead-saved 0)
                                 (plist-get instance :saved))))))
-    (list :previous (if dead-sessions
-                        (list :saved dead-saved :sessions dead-sessions)
-                      (plist-get registry :previous))
+    (list :previous (cond (dead-sessions
+                           (list :saved dead-saved :sessions dead-sessions))
+                          (dead nil)
+                          (t (plist-get registry :previous)))
           :instances (cons (append self (list :saved now :sessions entries))
                            (nreverse live)))))
 
@@ -4555,7 +4609,7 @@ was saved, recorded in the same form as `agent-session-registry-file'."
 ;;;###autoload
 (defun agent-save-session-group (name)
   "Save every live resumable session as the session group NAME.
-`agent-restore-session-group' resumes the group later.  Saving under an
+`agent-restore-sessions' resumes the group later.  Saving under an
 existing NAME replaces that group after confirmation.  Afterwards, offer
 to close the saved sessions as `agent-exit-without-skills' does."
   (interactive
@@ -4592,9 +4646,17 @@ to close the saved sessions as `agent-exit-without-skills' does."
 ;;;###autoload
 (defun agent-restore-session-group (name)
   "Resume every session saved in the session group NAME.
+Use `agent-restore-sessions', which also offers the previous Emacs's
+sessions."
+  (interactive (list (agent--read-session-group-name "Restore session group: ")))
+  (agent--restore-session-group name))
+
+(make-obsolete 'agent-restore-session-group 'agent-restore-sessions "0.2")
+
+(defun agent--restore-session-group (name)
+  "Resume every session saved in the session group NAME.
 Sessions already live in this Emacs are skipped.  The group is kept, so
 it can be restored again; the sessions that fail to resume are reported."
-  (interactive (list (agent--read-session-group-name "Restore session group: ")))
   (let* ((group (or (cdr (assoc name (agent--read-session-groups)))
                     (user-error "No session group named `%s'" name)))
          (pending (seq-remove (lambda (entry)
@@ -5074,7 +5136,6 @@ when it is not installed."
     ""
     "Session groups"
     ("g s" "save" agent-save-session-group)
-    ("g r" "restore" agent-restore-session-group)
     ("g d" "delete" agent-delete-session-group)]
    ["Current session"
     ("b n" "new branch" agent-create-branch)
