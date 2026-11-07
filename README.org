@@ -475,9 +475,11 @@ call and no permission prompt:
   never replaces a newer one. Subagents' tool calls are left out. The to-do
   item in progress wins over tool calls while it belongs to the present
   busy spell.
-- Codex (app-server sessions): the plan step in progress, or else the
-  heading of the latest reasoning summary, read from the notifications
-  =codex= passes to ~codex-app-server-notification-functions~.
+- Codex (app-server sessions): the plan step in progress; or else the
+  newer of the latest reasoning summary's heading and the latest item
+  Codex started, such as “Running make test” or “Editing init.el”; all
+  read from the notifications =codex= passes to
+  ~codex-app-server-notification-functions~.
 
 #+vindex: agent-session-derived-status-functions
 Backends add these through ~agent-session-derived-status-functions~, an

@@ -2089,4 +2089,32 @@ session that never restarts would otherwise keep every one of them."
       (setq-local agent-codex--reasoning-heading (cons 1.0 "Checking"))
       (should-not (agent-codex--derived-status (current-buffer))))))
 
+(ert-deftest agent-codex-test-derived-status-falls-back-to-started-items ()
+  "Without a plan, the newer of the reasoning heading and the latest item wins."
+  (with-temp-buffer
+    (let ((now 10.0))
+      (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_) t))
+                ((symbol-function 'float-time) (lambda (&optional _) now)))
+        (agent-codex--follow-notification
+         "item/started" '((item (type . "commandExecution") (id . "c1")
+                                (command . "cat a.txt b.txt"))))
+        (should (equal (agent-codex--derived-status (current-buffer))
+                       (cons 10.0 "Running cat a.txt b.txt")))
+        (setq now 20.0)
+        (agent-codex--follow-notification
+         "item/reasoning/summaryTextDelta"
+         '((itemId . "r1") (summaryIndex . 0) (delta . "**Checking output**")))
+        (should (equal (agent-codex--derived-status (current-buffer))
+                       (cons 20.0 "Checking output")))
+        (setq now 30.0)
+        (agent-codex--follow-notification
+         "item/started" `((item (type . "fileChange")
+                                (changes . ,(vector '((path . "/r/src/init.el")))))))
+        (should (equal (agent-codex--derived-status (current-buffer))
+                       (cons 30.0 "Editing init.el")))
+        (agent-codex--follow-notification
+         "item/started" '((item (type . "agentMessage") (id . "m1"))))
+        (should (equal (agent-codex--derived-status (current-buffer))
+                       (cons 30.0 "Editing init.el")))))))
+
 ;;; agent-codex-test.el ends here

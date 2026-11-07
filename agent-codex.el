@@ -860,6 +860,9 @@ Every handled event also records the native session id reported by
 (defvar-local agent-codex--reasoning-heading nil
   "Cons of the time and text of the latest reasoning summary's heading.")
 
+(defvar-local agent-codex--last-action nil
+  "Cons of the time and description of the latest item Codex started.")
+
 (defvar-local agent-codex--reasoning-parts nil
   "Text received so far of each reasoning summary part in this turn.
 An alist keyed by the item id and summary index.")
@@ -877,7 +880,39 @@ from `codex-app-server-notification-functions'."
                               (alist-get 'plan params))))
              (cons (float-time) step))))
     ("item/reasoning/summaryTextDelta"
-     (agent-codex--note-reasoning-delta params))))
+     (agent-codex--note-reasoning-delta params))
+    ("item/started"
+     (when-let* ((action (agent-codex--item-action (alist-get 'item params))))
+       (setq agent-codex--last-action (cons (float-time) action))))))
+
+(declare-function codex--app-server-strip-shell-wrapper "codex-app-server")
+
+(defun agent-codex--item-action (item)
+  "Return a short description of what starting ITEM does, or nil.
+ITEM is the item of an `item/started' notification.  Commands, file
+changes, tool calls and web searches are described; other items, such
+as messages and reasoning, are not."
+  (let ((text
+         (pcase (alist-get 'type item)
+           ("commandExecution"
+            (let ((command (alist-get 'command item)))
+              (when (stringp command)
+                (concat "Running "
+                        (if (fboundp 'codex--app-server-strip-shell-wrapper)
+                            (codex--app-server-strip-shell-wrapper command)
+                          command)))))
+           ("fileChange"
+            (when-let* ((path (seq-some (lambda (change) (alist-get 'path change))
+                                        (append (alist-get 'changes item) nil))))
+              (concat "Editing " (file-name-nondirectory path))))
+           ("mcpToolCall"
+            (format "Using %s" (or (alist-get 'tool item) "a tool")))
+           ("webSearch"
+            (concat "Searching the web for " (or (alist-get 'query item) ""))))))
+    (when text
+      (truncate-string-to-width
+       (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " text))
+       120 nil nil "..."))))
 
 (defun agent-codex--plan-step-in-progress (plan)
   "Return the text of the step of PLAN in progress, or nil.
@@ -903,15 +938,23 @@ Codex starts each summary part with a bold heading, such as
 (defun agent-codex--derived-status (buffer)
   "Return what Codex session BUFFER is doing, as a cons of time and text.
 The plan step in progress wins when it belongs to the present busy
-spell; otherwise the heading of the latest reasoning summary.  Return
-nil for other buffers and when neither is known."
+spell; otherwise the newer of the latest reasoning summary's heading and
+the latest item Codex started, such as a command.  Return nil for other
+buffers and when none is known."
   (when (and (buffer-live-p buffer) (codex--buffer-p buffer))
     (with-current-buffer buffer
       (let ((since agent--session-state-changed-at))
         (if (and agent-codex--plan-step
                  (or (null since) (>= (car agent-codex--plan-step) since)))
             agent-codex--plan-step
-          agent-codex--reasoning-heading)))))
+          (agent-codex--newer agent-codex--reasoning-heading
+                              agent-codex--last-action))))))
+
+(defun agent-codex--newer (a b)
+  "Return whichever of A and B has the later time, or the one that is non-nil.
+A and B are conses of a float time and a text."
+  (cond ((and a b) (if (>= (car a) (car b)) a b))
+        (t (or a b))))
 
 (defun agent-codex--handle-app-server-turn-completed ()
   "Report a native app-server turn completion to Agent."
