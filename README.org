@@ -457,10 +457,41 @@ state do not reset the age; neither do changes to either summary. An
 unobserved transition has no age. Ages refresh every five seconds while the
 menu is open.
 
-The state description is explicitly authored by the working agent, for
-example “Testing pagination fix” or “Waiting for your decision about bindings”.
-It is not extracted from the chat and requires no separate summarizer.
-Until an agent publishes an update, the column is blank. A prompt submitted
+The state description comes from one of two sources. An agent can publish
+one itself, for example “Testing pagination fix” or “Waiting for your
+decision about bindings”, as described below. Without that, =agent= derives
+one from what the agent is doing, with no instruction to the agent, no model
+call and no permission prompt:
+
+- Claude Code: the bundled =record-activity.sh= hook, installed on
+  =PreToolUse= for every session =agent= starts (and by
+  ~agent-claude-ensure-activity-hook-config~, part of
+  ~agent-claude-setup-config~), records the to-do item in progress and each
+  tool call: the description Claude gives a shell command, or a plain
+  phrase such as “Reading init.el”. It answers at once and writes in the
+  background, one file per event in an =.activity= directory keyed like the
+  statusline file, named by the time the event fired; =agent= reads the
+  newest file of each kind and deletes the older ones, so a late write
+  never replaces a newer one. Subagents' tool calls are left out. The to-do
+  item in progress wins over tool calls while it belongs to the present
+  busy spell.
+- Codex (app-server sessions): the plan step in progress, or else the
+  heading of the latest reasoning summary, read from the notifications
+  =codex= passes to ~codex-app-server-notification-functions~.
+
+#+vindex: agent-session-derived-status-functions
+Backends add these through ~agent-session-derived-status-functions~, an
+abnormal hook called with a session buffer that returns a cons of the
+activity's time and its text. A timer calls it every two seconds for busy
+sessions, and once more when a session changes state, so the last activity
+of a turn is caught; the result is cached, since the switcher and the mode
+line must not read files. A published status wins while it is current. A
+derived status is current while it describes the present busy spell, and
+dims when the turn ends or the next one starts. When neither is current,
+the more recent of the two is shown dimmed.
+
+Until the session has done something or the agent has published, the
+column is blank. A prompt submitted
 from Emacs marks the previous description stale rather than clearing it:
 it stays in the column in the face ~agent-session-stale-status~ (italic by
 default) until the agent publishes again. Most prompts start turns too short
@@ -496,7 +527,8 @@ symbol, status text, optional native session id, and optional process token. The
 The function validates the target and text, stores the update in that buffer, and refreshes an open switcher.
 ~agent-session-state-summary-functions~ supplies the column using the same
 cheap, first-non-nil convention as the session-summary hook. The built-in
-provider reads the published status without transcript I/O or model calls.
+provider, ~agent--session-status~, chooses between the published and the
+derived status as described above, from cached values only.
 The public function ~agent-session-state-summary~ returns a buffer's
 current description as a single line, for display elsewhere such as the
 mode line; publishing a status or marking it stale updates the mode line.

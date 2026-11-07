@@ -621,6 +621,31 @@ leave the state unchanged.")
 (defvar-local agent--session-published-status-stale nil
   "Non-nil when a prompt was sent after the agent last published its status.")
 
+(defvar-local agent--session-published-status-at nil
+  "Float time at which the agent last published its status, or nil.")
+
+(defcustom agent-session-derived-status-functions nil
+  "Abnormal hook deriving what a session is doing from its activity.
+Each function is called with a session buffer and returns a cons of the
+float time of the session's latest activity and a one-line description
+of it, such as \"Running the test suite\", or nil to leave the session
+to the functions after it.  It runs from a timer, never while the
+session switcher or the mode line renders, so it may read files.
+Backends add a function here; an agent that publishes its own status
+takes precedence over what is derived (see `agent--session-status').
+Nil disables derived statuses."
+  :type 'hook
+  :group 'agent)
+
+(defvar-local agent--session-derived-status nil
+  "Cons of the time and text of this session's latest derived status.")
+
+(defconst agent--derived-status-interval 2
+  "Seconds between refreshes of the derived status of busy sessions.")
+
+(defvar agent--derived-status-timer nil
+  "Timer refreshing the derived status of busy sessions.")
+
 (defvar agent--session-switcher-timer nil
   "Timer refreshing state ages in the open session switcher.")
 
@@ -1525,7 +1550,8 @@ not change the session's lifecycle state or its state-transition timestamp."
       (with-current-buffer buffer
         (setq agent--session-published-status
               (unless (string-empty-p status) status)
-              agent--session-published-status-stale nil)
+              agent--session-published-status-stale nil
+              agent--session-published-status-at (float-time))
         (force-mode-line-update)))
     (agent--refresh-session-switcher)
     t))
@@ -1547,8 +1573,76 @@ A status published before the latest prompt carries the face
              (not (active-minibuffer-window)))
     (transient--refresh-transient)))
 
-(add-hook 'agent-session-state-summary-functions
-          #'agent--session-published-status t)
+(defun agent--session-status (buffer)
+  "Return what BUFFER's session is doing, or nil.
+A status the agent published wins while it is current, that is, until
+the next prompt.  Otherwise a status derived from the session's
+activity wins while it is current, that is, from an activity of the
+present busy spell.  Otherwise the more recent of the two is shown with
+the face `agent-session-stale-status'."
+  (with-current-buffer buffer
+    (let ((derived agent--session-derived-status))
+      (cond
+       ((and agent--session-published-status
+             (not agent--session-published-status-stale))
+        agent--session-published-status)
+       ((agent--derived-status-current-p derived)
+        (cdr derived))
+       ((agent--latest-stale-status derived)
+        (propertize (agent--latest-stale-status derived)
+                    'face 'agent-session-stale-status))))))
+
+(defun agent--derived-status-current-p (derived)
+  "Return non-nil when DERIVED describes the current buffer's busy spell.
+DERIVED is a cons of an activity's float time and its text."
+  (and derived
+       (eq agent--session-state 'busy)
+       agent--session-state-changed-at
+       (>= (car derived) agent--session-state-changed-at)))
+
+(defun agent--latest-stale-status (derived)
+  "Return the newer of the published status and DERIVED's text, or nil.
+DERIVED is a cons of an activity's float time and its text."
+  (let ((published agent--session-published-status)
+        (published-at (or agent--session-published-status-at 0)))
+    (cond ((and published derived)
+           (if (> (car derived) published-at) (cdr derived) published))
+          (published)
+          (derived (cdr derived)))))
+
+(defun agent--refresh-derived-statuses ()
+  "Refresh the derived status of every busy session."
+  (dolist (buffer (agent--find-all-buffers))
+    (when (eq (buffer-local-value 'agent--session-state buffer) 'busy)
+      (agent--refresh-derived-status buffer))))
+
+(defun agent--refresh-derived-status (buffer &rest _)
+  "Store BUFFER's latest derived status and redisplay its mode line if new.
+Extra arguments, as from `agent-session-state-change-functions', are
+ignored, so a turn's last activity is caught when the session stops."
+  (when (buffer-live-p buffer)
+    (let ((status (with-demoted-errors "agent derived status: %S"
+                    (run-hook-with-args-until-success
+                     'agent-session-derived-status-functions buffer))))
+      (when (and status
+                 (not (equal status (buffer-local-value
+                                     'agent--session-derived-status buffer))))
+        (with-current-buffer buffer
+          (setq agent--session-derived-status status)
+          (force-mode-line-update))))))
+
+;; `agent--session-status' includes the published status; an Emacs that
+;; loaded an older agent has the published-status function here instead.
+(remove-hook 'agent-session-state-summary-functions
+             #'agent--session-published-status)
+(add-hook 'agent-session-state-summary-functions #'agent--session-status t)
+(add-hook 'agent-session-state-change-functions #'agent--refresh-derived-status)
+(when (timerp agent--derived-status-timer)
+  (cancel-timer agent--derived-status-timer))
+(setq agent--derived-status-timer
+      (run-with-timer agent--derived-status-interval
+                      agent--derived-status-interval
+                      #'agent--refresh-derived-statuses))
 (when (timerp agent--session-switcher-timer)
   (cancel-timer agent--session-switcher-timer))
 (setq agent--session-switcher-timer

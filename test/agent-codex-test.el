@@ -2044,4 +2044,49 @@ session that never restarts would otherwise keep every one of them."
     (should-not (buffer-live-p buffer))))
 
 (provide 'agent-codex-test)
+
+(ert-deftest agent-codex-test-derived-status-follows-plan-and-reasoning ()
+  "The plan step in progress wins; otherwise the latest reasoning heading."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_) t))
+              ((symbol-function 'float-time) (lambda (&optional _) 50.0)))
+      (setq-local agent--session-state-changed-at 10.0)
+      (agent-codex--follow-notification
+       "item/reasoning/summaryTextDelta"
+       '((itemId . "r1") (summaryIndex . 0) (delta . "**Inspecting the con")))
+      (should-not (agent-codex--derived-status (current-buffer)))
+      (agent-codex--follow-notification
+       "item/reasoning/summaryTextDelta"
+       '((itemId . "r1") (summaryIndex . 0) (delta . "fig**\n\nI will")))
+      (should (equal (agent-codex--derived-status (current-buffer))
+                     (cons 50.0 "Inspecting the config")))
+      (agent-codex--follow-notification
+       "turn/plan/updated"
+       `((plan . ,(vector '((step . "Read the code") (status . "completed"))
+                          '((step . "Write the fix") (status . "inProgress"))))))
+      (should (equal (agent-codex--derived-status (current-buffer))
+                     (cons 50.0 "Write the fix")))
+      (agent-codex--follow-notification
+       "turn/plan/updated"
+       `((plan . ,(vector '((step . "Write the fix") (status . "completed"))))))
+      (should (equal (agent-codex--derived-status (current-buffer))
+                     (cons 50.0 "Inspecting the config"))))))
+
+(ert-deftest agent-codex-test-derived-status-old-plan-step-yields ()
+  "A plan step from before the present busy spell gives way to reasoning."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_) t)))
+      (setq-local agent--session-state-changed-at 100.0
+                  agent-codex--plan-step (cons 50.0 "Old step")
+                  agent-codex--reasoning-heading (cons 120.0 "Checking tests"))
+      (should (equal (agent-codex--derived-status (current-buffer))
+                     (cons 120.0 "Checking tests"))))))
+
+(ert-deftest agent-codex-test-derived-status-ignores-other-buffers ()
+  "Buffers that are not Codex sessions have no derived status."
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'codex--buffer-p) (lambda (_) nil)))
+      (setq-local agent-codex--reasoning-heading (cons 1.0 "Checking"))
+      (should-not (agent-codex--derived-status (current-buffer))))))
+
 ;;; agent-codex-test.el ends here

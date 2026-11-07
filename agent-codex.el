@@ -850,6 +850,69 @@ Every handled event also records the native session id reported by
                     (agent--buffer-session-name buf))))))))
   nil)
 
+;;;; Derived status
+
+(defvar codex-app-server-notification-functions)
+
+(defvar-local agent-codex--plan-step nil
+  "Cons of the time and text of the plan step in progress, or nil.")
+
+(defvar-local agent-codex--reasoning-heading nil
+  "Cons of the time and text of the latest reasoning summary's heading.")
+
+(defvar-local agent-codex--reasoning-parts nil
+  "Text received so far of each reasoning summary part in this turn.
+An alist keyed by the item id and summary index.")
+
+(defun agent-codex--follow-notification (method params)
+  "Note what the Codex session is doing from app-server notification METHOD.
+PARAMS is the notification's parameters.  Runs in the session buffer
+from `codex-app-server-notification-functions'."
+  (pcase method
+    ("turn/started"
+     (setq agent-codex--reasoning-parts nil))
+    ("turn/plan/updated"
+     (setq agent-codex--plan-step
+           (when-let* ((step (agent-codex--plan-step-in-progress
+                              (alist-get 'plan params))))
+             (cons (float-time) step))))
+    ("item/reasoning/summaryTextDelta"
+     (agent-codex--note-reasoning-delta params))))
+
+(defun agent-codex--plan-step-in-progress (plan)
+  "Return the text of the step of PLAN in progress, or nil.
+PLAN is the list of step alists of a `turn/plan/updated' notification."
+  (seq-some (lambda (step)
+              (and (member (alist-get 'status step) '("inProgress" "in_progress"))
+                   (alist-get 'step step)))
+            (append plan nil)))
+
+(defun agent-codex--note-reasoning-delta (params)
+  "Add the reasoning summary text in PARAMS and note a completed heading.
+Codex starts each summary part with a bold heading, such as
+\"**Inspecting the config**\"; the heading counts once it is closed."
+  (let* ((key (cons (alist-get 'itemId params) (alist-get 'summaryIndex params)))
+         (text (concat (alist-get key agent-codex--reasoning-parts nil nil #'equal)
+                       (alist-get 'delta params))))
+    (setf (alist-get key agent-codex--reasoning-parts nil nil #'equal) text)
+    (when (string-match "\\`\\s-*\\*\\*\\([^*\n]+\\)\\*\\*" text)
+      (let ((heading (string-trim (match-string 1 text))))
+        (unless (equal heading (cdr agent-codex--reasoning-heading))
+          (setq agent-codex--reasoning-heading (cons (float-time) heading)))))))
+
+(defun agent-codex--derived-status (buffer)
+  "Return what Codex session BUFFER is doing, as a cons of time and text.
+The plan step in progress wins when it belongs to the present busy
+spell; otherwise the heading of the latest reasoning summary.  Return
+nil for other buffers and when neither is known."
+  (when (and (buffer-live-p buffer) (codex--buffer-p buffer))
+    (with-current-buffer buffer
+      (let ((since agent--session-state-changed-at))
+        (if (and agent-codex--plan-step
+                 (or (null since) (>= (car agent-codex--plan-step) since)))
+            agent-codex--plan-step
+          agent-codex--reasoning-heading)))))
+
 (defun agent-codex--handle-app-server-turn-completed ()
   "Report a native app-server turn completion to Agent."
   (unless codex--app-server-queued-turn-inputs
@@ -1438,6 +1501,10 @@ removes them symmetrically and restores
   (add-hook 'codex-event-hook #'agent-codex--handle-notification)
   (add-hook 'codex-app-server-turn-completed-hook
             #'agent-codex--handle-app-server-turn-completed)
+  (add-hook 'codex-app-server-notification-functions
+            #'agent-codex--follow-notification)
+  (add-hook 'agent-session-derived-status-functions
+            #'agent-codex--derived-status)
   (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
   (dolist (fn agent-codex--start-hook-functions)
     (add-hook 'codex-start-hook fn))
@@ -1459,6 +1526,10 @@ removes them symmetrically and restores
   (remove-hook 'codex-event-hook #'agent-codex--handle-notification)
   (remove-hook 'codex-app-server-turn-completed-hook
                #'agent-codex--handle-app-server-turn-completed)
+  (remove-hook 'codex-app-server-notification-functions
+               #'agent-codex--follow-notification)
+  (remove-hook 'agent-session-derived-status-functions
+               #'agent-codex--derived-status)
   (unless (bound-and-true-p agent-claude-mode)
     (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer)
     (agent-scroll-keys-global-mode -1))

@@ -951,8 +951,9 @@ buffer name for sessions started before the UUID existed."
                       (agent-claude--session-id-file (current-buffer))))
     (when (and file (file-exists-p file))
       (delete-file file)))
-  (when-let* ((dir (agent-claude--agents-file (current-buffer))))
-    (when (file-directory-p dir)
+  (dolist (dir (list (agent-claude--agents-file (current-buffer))
+                     (agent-claude--activity-directory (current-buffer))))
+    (when (and dir (file-directory-p dir))
       (delete-directory dir t))))
 
 (defun agent-claude--state-file (buffer)
@@ -1854,6 +1855,74 @@ the UUID have no tasks file."
     (expand-file-name (concat (secure-hash 'sha256 uuid) ".tasks.json")
                       agent-claude-status-directory)))
 
+(defun agent-claude--activity-directory (buffer)
+  "Return the directory where `record-activity.sh' records BUFFER's activity.
+The directory is keyed like the status file, by the per-process UUID.
+Sessions without the UUID have none."
+  (when-let* ((uuid (buffer-local-value 'agent-claude--status-uuid buffer)))
+    (expand-file-name (concat (secure-hash 'sha256 uuid) ".activity")
+                      agent-claude-status-directory)))
+
+(defun agent-claude--derived-status (buffer)
+  "Return what Claude session BUFFER is doing, as a cons of time and text.
+Read the activity `record-activity.sh' recorded, keeping only the newest
+file of each kind.  The to-do item in progress wins when it belongs to
+the present busy spell; otherwise the latest tool call.  Return nil for
+other buffers and when nothing is recorded."
+  (when-let* (((claude-code--buffer-p buffer))
+              (dir (agent-claude--activity-directory buffer))
+              ((file-directory-p dir)))
+    (let* ((latest (agent-claude--latest-activity dir))
+           (todo (alist-get "todo" latest nil nil #'equal))
+           (action (alist-get "action" latest nil nil #'equal))
+           (since (buffer-local-value 'agent--session-state-changed-at buffer)))
+      (if (and todo
+               (not (string-empty-p (cdr todo)))
+               (or (null since) (>= (car todo) since)))
+          todo
+        action))))
+
+(defun agent-claude--latest-activity (dir)
+  "Return the newest activity of each kind in DIR, deleting older files.
+The result is an alist from kind, \"todo\" or \"action\", to a cons of
+the activity's time and its text.  Interrupted writes left behind for
+over a minute are deleted too."
+  (let (latest)
+    (dolist (file (directory-files dir t "\\`[0-9.]+\\.\\(?:todo\\|action\\)\\'"))
+      (let* ((name (file-name-nondirectory file))
+             (kind (file-name-extension name))
+             (time (string-to-number (file-name-sans-extension name)))
+             (best (assoc kind latest)))
+        (if (and best (>= (cadr best) time))
+            (agent-claude--delete-activity-file file)
+          (when best (agent-claude--delete-activity-file (cddr best)))
+          (setq latest (cons (cons kind (cons time file))
+                             (assoc-delete-all kind latest))))))
+    (dolist (file (directory-files dir t "\\`\\.write\\."))
+      (when (> (float-time (time-since (file-attribute-modification-time
+                                        (file-attributes file))))
+               60)
+        (agent-claude--delete-activity-file file)))
+    (mapcar (lambda (entry)
+              (cons (car entry)
+                    (cons (cadr entry)
+                          (agent-claude--read-activity-text (cddr entry)))))
+            latest)))
+
+(defun agent-claude--read-activity-text (file)
+  "Return the text recorded in activity FILE, or an empty string."
+  (condition-case nil
+      (with-temp-buffer
+        (insert-file-contents file)
+        (string-trim (buffer-string)))
+    (file-missing "")))
+
+(defun agent-claude--delete-activity-file (file)
+  "Delete activity FILE, ignoring one another process already removed."
+  (condition-case nil
+      (delete-file file)
+    (file-missing nil)))
+
 (defun agent-claude--read-tasks-file (file)
   "Return the running tasks in the hook payload stored in FILE.
 See `agent-claude--running-tasks'.  Warn and return nil when FILE
@@ -2554,6 +2623,7 @@ sets is kept unless agent owns it."
     (agent-claude--ensure-notification-hook settings)
     (agent-claude--ensure-state-hooks settings)
     (agent-claude--ensure-background-hooks settings)
+    (agent-claude--ensure-activity-hooks settings)
     settings))
 
 (defun agent-claude--write-private-file (file contents)
@@ -2662,7 +2732,7 @@ group."
   (string-match-p
    (concat "/agent[^/]*/hooks/"
            "\\(?:fire-and-forget\\|notify-emacs-state\\|notify-emacs-notification"
-           "\\|record-background-tasks\\)\\.sh\\b")
+           "\\|record-background-tasks\\|record-activity\\)\\.sh\\b")
    command))
 
 (defun agent-claude--agent-stop-wrapper-command-p (command)
@@ -2684,6 +2754,7 @@ to have them in Claude Code sessions started outside Emacs."
   (agent-claude-ensure-notification-hook-config)
   (agent-claude-ensure-state-hook-config)
   (agent-claude-ensure-background-hook-config)
+  (agent-claude-ensure-activity-hook-config)
   (message "agent-claude: updated %s" agent-claude-settings-file))
 
 (defun agent-claude-ensure-statusline-config (&optional file)
@@ -2727,6 +2798,15 @@ FILE defaults to `agent-claude-settings-file'.  See
   (agent-claude--update-settings
    (or file agent-claude-settings-file)
    #'agent-claude--ensure-background-hooks))
+
+(defun agent-claude-ensure-activity-hook-config (&optional file)
+  "Ensure FILE has the Claude Code hook that records the session's activity.
+FILE defaults to `agent-claude-settings-file'.  See
+`agent-claude--activity-hook-events'."
+  (interactive)
+  (agent-claude--update-settings
+   (or file agent-claude-settings-file)
+   #'agent-claude--ensure-activity-hooks))
 
 (defun agent-claude--update-settings (file updater)
   "Read JSON settings FILE, apply UPDATER, and write when changed."
@@ -2861,6 +2941,23 @@ hook first, such as one pointing at a previously loaded checkout."
        (lambda (candidate)
          (and (not (equal candidate command))
               (string-match-p "/record-background-tasks\\.sh" candidate))))
+      (agent-claude--ensure-hook settings name command 5))))
+
+(defconst agent-claude--activity-hook-events '("PreToolUse")
+  "Claude Code hooks whose payloads say what the session is doing.
+`record-activity.sh' turns each into the session's derived status.")
+
+(defun agent-claude--ensure-activity-hooks (settings)
+  "Ensure SETTINGS has every hook in `agent-claude--activity-hook-events'.
+Remove any other `record-activity.sh' command under the same hook
+first, such as one pointing at a previously loaded checkout."
+  (let ((command (agent-claude--activity-hook-command)))
+    (dolist (name agent-claude--activity-hook-events)
+      (agent-claude--remove-hook-commands
+       settings name
+       (lambda (candidate)
+         (and (not (equal candidate command))
+              (string-match-p "/record-activity\\.sh" candidate))))
       (agent-claude--ensure-hook settings name command 5))))
 
 (defun agent-claude--remove-hook-commands (settings name predicate)
@@ -2998,6 +3095,21 @@ The command runs synchronously, since it only writes a file, and names
 the status directory where `agent-claude--tasks-file' looks."
   (let ((script (agent-claude--settings-path
                  (expand-file-name "record-background-tasks.sh"
+                                   agent-claude--hooks-directory))))
+    (agent-claude--require-executable script)
+    (format "AGENT_CLAUDE_STATUS_DIR=%s %s"
+            (shell-quote-argument
+             (directory-file-name
+              (expand-file-name agent-claude-status-directory)))
+            (shell-quote-argument script))))
+
+(defun agent-claude--activity-hook-command ()
+  "Return the command string for the hook that records the session's activity.
+The script answers at once and writes in the background, so a tool call
+never waits on it.  The command names the status directory, where
+`agent-claude--activity-directory' looks."
+  (let ((script (agent-claude--settings-path
+                 (expand-file-name "record-activity.sh"
                                    agent-claude--hooks-directory))))
     (agent-claude--require-executable script)
     (format "AGENT_CLAUDE_STATUS_DIR=%s %s"
@@ -3217,6 +3329,8 @@ symmetrically and restores `claude-code-notification-function'."
   (dolist (fn agent-claude--start-hook-functions)
     (add-hook 'claude-code-start-hook fn))
   (add-hook 'doom-modeline-mode-hook #'agent-claude--reapply-modelines)
+  (add-hook 'agent-session-derived-status-functions
+            #'agent-claude--derived-status)
   (agent-scroll-keys-global-mode 1)
   (agent-setup-scroll-keys-in-existing-buffers)
   (add-hook 'claude-code-process-environment-functions
@@ -3266,6 +3380,8 @@ symmetrically and restores `claude-code-notification-function'."
   (dolist (fn agent-claude--start-hook-functions)
     (remove-hook 'claude-code-start-hook fn))
   (remove-hook 'doom-modeline-mode-hook #'agent-claude--reapply-modelines)
+  (remove-hook 'agent-session-derived-status-functions
+               #'agent-claude--derived-status)
   (remove-hook 'claude-code-process-environment-functions
                #'agent-claude-account-env)
   (remove-hook 'claude-code-process-environment-functions

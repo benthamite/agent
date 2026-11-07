@@ -1151,6 +1151,78 @@ clearing the status there would leave the session blank."
         (should (equal status "Testing the parser"))
         (should-not (get-text-property 0 'face status))))))
 
+(ert-deftest agent-test-session-status-prefers-current-published ()
+  "A current published status wins over a fresh derived one."
+  (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+    (setq-local agent--session-state 'busy
+                agent--session-state-changed-at 100.0
+                agent--session-published-status "Fixing the parser"
+                agent--session-published-status-stale nil
+                agent--session-published-status-at 110.0
+                agent--session-derived-status (cons 120.0 "Reading init.el"))
+    (should (equal (agent-session-state-summary buf) "Fixing the parser"))))
+
+(ert-deftest agent-test-session-status-fresh-derived-beats-stale-published ()
+  "In a new turn, a fresh derived status replaces the stale published one."
+  (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+    (setq-local agent--session-state 'busy
+                agent--session-state-changed-at 200.0
+                agent--session-published-status "Fixing the parser"
+                agent--session-published-status-stale t
+                agent--session-published-status-at 110.0
+                agent--session-derived-status (cons 205.0 "Running the tests"))
+    (let ((status (agent-session-state-summary buf)))
+      (should (equal status "Running the tests"))
+      (should-not (get-text-property 0 'face status)))))
+
+(ert-deftest agent-test-session-status-stale-shows-most-recent ()
+  "Without a current status, the more recent stale one is shown dimmed."
+  (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+    (setq-local agent--session-state 'awaiting-input
+                agent--session-state-changed-at 300.0
+                agent--session-published-status "Fixing the parser"
+                agent--session-published-status-stale t
+                agent--session-published-status-at 110.0
+                agent--session-derived-status (cons 250.0 "Running the tests"))
+    (let ((status (agent-session-state-summary buf)))
+      (should (equal status "Running the tests"))
+      (should (eq (get-text-property 0 'face status)
+                  'agent-session-stale-status)))
+    (setq-local agent--session-published-status-at 260.0)
+    (should (equal (agent-session-state-summary buf) "Fixing the parser"))))
+
+(ert-deftest agent-test-session-status-derived-from-earlier-spell-is-stale ()
+  "A derived status from before the present busy spell is dimmed until replaced."
+  (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+    (setq-local agent--session-state 'busy
+                agent--session-state-changed-at 400.0
+                agent--session-derived-status (cons 350.0 "Running the tests"))
+    (let ((status (agent-session-state-summary buf)))
+      (should (equal status "Running the tests"))
+      (should (eq (get-text-property 0 'face status)
+                  'agent-session-stale-status)))
+    (let ((agent-session-derived-status-functions
+           (list (lambda (_) (cons 405.0 "Editing init.el")))))
+      (agent--refresh-derived-status buf)
+      (let ((status (agent-session-state-summary buf)))
+        (should (equal status "Editing init.el"))
+        (should-not (get-text-property 0 'face status))))))
+
+(ert-deftest agent-test-session-derived-status-refresh-only-busy ()
+  "The timer refreshes busy sessions and leaves waiting ones alone."
+  (agent-test--with-session-buffer "*one:~/repo/project/:default*"
+    (let* ((calls 0)
+           (agent-session-derived-status-functions
+            (list (lambda (_) (setq calls (1+ calls)) (cons 1.0 "Working")))))
+      (cl-letf (((symbol-function 'agent--find-all-buffers) (lambda () (list buf))))
+        (setq-local agent--session-state 'awaiting-input)
+        (agent--refresh-derived-statuses)
+        (should (= calls 0))
+        (setq-local agent--session-state 'busy)
+        (agent--refresh-derived-statuses)
+        (should (= calls 1))
+        (should (equal agent--session-derived-status (cons 1.0 "Working")))))))
+
 (ert-deftest agent-test-session-detail-label-keeps-stale-face ()
   "Render a stale status in its own face over the annotation face."
   (let ((agent-session-state-summary-functions

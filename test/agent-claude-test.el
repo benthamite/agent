@@ -584,6 +584,82 @@ A Monitor the agent started, which carries its command, still is."
                    (list (file-name-nondirectory
                           (agent-claude--tasks-file (current-buffer))))))))
 
+(defun agent-claude-test--write-activity (time kind text)
+  "Record activity TEXT of KIND at TIME for the current session."
+  (let ((dir (agent-claude--activity-directory (current-buffer))))
+    (make-directory dir t)
+    (with-temp-file (expand-file-name (format "%.6f.%s" time kind) dir)
+      (insert text))))
+
+(ert-deftest agent-claude-test-derived-status-newest-wins-in-any-order ()
+  "The newest activity wins however the writes landed, and older files go."
+  (agent-claude-test--with-tasks-session
+    (cl-letf (((symbol-function 'claude-code--buffer-p) (lambda (_) t)))
+      (agent-claude-test--write-activity 20.0 "action" "Running the tests")
+      (agent-claude-test--write-activity 10.0 "action" "Reading init.el")
+      (should (equal (agent-claude--derived-status (current-buffer))
+                     (cons 20.0 "Running the tests")))
+      (should (equal (directory-files
+                      (agent-claude--activity-directory (current-buffer))
+                      nil "action")
+                     (list "20.000000.action"))))))
+
+(ert-deftest agent-claude-test-derived-status-prefers-current-todo ()
+  "The to-do item in progress beats tool calls, but only within the busy spell."
+  (agent-claude-test--with-tasks-session
+    (cl-letf (((symbol-function 'claude-code--buffer-p) (lambda (_) t)))
+      (setq-local agent--session-state-changed-at 5.0)
+      (agent-claude-test--write-activity 10.0 "todo" "Writing tests")
+      (agent-claude-test--write-activity 12.0 "action" "Running the tests")
+      (should (equal (agent-claude--derived-status (current-buffer))
+                     (cons 10.0 "Writing tests")))
+      (setq-local agent--session-state-changed-at 11.0)
+      (should (equal (agent-claude--derived-status (current-buffer))
+                     (cons 12.0 "Running the tests")))
+      (setq-local agent--session-state-changed-at 5.0)
+      (agent-claude-test--write-activity 13.0 "todo" "")
+      (should (equal (agent-claude--derived-status (current-buffer))
+                     (cons 12.0 "Running the tests"))))))
+
+(ert-deftest agent-claude-test-derived-status-ignores-other-buffers ()
+  "Buffers that are not Claude sessions have no derived status."
+  (agent-claude-test--with-tasks-session
+    (cl-letf (((symbol-function 'claude-code--buffer-p) (lambda (_) nil)))
+      (agent-claude-test--write-activity 1.0 "action" "Reading init.el")
+      (should-not (agent-claude--derived-status (current-buffer))))))
+
+(ert-deftest agent-claude-test-record-activity-script ()
+  "The hook script records tool calls and to-dos, skipping subagents."
+  (agent-claude-test--with-tasks-session
+    (cl-letf (((symbol-function 'claude-code--buffer-p) (lambda (_) t)))
+      (let ((dir (agent-claude--activity-directory (current-buffer))))
+        (dolist (payload
+                 '("{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make\",\"description\":\"Run the test suite\"}}"
+                   "{\"agent_id\":\"sub\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/x/y.el\"}}"
+                   "{\"tool_name\":\"TodoWrite\",\"tool_input\":{\"todos\":[{\"content\":\"Fix\",\"status\":\"in_progress\",\"activeForm\":\"Fixing the parser\"}]}}"))
+          (should (zerop (agent-claude-test--run-hook
+                          "hooks/record-activity.sh" payload))))
+        (with-timeout (5 (ert-fail "record-activity.sh wrote nothing"))
+          (while (or (not (file-directory-p dir))
+                     (< (length (directory-files dir nil "\\`[0-9]")) 2))
+            (sleep-for 0.05)))
+        (let ((latest (agent-claude--latest-activity dir)))
+          (should (equal (cdr (alist-get "action" latest nil nil #'equal))
+                         "Run the test suite"))
+          (should (equal (cdr (alist-get "todo" latest nil nil #'equal))
+                         "Fixing the parser")))))))
+
+(ert-deftest agent-claude-test-session-settings-include-activity-hook ()
+  "Sessions agent starts get the activity hook on PreToolUse."
+  (let* ((settings (agent-claude--session-settings nil))
+         (entries (gethash "PreToolUse" (gethash "hooks" settings))))
+    (should (seq-some (lambda (entry)
+                        (seq-some (lambda (hook)
+                                    (string-match-p "record-activity\\.sh"
+                                                    (gethash "command" hook)))
+                                  (gethash "hooks" entry)))
+                      entries))))
+
 (defun agent-claude-test--run-hook (script payload)
   "Run hook SCRIPT on PAYLOAD as the current session's CLI would.
 Return the exit status."
