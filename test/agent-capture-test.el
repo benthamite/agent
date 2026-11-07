@@ -188,7 +188,6 @@ PROMPTS is a list of (TITLE . TEXT).  `sent' collects what is sent."
     (let ((session buf))
       (with-current-buffer (find-file-noselect (agent-capture--file 'one session))
         (org-mode)
-        (agent-prompt-capture-mode 1)
         (transient-mark-mode 1)
         (goto-char (point-min))
         (search-forward "* Prompt B")
@@ -201,6 +200,17 @@ PROMPTS is a list of (TITLE . TEXT).  `sent' collects what is sent."
         (should (equal (mapcar (lambda (p) (plist-get p :text))
                                (agent-capture--prompts 'one session t))
                        '("Alpha")))))))
+
+(ert-deftest agent-capture-test-delete-keeps-capture-mode ()
+  "Removing a prompt leaves the capture buffer's minor mode on."
+  (agent-capture-test--with-session '(("Prompt A" . "Alpha")
+                                      ("Prompt B" . "Beta"))
+    (with-current-buffer (find-file-noselect (agent-capture--file 'one buf))
+      (org-mode)
+      (agent-prompt-capture-mode 1)
+      (agent-capture--delete-prompt
+       (car (agent-capture--prompts 'one buf)))
+      (should agent-prompt-capture-mode))))
 
 (ert-deftest agent-capture-test-captured-prompt-candidate-previews-body ()
   "Show a truncated prompt body preview in completion candidates."

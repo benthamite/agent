@@ -141,8 +141,7 @@ file's session, and switch to it."
   "Return the captured prompts whose headings the active region covers.
 Return nil unless the current buffer is a prompt capture file with an
 active region."
-  (when (and (bound-and-true-p agent-prompt-capture-mode)
-             buffer-file-name
+  (when (and (agent-capture--file-p buffer-file-name)
              (use-region-p))
     (let ((start (save-excursion (goto-char (region-beginning))
                                  (line-beginning-position)))
@@ -159,6 +158,14 @@ active region."
           (or (outline-next-heading) (goto-char (point-max)))))
       (or (nreverse prompts)
           (user-error "The region covers no captured prompt")))))
+
+(defun agent-capture--file-p (file)
+  "Return non-nil when FILE is a prompt capture file.
+Capture files are recognized by location, not by a buffer-local mode,
+which reverting or re-running the major mode would turn off."
+  (and file
+       (string-suffix-p ".org" file)
+       (file-in-directory-p file agent-prompt-capture-directory)))
 
 (defun agent-capture--file-session (file)
   "Return the live session buffer whose prompt capture file is FILE."
@@ -230,13 +237,20 @@ its own position, so point is moved in the window, not only the buffer."
   (let ((capture-buffer (find-file-noselect file))
         entry)
     (with-current-buffer capture-buffer
-      (org-mode)
+      (agent-capture--ensure-org-mode)
       (agent-prompt-capture-mode 1)
       (agent-capture--ensure-header backend buffer)
       (setq entry (agent-capture--append-entry))
       (save-buffer))
     (pop-to-buffer capture-buffer)
     (goto-char entry)))
+
+(defun agent-capture--ensure-org-mode ()
+  "Turn on Org mode in the current buffer unless it is already on.
+Re-running the major mode would kill buffer-local state such as
+`agent-prompt-capture-mode'."
+  (unless (derived-mode-p 'org-mode)
+    (org-mode)))
 
 (defun agent-capture--ensure-header (backend buffer)
   "Insert the prompt capture file header for BACKEND session BUFFER."
@@ -383,7 +397,7 @@ PROMPTS is the list of prompt plists offered as candidates."
   (when-let* ((file (plist-get prompt :file)))
     (let ((buffer (find-file-noselect file)))
       (with-current-buffer buffer
-        (org-mode)
+        (agent-capture--ensure-org-mode)
         (when (agent-capture--find-prompt prompt)
           (delete-region
            (point)
