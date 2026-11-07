@@ -45,7 +45,6 @@
 
 (autoload 'agent-capture-prompt "agent-capture" nil t)
 (autoload 'agent-insert-captured-prompt "agent-capture" nil t)
-(autoload 'agent-batch-todos "agent-todo" nil t)
 (autoload 'agent-act-on-slack-message "agent-slack" nil t)
 (autoload 'agent-act-on-forge-notification "agent-forge" nil t)
 (autoload 'agent-act-on-email "agent-mu4e" nil t)
@@ -149,6 +148,8 @@ chain only once.  Only
   notify
   account-env-var accounts account-file shared-config-items canonical-home
   account-init credential-file login-args usage-fetch
+  ;; `exec-prompt' is unused since batch TODOs were removed; it keeps its
+  ;; place so the slots after it stay where a reloading Emacs expects them.
   run-prompt exec-prompt skill-roots skill-command-prefix
   session-headers session-prompt prepare-fork
   sync-theme
@@ -195,8 +196,6 @@ session id to a header plist with `:session-id', `:forked-from' and
 `:timestamp', called with a session buffer and an optional session id
 whose descendants are the only ones the caller needs),
 `:session-prompt' (enrich one header with `:first-prompt'),
-`:exec-prompt' (run a prompt non-interactively, calling back with a
-plist of `:exit-code', `:duration', `:text' and `:raw'), and
 `:prepare-fork' (prepare a fork of a session recorded under one
 directory to run in another), and `:session-history' (read a bounded
 stretch of a session's past conversation, called with a session buffer,
@@ -988,7 +987,6 @@ indefinite snooze arms no timer.")
 (declare-function forge-topic-at-point "forge-topic" (&optional demand))
 (declare-function mu4e-message-at-point "mu4e-message" (&optional noerror))
 (declare-function agent-log-menu "agent-log" ())
-(declare-function agent-batch-todos "agent-todo" ())
 (declare-function agent-send-todo-at-point "agent-todo"
                   (&optional existing))
 (declare-function agent-capture-confirm-no-pending "agent-capture"
@@ -5167,7 +5165,7 @@ when it is not installed."
     "Prompts"
     ("p c" "capture prompt" agent-capture-prompt)
     ("p i" "insert prompt" agent-insert-captured-prompt)
-    ("p b" "batch todos" agent-batch-todos)]
+    ("p a" "insert all" agent-insert-all-captured-prompts)]
    ["Options"
     ("-c" agent--infix-account)
     ("-p" agent--infix-protect-buffers)

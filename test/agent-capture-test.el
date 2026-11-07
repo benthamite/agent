@@ -132,6 +132,76 @@
                 (should (equal (plist-get (car all) :text) "Alpha"))))))
       (delete-directory agent-prompt-capture-directory t))))
 
+(defmacro agent-capture-test--with-session (prompts &rest body)
+  "Run BODY with `buf' a session whose capture file holds PROMPTS.
+PROMPTS is a list of (TITLE . TEXT).  `sent' collects what is sent."
+  (declare (indent 1) (debug t))
+  `(let ((agent-backends nil)
+         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+         (agent-prompt-capture-auto-save-delay nil)
+         sent)
+     (unwind-protect
+         (with-temp-buffer
+           (rename-buffer "*one:~/repo/project/:default*" t)
+           (let ((buf (current-buffer)))
+             (apply #'agent-register-backend
+                    'one
+                    (agent-capture-test--backend
+                     :buffer-p (lambda (candidate) (eq candidate buf))
+                     :find-all-buffers (lambda () (list buf))
+                     :send-string (lambda (text target)
+                                    (setq sent (list text target)))))
+             (let ((file (agent-capture--file 'one buf)))
+               (make-directory (file-name-directory file) t)
+               (with-temp-file file
+                 (dolist (prompt ,prompts)
+                   (insert "* " (car prompt) "\n:PROPERTIES:\n:CREATED: x\n:END:\n\n"
+                           (cdr prompt) "\n")))
+               ,@body)))
+       (dolist (buffer (buffer-list))
+         (when (and (buffer-file-name buffer)
+                    (string-prefix-p agent-prompt-capture-directory
+                                     (buffer-file-name buffer)))
+           (with-current-buffer buffer (set-buffer-modified-p nil))
+           (kill-buffer buffer)))
+       (delete-directory agent-prompt-capture-directory t))))
+
+(ert-deftest agent-capture-test-insert-all-sends-numbered-list ()
+  "Insert every pending prompt as one numbered message and clear them."
+  (agent-capture-test--with-session '(("Prompt A" . "Alpha\nsecond line")
+                                      ("Prompt B" . "Beta"))
+    (agent-insert-all-captured-prompts buf)
+    (should (equal sent (list "1. Alpha\n   second line\n\n2. Beta" buf)))
+    (should-not (agent-capture--prompts 'one buf t))))
+
+(ert-deftest agent-capture-test-insert-all-single-prompt-is-plain ()
+  "A single pending prompt is inserted without a number."
+  (agent-capture-test--with-session '(("Prompt A" . "Alpha"))
+    (agent-insert-all-captured-prompts buf)
+    (should (equal sent (list "Alpha" buf)))))
+
+(ert-deftest agent-capture-test-insert-all-uses-selected-headings ()
+  "From a capture file, an active region limits the prompts to its headings."
+  (agent-capture-test--with-session '(("Prompt A" . "Alpha")
+                                      ("Prompt B" . "Beta")
+                                      ("Prompt C" . "Gamma"))
+    (let ((session buf))
+      (with-current-buffer (find-file-noselect (agent-capture--file 'one session))
+        (org-mode)
+        (agent-prompt-capture-mode 1)
+        (transient-mark-mode 1)
+        (goto-char (point-min))
+        (search-forward "* Prompt B")
+        (beginning-of-line)
+        (push-mark (point) t t)
+        (search-forward "Gamma")
+        (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+          (agent-insert-all-captured-prompts))
+        (should (equal sent (list "1. Beta\n\n2. Gamma" session)))
+        (should (equal (mapcar (lambda (p) (plist-get p :text))
+                               (agent-capture--prompts 'one session t))
+                       '("Alpha")))))))
+
 (ert-deftest agent-capture-test-captured-prompt-candidate-previews-body ()
   "Show a truncated prompt body preview in completion candidates."
   (let* ((text (concat "First line\nSecond line with extra spacing "

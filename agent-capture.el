@@ -104,6 +104,86 @@ already been inserted."
       (agent-send-string (plist-get prompt :text) session-buffer)
       (agent-capture--delete-prompt prompt))))
 
+;;;###autoload
+(defun agent-insert-all-captured-prompts (&optional buffer)
+  "Insert the session's pending captured prompts into it as one message.
+The prompts go into session BUFFER's input field as a numbered list, not
+submitted, so they can be reviewed first; their Org entries are then
+removed from the capture file.  BUFFER defaults to the current session,
+or is prompted for.  Called from a capture file with an active region,
+insert only the prompts whose headings the region covers, into that
+file's session, and switch to it."
+  (interactive)
+  (let* ((selected (agent-capture--selected-prompts))
+         (session-buffer
+          (if selected
+              (agent-capture--file-session buffer-file-name)
+            (agent--resolve-session-buffer buffer)))
+         (backend (agent--detect-backend session-buffer))
+         (struct (and backend (agent-backend backend)))
+         (prompts (or selected
+                      (agent-capture--prompts backend session-buffer))))
+    (unless (and struct (agent-backend-send-string struct))
+      (user-error "Backend `%s' does not support prompt insertion" backend))
+    (unless prompts
+      (user-error "No captured prompts for this session"))
+    (when (and selected (buffer-modified-p))
+      (save-buffer))
+    (agent-send-string (agent-capture--combine-prompts prompts) session-buffer)
+    (mapc #'agent-capture--delete-prompt prompts)
+    (when selected
+      (deactivate-mark)
+      (pop-to-buffer session-buffer))
+    (message "Inserted %d captured prompt%s"
+             (length prompts) (if (cdr prompts) "s" ""))))
+
+(defun agent-capture--selected-prompts ()
+  "Return the captured prompts whose headings the active region covers.
+Return nil unless the current buffer is a prompt capture file with an
+active region."
+  (when (and (bound-and-true-p agent-prompt-capture-mode)
+             buffer-file-name
+             (use-region-p))
+    (let ((start (save-excursion (goto-char (region-beginning))
+                                 (line-beginning-position)))
+          (end (region-end))
+          prompts)
+      (save-excursion
+        (goto-char start)
+        (while (and (< (point) end)
+                    (re-search-forward org-heading-regexp end t))
+          (goto-char (match-beginning 0))
+          (when-let* ((prompt (agent-capture--prompt-at-point
+                               buffer-file-name nil)))
+            (push prompt prompts))
+          (or (outline-next-heading) (goto-char (point-max)))))
+      (or (nreverse prompts)
+          (user-error "The region covers no captured prompt")))))
+
+(defun agent-capture--file-session (file)
+  "Return the live session buffer whose prompt capture file is FILE."
+  (or (seq-find (lambda (buffer)
+                  (when-let* ((backend (agent--detect-backend buffer)))
+                    (file-equal-p (agent-capture--file backend buffer) file)))
+                (agent--find-all-buffers))
+      (user-error "The session of this capture file is not open")))
+
+(defun agent-capture--combine-prompts (prompts)
+  "Return the texts of PROMPTS joined into one message.
+A single prompt is returned as it is; several become a numbered list,
+with each prompt's later lines indented under its number."
+  (if (null (cdr prompts))
+      (plist-get (car prompts) :text)
+    (let ((n 0))
+      (mapconcat (lambda (prompt)
+                   (setq n (1+ n))
+                   (let ((marker (format "%d. " n)))
+                     (concat marker
+                             (replace-regexp-in-string
+                              "\n" (concat "\n" (make-string (length marker) ?\s))
+                              (plist-get prompt :text)))))
+                 prompts "\n\n"))))
+
 (defun agent-capture-confirm-no-pending (backend buffer action)
   "Confirm ACTION for BACKEND session BUFFER when captures are pending.
 Return non-nil when ACTION may proceed."

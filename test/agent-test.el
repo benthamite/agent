@@ -4124,13 +4124,11 @@ Naming the backend there instead would present a tool as an account."
      :resume #'ignore
      :session-headers #'ignore
      :session-prompt #'ignore
-     :exec-prompt #'ignore
      :prepare-fork #'ignore)
     (let ((struct (agent-backend 'stub)))
       (should (agent-backend-resume struct))
       (should (agent-backend-session-headers struct))
       (should (agent-backend-session-prompt struct))
-      (should (agent-backend-exec-prompt struct))
       (should (agent-backend-prepare-fork struct)))))
 
 (ert-deftest agent-test-backend-capability-slots-are-optional ()
@@ -4143,7 +4141,6 @@ Naming the backend there instead would present a tool as an account."
       (should-not (agent-backend-resume struct))
       (should-not (agent-backend-session-headers struct))
       (should-not (agent-backend-session-prompt struct))
-      (should-not (agent-backend-exec-prompt struct))
       (should-not (agent-backend-prepare-fork struct)))))
 
 (ert-deftest agent-test-start-session-dispatches-to-backend ()
@@ -4708,7 +4705,7 @@ Such a key breaks the whole menu when it opens, not at definition."
   (let ((keys (agent-test--menu-keys)))
     (dolist (key '("l" "o" "r" "s" "b" "a l" "a u" "n" "X" "-a" "-c" "-w"
                    "g s" "g r" "g d"
-                   "t ." "t r" "p c" "p i" "p b"))
+                   "t ." "t r" "p c" "p i" "p a"))
       (should (member key keys)))
     (dolist (key '("O" "b s" "H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
                    "." "e" "N" "B" "L" "u" "a" "c" "R" "p" "i" "b n"

@@ -56,14 +56,8 @@ These directories are not loaded by ordinary Claude Code sessions."
 (define-obsolete-variable-alias 'agent-claude-warn-kill-with-branches
   'agent-warn-kill-with-branches "0.3")
 
-(define-obsolete-variable-alias 'agent-claude-log-directory
-  'agent-todo-log-directory "0.3")
-
 (define-obsolete-variable-alias 'agent-claude-org-todo-in-progress-keyword
   'agent-todo-in-progress-keyword "0.3")
-
-(define-obsolete-function-alias 'agent-claude-batch-todos
-  #'agent-batch-todos "0.3")
 
 (define-obsolete-function-alias 'agent-claude-send-todo-at-point
   #'agent-send-todo-at-point "0.3")
@@ -205,7 +199,6 @@ ended in that window.")
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
 (declare-function agent-act-on-slack-message "agent-slack"
                   (&optional existing))
-(declare-function agent-batch-todos "agent-todo" ())
 (declare-function agent-send-todo-at-point "agent-todo"
                   (&optional existing))
 (declare-function claude-code--get-or-prompt-for-buffer "claude-code" ())
@@ -252,7 +245,6 @@ Source: lobehub/lobe-icons (MIT).")
   :display-name-suffix #'agent-claude--branch-suffix
   :label "Claude Code"
   :run-prompt #'agent-claude-run-prompt
-  :exec-prompt #'agent-claude--run-prompt
   :notify #'agent-claude-notify
   :skill-roots #'agent-claude-skill-roots
   :skill-command-prefix "/"
