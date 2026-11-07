@@ -4954,7 +4954,10 @@ stops to ask for one."
   "Navigate between branches of the current session.
 Show every session that shares a fork ancestor with this one as a
 tree, then switch to the selected session's live buffer, or resume it
-in a new buffer when it has none."
+in a new buffer when it has none.
+
+A branch is an ordinary session: select an open one with
+`agent-select-session' and resume a closed one with `agent-resume'."
   (interactive)
   (let* ((buffer (current-buffer))
          (backend (or (agent--detect-backend buffer)
@@ -5049,6 +5052,10 @@ behind, and the original error is re-signaled."
       (message "Branched in worktree %s on branch %s"
                (car worktree) (cdr worktree)))))
 
+(make-obsolete 'agent-switch-branch
+               "select a branch with `agent-select-session', or resume it with `agent-resume'"
+               "0.2")
+
 (defun agent--prepare-fork (backend session-id from-dir to-dir)
   "Prepare BACKEND to fork SESSION-ID from FROM-DIR inside TO-DIR.
 Backends that record sessions per project directory use this to make
@@ -5129,17 +5136,16 @@ when it is not installed."
   [["Sessions"
     ("n" "new session" agent-start-new-session)
     ("r" "resume session" agent-resume)
-    ("O" "restore sessions" agent-restore-sessions)
     ("s" "select session" agent-select-session)
     ("w" "jump to waiting" agent-jump-to-waiting)
     ("l" "open log" agent-history)
     ""
     "Session groups"
     ("g s" "save" agent-save-session-group)
+    ("g r" "restore" agent-restore-sessions)
     ("g d" "delete" agent-delete-session-group)]
    ["Current session"
     ("b n" "new branch" agent-create-branch)
-    ("b s" "switch branch" agent-switch-branch)
     ("z" "toggle snooze" agent-toggle-snooze)
     ("h" "handoff" agent-handoff)
     ("R" "restart" agent-restart)

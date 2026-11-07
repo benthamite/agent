@@ -4706,16 +4706,16 @@ Such a key breaks the whole menu when it opens, not at definition."
 (ert-deftest agent-test-menu-binds-the-unified-commands ()
   "Bind every unified session command in the static layout."
   (let ((keys (agent-test--menu-keys)))
-    (dolist (key '("l" "r" "O" "R" "s" "b n" "b s" "a l" "a u" "n" "X" "-a" "-c" "-w"
-                   "g s" "g d"
+    (dolist (key '("l" "r" "R" "s" "b n" "a l" "a u" "n" "X" "-a" "-c" "-w"
+                   "g s" "g r" "g d"
                    "t ." "t r" "p c" "p i" "p b"))
       (should (member key keys)))
-    (dolist (key '("H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
+    (dolist (key '("O" "b s" "H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
                    "." "e" "N" "B" "L" "u" "a" "c" "o" "p" "i" "b"
                    "t a" "t c" "t o"))
       (should-not (member key keys))))
   (dolist (binding '(("r" . agent-resume)
-                     ("O" . agent-restore-sessions)
+                     ("g r" . agent-restore-sessions)
                      ("g s" . agent-save-session-group)
                      ("g d" . agent-delete-session-group)
                      ("R" . agent-restart)
