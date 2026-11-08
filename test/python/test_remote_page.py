@@ -289,20 +289,6 @@ class RemotePageTest(unittest.TestCase):
         self.page.wait_for_timeout(100)
         self.assertEqual(self.sent, ["hello"])
 
-    def test_lost_transcript_is_said_over_the_screen(self):
-        self.page.go_back()
-        self.history = {"available": False, "pending": False,
-                        "lost": "Emacs lost this session's transcript."}
-        self.output = dict(SESSION, output="whole screen here")
-        self.page.wait_for_selector(".card")
-        self.page.click(".card")
-        self.page.wait_for_function("document.getElementById('live').textContent.includes('whole')")
-        self.page.evaluate("clearInterval(timer)")
-        self.assertTrue(self.visible("#live"))
-        self.assertTrue(self.visible("#history-bar"))
-        self.assertIn("lost this session's transcript", self.text("#history-note"))
-        self.assertNotIn("fresh", self.page.evaluate("document.getElementById('session-view').className"))
-
     def test_no_glyph_a_phone_font_lacks(self):
         page = self.page.evaluate("document.getElementById('session-view').textContent"
                                   " + MORE_KEYS.flat(2).join() + CARD_KEYS.flat().join()")
@@ -334,6 +320,19 @@ class RemotePageTest(unittest.TestCase):
         self.poll()
         self.assertFalse(self.visible("#more"))
 
+    def test_lost_transcript_is_said_over_the_screen(self):
+        self.page.go_back()
+        self.history = {"available": False, "pending": False,
+                        "lost": "Emacs lost this session's transcript."}
+        self.output = dict(SESSION, output="whole screen here")
+        self.page.wait_for_selector(".card")
+        self.page.click(".card")
+        self.page.wait_for_function("document.getElementById('live').textContent.includes('whole')")
+        self.page.evaluate("clearInterval(timer)")
+        self.assertTrue(self.visible("#live"))
+        self.assertTrue(self.visible("#history-bar"))
+        self.assertIn("lost this session's transcript", self.text("#history-note"))
+        self.assertNotIn("fresh", self.page.evaluate("document.getElementById('session-view').className"))
 
 if __name__ == "__main__":
     unittest.main()
