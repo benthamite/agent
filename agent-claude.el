@@ -873,10 +873,14 @@ Returns a plist, or nil if the file is missing or malformed."
            :object-type 'plist)
         (json-error nil)))))
 
-(defvar agent-claude--pending-status-uuid nil
-  "Status UUID for the Claude process currently being started.
-Set by `agent-claude--status-uuid-env' on the environment hook and
-consumed by `agent-claude--capture-status-uuid' on the start hook.")
+(defvar agent-claude--pending-status-uuids (make-hash-table :test #'equal)
+  "Status UUIDs of Claude processes being started, by buffer name.
+`agent-claude--status-uuid-env' adds one on the environment hook and
+`agent-claude--capture-status-uuid' takes it on the start hook.  Keying
+by buffer name, which both hooks know, keeps a start that runs between
+another's two hooks from taking that other's UUID, which would leave
+the other session without one: no status line, no session id, and no
+transcript on the phone.")
 
 (defvar-local agent-claude--status-uuid nil
   "Per-process UUID keying this session's statusline file.
@@ -892,10 +896,11 @@ per CLI process.")
 
 (add-hook 'agent-session-status-token-functions #'agent-claude--publisher-token)
 
-(defun agent-claude--status-uuid-env (_buffer-name _dir)
-  "Return the AGENT_SESSION_UUID environment entry for a new session."
-  (setq agent-claude--pending-status-uuid (agent-claude--generate-uuid))
-  (list (format "AGENT_SESSION_UUID=%s" agent-claude--pending-status-uuid)))
+(defun agent-claude--status-uuid-env (buffer-name _dir)
+  "Return the AGENT_SESSION_UUID environment entry for session BUFFER-NAME."
+  (let ((uuid (agent-claude--generate-uuid)))
+    (puthash buffer-name uuid agent-claude--pending-status-uuids)
+    (list (format "AGENT_SESSION_UUID=%s" uuid))))
 
 (defvar server-process)
 (defvar server-name)
@@ -917,10 +922,12 @@ when several Emacs instances run servers."
                     (expand-file-name server-name server-socket-dir))))))
 
 (defun agent-claude--capture-status-uuid ()
-  "Store the pending status UUID buffer-locally at session start."
-  (when (claude-code--buffer-p (current-buffer))
-    (setq agent-claude--status-uuid agent-claude--pending-status-uuid)
-    (setq agent-claude--pending-status-uuid nil)))
+  "Store the status UUID this buffer's process was started with.
+A buffer with no UUID waiting for it keeps the one it has."
+  (when-let* (((claude-code--buffer-p (current-buffer)))
+              (uuid (gethash (buffer-name) agent-claude--pending-status-uuids)))
+    (remhash (buffer-name) agent-claude--pending-status-uuids)
+    (setq agent-claude--status-uuid uuid)))
 
 (defun agent-claude--generate-uuid ()
   "Return a random UUID-shaped string for status-file identity."

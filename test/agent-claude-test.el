@@ -889,6 +889,40 @@ when `debug-on-error' is set, and Emacs never runs it again."
     (should (= (length entries) 1))
     (should (string-prefix-p "AGENT_SESSION_UUID=" (car entries)))))
 
+(defun agent-claude-test--env-uuid (entries)
+  "Return the UUID in the AGENT_SESSION_UUID entry of ENTRIES."
+  (string-remove-prefix "AGENT_SESSION_UUID=" (car entries)))
+
+(ert-deftest agent-claude-test-status-uuid-survives-an-overlapping-start ()
+  "A start that runs between another's two hooks takes nothing from it.
+Each buffer keeps the UUID its own process was started with, whatever
+starts while it is being set up."
+  (let ((a (generate-new-buffer "*claude:~/a/:default*"))
+        (b (generate-new-buffer "*claude:~/a/:second*")))
+    (unwind-protect
+        (let ((uuid-a (agent-claude-test--env-uuid
+                       (agent-claude--status-uuid-env (buffer-name a) "~/a/")))
+              (uuid-b (agent-claude-test--env-uuid
+                       (agent-claude--status-uuid-env (buffer-name b) "~/a/"))))
+          (with-current-buffer b (agent-claude--capture-status-uuid))
+          (with-current-buffer a (agent-claude--capture-status-uuid))
+          (should (equal (buffer-local-value 'agent-claude--status-uuid a) uuid-a))
+          (should (equal (buffer-local-value 'agent-claude--status-uuid b) uuid-b)))
+      (kill-buffer a)
+      (kill-buffer b))))
+
+(ert-deftest agent-claude-test-status-uuid-kept-without-a-new-one ()
+  "A start hook with no UUID waiting for its buffer keeps the one it has."
+  (let ((a (generate-new-buffer "*claude:~/a/:default*")))
+    (unwind-protect
+        (let ((uuid (agent-claude-test--env-uuid
+                     (agent-claude--status-uuid-env (buffer-name a) "~/a/"))))
+          (with-current-buffer a
+            (agent-claude--capture-status-uuid)
+            (agent-claude--capture-status-uuid)
+            (should (equal agent-claude--status-uuid uuid))))
+      (kill-buffer a))))
+
 ;;;; Session settings
 
 (defmacro agent-claude-test--with-session-dir (&rest body)
