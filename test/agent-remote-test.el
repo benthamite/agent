@@ -858,31 +858,47 @@ BODY can refer to the transcript as `file'."
                                   (expand-file-name directory))
                                  'codex)))))))))
 
-(ert-deftest agent-remote-test-report-starts-reporting-session ()
-  "The report endpoint hands the report to `agent-report-submit'."
-  (agent-remote-test--with-session buffer
-    (let (called)
-      (cl-letf (((symbol-function 'agent-report-submit)
-                 (lambda (text backend) (setq called (list text backend)) buffer)))
-        (agent-remote-test--with-server
-          (let ((response (agent-remote-test--http
-                           "POST" "/api/report"
-                           (json-serialize (list :text "  Add sorting \n"
-                                                 :backend "codex"))
-                           '("X-Agent-Remote: 1"))))
-            (should (= (agent-remote-test--status response) 200))
-            (should (equal (alist-get 'id (agent-remote-test--json response))
-                           (buffer-name buffer)))
-            (should (equal called '("Add sorting" codex)))))))))
+(ert-deftest agent-remote-test-report-answers-once-filed ()
+  "The report endpoint answers with the issue's URL once it is filed.
+Filing is asynchronous, so the response waits for it."
+  (let (filed)
+    (cl-letf (((symbol-function 'agent-report-file)
+               (lambda (text origin on-success _on-failure)
+                 (setq filed (list text origin))
+                 (run-with-timer 0.2 nil on-success
+                                 "https://github.com/o/r/issues/1"))))
+      (agent-remote-test--with-server
+        (let ((response (agent-remote-test--http
+                         "POST" "/api/report"
+                         (json-serialize (list :text "  Add sorting \n"))
+                         '("X-Agent-Remote: 1"))))
+          (should (= (agent-remote-test--status response) 200))
+          (should (equal (alist-get 'url (agent-remote-test--json response))
+                         "https://github.com/o/r/issues/1"))
+          (should (equal filed '("Add sorting" "the phone"))))))))
 
-(ert-deftest agent-remote-test-report-refuses-empty-text ()
-  "The report endpoint starts nothing without a report."
-  (cl-letf (((symbol-function 'agent-report-submit)
-             (lambda (&rest _) (error "Should not start"))))
+(ert-deftest agent-remote-test-report-says-why-not-filed ()
+  "A report that could not be filed answers with the reason."
+  (cl-letf (((symbol-function 'agent-report-file)
+             (lambda (_text _origin _on-success on-failure)
+               (funcall on-failure "not logged in"))))
     (agent-remote-test--with-server
       (let ((response (agent-remote-test--http
                        "POST" "/api/report"
-                       (json-serialize (list :text " " :backend "codex"))
+                       (json-serialize (list :text "x"))
+                       '("X-Agent-Remote: 1"))))
+        (should (= (agent-remote-test--status response) 502))
+        (should (equal (alist-get 'error (agent-remote-test--json response))
+                       "not logged in"))))))
+
+(ert-deftest agent-remote-test-report-refuses-empty-text ()
+  "The report endpoint files nothing without a report."
+  (cl-letf (((symbol-function 'agent-report-file)
+             (lambda (&rest _) (error "Should not file"))))
+    (agent-remote-test--with-server
+      (let ((response (agent-remote-test--http
+                       "POST" "/api/report"
+                       (json-serialize (list :text " "))
                        '("X-Agent-Remote: 1"))))
         (should (= (agent-remote-test--status response) 400))))))
 

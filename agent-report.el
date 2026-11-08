@@ -1,4 +1,4 @@
-;;; agent-report.el --- Turn a bug report or feature idea into a pull request -*- lexical-binding: t -*-
+;;; agent-report.el --- File a bug report or feature idea as a GitHub issue -*- lexical-binding: t -*-
 
 ;; Copyright (C) 2026
 
@@ -25,10 +25,9 @@
 ;;; Commentary:
 
 ;; `agent-report' asks for a description of a bug or a feature idea and
-;; hands it to a new agent session, which works out where the change
-;; belongs, makes it in a fresh clone and opens a pull request for the
-;; maintainer to review.  The phone page of `agent-remote' offers the
-;; same through its Report button.
+;; files it as an issue on `agent-report-repository' with the GitHub
+;; CLI, for the maintainer to act on.  The phone page of `agent-remote'
+;; offers the same through its Report button.
 
 ;;; Code:
 
@@ -41,17 +40,20 @@
             ".el")))
   "Absolute path to the source checkout holding this library.
 Resolved through the `.el' file because Elpaca's build directory holds
-only the Lisp files, not the bundled `etc/' directory.  The reporting
-session runs here.")
+only the Lisp files.  Its commit goes into every report.")
 
-(defcustom agent-report-prompt-file
-  (expand-file-name "etc/agent-report-prompt.md"
-                    agent-report--package-directory)
-  "File holding the instructions a reporting session starts with.
-In it, {{REPORT}} stands for the report, {{AGENT_DIR}} for the source
-checkout of this package and {{EMACS_DIR}} for `user-emacs-directory'."
-  :type 'file
+(defcustom agent-report-repository "benthamite/agent"
+  "GitHub repository, as OWNER/NAME, that reports are filed on."
+  :type 'string
   :group 'agent)
+
+(defcustom agent-report-gh-program "gh"
+  "The GitHub CLI program that files reports."
+  :type 'string
+  :group 'agent)
+
+(defconst agent-report--title-length 72
+  "Most characters of a report's first line that become its title.")
 
 (defconst agent-report--buffer-name "*agent report*"
   "Name of the buffer `agent-report' collects the description in.")
@@ -64,63 +66,104 @@ checkout of this package and {{EMACS_DIR}} for `user-emacs-directory'."
   "Mode for describing a bug or feature idea for `agent-report'."
   (setq header-line-format
         (substitute-command-keys
-         "Describe the bug or idea.  \\[agent-report-send] sends it, \\[agent-report-cancel] cancels.")))
+         "Describe the bug or idea.  \\[agent-report-send] files it, \\[agent-report-cancel] cancels.")))
 
 ;;;###autoload
 (defun agent-report ()
-  "Describe a bug or feature idea, to become a pull request.
-The description goes to a new agent session, which turns it into a
-pull request for the maintainer of Agent Emacs to review."
+  "Describe a bug or feature idea, to be filed as a GitHub issue.
+The issue goes to `agent-report-repository' for its maintainer."
   (interactive)
   (pop-to-buffer (get-buffer-create agent-report--buffer-name))
   (unless (derived-mode-p 'agent-report-mode)
     (agent-report-mode)))
 
 (defun agent-report-send ()
-  "Send the description in the current buffer to a new agent session."
+  "File the description in the current buffer as a GitHub issue.
+The buffer is killed once the issue exists, and kept if filing fails."
   (interactive)
-  (let ((text (string-trim (buffer-string))))
+  (let ((text (string-trim (buffer-string)))
+        (buffer (current-buffer)))
     (when (string-empty-p text)
       (user-error "Describe the bug or idea first"))
-    (let ((buffer (agent-report-submit text (agent-read-backend))))
-      (kill-buffer agent-report--buffer-name)
-      (pop-to-buffer buffer))))
+    (message "Filing the report...")
+    (agent-report-file
+     text "Emacs"
+     (lambda (url)
+       (when (buffer-live-p buffer)
+         (kill-buffer buffer))
+       (message "Filed %s" url))
+     (lambda (failure)
+       (message "Report not filed, and kept in %s: %s"
+                agent-report--buffer-name failure)))))
 
 (defun agent-report-cancel ()
   "Discard the description being written."
   (interactive)
   (kill-buffer agent-report--buffer-name))
 
-(defun agent-report-submit (text backend)
-  "Start a BACKEND session that turns report TEXT into a pull request.
-The session runs in this package's source checkout, under an instance
-name of the form report-N when a BACKEND session already runs there.
-Return its buffer."
-  (unless (assq backend agent-backends)
-    (user-error "No AI backend named `%s'" backend))
-  (let ((directory (abbreviate-file-name agent-report--package-directory)))
-    (agent-start-session
-     (agent-session-create
-      :backend backend
-      :directory directory
-      :instance (agent--free-instance-name backend directory "report"))
-     :initial-prompt (agent-report-prompt text))))
+(defun agent-report-file (text origin on-success on-failure)
+  "File report TEXT, sent from ORIGIN, as an issue without waiting.
+ORIGIN, such as \"Emacs\" or \"the phone\", is named in the issue.
+Call ON-SUCCESS with the issue's URL, or ON-FAILURE with a message
+saying what went wrong, once the GitHub CLI has finished."
+  (if (not (executable-find agent-report-gh-program))
+      (funcall on-failure
+               "the GitHub CLI is not installed; install it from https://cli.github.com and run `gh auth login'")
+    (let* ((stderr (generate-new-buffer " *agent-report-gh-stderr*" t))
+           (process
+            (make-process
+             :name "agent-report-gh"
+             :buffer (generate-new-buffer " *agent-report-gh*" t)
+             :stderr stderr
+             :connection-type 'pipe
+             :noquery t
+             :command (list agent-report-gh-program "issue" "create"
+                            "--repo" agent-report-repository
+                            "--title" (agent-report-title text)
+                            "--body-file" "-")
+             :sentinel (lambda (process _event)
+                         (unless (process-live-p process)
+                           (agent-report--finish process stderr
+                                                 on-success on-failure))))))
+      (process-send-string process (agent-report-body text origin))
+      (process-send-eof process))))
 
-(defun agent-report-prompt (text)
-  "Return the instructions for a session handling report TEXT.
-They are `agent-report-prompt-file' with its placeholders filled in.
-TEXT goes in last, so that a report quoting a placeholder stays as
-written."
-  (let ((template (with-temp-buffer
-                    (insert-file-contents agent-report-prompt-file)
-                    (buffer-string))))
-    (dolist (pair `(("{{AGENT_DIR}}" . ,(abbreviate-file-name
-                                         agent-report--package-directory))
-                    ("{{EMACS_DIR}}" . ,(abbreviate-file-name
-                                         (expand-file-name user-emacs-directory)))
-                    ("{{REPORT}}" . ,text)))
-      (setq template (string-replace (car pair) (cdr pair) template)))
-    template))
+(defun agent-report--finish (process stderr on-success on-failure)
+  "Report how the GitHub CLI's PROCESS ended, then clean up.
+STDERR is its error buffer.  Call ON-SUCCESS with the issue URL it
+printed, or ON-FAILURE with its error."
+  (let ((output (with-current-buffer (process-buffer process)
+                  (string-trim (buffer-string))))
+        (failure (with-current-buffer stderr (string-trim (buffer-string)))))
+    (kill-buffer (process-buffer process))
+    (kill-buffer stderr)
+    (if (and (zerop (process-exit-status process))
+             (string-match "https://\\S-+" output))
+        (funcall on-success (match-string 0 output))
+      (funcall on-failure
+               (format "%s; if you are not logged in, run `gh auth login'"
+                       (if (string-empty-p failure) "gh failed" failure))))))
+
+(defun agent-report-title (text)
+  "Return the issue title for report TEXT: its first line, shortened."
+  (truncate-string-to-width (car (split-string (string-trim text) "\n"))
+                            agent-report--title-length nil nil "…"))
+
+(defun agent-report-body (text origin)
+  "Return the issue body for report TEXT sent from ORIGIN.
+It is TEXT followed by what the maintainer needs to reproduce a bug."
+  (format "%s\n\n---\nReported from %s with `agent-report`.\n\n- agent: %s\n- Emacs: %s\n- System: %s\n"
+          text origin (agent-report--package-commit) emacs-version
+          system-configuration))
+
+(defun agent-report--package-commit ()
+  "Return the commit this package's checkout is at, or \"unknown\"."
+  (let ((default-directory agent-report--package-directory))
+    (with-temp-buffer
+      (if (eq 0 (ignore-errors
+                  (call-process "git" nil t nil "rev-parse" "--short" "HEAD")))
+          (string-trim (buffer-string))
+        "unknown"))))
 
 (provide 'agent-report)
 

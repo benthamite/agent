@@ -326,10 +326,10 @@
 <div class="sheet" id="report-sheet">
   <div class="panel">
     <h2>Report a bug or idea</h2>
-    <p class="note">An agent turns it into a pull request for the maintainer to review.</p>
+    <p class="note">It is filed as a GitHub issue for the maintainer.</p>
     <textarea id="report-text" placeholder="What went wrong, or what would you like?"></textarea>
     <p class="note" id="report-note"></p>
-    <div id="report-backends"></div>
+    <div id="report-backends"><button id="report-send">File report</button></div>
     <div class="actions">
       <button class="cancel">Cancel</button>
     </div>
@@ -1721,50 +1721,34 @@ async function openNew() {
 }
 
 // The report survives a cancelled sheet, so a slip of the finger loses
-// nothing; it is cleared once sent.
-async function openReport() {
-  $("report-note").textContent = "Loading…";
-  $("report-backends").replaceChildren();
+// nothing; it is cleared once filed.
+function openReport() {
+  $("report-note").textContent = "";
+  $("report-send").disabled = false;
   $("report-sheet").classList.add("open");
-  try {
-    const data = await api("/api/backends");
-    $("report-backends").replaceChildren(...data.choices.map((c) => {
-      const b = document.createElement("button");
-      b.textContent = "Send to " + c.label;
-      b.addEventListener("click", () => doReport(c, b));
-      return b;
-    }));
-    $("report-note").textContent = "";
-  } catch (e) {
-    $("report-note").textContent = "Error: " + e.message;
-  }
 }
 
-async function doReport(choice, button) {
+async function doReport() {
   const text = $("report-text").value.trim();
   if (!text) {
     $("report-note").textContent = "Describe the bug or idea first.";
     return;
   }
-  const buttons = [...$("report-backends").children];
-  for (const b of buttons) b.disabled = true;
-  const label = button.textContent;
-  button.textContent = "Sending…";
+  const button = $("report-send");
+  button.disabled = true;
+  button.textContent = "Filing…";
   try {
-    const data = await api("/api/report", { text, backend: choice.name });
+    const data = await api("/api/report", { text });
     $("report-text").value = "";
-    button.textContent = label;
-    for (const b of buttons) b.disabled = false;
-    history.pushState({ session: data.id }, "");
-    show("session-view");
-    $("session-title").textContent = data.name;
-    followSession(data.id);
-    schedule();
+    const link = document.createElement("a");
+    link.href = data.url;
+    link.textContent = data.url;
+    $("report-note").replaceChildren("Filed: ", link);
   } catch (e) {
-    $("report-note").textContent = "Error: " + e.message;
-    button.textContent = label;
-    for (const b of buttons) b.disabled = false;
+    $("report-note").textContent = "Not filed: " + e.message;
   }
+  button.textContent = "File report";
+  button.disabled = false;
 }
 
 // A failed step keeps the folder on show, so there is always a way on.
@@ -1944,6 +1928,7 @@ $("restart-go").addEventListener("click", doRestart);
 $("new").addEventListener("click", openNew);
 $("list-new").addEventListener("click", openNew);
 $("list-report").addEventListener("click", openReport);
+$("report-send").addEventListener("click", doReport);
 $("list-sort").addEventListener("change", (e) => setListSort(e.target.value, false));
 $("list-sort-direction").addEventListener("click",
   () => setListSort(listSort.by, !listSort.reverse));

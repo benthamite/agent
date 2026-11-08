@@ -285,7 +285,11 @@ whose final element is the port."
     (process-put proc :input input)
     (when-let* ((request (agent-remote--parse-request input)))
       (process-put proc :input nil)
-      (agent-remote--respond proc (agent-remote--dispatch request)))))
+      (let ((response (agent-remote--dispatch request)))
+        (if (eq (car response) :defer)
+            (funcall (cadr response)
+                     (lambda (reply) (agent-remote--respond proc reply)))
+          (agent-remote--respond proc response))))))
 
 (defun agent-remote--parse-request (input)
   "Parse the raw HTTP request INPUT, or return nil if it is incomplete.
@@ -350,7 +354,10 @@ connection that is still live is re-signaled."
 ;;;; Routing
 
 (defun agent-remote--dispatch (request)
-  "Return the response to REQUEST."
+  "Return the response to REQUEST.
+A request that must wait, such as on the network, returns (:defer FN)
+instead: FN is called with a function that sends the response, and
+must call it exactly once, without signaling."
   (condition-case err
       (let ((method (plist-get request :method))
             (path (plist-get request :path)))
@@ -388,7 +395,7 @@ connection that is still live is re-signaled."
          ((equal path "/api/new")
           (agent-remote--json (agent-remote--new request)))
          ((equal path "/api/report")
-          (agent-remote--json (agent-remote--report request)))
+          (agent-remote--report request))
          ((equal path "/api/exit")
           (agent-remote--json (agent-remote--exit request)))
          ((equal path "/api/snooze")
@@ -792,22 +799,19 @@ the phone follows."
             :name (agent-display-name buffer)))))
 
 (defun agent-remote--report (request)
-  "Start a session that turns the report in REQUEST's JSON body into a PR.
-The body's `text' is the report and its `backend' names the backend, as
-for `agent-report-submit'.  Return the new session buffer's name and
-display name, which the phone follows."
-  (let* ((args (agent-remote--json-body request))
-         (text (alist-get 'text args))
-         (name (alist-get 'backend args))
-         (backend (and (stringp name) (intern-soft name))))
+  "File the report in REQUEST's JSON body, `text', as a GitHub issue.
+The GitHub CLI runs without blocking Emacs, so the response is
+deferred until it finishes: the issue's URL, or why it was not filed."
+  (let ((text (alist-get 'text (agent-remote--json-body request))))
     (unless (and (stringp text) (not (string-blank-p text)))
       (user-error "No report given"))
-    (unless backend
-      (user-error "No backend given"))
-    (let ((buffer (agent-report-submit (string-trim text) backend)))
-      (list :ok t
-            :id (buffer-name buffer)
-            :name (agent-display-name buffer)))))
+    (list :defer
+          (lambda (reply)
+            (agent-report-file
+             (string-trim text) "the phone"
+             (lambda (url) (funcall reply (agent-remote--json (list :ok t :url url))))
+             (lambda (failure)
+               (funcall reply (agent-remote--error "502 Bad Gateway" failure))))))))
 
 (defun agent-remote--exit (request)
   "Exit the session named in REQUEST's JSON body.
