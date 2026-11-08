@@ -167,6 +167,34 @@ HOST overrides the Host header, which defaults to the server's own."
 
 ;;;; Security checks over a live connection
 
+(ert-deftest agent-remote-test-respond-to-closed-connection ()
+  "Answering a client that has hung up does not signal."
+  (agent-remote-test--with-server
+    (let* ((port (process-contact agent-remote--server :service))
+           (server-side nil))
+      (cl-letf (((symbol-function 'agent-remote--filter)
+                 (lambda (proc _data) (setq server-side proc))))
+        (let ((client (make-network-process
+                       :name "agent-remote-test-client" :host "127.0.0.1"
+                       :service port :coding 'binary)))
+          (process-send-string client "x")
+          (with-timeout (5 (error "Server never saw the client"))
+            (while (not server-side)
+              (accept-process-output nil 0.05)))
+          (delete-process client)))
+      (with-timeout (5 (error "Server never saw the hang-up"))
+        (while (process-live-p server-side)
+          (accept-process-output nil 0.05)))
+      (agent-remote--respond
+       server-side (list "200 OK" "text/plain" (make-string 200000 ?x))))))
+
+(ert-deftest agent-remote-test-respond-on-live-connection-signals ()
+  "A send error on a connection that is still live is not dropped."
+  (cl-letf (((symbol-function 'process-send-string)
+             (lambda (&rest _) (error "Boom")))
+            ((symbol-function 'process-live-p) (lambda (_) t)))
+    (should-error (agent-remote--respond 'proc (list "200 OK" "text/plain" "")))))
+
 (ert-deftest agent-remote-test-rejects-foreign-host ()
   "A request naming another host is refused, defeating DNS rebinding."
   (agent-remote-test--with-server

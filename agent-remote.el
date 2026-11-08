@@ -299,19 +299,30 @@ and `:body'.  Header names are downcased; the body is decoded as UTF-8."
 
 (defun agent-remote--respond (proc response)
   "Send RESPONSE to connection PROC and close it.
-RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string."
+RESPONSE is a list (STATUS CONTENT-TYPE BODY), BODY being a string.
+
+A client may hang up before the response is written, as a phone does
+when the page is closed or the network drops mid-request.  Writing to
+the closed connection then fails and Emacs deletes PROC, which leaves
+nobody to answer, so that failure is dropped.  An error on a
+connection that is still live is re-signaled."
   (pcase-let* ((`(,status ,type ,body) response)
                (bytes (encode-coding-string body 'utf-8-unix)))
-    (process-send-string
-     proc
-     (concat (format "HTTP/1.1 %s\r\n" status)
-             (format "Content-Type: %s\r\n" type)
-             (format "Content-Length: %d\r\n" (length bytes))
-             "Cache-Control: no-store\r\n"
-             "X-Content-Type-Options: nosniff\r\n"
-             "Connection: close\r\n\r\n"
-             bytes))
-    (process-send-eof proc)))
+    (condition-case err
+        (progn
+          (process-send-string
+           proc
+           (concat (format "HTTP/1.1 %s\r\n" status)
+                   (format "Content-Type: %s\r\n" type)
+                   (format "Content-Length: %d\r\n" (length bytes))
+                   "Cache-Control: no-store\r\n"
+                   "X-Content-Type-Options: nosniff\r\n"
+                   "Connection: close\r\n\r\n"
+                   bytes))
+          (process-send-eof proc))
+      (error
+       (when (process-live-p proc)
+         (signal (car err) (cdr err)))))))
 
 ;;;; Routing
 
