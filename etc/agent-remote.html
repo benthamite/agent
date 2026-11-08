@@ -180,8 +180,9 @@
   .toggle { background: var(--panel-2); border-radius: 10px; padding: 8px 9px;
     font-size: 13px; }
   .toggle.danger { color: var(--error); }
-  .list-tools { display: flex; align-items: center; gap: 8px; padding: 8px 12px 0;
-    font-size: 13px; color: var(--muted); }
+  .list-tools { gap: 8px; font-size: 13px; }
+  .list-tools .status { flex: 1; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
   .list-tools select { font: inherit; color: var(--text); background: var(--panel-2);
     border: 0; border-radius: 10px; padding: 8px 9px; }
   .list-tools .toggle { min-width: 40px; }
@@ -228,15 +229,9 @@
 </head>
 <body>
 <section id="list-view" class="view active">
-  <header>
-    <h1>Sessions</h1>
-    <span id="list-status" class="status"></span>
-    <button class="toggle" id="list-report">Report</button>
+  <header class="list-tools">
     <button class="toggle" id="list-new">New</button>
-  </header>
-  <div class="list-tools">
-    <label for="list-sort">Sort by</label>
-    <select id="list-sort">
+    <select id="list-sort" aria-label="Sort by">
       <option value="manual">Manual</option>
       <option value="project">Project</option>
       <option value="account">Account</option>
@@ -244,7 +239,9 @@
       <option value="state">Status</option>
     </select>
     <button class="toggle" id="list-sort-direction"></button>
-  </div>
+    <span id="list-status" class="status"></span>
+    <button class="toggle" id="list-report">Report</button>
+  </header>
   <div id="list"></div>
 </section>
 
