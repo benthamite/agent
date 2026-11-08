@@ -731,7 +731,8 @@ A backend without an icon is left out, and the page names it in text."
 REQUEST's `id', when given, names the session the sheet was opened
 from: the browser then starts in its directory and its backend comes
 first.  Without one the browser starts in
-`agent-remote-new-session-directory'."
+`agent-remote-new-session-directory'.  Each backend lists the accounts
+and pools a session can start under, in `agent-account-select' order."
   (let* ((id (agent-remote--query-param request "id"))
          (buffer (and id (agent-remote--session-buffer id)))
          (own (and buffer (agent--detect-backend buffer)))
@@ -744,7 +745,10 @@ first.  Without one the browser starts in
                               (list :name (symbol-name backend)
                                     :label (or (agent-backend-label
                                                 (agent-backend backend))
-                                               (symbol-name backend))))
+                                               (symbol-name backend))
+                                    :accounts (vconcat
+                                               (agent-account-selection-names
+                                                backend))))
                             (if (memq own backends)
                                 (cons own (delq own backends))
                               backends))))))
@@ -801,18 +805,23 @@ that directory's."
 
 (defun agent-remote--new (request)
   "Start a session as REQUEST's JSON body says.
-The body's `directory' is where it runs and its `backend' names its
-backend.  Return the new session buffer's name and display name, which
-the phone follows."
+The body's `directory' is where it runs, its `backend' names its
+backend, and its optional `account' names the account or pool to run
+under; without one Emacs picks the account as it would for a session
+started there from Emacs.  Return the new session buffer's name and
+display name, which the phone follows."
   (let* ((args (agent-remote--json-body request))
          (directory (let ((file-name-handler-alist nil))
                       (agent-remote--directory (alist-get 'directory args))))
          (name (alist-get 'backend args))
-         (backend (and (stringp name) (intern-soft name))))
+         (backend (and (stringp name) (intern-soft name)))
+         (account (alist-get 'account args)))
     (unless backend
       (user-error "No backend given"))
+    (unless (or (null account) (stringp account))
+      (user-error "Account must be a name"))
     (let ((buffer (agent-start-session-in
-                   (abbreviate-file-name directory) backend)))
+                   (abbreviate-file-name directory) backend account)))
       (list :ok t
             :id (buffer-name buffer)
             :name (agent-display-name buffer)))))

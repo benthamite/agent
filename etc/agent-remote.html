@@ -225,6 +225,11 @@
   #backends button, #report-backends button { flex: 1; min-height: 48px; border-radius: 12px;
     background: var(--accent); color: #fff; font-weight: 600; }
   #backends button:disabled, #report-backends button:disabled { opacity: .5; }
+  #accounts { display: flex; gap: 8px; }
+  #accounts:empty { display: none; }
+  #accounts > * { flex: 1; min-width: 0; }
+  #accounts select { font: inherit; color: var(--text); background: var(--panel-2);
+    border: 0; border-radius: 10px; padding: 8px 9px; }
 </style>
 </head>
 <body>
@@ -313,6 +318,7 @@
     </div>
     <p class="note" id="new-note"></p>
     <div id="folders"></div>
+    <div id="accounts"></div>
     <div id="backends"></div>
     <div class="actions">
       <button class="cancel">Cancel</button>
@@ -396,6 +402,7 @@ let showHidden = false;
 // How the new-session sheet orders folders, "name" or "recent", kept
 // across visits on this phone.
 const FOLDER_SORT_KEY = "agent-remote-folder-sort";
+const ACCOUNT_KEY_PREFIX = "agent-remote-new-account-";
 let folderSort = savedFolderSort();
 // Images chosen for the next reply; each has its file's path once saved.
 let attachments = [];
@@ -1738,6 +1745,7 @@ function followSession(id) {
 async function openNew() {
   browsing = null;
   $("backends").replaceChildren();
+  $("accounts").replaceChildren();
   renderFolders();
   $("new-note").textContent = "Loading…";
   $("new-sheet").classList.add("open");
@@ -1750,7 +1758,10 @@ async function openNew() {
       b.disabled = true;
       b.addEventListener("click", () => doNew(c, b));
       $("backends").appendChild(b);
+      $("accounts").appendChild(accountPicker(c));
     }
+    if (!data.choices.some((c) => c.accounts.length > 1))
+      $("accounts").replaceChildren();
     await browse(data.directory);
   } catch (e) {
     $("new-note").textContent = "Error: " + e.message;
@@ -1853,13 +1864,49 @@ function renderFolders() {
   }
 }
 
+// The account a backend's new sessions start under, shown under its
+// button.  "" leaves the choice to Emacs, as a session started there
+// from Emacs would.  A backend with one account or none has nothing to
+// choose, and gets an empty slot that keeps the pickers under their
+// buttons.  The last pick is remembered per backend.
+function accountPicker(choice) {
+  if (choice.accounts.length < 2) return document.createElement("span");
+  const select = document.createElement("select");
+  select.id = "account-" + choice.name;
+  select.setAttribute("aria-label", choice.label + " account");
+  const names = ["", ...choice.accounts];
+  for (const name of names) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name || "Default account";
+    select.appendChild(option);
+  }
+  const key = ACCOUNT_KEY_PREFIX + choice.name;
+  try {
+    const saved = localStorage.getItem(key);
+    if (names.includes(saved)) select.value = saved;
+  } catch (e) {
+    // Without storage the picker starts at the default every time.
+  }
+  select.addEventListener("change", () => {
+    try {
+      localStorage.setItem(key, select.value);
+    } catch (e) {
+      // The pick then lasts only while the sheet is open.
+    }
+  });
+  return select;
+}
+
 async function doNew(choice, button) {
   for (const b of $("backends").children) b.disabled = true;
   const label = button.textContent;
   button.textContent = "Starting…";
+  const picker = $("account-" + choice.name);
+  const body = { directory: browsing.path, backend: choice.name };
+  if (picker && picker.value) body.account = picker.value;
   try {
-    const data = await api("/api/new",
-                           { directory: browsing.path, backend: choice.name });
+    const data = await api("/api/new", body);
     if (current) {
       history.replaceState({ session: data.id }, "");
     } else {

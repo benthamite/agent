@@ -796,13 +796,17 @@ answer or dismiss it, and only the rest would reach the prompt."
   "Opened from the session list, the sheet starts in the configured folder."
   (let ((agent-backends (list (cons 'claude (agent-backend--create))))
         (agent-remote-new-session-directory "~/repos/"))
-    (agent-remote-test--with-server
-      (let ((data (agent-remote-test--json
-                   (agent-remote-test--http "GET" "/api/backends"))))
-        (should (equal (alist-get 'directory data) "~/repos/"))
-        (should (equal (mapcar (lambda (c) (alist-get 'name c))
-                               (alist-get 'choices data))
-                       '("claude")))))))
+    (cl-letf (((symbol-function 'agent-account-selection-names)
+               (lambda (_) '("pool" "personal" "work"))))
+      (agent-remote-test--with-server
+        (let ((data (agent-remote-test--json
+                     (agent-remote-test--http "GET" "/api/backends"))))
+          (should (equal (alist-get 'directory data) "~/repos/"))
+          (should (equal (mapcar (lambda (c) (alist-get 'name c))
+                                 (alist-get 'choices data))
+                         '("claude")))
+          (should (equal (alist-get 'accounts (car (alist-get 'choices data)))
+                         '("pool" "personal" "work"))))))))
 
 (ert-deftest agent-remote-test-directories-lists-folders ()
   "The directories endpoint lists folders and links to them, and no files."
@@ -904,7 +908,9 @@ answer or dismiss it, and only the rest would reach the prompt."
     (let ((directory (file-name-as-directory temporary-file-directory))
           called)
       (cl-letf (((symbol-function 'agent-start-session-in)
-                 (lambda (dir backend) (setq called (list dir backend)) buffer)))
+                 (lambda (dir backend &optional account)
+                   (setq called (list dir backend account))
+                   buffer)))
         (agent-remote-test--with-server
           (let ((response (agent-remote-test--http
                            "POST" "/api/new"
@@ -919,7 +925,26 @@ answer or dismiss it, and only the rest would reach the prompt."
             (should (equal called
                            (list (abbreviate-file-name
                                   (expand-file-name directory))
-                                 'codex)))))))))
+                                 'codex nil)))))))))
+
+(ert-deftest agent-remote-test-new-passes-the-chosen-account ()
+  "The new endpoint starts the session under the account the phone chose."
+  (agent-remote-test--with-session buffer
+    (let (called)
+      (cl-letf (((symbol-function 'agent-start-session-in)
+                 (lambda (_dir backend &optional account)
+                   (setq called (list backend account))
+                   buffer)))
+        (agent-remote-test--with-server
+          (should (= (agent-remote-test--status
+                      (agent-remote-test--http
+                       "POST" "/api/new"
+                       (json-serialize
+                        (list :directory temporary-file-directory
+                              :backend "claude" :account "work"))
+                       '("X-Agent-Remote: 1")))
+                     200))
+          (should (equal called '(claude "work"))))))))
 
 (ert-deftest agent-remote-test-report-answers-once-filed ()
   "The report endpoint answers with the issue's URL once it is filed.

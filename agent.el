@@ -1285,19 +1285,30 @@ new session buffer."
                      (user-error "Not an AI session buffer: %s" buffer))))
     (agent-start-session-in (agent-session-directory session) backend)))
 
-(defun agent-start-session-in (directory backend)
+(defun agent-start-session-in (directory backend &optional selection)
   "Start a new BACKEND session in DIRECTORY.
-Never prompts: the account is the one `agent-account-resolve' picks for
-DIRECTORY without prompting, and when a BACKEND session already runs
-there the new one gets the first free instance name of the form
-\"new-N\".  Return the new session buffer."
+SELECTION, when non-nil, names the account or pool to run under, as
+`agent-account-selection-names' lists them; a pool is routed to one of
+its members.  Never prompts: without SELECTION the account is the one
+`agent-account-resolve' picks for DIRECTORY without prompting.  When a
+BACKEND session already runs there the new one gets the first free
+instance name of the form \"new-N\".  Return the new session buffer."
   (unless (assq backend agent-backends)
     (user-error "No AI backend named `%s'" backend))
   (agent-start-session
    (agent-session-create
     :backend backend
     :directory directory
+    :account (and selection (agent--selected-account backend selection))
     :instance (agent--free-instance-name backend directory "new"))))
+
+(defun agent--selected-account (backend selection)
+  "Return the configured BACKEND account that SELECTION stands for.
+SELECTION is an account or pool name; a pool is routed to a member."
+  (unless (member selection (agent-account-selection-names backend))
+    (user-error "No %s account or pool named `%s'" backend selection))
+  (agent-restart--ensure-account
+   backend (agent-account--route-selection backend selection)))
 
 (defun agent--free-instance-name (backend directory prefix)
   "Return an instance name no live BACKEND session in DIRECTORY uses.
