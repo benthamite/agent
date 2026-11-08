@@ -1099,6 +1099,53 @@ Filing is asynchronous, so the response waits for it."
                                                          (process-name p)))))
                             (process-list)))))
 
+;;;; App Nap
+
+(defmacro agent-remote-test--with-defaults (settings &rest body)
+  "Run BODY with `defaults' reading and writing the alist SETTINGS.
+Keys are (DOMAIN . KEY) pairs; the variable `settings' holds them."
+  (declare (indent 1))
+  `(let ((settings ,settings)
+         (invocation-directory "/Applications/Emacs.app/Contents/MacOS/")
+         (system-type 'darwin))
+     (cl-letf (((symbol-function 'file-exists-p) (lambda (_) t))
+               ((symbol-function 'agent-remote--defaults)
+                (lambda (verb domain key &rest _)
+                  (pcase verb
+                    ("read" (cdr (assoc (cons domain key) settings)))
+                    ("write" (push (cons (cons domain key) "1") settings)
+                     "")))))
+       ,@body)))
+
+(ert-deftest agent-remote-test-warns-while-app-nap-is-on ()
+  "Turning the mode on warns when App Nap can throttle Emacs, and only then."
+  (dolist (case '((nil . t) ("1" . nil)))
+    (let (warned)
+      (agent-remote-test--with-defaults
+          `((("/Applications/Emacs.app/Contents/Info" . "CFBundleIdentifier")
+             . "org.gnu.Emacs")
+            (("org.gnu.Emacs" . "NSAppSleepDisabled") . ,(car case)))
+        (cl-letf (((symbol-function 'display-warning)
+                   (lambda (&rest _) (setq warned t))))
+          (agent-remote--warn-about-app-nap)))
+      (should (eq warned (cdr case))))))
+
+(ert-deftest agent-remote-test-disable-app-nap-writes-the-default ()
+  "The command turns App Nap off for the app running Emacs."
+  (agent-remote-test--with-defaults
+      '((("/Applications/Emacs.app/Contents/Info" . "CFBundleIdentifier")
+         . "org.gnu.Emacs"))
+    (agent-remote-disable-app-nap)
+    (should (agent-remote--app-nap-disabled-p "org.gnu.Emacs"))))
+
+(ert-deftest agent-remote-test-no-app-nap-warning-off-macos ()
+  "Outside macOS there is no bundle and no warning."
+  (let ((system-type 'gnu/linux))
+    (cl-letf (((symbol-function 'display-warning)
+               (lambda (&rest _) (error "Should not warn"))))
+      (should-not (agent-remote--bundle-id))
+      (agent-remote--warn-about-app-nap))))
+
 (provide 'agent-remote-test)
 
 ;;; agent-remote-test.el ends here

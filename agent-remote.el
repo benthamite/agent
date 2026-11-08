@@ -174,11 +174,60 @@ When enabled, listen on `agent-remote-host' and `agent-remote-port'."
   :group 'agent-remote
   (if agent-remote-mode
       (condition-case err
-          (agent-remote--start)
+          (progn
+            (agent-remote--start)
+            (agent-remote--warn-about-app-nap))
         (error
          (setq agent-remote-mode nil)
          (signal (car err) (cdr err))))
     (agent-remote--stop)))
+
+;;;; App Nap
+
+(defun agent-remote--warn-about-app-nap ()
+  "Warn when macOS App Nap may throttle this Emacs behind a locked screen.
+A locked screen hides every Emacs window, so App Nap lowers Emacs to
+background priority about a minute later, and the page's requests
+then take seconds and time out until the screen is unlocked."
+  (when-let* ((bundle (agent-remote--bundle-id))
+              ((not (agent-remote--app-nap-disabled-p bundle))))
+    (display-warning
+     'agent-remote
+     "App Nap will slow this Emacs while the screen is locked, and the phone page will time out; run `M-x agent-remote-disable-app-nap' and restart Emacs"
+     :warning)))
+
+(defun agent-remote--bundle-id ()
+  "Return the bundle identifier of the macOS app running Emacs, or nil.
+Nil outside macOS and for an Emacs not run from an application bundle."
+  (let ((info (expand-file-name "../Info" invocation-directory)))
+    (when (and (eq system-type 'darwin)
+               (file-exists-p (concat info ".plist")))
+      (agent-remote--defaults "read" info "CFBundleIdentifier"))))
+
+(defun agent-remote--app-nap-disabled-p (bundle)
+  "Return non-nil when App Nap is turned off for the app BUNDLE names."
+  (equal (agent-remote--defaults "read" bundle "NSAppSleepDisabled") "1"))
+
+(defun agent-remote--defaults (&rest args)
+  "Run the macOS `defaults' program with ARGS and return its first line.
+Return nil when it fails, as it does for a key that is not set."
+  (with-temp-buffer
+    (when (eql 0 (apply #'call-process "defaults" nil '(t nil) nil args))
+      (car (split-string (buffer-string) "\n" t)))))
+
+;;;###autoload
+(defun agent-remote-disable-app-nap ()
+  "Keep macOS App Nap from throttling Emacs while the screen is locked.
+Write the NSAppSleepDisabled default for the app running Emacs.  Emacs
+reads it at launch, so it takes effect once Emacs is restarted."
+  (interactive)
+  (let ((bundle (or (agent-remote--bundle-id)
+                    (user-error "This Emacs is not a macOS application"))))
+    (agent-remote--defaults "write" bundle "NSAppSleepDisabled" "-bool" "YES")
+    (unless (agent-remote--app-nap-disabled-p bundle)
+      (user-error "Could not write the NSAppSleepDisabled default for %s"
+                  bundle))
+    (message "App Nap is off for %s once Emacs is restarted" bundle)))
 
 (defun agent-remote--start ()
   "Start the remote-control server, replacing any running one.
