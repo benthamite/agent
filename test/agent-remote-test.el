@@ -555,6 +555,47 @@ BODY can refer to the transcript as `file'."
             (should (= (agent-remote-test--status response) 200))
             (should (equal submitted (list "¿sí?" buffer)))))))))
 
+(ert-deftest agent-remote-test-send-refuses-while-a-dialog-shows ()
+  "Text is not sent to a session whose screen shows a dialog.
+The dialog would take the text as keystrokes: its first characters would
+answer or dismiss it, and only the rest would reach the prompt."
+  (agent-remote-test--with-session buffer
+    (with-current-buffer buffer (insert "the screen"))
+    (let (submitted)
+      (cl-letf (((symbol-function 'agent-submit)
+                 (lambda (text buf) (setq submitted (list text buf))))
+                ((symbol-function 'agent-backend)
+                 (lambda (_) (agent-backend--create
+                              :screen-state
+                              (lambda (text)
+                                (should (equal text "the screen"))
+                                (list :card "A question" :dialog t))))))
+        (agent-remote-test--with-server
+          (let ((response (agent-remote-test--http
+                           "POST" "/api/send"
+                           (json-serialize (list :id (buffer-name buffer)
+                                                 :text "a long reply"))
+                           '("X-Agent-Remote: 1"))))
+            (should (= (agent-remote-test--status response) 400))
+            (should (string-match-p "dialog"
+                                    (alist-get 'error
+                                               (agent-remote-test--json response))))
+            (should-not submitted)))))))
+
+(ert-deftest agent-remote-test-send-goes-ahead-without-a-dialog ()
+  "A card that leaves the input box in place does not stop a send."
+  (agent-remote-test--with-session buffer
+    (let (submitted)
+      (cl-letf (((symbol-function 'agent-submit)
+                 (lambda (text buf) (setq submitted (list text buf))))
+                ((symbol-function 'agent-backend)
+                 (lambda (_) (agent-backend--create
+                              :screen-state
+                              (lambda (_) (list :card "A notice"))))))
+        (agent-remote--send
+         (list :body (json-serialize (list :id (buffer-name buffer) :text "hi"))))
+        (should (equal submitted (list "hi" buffer)))))))
+
 (ert-deftest agent-remote-test-send-rejects-unknown-session ()
   "Sending to a buffer that is not a session is refused."
   (agent-remote-test--with-session _buffer

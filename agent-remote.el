@@ -597,8 +597,22 @@ unredacted."
          (text (alist-get 'text args)))
     (unless (and (stringp text) (not (string-blank-p text)))
       (user-error "Nothing to send"))
+    (when (agent-remote--shows-dialog-p buffer)
+      (user-error "The session shows a dialog; answer or dismiss it, then send"))
     (agent-submit text buffer)
     (list :ok t)))
+
+(defun agent-remote--shows-dialog-p (buffer)
+  "Return non-nil when session BUFFER's screen shows a dialog.
+A dialog takes typed text as keystrokes: the first characters of a reply
+would answer or dismiss it, and only the rest would reach the prompt.
+This asks the backend's `:screen-state' for `:dialog'.  A backend
+without one, or a screen it fails to read, counts as no dialog, so the
+text is sent as it was before this check existed."
+  (when-let* ((backend (agent-backend (agent--detect-backend buffer)))
+              (function (agent-backend-screen-state backend)))
+    (plist-get (ignore-errors (funcall function (agent-remote--buffer-tail buffer)))
+               :dialog)))
 
 (defun agent-remote--attach (request)
   "Save the base64 image in REQUEST's JSON body and return its file name.

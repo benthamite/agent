@@ -56,6 +56,9 @@ class RemotePageTest(unittest.TestCase):
         self.history = history()
         self.keys = []
         self.sent = []
+        self.sessions = [SESSION]
+        self.sent_to = []
+        self.send_error = None
         context = self.browser.new_context(
             viewport={"width": 390, "height": 780}, has_touch=True, is_mobile=True)
         self.addCleanup(context.close)
@@ -74,7 +77,7 @@ class RemotePageTest(unittest.TestCase):
         if url == "http://phone.test/":
             route.fulfill(body=PAGE.read_text(encoding="utf-8"), content_type="text/html")
         elif "/api/sessions" in url:
-            route.fulfill(json={"sessions": [SESSION]})
+            route.fulfill(json={"sessions": self.sessions})
         elif "/api/history" in url:
             route.fulfill(json=self.history)
         elif "/api/output" in url:
@@ -86,7 +89,12 @@ class RemotePageTest(unittest.TestCase):
             self.keys.append(json.loads(route.request.post_data)["key"])
             route.fulfill(json={"ok": True})
         elif "/api/send" in url:
-            self.sent.append(json.loads(route.request.post_data)["text"])
+            if self.send_error:
+                route.fulfill(status=400, json={"error": self.send_error})
+                return
+            body = json.loads(route.request.post_data)
+            self.sent.append(body["text"])
+            self.sent_to.append(body["id"])
             route.fulfill(json={"ok": True})
         else:
             route.fulfill(status=404, json={"error": "not found"})
@@ -288,6 +296,52 @@ class RemotePageTest(unittest.TestCase):
         self.page.click("#send")
         self.page.wait_for_timeout(100)
         self.assertEqual(self.sent, ["hello"])
+
+    def open_session(self, name):
+        self.page.go_back()
+        self.page.wait_for_selector(".card:has-text('%s')" % name)
+        self.page.evaluate("clearInterval(timer)")
+        self.page.click(".card:has-text('%s')" % name)
+        self.page.wait_for_timeout(100)
+        self.page.evaluate("clearInterval(timer)")
+
+    def test_each_session_keeps_its_own_draft(self):
+        self.sessions = [SESSION, dict(SESSION, id="s2", name="second")]
+        self.page.fill("#text", "a reply to the first")
+        self.open_session("second")
+        self.assertEqual(self.page.input_value("#text"), "")
+        self.page.fill("#text", "a reply to the second")
+        self.open_session("fixture")
+        self.assertEqual(self.page.input_value("#text"), "a reply to the first")
+        self.open_session("second")
+        self.assertEqual(self.page.input_value("#text"), "a reply to the second")
+        self.page.click("#send")
+        self.page.wait_for_timeout(100)
+        self.assertEqual(self.sent, ["a reply to the second"])
+        self.assertEqual(self.sent_to, ["s2"])
+        self.open_session("fixture")
+        self.assertEqual(self.page.input_value("#text"), "a reply to the first")
+        self.open_session("second")
+        self.assertEqual(self.page.input_value("#text"), "")
+
+    def test_drafts_survive_a_reload(self):
+        self.page.fill("#text", "half a thought")
+        self.page.reload()
+        self.page.wait_for_selector(".card")
+        self.page.evaluate("clearInterval(timer)")
+        self.page.click(".card")
+        self.page.wait_for_timeout(100)
+        self.assertEqual(self.page.input_value("#text"), "half a thought")
+
+    def test_refused_send_keeps_the_draft(self):
+        self.send_error = "The session shows a dialog; answer it first"
+        self.page.fill("#text", "a long reply")
+        self.page.click("#send")
+        self.page.wait_for_timeout(100)
+        self.assertEqual(self.page.input_value("#text"), "a long reply")
+        self.assertIn("answer it first", self.text("#messages"))
+        self.open_session("fixture")
+        self.assertEqual(self.page.input_value("#text"), "a long reply")
 
     def test_no_glyph_a_phone_font_lacks(self):
         page = self.page.evaluate("document.getElementById('session-view').textContent"
