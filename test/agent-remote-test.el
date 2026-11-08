@@ -664,13 +664,14 @@ BODY can refer to the transcript as `file'."
               (should (eq (alist-get 'available data) :false))
               (should (eq (alist-get 'pending data) (cdr case))))))))))
 
-(ert-deftest agent-remote-test-backends-without-session-starts-at-home ()
-  "Opened from the session list, the sheet starts in the home directory."
-  (let ((agent-backends (list (cons 'claude (agent-backend--create)))))
+(ert-deftest agent-remote-test-backends-without-session-starts-at-option ()
+  "Opened from the session list, the sheet starts in the configured folder."
+  (let ((agent-backends (list (cons 'claude (agent-backend--create))))
+        (agent-remote-new-session-directory "~/repos/"))
     (agent-remote-test--with-server
       (let ((data (agent-remote-test--json
                    (agent-remote-test--http "GET" "/api/backends"))))
-        (should (equal (alist-get 'directory data) "~/"))
+        (should (equal (alist-get 'directory data) "~/repos/"))
         (should (equal (mapcar (lambda (c) (alist-get 'name c))
                                (alist-get 'choices data))
                        '("claude")))))))
@@ -701,8 +702,38 @@ BODY can refer to the transcript as `file'."
                              (abbreviate-file-name
                               (file-name-directory
                                (directory-file-name root)))))
-              (should (equal (alist-get 'folders data)
-                             '(".hidden" "Alpha" "beta" "link"))))))
+              (should (equal (mapcar (lambda (folder) (alist-get 'name folder))
+                                     (alist-get 'folders data))
+                             '(".hidden" "Alpha" "beta" "link")))
+              (should (seq-every-p (lambda (folder)
+                                     (natnump (alist-get 'modified folder)))
+                                   (alist-get 'folders data))))))
+      (delete-directory root t))))
+
+(ert-deftest agent-remote-test-directories-give-modification-times ()
+  "Each folder carries its own modification time, a link its target's."
+  (let ((root (file-name-as-directory
+               (file-truename (make-temp-file "agent-remote" t)))))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "old" root))
+          (make-directory (expand-file-name "new" root))
+          (set-file-times (expand-file-name "old" root) 1000000000)
+          (set-file-times (expand-file-name "new" root) 1700000000)
+          (make-symbolic-link (expand-file-name "old" root)
+                              (expand-file-name "link" root))
+          (agent-remote-test--with-server
+            (let ((folders (alist-get 'folders
+                                      (agent-remote-test--json
+                                       (agent-remote-test--http
+                                        "GET" (concat "/api/directories?path="
+                                                      (url-hexify-string root)))))))
+              (should (equal (mapcar (lambda (folder)
+                                       (cons (alist-get 'name folder)
+                                             (alist-get 'modified folder)))
+                                     folders)
+                             '(("link" . 1000000000) ("new" . 1700000000)
+                               ("old" . 1000000000)))))))
       (delete-directory root t))))
 
 (ert-deftest agent-remote-test-directories-root-has-no-parent ()

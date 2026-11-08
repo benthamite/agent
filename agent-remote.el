@@ -104,6 +104,12 @@ Connections from any other address are closed without a response."
   :type 'natnum
   :group 'agent-remote)
 
+(defcustom agent-remote-new-session-directory "~/"
+  "Folder the new-session sheet starts in when opened from the session list.
+Opened from a session, the sheet starts in that session's folder."
+  :type 'directory
+  :group 'agent-remote)
+
 (defcustom agent-remote-history-bytes (* 4 1024 1024)
   "Most bytes of a session's transcript that one history request reads.
 A request runs on Emacs's main thread, at roughly 12 ms per MiB, so
@@ -648,14 +654,15 @@ A backend without an icon is left out, and the page names it in text."
   "Return what the new-session sheet opened from REQUEST starts with.
 REQUEST's `id', when given, names the session the sheet was opened
 from: the browser then starts in its directory and its backend comes
-first.  Without one the browser starts in the home directory."
+first.  Without one the browser starts in
+`agent-remote-new-session-directory'."
   (let* ((id (agent-remote--query-param request "id"))
          (buffer (and id (agent-remote--session-buffer id)))
          (own (and buffer (agent--detect-backend buffer)))
          (backends (mapcar #'car agent-backends)))
     (list :directory (if buffer
                          (agent-session-directory (agent-session buffer))
-                       "~/")
+                       agent-remote-new-session-directory)
           :choices (vconcat
                     (mapcar (lambda (backend)
                               (list :name (symbol-name backend)
@@ -668,6 +675,8 @@ first.  Without one the browser starts in the home directory."
 
 (defun agent-remote--directories (request)
   "Return the folder that REQUEST's `path' names and the folders in it.
+Each folder is a plist of its `:name' and `:modified', the time it last
+changed in seconds since the epoch, so the page can sort by either.
 File name handlers stay off, so that no path a client sends can make
 Emacs open a remote connection on its main thread."
   (let* ((file-name-handler-alist nil)
@@ -690,19 +699,29 @@ Signal a user error unless PATH names an existing directory."
     directory))
 
 (defun agent-remote--subdirectories (directory)
-  "Return the names of DIRECTORY's subdirectories, sorted ignoring case.
-A symbolic link counts when it leads to a directory."
+  "Return DIRECTORY's subdirectories, sorted by name ignoring case.
+Each is a plist of its `:name' and `:modified' time in whole seconds.
+A symbolic link counts when it leads to a directory, and its time is
+that directory's."
   (sort (seq-keep
          (lambda (entry)
-           (let ((type (file-attribute-type (cdr entry))))
-             (when (or (eq type t)
-                       (and (stringp type)
-                            (file-directory-p
-                             (expand-file-name (car entry) directory))))
-               (car entry))))
+           (let* ((name (car entry))
+                  (attributes (cdr entry))
+                  (type (file-attribute-type attributes)))
+             (when (stringp type)
+               (setq attributes
+                     (file-attributes
+                      (file-truename (expand-file-name name directory)))
+                     type (file-attribute-type attributes)))
+             (when (eq type t)
+               (list :name name
+                     :modified (truncate
+                                (float-time (file-attribute-modification-time
+                                             attributes)))))))
          (directory-files-and-attributes
           directory nil directory-files-no-dot-files-regexp t))
-        :key #'downcase :in-place t))
+        :key (lambda (folder) (downcase (plist-get folder :name)))
+        :in-place t))
 
 (defun agent-remote--new (request)
   "Start a session as REQUEST's JSON body says.

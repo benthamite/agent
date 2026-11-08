@@ -204,7 +204,7 @@
   .sheet .actions .go:disabled { opacity: .5; }
   #new-sheet .panel { height: 80vh; overflow: hidden; }
   #new-path { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
-  #folder-bar { display: flex; gap: 6px; }
+  #folder-bar { display: flex; flex-wrap: wrap; gap: 6px; }
   #folder-bar button:disabled { opacity: .45; }
   #new-note:empty { display: none; }
   #folders { flex: 1; min-height: 0; overflow-y: auto; display: flex;
@@ -293,6 +293,7 @@
       <button class="toggle" id="folder-up">‹ Up</button>
       <button class="toggle" id="folder-home">Home</button>
       <button class="toggle" id="folder-hidden">Show hidden</button>
+      <button class="toggle" id="folder-sort">Sort: name</button>
     </div>
     <p class="note" id="new-note"></p>
     <div id="folders"></div>
@@ -359,6 +360,10 @@ let past = null;
 let browsing = null;
 let browseRequest = 0;
 let showHidden = false;
+// How the new-session sheet orders folders, "name" or "recent", kept
+// across visits on this phone.
+const FOLDER_SORT_KEY = "agent-remote-folder-sort";
+let folderSort = savedFolderSort();
 // Images chosen for the next reply; each has its file's path once saved.
 let attachments = [];
 const MAX_IMAGE_SIDE = 2048;
@@ -1602,18 +1607,45 @@ async function browse(path) {
   }
 }
 
+function savedFolderSort() {
+  try {
+    return localStorage.getItem(FOLDER_SORT_KEY) === "recent" ? "recent" : "name";
+  } catch (e) {
+    return "name";
+  }
+}
+
+function toggleFolderSort() {
+  folderSort = folderSort === "name" ? "recent" : "name";
+  try {
+    localStorage.setItem(FOLDER_SORT_KEY, folderSort);
+  } catch (e) {
+    // The choice then lasts only until the page is closed.
+  }
+  renderFolders();
+  $("folders").scrollTop = 0;
+}
+
+// The server sends folders sorted by name; recent puts the latest
+// changed first, and names break ties.
+function sortedFolders(folders) {
+  if (folderSort !== "recent") return folders;
+  return [...folders].sort((a, b) => b.modified - a.modified);
+}
+
 function renderFolders() {
   $("new-path").textContent = browsing ? browsing.path : "";
   $("folder-up").disabled = !(browsing && browsing.parent);
   $("folder-hidden").textContent = showHidden ? "Hide hidden" : "Show hidden";
+  $("folder-sort").textContent = folderSort === "recent" ? "Sort: recent" : "Sort: name";
   for (const b of $("backends").children) b.disabled = !browsing;
-  const folders = browsing ? browsing.folders : [];
-  const shown = folders.filter((name) => showHidden || !name.startsWith("."));
-  $("folders").replaceChildren(...shown.map((name) => {
+  const folders = browsing ? sortedFolders(browsing.folders) : [];
+  const shown = folders.filter((f) => showHidden || !f.name.startsWith("."));
+  $("folders").replaceChildren(...shown.map((f) => {
     const b = document.createElement("button");
     b.className = "folder";
-    b.textContent = name;
-    b.addEventListener("click", () => browse(browsing.path + name + "/"));
+    b.textContent = f.name;
+    b.addEventListener("click", () => browse(browsing.path + f.name + "/"));
     return b;
   }));
   if (browsing && !shown.length) {
@@ -1734,6 +1766,7 @@ $("new").addEventListener("click", openNew);
 $("list-new").addEventListener("click", openNew);
 $("folder-up").addEventListener("click", () => browse(browsing.parent));
 $("folder-home").addEventListener("click", () => browse("~/"));
+$("folder-sort").addEventListener("click", toggleFolderSort);
 $("folder-hidden").addEventListener("click", () => {
   showHidden = !showHidden;
   renderFolders();
