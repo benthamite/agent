@@ -650,6 +650,14 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
     (should (eq (plist-get (nthcdr 3 (agent--session-suffix-spec b "s")) :face)
                 'agent-unknown))))
 
+(ert-deftest agent-test-session-state-faces ()
+  "Give each display state the face the phone page's color matches."
+  (should (eq (agent--session-state-face 'waiting) 'agent-waiting))
+  (should (eq (agent--session-state-face 'background-waiting)
+              'agent-waiting-with-background))
+  (should (eq (agent--session-state-face 'busy) 'agent-busy))
+  (should (eq (agent--session-state-face 'unknown) 'agent-unknown)))
+
 ;;;; Tab bar
 
 (ert-deftest agent-test-tab-bar-colors-sessions-like-the-switcher ()

@@ -850,11 +850,20 @@ finds that a session changed name, state, or snooze status."
   :group 'agent)
 
 (defface agent-waiting-with-background
-  '((t :inherit warning))
+  '((((class color) (background dark)) :foreground "#c9a14a")
+    (((class color) (background light)) :foreground "#8f6a1f")
+    (t :inherit warning))
   "Face for sessions waiting for user input while background work runs.
 Applied in the session switcher when the backend's
 `:background-tasks-p' reports ongoing work, to distinguish
-these sessions from `agent-waiting' (truly idle)."
+these sessions from `agent-waiting' (truly idle).  Its gold matches
+the one the phone page uses for this state, as `agent-waiting' and
+`agent-busy' match its green and red."
+  :group 'agent)
+
+(defface agent-busy
+  '((t :inherit error))
+  "Face for sessions working on a turn in the session switcher."
   :group 'agent)
 
 (defface agent-unknown
@@ -1819,6 +1828,7 @@ A snoozed session takes `agent-snoozed' in place of any state face."
   (pcase state
     ('waiting 'agent-waiting)
     ('background-waiting 'agent-waiting-with-background)
+    ('busy 'agent-busy)
     ('unknown 'agent-unknown)
     (_ nil)))
 
@@ -1911,8 +1921,9 @@ that the tab bar is re-rendered only when something visible changed.")
 Sessions appear in the order and with the faces of
 `agent-select-session': `agent-waiting' for a session waiting for
 input, `agent-waiting-with-background' for one waiting while
-background work runs, `agent-unknown' for one never observed,
-`agent-snoozed' for a snoozed one, and no state face for a busy one.
+background work runs, `agent-busy' for one working on a turn,
+`agent-unknown' for one never observed, and `agent-snoozed' for a
+snoozed one.
 The session a frame's selected window shows also carries
 `agent-current-session' in that frame.  Clicking a session switches to
 it.  The segment is inserted into `tab-bar-format' before any
