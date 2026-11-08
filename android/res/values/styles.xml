@@ -1,8 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.DayNight">
+  <!-- The page is always dark, and the system bars are drawn over the
+       window background, so the window matches the page's background and
+       the bars use light icons whatever the phone's own theme. -->
+  <style name="AppTheme" parent="@android:style/Theme.DeviceDefault">
     <item name="android:windowActionBar">false</item>
     <item name="android:windowNoTitle">true</item>
+    <item name="android:windowBackground">@color/page_background</item>
+    <item name="android:windowLightStatusBar">false</item>
+    <item name="android:windowLightNavigationBar">false</item>
   </style>
   <color name="icon_background">#1E2A38</color>
+  <!-- The background colour of the page (etc/agent-remote.html). -->
+  <color name="page_background">#111418</color>
 </resources>
