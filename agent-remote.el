@@ -506,7 +506,8 @@ fields intact, and the next poll asks again from the same offset."
   (when-let* ((reader (and backend (agent-backend-session-history backend)))
               (history (ignore-errors
                          (funcall reader buffer agent-remote-history-bytes
-                                  nil after))))
+                                  nil after)))
+              ((not (plist-get history :lost))))
     (list :history (agent-remote--history-response history))))
 
 (defun agent-remote--query-param (request name)
@@ -534,7 +535,9 @@ it.  The stretch holds at most `agent-remote-history-bytes' bytes.  A
 session without a transcript gets `available' false.  When its backend
 keeps transcripts, `pending' true says one is still to come, as it is
 for a session with no prompt yet, and its phone page shows an empty
-conversation.  Otherwise the page shows just the screen."
+conversation.  Otherwise the page shows just the screen, under the
+reason in `lost' when the backend says the transcript exists but cannot
+be found."
   (let* ((buffer (agent-remote--session-buffer
                   (agent-remote--query-param request "id")))
          (before (agent-remote--offset-param request "before"))
@@ -544,9 +547,11 @@ conversation.  Otherwise the page shows just the screen."
          (history (and reader
                        (funcall reader buffer agent-remote-history-bytes
                                 before after))))
-    (if history
-        (agent-remote--history-response history)
-      (list :available :false :pending (if reader t :false)))))
+    (cond ((plist-get history :lost)
+           (list :available :false :pending :false
+                 :lost (plist-get history :lost)))
+          (history (agent-remote--history-response history))
+          (t (list :available :false :pending (if reader t :false))))))
 
 (defun agent-remote--offset-param (request name)
   "Return query parameter NAME of REQUEST as a byte offset, or nil if absent.

@@ -1561,10 +1561,25 @@ id to look up.  Start a query when the result is missing or older than
   "Return past conversation of Claude session BUFFER, or nil if it has none.
 BYTES, BEFORE and AFTER are as in `agent-claude-cli-transcript-history',
 and the plist returned has `:session' as well, the session id, so a
-reader can tell when the session moved to another transcript."
-  (when-let* ((file (agent-claude--session-transcript buffer)))
-    (append (list :session (file-name-base file))
-            (agent-claude-cli-transcript-history file bytes before after))))
+reader can tell when the session moved to another transcript.  A running
+session that lost its status link, so that its id and transcript cannot
+be known, gets a plist with only `:lost', the reason."
+  (if-let* ((file (agent-claude--session-transcript buffer)))
+      (append (list :session (file-name-base file))
+              (agent-claude-cli-transcript-history file bytes before after))
+    (when (agent-claude--status-link-lost-p buffer)
+      (list :lost (concat "Emacs lost this session's link to its status line, "
+                          "so its conversation cannot be found.  Resume the "
+                          "conversation in a new session to see it here.")))))
+
+(defun agent-claude--status-link-lost-p (buffer)
+  "Return non-nil when running Claude session BUFFER has no status link.
+Such a session has neither a session id nor the UUID that keys its
+status line, so nothing will ever tell Emacs its id.  A session that has
+the UUID is only waiting for its first status poll."
+  (and (not (agent-claude--session-id buffer))
+       (not (buffer-local-value 'agent-claude--status-uuid buffer))
+       (process-live-p (get-buffer-process buffer))))
 
 (defun agent-claude--session-transcript (buffer)
   "Return the transcript file of Claude session BUFFER, or nil.
