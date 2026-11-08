@@ -451,6 +451,7 @@ reloads instead of misreading the newer API's answers."
   (let ((changed (buffer-local-value 'agent--session-state-changed-at buffer)))
     (list :id (buffer-name buffer)
           :name (agent-display-name buffer)
+          :project (agent--buffer-session-name buffer)
           :backend (symbol-name (or (agent--detect-backend buffer) 'unknown))
           :account (agent--session-account-name buffer)
           :state (symbol-name (agent-session-display-state buffer))

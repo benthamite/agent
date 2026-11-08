@@ -180,6 +180,12 @@
   .toggle { background: var(--panel-2); border-radius: 10px; padding: 8px 9px;
     font-size: 13px; }
   .toggle.danger { color: var(--error); }
+  .list-tools { display: flex; align-items: center; gap: 8px; padding: 8px 12px 0;
+    font-size: 13px; color: var(--muted); }
+  .list-tools select { font: inherit; color: var(--text); background: var(--panel-2);
+    border: 0; border-radius: 10px; padding: 8px 9px; }
+  .list-tools .toggle { min-width: 40px; }
+  .list-tools .toggle:disabled { opacity: .4; }
   .sheet { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none;
     align-items: flex-end; }
   .sheet.open { display: flex; }
@@ -226,6 +232,17 @@
     <span id="list-status" class="status"></span>
     <button class="toggle" id="list-new">New</button>
   </header>
+  <div class="list-tools">
+    <label for="list-sort">Sort by</label>
+    <select id="list-sort">
+      <option value="manual">Manual</option>
+      <option value="project">Project</option>
+      <option value="account">Account</option>
+      <option value="changed">Last change</option>
+      <option value="state">Status</option>
+    </select>
+    <button class="toggle" id="list-sort-direction"></button>
+  </div>
   <div id="list"></div>
 </section>
 
@@ -340,6 +357,10 @@ const STATE_ORDER = { "waiting": 0, "background-waiting": 1, "unknown": 2, "busy
 let current = null;
 let timer = null;
 const ORDER_KEY = "agent-remote-order";
+// How the list is sorted: `by' is "manual", the order sessions were
+// dragged into, or a criterion of LIST_SORTS, which keeps the list sorted
+// as sessions change; `reverse' flips a criterion's natural direction.
+const LIST_SORT_KEY = "agent-remote-list-sort";
 const LONG_PRESS_MS = 400;
 const TOUCH_SLOP = 10;
 const SWIPE_EDGE = 24;
@@ -369,6 +390,63 @@ let attachments = [];
 const MAX_IMAGE_SIDE = 2048;
 
 const $ = (id) => document.getElementById(id);
+
+// Each criterion's comparator in its natural direction: names A to Z,
+// the latest change first, and sessions waiting on the user first.
+// Ties go to the latest change, then the name.
+const byName = (a, b) => (a.name || "").localeCompare(b.name || "");
+const byChanged = (a, b) => (b.changed || 0) - (a.changed || 0);
+const byState = (a, b) => (STATE_ORDER[a.state] ?? 9) - (STATE_ORDER[b.state] ?? 9);
+const LIST_SORTS = {
+  project: (a, b) => (a.project || "").localeCompare(b.project || ""),
+  account: (a, b) => (a.account || "").localeCompare(b.account || ""),
+  changed: byChanged,
+  state: byState
+};
+let listSort = savedListSort();
+
+function savedListSort() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LIST_SORT_KEY));
+    if (saved && (saved.by === "manual" || LIST_SORTS[saved.by]))
+      return { by: saved.by, reverse: !!saved.reverse };
+  } catch (e) {
+    // An unreadable choice is the same as none.
+  }
+  return { by: "manual", reverse: false };
+}
+
+function setListSort(by, reverse) {
+  listSort = { by, reverse };
+  try {
+    localStorage.setItem(LIST_SORT_KEY, JSON.stringify(listSort));
+  } catch (e) {
+    // The choice then lasts only until the page is closed.
+  }
+  renderSortControls();
+  renderSessions();
+}
+
+function renderSortControls() {
+  $("list-sort").value = listSort.by;
+  const button = $("list-sort-direction");
+  button.disabled = listSort.by === "manual";
+  button.textContent = listSort.reverse ? "↑" : "↓";
+  button.setAttribute("aria-label",
+                      listSort.reverse ? "Reversed order" : "Natural order");
+}
+
+function sortedSessions(sessions) {
+  const compare = LIST_SORTS[listSort.by];
+  const sign = listSort.reverse ? -1 : 1;
+  return [...sessions].sort((a, b) =>
+    sign * (compare(a, b) || byChanged(a, b) || byName(a, b)));
+}
+
+function arrange(sessions, saved) {
+  return listSort.by === "manual" ? inSavedOrder(sessions, saved)
+    : sortedSessions(sessions);
+}
 
 // An unreachable Tailscale peer drops packets rather than refusing them,
 // so without a deadline a poll hangs for minutes and the page never
@@ -445,9 +523,7 @@ async function refreshList() {
   const changes = listChanges;
   try {
     const { sessions } = await api("/api/sessions");
-    sessions.sort((a, b) =>
-      (STATE_ORDER[a.state] ?? 9) - (STATE_ORDER[b.state] ?? 9) ||
-      (b.changed || 0) - (a.changed || 0));
+    sessions.sort((a, b) => byState(a, b) || byChanged(a, b));
     if (changes !== listChanges) return;
     listSessions = sessions;
     if (!touch) renderSessions();
@@ -468,7 +544,7 @@ function renderSessions() {
   const active = listSessions.filter((s) => !s.snoozed);
   const snoozed = listSessions.filter((s) => s.snoozed);
   if (active.length) {
-    list.appendChild(listSection("active", inSavedOrder(active, saved.active)));
+    list.appendChild(listSection("active", arrange(active, saved.active)));
   }
   if (active.length && snoozed.length) {
     const divider = document.createElement("hr");
@@ -476,7 +552,7 @@ function renderSessions() {
     list.appendChild(divider);
   }
   if (snoozed.length) {
-    list.appendChild(listSection("snoozed", inSavedOrder(snoozed, saved.snoozed)));
+    list.appendChild(listSection("snoozed", arrange(snoozed, saved.snoozed)));
   }
 }
 
@@ -642,9 +718,16 @@ function finishDrag(ended) {
   const section = el.parentElement;
   const ids = sectionIds(section);
   if (ids.join("\n") !== ended.before.join("\n")) {
-    const saved = savedOrder();
-    saved[section.dataset.section] = ids;
+    // Dragging out of a sorted list keeps every section as shown, now
+    // as the manual order.
+    const saved = listSort.by === "manual" ? savedOrder() : {};
+    for (const other of $("list").querySelectorAll(".list-section"))
+      saved[other.dataset.section] = sectionIds(other);
     localStorage.setItem(ORDER_KEY, JSON.stringify(saved));
+    if (listSort.by !== "manual") {
+      setListSort("manual", false);
+      return;
+    }
   }
   renderSessions();
 }
@@ -1798,6 +1881,10 @@ $("restart-cancel").addEventListener("click", closeSheets);
 $("restart-go").addEventListener("click", doRestart);
 $("new").addEventListener("click", openNew);
 $("list-new").addEventListener("click", openNew);
+$("list-sort").addEventListener("change", (e) => setListSort(e.target.value, false));
+$("list-sort-direction").addEventListener("click",
+  () => setListSort(listSort.by, !listSort.reverse));
+renderSortControls();
 $("folder-up").addEventListener("click", () => browse(browsing.parent));
 $("folder-home").addEventListener("click", () => browse("~/"));
 $("folder-sort").addEventListener("click", toggleFolderSort);
