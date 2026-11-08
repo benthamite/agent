@@ -552,6 +552,10 @@ Group 1 is its verb and group 2 the details in parentheses, if any.")
   "\\`[^[:alnum:]]*\\([0-9]\\)\\. "
   "Regexp matching a numbered option in a dialog, such as \" ❯ 1. Yes\".")
 
+(defconst agent-claude-cli--screen-dialog-hint-regexp
+  "\\(?:Esc to cancel\\|Enter to select\\|Enter to confirm\\)"
+  "Regexp matching the key hint a dialog or picker ends with.")
+
 (defun agent-claude-cli-screen-panel (screen)
   "Return which trailing lines of SCREEN the transcript cannot show.
 SCREEN is the text of a Claude Code screen.  Return a plist.  `:start' is
@@ -660,7 +664,11 @@ when a spinner shows.  `:writing' is the text of the message just above
 the status, unwrapped, which the transcript lacks while it is being
 written, or nil.  `:card' is the text of a dialog, a picker or a notice
 that takes input, or nil.  `:options' lists as strings the digits that
-choose among the card's options.
+choose among the card's options.  `:dialog' is non-nil when the card is
+a dialog or picker shown in place of the input box, recognized by its
+numbered options or its key hint: text typed then would go to it as
+keystrokes, not to the prompt.  A card under an input box, such as a
+notice, and a screen with nothing recognized are not dialogs.
 
 A screen with no input box always has a card, by the rules of
 `agent-claude-cli-screen-panel'.  A notice with no options takes no input
@@ -669,9 +677,18 @@ and is dropped."
          (panel (agent-claude-cli-screen-panel screen))
          (start (plist-get panel :start)))
     (if (plist-get panel :dialog)
-        (let ((card (append (seq-subseq lines start) nil)))
+        (let* ((card (append (seq-subseq lines start) nil))
+               (options (agent-claude-cli--screen-options card)))
           (list :card (string-join card "\n")
-                :options (agent-claude-cli--screen-options card)))
+                :options options
+                :dialog (and (or options
+                                 (seq-some
+                                  (lambda (line)
+                                    (string-match-p
+                                     agent-claude-cli--screen-dialog-hint-regexp
+                                     line))
+                                  card))
+                             t)))
       (agent-claude-cli--screen-box-state lines panel))))
 
 (defun agent-claude-cli--screen-box-state (lines panel)

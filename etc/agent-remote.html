@@ -402,6 +402,10 @@ const FOLDER_SORT_KEY = "agent-remote-folder-sort";
 let folderSort = savedFolderSort();
 // Images chosen for the next reply; each has its file's path once saved.
 let attachments = [];
+// What has been typed and not sent, per session id.  It is kept for the
+// tab's life, across the reloads that follow an update.
+const DRAFTS_KEY = "agent-remote-drafts";
+const drafts = savedDrafts();
 const MAX_IMAGE_SIDE = 2048;
 
 const $ = (id) => document.getElementById(id);
@@ -419,6 +423,30 @@ const LIST_SORTS = {
   state: byState
 };
 let listSort = savedListSort();
+
+function savedDrafts() {
+  try {
+    return new Map(Object.entries(JSON.parse(sessionStorage.getItem(DRAFTS_KEY)) || {}));
+  } catch (e) {
+    return new Map();
+  }
+}
+
+function setDraft(id, text) {
+  if (text) drafts.set(id, text);
+  else drafts.delete(id);
+  try {
+    sessionStorage.setItem(DRAFTS_KEY, JSON.stringify(Object.fromEntries(drafts)));
+  } catch (e) {
+    // Without storage the draft lasts only until the page reloads.
+  }
+}
+
+// The reply box holds the open session's draft and nothing else.
+function showDraft(id) {
+  $("text").value = (id && drafts.get(id)) || "";
+  autosize();
+}
 
 function savedListSort() {
   try {
@@ -807,6 +835,7 @@ function openSession(s) {
   current = s.id;
   $("session-title").textContent = s.name;
   resetSessionView();
+  showDraft(s.id);
   show("session-view");
   history.pushState({ session: s.id }, "");
   loadOlder().then(() => refreshSession(true));
@@ -874,6 +903,7 @@ function updateOverlay() {
 function closeSession() {
   closeSheets();
   current = null;
+  showDraft(null);
   show("list-view");
   refreshList();
   schedule();
@@ -1532,15 +1562,20 @@ async function sendKey(key) {
 
 async function sendText() {
   const area = $("text");
-  const typed = area.value.trim() ? [area.value] : [];
+  const id = current;
+  const draft = area.value;
+  const typed = draft.trim() ? [draft] : [];
   const parts = typed.concat(attachments.map((a) => a.path));
-  if (!current || !parts.length) return;
+  if (!id || !parts.length) return;
   $("send").disabled = true;
   try {
-    await api("/api/send", { id: current, text: parts.join(" ") });
-    area.value = "";
-    autosize();
-    clearAttachments();
+    await api("/api/send", { id, text: parts.join(" ") });
+    // What was typed while the reply went out stays.
+    if (drafts.get(id) === draft) setDraft(id, "");
+    if (current === id) {
+      showDraft(id);
+      clearAttachments();
+    }
     setTimeout(() => refreshSession(true), 400);
   } catch (e) {
     alertError(e);
@@ -1907,7 +1942,10 @@ for (const keys of MORE_KEYS) {
 $("stop").addEventListener("click", () => sendKey("esc"));
 $("more-toggle").addEventListener("click", toggleMore);
 $("send").addEventListener("click", sendText);
-$("text").addEventListener("input", autosize);
+$("text").addEventListener("input", () => {
+  if (current) setDraft(current, $("text").value);
+  autosize();
+});
 $("text").addEventListener("paste", (e) => {
   const images = imagesIn(e.clipboardData.files);
   if (!images.length) return;

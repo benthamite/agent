@@ -786,6 +786,31 @@ CONTENT is written as UTF-8."
     (should (equal (plist-get state :options) '("1" "2" "3")))
     (should-not (plist-get state :status))))
 
+(ert-deftest agent-claude-cli-test-state-dialog-takes-keys ()
+  "A dialog in place of the input box says so; one with the box does not."
+  (should (plist-get (agent-claude-cli-test--state
+                      "⏺ Earlier" "" 'rule " Do you want to create a.txt?"
+                      " ❯ 1. Yes" "   2. No" "" " Esc to cancel")
+                     :dialog))
+  (should (plist-get (agent-claude-cli-test--state
+                      "✻ Sautéed" "" "❯ Ask me" 'rule " ☐ Drink" ""
+                      "Do you prefer tea or coffee?" "" "❯ Tea" "  Coffee"
+                      'rule "  Chat about this" "" "Enter to select")
+                     :dialog))
+  (should-not (plist-get (agent-claude-cli-test--state
+                          "⏺ Answer" "" 'rule "❯" 'rule "  m")
+                         :dialog))
+  (should-not (plist-get (agent-claude-cli-test--state
+                          "✻ Done" "" "✦ Heads up · A notice" "  1: Learn more   0: Dismiss"
+                          'rule "❯" 'rule "  m")
+                         :dialog)))
+
+(ert-deftest agent-claude-cli-test-state-unrecognized-is-no-dialog ()
+  "A screen with neither an input box nor a dialog's marks is not a dialog."
+  (should-not (plist-get (agent-claude-cli-screen-state "") :dialog))
+  (should-not (plist-get (agent-claude-cli-screen-state "something\nunknown")
+                         :dialog)))
+
 (ert-deftest agent-claude-cli-test-state-picker-options ()
   "A scrolled picker offers only the options on screen."
   (should (equal (plist-get (agent-claude-cli-test--state
