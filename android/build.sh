@@ -15,6 +15,8 @@ here=$(cd "$(dirname "$0")" && pwd)
 out="$here/build"
 
 base_url=${AGENT_REMOTE_URL:-}
+# shellcheck source=android/version.env
+source "$here/version.env"
 sdk=${ANDROID_HOME:-/opt/homebrew/share/android-commandlinetools}
 platform=android-37.2
 build_tools=37.0.0
@@ -57,7 +59,7 @@ EOF
   -I "$android_jar" \
   --manifest "$here/AndroidManifest.xml" \
   --min-sdk-version "$min_sdk" --target-sdk-version "$target_sdk" \
-  --version-code 5 --version-name 1.4 \
+  --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
   --java "$out/gen" \
   "$out/compiled/res.zip" "$out/compiled/res-gen.zip"
 
