@@ -541,17 +541,48 @@ BODY can refer to the transcript as `file'."
         (agent-remote--send-key buffer "down")
         (should (equal sent '(fake-terminal "\e[B")))))))
 
-(ert-deftest agent-remote-test-claude-escape-goes-through-claude-code ()
-  "Escape to a Claude session uses `claude-code-send-escape'."
+(ert-deftest agent-remote-test-escape-goes-through-backend-interrupt ()
+  "Escape uses the backend's interrupt function, even without a terminal."
   (agent-remote-test--with-session buffer
-    (with-current-buffer buffer (setq-local eat-terminal 'fake-terminal))
-    (let (called-in)
-      (cl-letf (((symbol-function 'claude-code-send-escape)
-                 (lambda () (setq called-in (current-buffer))))
+    (let* (called-with
+           (backend (agent-backend--create
+                     :interrupt (lambda (buf) (setq called-with buf)))))
+      (cl-letf (((symbol-function 'agent-backend) (lambda (_) backend))
                 ((symbol-function 'eat-term-send-string)
                  (lambda (&rest _) (error "Should not send raw escape"))))
         (agent-remote--send-key buffer "esc")
-        (should (eq called-in buffer))))))
+        (should (eq called-with buffer))))))
+
+(ert-deftest agent-remote-test-escape-without-interrupt-is-raw ()
+  "Escape to a backend without an interrupt function goes to the terminal."
+  (agent-remote-test--with-session buffer
+    (with-current-buffer buffer (setq-local eat-terminal 'fake-terminal))
+    (let (sent)
+      (cl-letf (((symbol-function 'agent-backend)
+                 (lambda (_) (agent-backend--create)))
+                ((symbol-function 'eat-term-send-string)
+                 (lambda (terminal string) (setq sent (list terminal string)))))
+        (agent-remote--send-key buffer "esc")
+        (should (equal sent '(fake-terminal "\e")))))))
+
+(ert-deftest agent-remote-test-keys-need-a-terminal ()
+  "A key other than escape to a session without a terminal is refused."
+  (agent-remote-test--with-session buffer
+    (should-error (agent-remote--send-key buffer "down") :type 'user-error)))
+
+(ert-deftest agent-remote-test-output-says-whether-session-takes-keys ()
+  "The output endpoint says whether the session has a terminal."
+  (agent-remote-test--with-session buffer
+    (agent-remote-test--with-server
+      (let ((query (concat "/api/output?id="
+                           (url-hexify-string (buffer-name buffer)))))
+        (should (eq (alist-get 'terminal (agent-remote-test--json
+                                          (agent-remote-test--http "GET" query)))
+                    :false))
+        (with-current-buffer buffer (setq-local eat-terminal 'fake-terminal))
+        (should (eq (alist-get 'terminal (agent-remote-test--json
+                                          (agent-remote-test--http "GET" query)))
+                    t))))))
 
 (ert-deftest agent-remote-test-every-digit-is-a-key ()
   "A dialog's option or a notice's can have any digit."

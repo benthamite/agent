@@ -56,7 +56,6 @@
 (defvar agent-log-redact-enabled)
 (declare-function agent-log-redact-text "agent-log-redact" (text))
 (declare-function eat-term-send-string "eat" (terminal string))
-(declare-function claude-code-send-escape "claude-code" ())
 
 ;;;; User options
 
@@ -422,17 +421,18 @@ connection that is still live is re-signaled."
 (defun agent-remote--output (request)
   "Return the session summary and recent output named by REQUEST.
 `screen' is what the output shows that the transcript cannot, for a
-backend that can tell.  When REQUEST has `after', `history' is
-what the session's transcript gained since that byte offset; the phone
-page polls this, so polling costs one file status check while nothing
-is new."
+backend that can tell, and `terminal' whether the session takes keys.
+When REQUEST has `after', `history' is what the session's transcript
+gained since that byte offset; the phone page polls this, so polling
+costs one file status check while nothing is new."
   (let* ((buffer (agent-remote--session-buffer
                   (agent-remote--query-param request "id")))
          (after (agent-remote--offset-param request "after"))
          (backend (agent-backend (agent--detect-backend buffer)))
          (output (agent-remote--buffer-tail buffer)))
     (append (agent-remote--session-summary buffer)
-            (list :output output)
+            (list :output output
+                  :terminal (if (agent-remote--terminal-p buffer) t :false))
             (agent-remote--output-screen backend output)
             (and after (agent-remote--output-history backend buffer after)))))
 
@@ -508,7 +508,7 @@ Signal a user error when it is not a natural number."
 
 (defun agent-remote--history-response (history)
   "Return the response describing HISTORY, with its text redacted.
-HISTORY is a plist as `agent-claude-cli-transcript-history' returns.
+HISTORY is a plist as `agent-util-jsonl-history' returns.
 `redacted' says whether secrets were looked for, so the page can warn
 when they were not."
   (let ((redactor (agent-remote--redactor)))
@@ -591,17 +591,24 @@ session.  The system's temporary-file cleanup removes the file."
 
 (defun agent-remote--send-key (buffer key)
   "Send the key named KEY to the terminal of session BUFFER.
-An escape to a Claude session goes through `claude-code-send-escape',
-so the session notices when the escape interrupts a running turn."
+An escape goes through the backend's `:interrupt' function when it has
+one, so the session notices when the escape interrupts a running turn,
+and so it reaches a session that has no terminal."
+  (let* ((backend (agent-backend (agent--detect-backend buffer)))
+         (interrupt (and (equal key "esc") backend
+                         (agent-backend-interrupt backend))))
+    (if interrupt
+        (funcall interrupt buffer)
+      (unless (agent-remote--terminal-p buffer)
+        (user-error "Session has no terminal to send keys to"))
+      (with-current-buffer buffer
+        (eat-term-send-string eat-terminal
+                              (cdr (assoc key agent-remote--keys)))))))
+
+(defun agent-remote--terminal-p (buffer)
+  "Return non-nil when session BUFFER has a terminal that takes keys."
   (with-current-buffer buffer
-    (unless (and (local-variable-p 'eat-terminal) eat-terminal)
-      (user-error "Session has no terminal to send keys to"))
-    (if (and (equal key "esc")
-             (eq (agent--detect-backend buffer) 'claude)
-             (fboundp 'claude-code-send-escape))
-        (claude-code-send-escape)
-      (eat-term-send-string eat-terminal
-                            (cdr (assoc key agent-remote--keys))))))
+    (and (local-variable-p 'eat-terminal) eat-terminal t)))
 
 (defun agent-remote--accounts (request)
   "Return the accounts the session named by REQUEST can restart under.

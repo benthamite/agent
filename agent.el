@@ -157,7 +157,7 @@ chain only once.  Only
   session-history screen-state
   ;; New slots go last: a running Emacs that reloads this file keeps its
   ;; registered backends, and earlier slots must stay where they were.
-  icon-svg)
+  icon-svg interrupt)
 
 (defvar agent-backends nil
   "Alist of registered AI backends.
@@ -201,7 +201,7 @@ directory to run in another), and `:session-history' (read a bounded
 stretch of a session's past conversation, called with a session buffer,
 a byte limit, and optional BEFORE and AFTER byte offsets, returning nil
 when the session has no transcript yet, else a plist as
-`agent-claude-cli-transcript-history' documents), and `:screen-state'
+`agent-util-jsonl-history' documents), and `:screen-state'
 (read what a session's screen shows that its transcript cannot, called
 with the screen's text, returning a plist as
 `agent-claude-cli-screen-state' documents).  A backend that omits a key
@@ -209,6 +209,11 @@ does not support the commands that dispatch on it.
 
 The optional `:icon-svg' key is the SVG source of the backend's icon,
 for displays outside Emacs such as the phone page of `agent-remote'.
+
+The optional `:interrupt' key is a function of a session buffer that
+interrupts the session's running turn as escape typed in Emacs would,
+so the session notices the interruption.  Without it, an interrupt
+from outside Emacs is a raw escape sent to the session's terminal.
 
 The optional `:ambient-directory' key is a function of no arguments
 returning the directory a session started from the current buffer

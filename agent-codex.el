@@ -121,6 +121,7 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (declare-function codex-start-session "codex")
 (declare-function codex-session-identity "codex" (&optional buffer))
 (declare-function codex-prompt-input "codex" (&optional buffer))
+(declare-function codex--send-tui-action "codex" (action))
 
 (defconst agent-codex--shared-config-items
   '("hooks.json" "AGENTS.md" "rules"
@@ -183,6 +184,8 @@ Source: SVG Repo (CC0).")
   :sync-theme #'agent-codex--sync-theme
   :session-headers #'agent-codex--session-headers
   :session-prompt #'agent-codex--session-prompt
+  :session-history #'agent-codex--session-history
+  :interrupt #'agent-codex--interrupt
   :resume #'codex-resume)
 
 ;;;; Functions
@@ -1457,6 +1460,92 @@ stopped it can have other children older than anything the climb saw."
           (setq file found
                 id (plist-get header :forked-from))))
       file)))
+
+;;;;; Conversation history
+
+;; CLI convention: a rollout holds one JSON object per line.  What was
+;; said is in lines of type `response_item': a `message' payload with
+;; role `user' or `assistant' and a `content' vector of `input_text',
+;; `input_image' or `output_text' parts, and a `function_call',
+;; `custom_tool_call' or `local_shell_call' payload for each tool call.
+;; Codex also records as user messages text it wrote itself: the
+;; project's AGENTS.md, under a heading starting "# AGENTS.md", and
+;; context wrapped whole in one element such as <environment_context>
+;; or <skill>.  Developer messages, reasoning and tool output are
+;; never the conversation.
+;; Last verified against Codex 0.167.0 on 2026-11-08.
+
+(defun agent-codex--session-history (buffer bytes &optional before after)
+  "Return past conversation of Codex session BUFFER, or nil if it has none.
+BYTES, BEFORE and AFTER are as in `agent-util-jsonl-history', and the
+plist returned has `:session' as well, the session id, so a reader can
+tell when the session moved to another rollout."
+  (when-let* ((id (agent-codex--session-identity buffer))
+              (file (codex--find-session-transcript id)))
+    (append (list :session id)
+            (agent-util-jsonl-history file bytes before after
+                                      #'agent-codex--entry-messages))))
+
+(defun agent-codex--entry-messages (entry)
+  "Return the messages rollout line ENTRY records, as a list of plists."
+  (let ((payload (plist-get entry :payload))
+        (time (plist-get entry :timestamp)))
+    (when (and (equal (plist-get entry :type) "response_item")
+               (listp payload))
+      (mapcar (lambda (part)
+                (list :role (car part) :text (cdr part) :time time))
+              (pcase (plist-get payload :type)
+                ("message"
+                 (pcase (plist-get payload :role)
+                   ("user" (agent-codex--user-parts
+                            (plist-get payload :content)))
+                   ("assistant" (agent-codex--assistant-parts
+                                 (plist-get payload :content)))))
+                ((or "function_call" "custom_tool_call")
+                 (list (cons "tool" (plist-get payload :name))))
+                ("local_shell_call" (list (cons "tool" "shell"))))))))
+
+(defun agent-codex--user-parts (content)
+  "Return (ROLE . TEXT) pairs for what the user wrote in message CONTENT."
+  (delq nil
+        (mapcar (lambda (part)
+                  (pcase (plist-get part :type)
+                    ("input_text"
+                     (let ((text (plist-get part :text)))
+                       (when (and (stringp text)
+                                  (not (string-blank-p text))
+                                  (not (agent-codex--injected-text-p text)))
+                         (cons "user" text))))
+                    ("input_image" (cons "user" "[image]"))))
+                content)))
+
+(defun agent-codex--assistant-parts (content)
+  "Return (ROLE . TEXT) pairs for the text in assistant message CONTENT."
+  (delq nil
+        (mapcar (lambda (part)
+                  (let ((text (plist-get part :text)))
+                    (when (and (equal (plist-get part :type) "output_text")
+                               (stringp text)
+                               (not (string-blank-p text)))
+                      (cons "assistant" text))))
+                content)))
+
+(defun agent-codex--injected-text-p (text)
+  "Return non-nil when user TEXT is something Codex wrote, not the user.
+That is the project's AGENTS.md, or text wrapped whole in one element.
+A whole message is checked by its two ends, never matched as one
+regexp, since injected context can run to hundreds of kilobytes."
+  (let ((trimmed (string-trim text)))
+    (or (string-prefix-p "# AGENTS.md" trimmed)
+        (and (string-match "\\`<\\([a-z_]+\\)[ >]" trimmed)
+             (string-suffix-p (concat "</" (match-string 1 trimmed) ">")
+                              trimmed)))))
+
+(defun agent-codex--interrupt (buffer)
+  "Interrupt the running turn of Codex session BUFFER, as escape would.
+An app-server session interrupts its turn; a terminal one gets escape."
+  (with-current-buffer buffer
+    (codex--send-tui-action :escape)))
 
 (defun agent-codex--user-prompt-from-line (line)
   "Return the human prompt text in rollout LINE, or nil."

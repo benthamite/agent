@@ -2117,4 +2117,123 @@ session that never restarts would otherwise keep every one of them."
         (should (equal (agent-codex--derived-status (current-buffer))
                        (cons 30.0 "Editing init.el")))))))
 
+;;;; Conversation history
+
+(defun agent-codex-test--rollout-line (type payload &optional time)
+  "Return one rollout line of TYPE with PAYLOAD, at TIME."
+  (concat (json-encode `((timestamp . ,(or time "2026-11-08T12:00:00Z"))
+                         (type . ,type) (payload . ,payload)))
+          "\n"))
+
+(defun agent-codex-test--message (role type text)
+  "Return a rollout message payload from ROLE with one TYPE part of TEXT."
+  `((type . "message") (role . ,role)
+    (content . [((type . ,type) (text . ,text))])))
+
+(ert-deftest agent-codex-test-history-keeps-the-conversation ()
+  "A rollout yields what the user and Codex said, and tool runs merged."
+  (let ((file (make-temp-file "rollout" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert
+             (agent-codex-test--rollout-line "session_meta" '((id . "abc")))
+             (agent-codex-test--rollout-line
+              "response_item"
+              (agent-codex-test--message "developer" "input_text" "rules"))
+             (agent-codex-test--rollout-line
+              "response_item"
+              (agent-codex-test--message
+               "user" "input_text" "# AGENTS.md instructions for ~/x\n\nbe nice"))
+             (agent-codex-test--rollout-line
+              "response_item"
+              (agent-codex-test--message
+               "user" "input_text"
+               "<environment_context>\n  <cwd>/x</cwd>\n</environment_context>"))
+             (agent-codex-test--rollout-line
+              "response_item"
+              (agent-codex-test--message "user" "input_text" "<b>hi</b> there"))
+             (agent-codex-test--rollout-line
+              "response_item" '((type . "reasoning") (summary . [])))
+             (agent-codex-test--rollout-line
+              "response_item"
+              (agent-codex-test--message "assistant" "output_text" "Looking."))
+             (agent-codex-test--rollout-line
+              "response_item" '((type . "custom_tool_call") (name . "exec")))
+             (agent-codex-test--rollout-line
+              "response_item" '((type . "custom_tool_call_output")
+                                (output . "secret output")))
+             (agent-codex-test--rollout-line
+              "response_item" '((type . "function_call") (name . "exec")))
+             (agent-codex-test--rollout-line
+              "response_item" '((type . "local_shell_call")))
+             (agent-codex-test--rollout-line
+              "event_msg" '((type . "agent_message") (message . "Done.")))
+             (agent-codex-test--rollout-line
+              "response_item"
+              (agent-codex-test--message "assistant" "output_text" "Done.")
+              "2026-11-08T12:01:00Z")
+             "{\"type\":\"response_item\",\"payload\":{\"type\":\"mess"))
+          (cl-letf (((symbol-function 'agent-codex--session-identity)
+                     (lambda (_) "abc"))
+                    ((symbol-function 'codex--find-session-transcript)
+                     (lambda (id) (and (equal id "abc") file))))
+            (let ((history (agent-codex--session-history
+                            (current-buffer) 100000)))
+              (should (equal (plist-get history :session) "abc"))
+              (should (equal (mapcar (lambda (message)
+                                       (list (plist-get message :role)
+                                             (plist-get message :text)))
+                                     (plist-get history :messages))
+                             '(("user" "<b>hi</b> there")
+                               ("assistant" "Looking.")
+                               ("tool" "exec ×2, shell")
+                               ("assistant" "Done."))))
+              (should (equal (plist-get (car (last (plist-get history :messages)))
+                                        :time)
+                             "2026-11-08T12:01:00Z"))
+              ;; The unfinished last line is left for the next read.
+              (should (< (plist-get history :after)
+                         (plist-get history :size))))))
+      (delete-file file))))
+
+(ert-deftest agent-codex-test-history-without-rollout-is-nil ()
+  "A session with no id, or no rollout yet, has no history."
+  (cl-letf (((symbol-function 'agent-codex--session-identity) #'ignore))
+    (should-not (agent-codex--session-history (current-buffer) 1000)))
+  (cl-letf (((symbol-function 'agent-codex--session-identity)
+             (lambda (_) "abc"))
+            ((symbol-function 'codex--find-session-transcript) #'ignore))
+    (should-not (agent-codex--session-history (current-buffer) 1000))))
+
+(ert-deftest agent-codex-test-user-images-show-as-placeholders ()
+  "An image the user attached shows as [image]."
+  (should (equal (agent-codex--entry-messages
+                  '(:type "response_item" :timestamp "t"
+                    :payload (:type "message" :role "user"
+                              :content [(:type "input_image" :image_url "x")
+                                        (:type "input_text" :text "see")])))
+                 '((:role "user" :text "[image]" :time "t")
+                   (:role "user" :text "see" :time "t")))))
+
+(ert-deftest agent-codex-test-injected-text-is-checked-by-its-ends ()
+  "Injected context is recognized whatever its length, and typed text is not."
+  (should (agent-codex--injected-text-p
+           (concat "<skill>\n" (make-string 500000 ?x) "\n</skill>\n")))
+  (should (agent-codex--injected-text-p "# AGENTS.md instructions for /x"))
+  (should-not (agent-codex--injected-text-p "<b>bold</b> and more"))
+  (should-not (agent-codex--injected-text-p "<skill> mentioned")))
+
+(ert-deftest agent-codex-test-interrupt-sends-escape-action ()
+  "The backend's interrupt sends Codex's escape action in the session."
+  (should (eq (agent-backend-interrupt (agent-backend 'codex))
+              #'agent-codex--interrupt))
+  (with-temp-buffer
+    (let ((buffer (current-buffer)) called)
+      (with-temp-buffer
+        (cl-letf (((symbol-function 'codex--send-tui-action)
+                   (lambda (action) (setq called (list action (current-buffer))))))
+          (agent-codex--interrupt buffer)))
+      (should (equal called (list :escape buffer))))))
+
 ;;; agent-codex-test.el ends here

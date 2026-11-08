@@ -696,7 +696,7 @@ function resetSessionView() {
   past = { before: null, after: null, size: 0, loading: false, available: true,
            failed: false, redacted: true, session: null, polls: 0, writing: null,
            overlay: 0, known: false, fresh: false, moreChosen: null,
-           cardOptions: null };
+           cardOptions: null, terminal: true };
   clearAttachments();
   $("live").textContent = "";
   $("card-text").textContent = "";
@@ -727,10 +727,14 @@ function applyViewMode() {
 }
 
 // Open by default only where there is no transcript, once that is known.
+// A session without a terminal, such as a Codex app-server session,
+// takes no keys, so it has neither the keys nor the button.
 function renderMore() {
-  const open = past.moreChosen ?? (past.known && !showsConversation());
+  const open = past.terminal &&
+    (past.moreChosen ?? (past.known && !showsConversation()));
   $("more").classList.toggle("open", open);
   $("more-toggle").classList.toggle("open", open);
+  $("more-toggle").hidden = !past.terminal;
   updateOverlay();
 }
 
@@ -777,6 +781,10 @@ async function refreshSession(forceBottom) {
       return;
     }
     if (data.history && after === state.after) applyNewHistory(data.history);
+    if (past.terminal !== (data.terminal !== false)) {
+      past.terminal = data.terminal !== false;
+      renderMore();
+    }
     renderScreenState(data, forceBottom);
     if (forceBottom || atBottom) scrollOutputToBottom();
     const badge = $("session-badge");

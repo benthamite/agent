@@ -204,6 +204,7 @@ ended in that window.")
 (declare-function claude-code--get-or-prompt-for-buffer "claude-code" ())
 (declare-function claude-code--term-send-string "claude-code" (backend string))
 (declare-function claude-code--directory "claude-code" ())
+(declare-function claude-code-send-escape "claude-code" ())
 (declare-function claude-code--prompt-for-instance-name
                   "claude-code" (dir existing-instance-names &optional force-prompt))
 (declare-function eat-self-input "eat" (n &optional e))
@@ -255,6 +256,7 @@ Source: lobehub/lobe-icons (MIT).")
   :session-prompt #'agent-claude--session-prompt
   :session-history #'agent-claude--session-history
   :screen-state #'agent-claude-cli-screen-state
+  :interrupt #'agent-claude--interrupt
   :prepare-fork #'agent-claude--prepare-fork
   :resume #'claude-code-resume)
 
@@ -1542,6 +1544,11 @@ id to look up.  Start a query when the result is missing or older than
 
 (defvar-local agent-claude--searched-transcript nil
   "Cons of a session id and the transcript file a search found for it.")
+
+(defun agent-claude--interrupt (buffer)
+  "Interrupt the running turn of Claude session BUFFER, as escape would."
+  (with-current-buffer buffer
+    (claude-code-send-escape)))
 
 (defun agent-claude--session-history (buffer bytes &optional before after)
   "Return past conversation of Claude session BUFFER, or nil if it has none.

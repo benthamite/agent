@@ -3104,4 +3104,16 @@ sentinel those nested without bound and froze Emacs."
         (should-not (agent-claude--session-transcript (current-buffer)))
         (should (= searches 2))))))
 
+(ert-deftest agent-claude-test-interrupt-sends-escape-in-session ()
+  "The backend's interrupt runs `claude-code-send-escape' in the session."
+  (should (eq (agent-backend-interrupt (agent-backend 'claude-code))
+              #'agent-claude--interrupt))
+  (with-temp-buffer
+    (let ((buffer (current-buffer)) called-in)
+      (with-temp-buffer
+        (cl-letf (((symbol-function 'claude-code-send-escape)
+                   (lambda () (setq called-in (current-buffer)))))
+          (agent-claude--interrupt buffer)))
+      (should (eq called-in buffer)))))
+
 ;;; agent-claude-test.el ends here
