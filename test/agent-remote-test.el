@@ -423,6 +423,28 @@ BODY can refer to the transcript as `file'."
                       "GET" (agent-remote-test--history-path buffer)))))
           (should (eq (alist-get 'available data) :false)))))))
 
+(ert-deftest agent-remote-test-history-says-when-a-transcript-is-lost ()
+  "A transcript the backend cannot locate is reported, not shown as pending.
+Polls carry no history for it."
+  (agent-remote-test--with-session buffer
+    (cl-letf (((symbol-function 'agent-backend)
+               (lambda (_) (agent-backend--create
+                            :session-history
+                            (lambda (&rest _) (list :lost "Lost it."))))))
+      (agent-remote-test--with-server
+        (let ((data (agent-remote-test--json
+                     (agent-remote-test--http
+                      "GET" (agent-remote-test--history-path buffer)))))
+          (should (eq (alist-get 'available data) :false))
+          (should (eq (alist-get 'pending data) :false))
+          (should (equal (alist-get 'lost data) "Lost it.")))
+        (should-not (alist-get 'history
+                               (agent-remote-test--json
+                                (agent-remote-test--http
+                                 "GET" (concat "/api/output?after=0&id="
+                                               (url-hexify-string
+                                                (buffer-name buffer)))))))))))
+
 (ert-deftest agent-remote-test-output-never-reads-history ()
   "The polled output endpoint does not touch the transcript."
   (agent-remote-test--with-session buffer

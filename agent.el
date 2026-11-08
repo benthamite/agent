@@ -201,7 +201,8 @@ whose descendants are the only ones the caller needs),
 directory to run in another), and `:session-history' (read a bounded
 stretch of a session's past conversation, called with a session buffer,
 a byte limit, and optional BEFORE and AFTER byte offsets, returning nil
-when the session has no transcript yet, else a plist as
+when the session has no transcript yet, a plist with only `:lost', the
+reason, when it has one that cannot be found, else a plist as
 `agent-util-jsonl-history' documents), and `:screen-state'
 (read what a session's screen shows that its transcript cannot, called
 with the screen's text, returning a plist as

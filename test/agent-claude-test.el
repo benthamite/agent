@@ -3059,6 +3059,20 @@ sentinel those nested without bound and froze Emacs."
                                       :directory "/p/"))
     (should-not (agent-claude--session-history (current-buffer) 1000))))
 
+(ert-deftest agent-claude-test-session-history-lost-without-a-status-link ()
+  "A running session with neither an id nor a status UUID has lost its transcript.
+With the UUID it is only waiting for its first status poll."
+  (agent-claude-test--with-transcripts _config
+    (setq-local agent--session
+                (agent-session-create :backend 'claude-code :directory "/p/"))
+    (cl-letf (((symbol-function 'get-buffer-process) (lambda (_) 'proc))
+              ((symbol-function 'process-live-p) (lambda (p) (eq p 'proc))))
+      (should (stringp (plist-get (agent-claude--session-history
+                                   (current-buffer) 1000)
+                                  :lost)))
+      (setq-local agent-claude--status-uuid "uuid")
+      (should-not (agent-claude--session-history (current-buffer) 1000)))))
+
 (ert-deftest agent-claude-test-session-history-reads-the-transcript ()
   "The backend reads the conversation from the session's transcript."
   (agent-claude-test--with-transcripts config

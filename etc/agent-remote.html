@@ -816,6 +816,7 @@ function openSession(s) {
 function resetSessionView() {
   past = { before: null, after: null, size: 0, loading: false, available: true,
            failed: false, redacted: true, session: null, polls: 0, writing: null,
+           lost: null,
            overlay: 0, known: false, fresh: false, moreChosen: null,
            cardOptions: null, terminal: true };
   clearAttachments();
@@ -1444,10 +1445,12 @@ async function loadOlder() {
       if (!data.available) {
         state.available = false;
         state.fresh = data.pending === true;
+        state.lost = data.lost || null;
         applyViewMode();
         break;
       }
       state.fresh = false;
+      state.lost = null;
       state.before = data.before;
       if (state.after === null) state.after = data.after;
       state.session = data.session;
@@ -1494,8 +1497,9 @@ function renderHistoryBar() {
   const older = $("older");
   keepingView(() => {
     $("history-bar").classList.toggle(
-      "shown", state.failed || (state.available && state.before !== null));
-    older.hidden = state.before === 0;
+      "shown", state.failed || !!state.lost
+        || (state.available && state.before !== null));
+    older.hidden = state.before === 0 || !!state.lost;
     older.disabled = state.loading;
     older.textContent = state.failed ? "Retry" : "Load older";
     $("history-note").textContent = historyNote(state);
@@ -1504,6 +1508,7 @@ function renderHistoryBar() {
 
 function historyNote(state) {
   if (state.failed) return "Could not load the history.";
+  if (state.lost) return state.lost;
   const warning = state.redacted ? "" : "Secrets are not redacted. ";
   if (state.before === 0) return warning + "Start of the conversation.";
   const percent = Math.max(1, Math.round(
