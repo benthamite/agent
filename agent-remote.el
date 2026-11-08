@@ -136,6 +136,21 @@ only the Lisp files, not the bundled `etc/' directory.")
   (expand-file-name "etc/agent-remote.html" agent-remote--package-directory)
   "Absolute path to the bundled phone page.")
 
+(defconst agent-remote--library-hash
+  (with-temp-buffer
+    (insert-file-contents
+     (expand-file-name "agent-remote.el" agent-remote--package-directory))
+    (secure-hash 'md5 (current-buffer)))
+  "MD5 of this library's source as it stood when the library was loaded.
+Part of `agent-remote--version': the API's shape is whatever was
+loaded, whatever the file now says.")
+
+(defvar agent-remote--page-hash nil
+  "Cache of the page file's MD5, as (MODIFICATION-TIME . HASH).")
+
+(defconst agent-remote--version-placeholder "__AGENT_REMOTE_VERSION__"
+  "Text in the page that serving it replaces with `agent-remote--version'.")
+
 (defvar agent-remote--server nil
   "The listening server process, or nil when the server is stopped.")
 
@@ -321,6 +336,8 @@ connection that is still live is re-signaled."
                    (format "Content-Type: %s\r\n" type)
                    (format "Content-Length: %d\r\n" (length bytes))
                    "Cache-Control: no-store\r\n"
+                   (format "X-Agent-Remote-Version: %s\r\n"
+                           (agent-remote--version))
                    "X-Content-Type-Options: nosniff\r\n"
                    "Connection: close\r\n\r\n"
                    bytes))
@@ -386,10 +403,32 @@ connection that is still live is re-signaled."
                 authority))))
 
 (defun agent-remote--page ()
-  "Return the contents of the bundled phone page."
+  "Return the bundled phone page, stamped with `agent-remote--version'."
   (with-temp-buffer
     (insert-file-contents agent-remote--page-file)
-    (buffer-string)))
+    (string-replace agent-remote--version-placeholder
+                    (agent-remote--version)
+                    (buffer-string))))
+
+(defun agent-remote--version ()
+  "Return a stamp that changes whenever the page or the loaded API does.
+Every response carries it, and the page compares it with the one it was
+served with: a phone that kept an older page open across an update then
+reloads instead of misreading the newer API's answers."
+  (concat (substring agent-remote--library-hash 0 12)
+          (substring (agent-remote--page-hash) 0 12)))
+
+(defun agent-remote--page-hash ()
+  "Return the page file's MD5, rehashing only when the file changes."
+  (let ((modified (file-attribute-modification-time
+                   (file-attributes agent-remote--page-file))))
+    (unless (equal modified (car agent-remote--page-hash))
+      (setq agent-remote--page-hash
+            (cons modified
+                  (with-temp-buffer
+                    (insert-file-contents agent-remote--page-file)
+                    (secure-hash 'md5 (current-buffer))))))
+    (cdr agent-remote--page-hash)))
 
 (defun agent-remote--json (object)
   "Return a 200 response carrying OBJECT as JSON."

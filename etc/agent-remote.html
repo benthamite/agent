@@ -385,9 +385,32 @@ async function api(path, body) {
         body: JSON.stringify(body)
       };
   const response = await fetch(path, options);
+  reloadIfOutdated(response.headers.get("X-Agent-Remote-Version"));
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || response.statusText);
   return data;
+}
+
+// Emacs stamps the page it serves and every response with a version
+// that changes when either the page or its API does.  A page left open
+// across an update would misread the newer API, so on a mismatch it
+// reloads, unless that would lose a reply being written or an open
+// sheet; it then waits for a later response.  It reloads once per
+// version, so a stamp that somehow never matches cannot loop.
+const PAGE_VERSION = "__AGENT_REMOTE_VERSION__";
+const RELOADED_KEY = "agent-remote-reloaded-for";
+
+function reloadIfOutdated(version) {
+  if (!version || version === PAGE_VERSION) return;
+  if ($("text").value || attachments.length ||
+      document.querySelector(".sheet.open")) return;
+  try {
+    if (sessionStorage.getItem(RELOADED_KEY) === version) return;
+    sessionStorage.setItem(RELOADED_KEY, version);
+  } catch (e) {
+    return;
+  }
+  location.reload();
 }
 
 // Each backend's icon, as SVG source from Emacs, keyed by backend name.

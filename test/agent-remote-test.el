@@ -218,6 +218,37 @@ HOST overrides the Host header, which defaults to the server's own."
       (should (string-match-p "text/html" response))
       (should (string-match-p "<title>Agents</title>" response)))))
 
+;; A page left open across an update reloads when the stamp it was
+;; served with no longer matches the server's.
+(ert-deftest agent-remote-test-page-and-responses-carry-the-version ()
+  "The served page and every response carry the same version stamp."
+  (agent-remote-test--with-server
+    (let ((page (agent-remote-test--http "GET" "/"))
+          (api (agent-remote-test--http "GET" "/api/sessions"))
+          (version (agent-remote--version)))
+      (should (string-match-p (regexp-quote
+                               (format "PAGE_VERSION = \"%s\"" version))
+                              page))
+      (should-not (string-search agent-remote--version-placeholder page))
+      (dolist (response (list page api))
+        (should (string-match-p
+                 (regexp-quote (format "X-Agent-Remote-Version: %s\r\n"
+                                       version))
+                 response))))))
+
+(ert-deftest agent-remote-test-version-follows-page-changes ()
+  "Editing the page file changes the version stamp."
+  (let* ((file (make-temp-file "agent-remote-page" nil ".html" "one"))
+         (agent-remote--page-file file)
+         (agent-remote--page-hash nil))
+    (unwind-protect
+        (let ((before (agent-remote--version)))
+          (should (equal before (agent-remote--version)))
+          (with-temp-file file (insert "two"))
+          (set-file-times file (time-add (current-time) 10))
+          (should-not (equal before (agent-remote--version))))
+      (delete-file file))))
+
 ;;;; Session API
 
 (defmacro agent-remote-test--with-session (var &rest body)
