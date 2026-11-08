@@ -48,6 +48,7 @@
 ;;; Code:
 
 (require 'agent)
+(require 'agent-report)
 (require 'url-util)
 
 ;;;; Forward declarations
@@ -386,6 +387,8 @@ connection that is still live is re-signaled."
           (agent-remote--json (agent-remote--restart request)))
          ((equal path "/api/new")
           (agent-remote--json (agent-remote--new request)))
+         ((equal path "/api/report")
+          (agent-remote--json (agent-remote--report request)))
          ((equal path "/api/exit")
           (agent-remote--json (agent-remote--exit request)))
          ((equal path "/api/snooze")
@@ -784,6 +787,24 @@ the phone follows."
       (user-error "No backend given"))
     (let ((buffer (agent-start-session-in
                    (abbreviate-file-name directory) backend)))
+      (list :ok t
+            :id (buffer-name buffer)
+            :name (agent-display-name buffer)))))
+
+(defun agent-remote--report (request)
+  "Start a session that turns the report in REQUEST's JSON body into a PR.
+The body's `text' is the report and its `backend' names the backend, as
+for `agent-report-submit'.  Return the new session buffer's name and
+display name, which the phone follows."
+  (let* ((args (agent-remote--json-body request))
+         (text (alist-get 'text args))
+         (name (alist-get 'backend args))
+         (backend (and (stringp name) (intern-soft name))))
+    (unless (and (stringp text) (not (string-blank-p text)))
+      (user-error "No report given"))
+    (unless backend
+      (user-error "No backend given"))
+    (let ((buffer (agent-report-submit (string-trim text) backend)))
       (list :ok t
             :id (buffer-name buffer)
             :name (agent-display-name buffer)))))

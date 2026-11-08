@@ -858,6 +858,34 @@ BODY can refer to the transcript as `file'."
                                   (expand-file-name directory))
                                  'codex)))))))))
 
+(ert-deftest agent-remote-test-report-starts-reporting-session ()
+  "The report endpoint hands the report to `agent-report-submit'."
+  (agent-remote-test--with-session buffer
+    (let (called)
+      (cl-letf (((symbol-function 'agent-report-submit)
+                 (lambda (text backend) (setq called (list text backend)) buffer)))
+        (agent-remote-test--with-server
+          (let ((response (agent-remote-test--http
+                           "POST" "/api/report"
+                           (json-serialize (list :text "  Add sorting \n"
+                                                 :backend "codex"))
+                           '("X-Agent-Remote: 1"))))
+            (should (= (agent-remote-test--status response) 200))
+            (should (equal (alist-get 'id (agent-remote-test--json response))
+                           (buffer-name buffer)))
+            (should (equal called '("Add sorting" codex)))))))))
+
+(ert-deftest agent-remote-test-report-refuses-empty-text ()
+  "The report endpoint starts nothing without a report."
+  (cl-letf (((symbol-function 'agent-report-submit)
+             (lambda (&rest _) (error "Should not start"))))
+    (agent-remote-test--with-server
+      (let ((response (agent-remote-test--http
+                       "POST" "/api/report"
+                       (json-serialize (list :text " " :backend "codex"))
+                       '("X-Agent-Remote: 1"))))
+        (should (= (agent-remote-test--status response) 400))))))
+
 (ert-deftest agent-remote-test-new-refuses-missing-folder ()
   "The new endpoint starts nothing in a folder that does not exist."
   (let (called)

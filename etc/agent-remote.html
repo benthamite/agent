@@ -219,10 +219,11 @@
     padding: 10px 12px; text-align: left; background: var(--panel-2);
     border-radius: 10px; overflow-wrap: anywhere; }
   .folder:active { background: var(--line); }
-  #backends { display: flex; gap: 8px; }
-  #backends button { flex: 1; min-height: 48px; border-radius: 12px;
+  #report-text { width: 100%; min-height: 140px; max-height: 40vh; margin: 10px 0; }
+  #backends, #report-backends { display: flex; gap: 8px; }
+  #backends button, #report-backends button { flex: 1; min-height: 48px; border-radius: 12px;
     background: var(--accent); color: #fff; font-weight: 600; }
-  #backends button:disabled { opacity: .5; }
+  #backends button:disabled, #report-backends button:disabled { opacity: .5; }
 </style>
 </head>
 <body>
@@ -230,6 +231,7 @@
   <header>
     <h1>Sessions</h1>
     <span id="list-status" class="status"></span>
+    <button class="toggle" id="list-report">Report</button>
     <button class="toggle" id="list-new">New</button>
   </header>
   <div class="list-tools">
@@ -315,6 +317,19 @@
     <p class="note" id="new-note"></p>
     <div id="folders"></div>
     <div id="backends"></div>
+    <div class="actions">
+      <button class="cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="sheet" id="report-sheet">
+  <div class="panel">
+    <h2>Report a bug or idea</h2>
+    <p class="note">An agent turns it into a pull request for the maintainer to review.</p>
+    <textarea id="report-text" placeholder="What went wrong, or what would you like?"></textarea>
+    <p class="note" id="report-note"></p>
+    <div id="report-backends"></div>
     <div class="actions">
       <button class="cancel">Cancel</button>
     </div>
@@ -1705,6 +1720,53 @@ async function openNew() {
   }
 }
 
+// The report survives a cancelled sheet, so a slip of the finger loses
+// nothing; it is cleared once sent.
+async function openReport() {
+  $("report-note").textContent = "Loading…";
+  $("report-backends").replaceChildren();
+  $("report-sheet").classList.add("open");
+  try {
+    const data = await api("/api/backends");
+    $("report-backends").replaceChildren(...data.choices.map((c) => {
+      const b = document.createElement("button");
+      b.textContent = "Send to " + c.label;
+      b.addEventListener("click", () => doReport(c, b));
+      return b;
+    }));
+    $("report-note").textContent = "";
+  } catch (e) {
+    $("report-note").textContent = "Error: " + e.message;
+  }
+}
+
+async function doReport(choice, button) {
+  const text = $("report-text").value.trim();
+  if (!text) {
+    $("report-note").textContent = "Describe the bug or idea first.";
+    return;
+  }
+  const buttons = [...$("report-backends").children];
+  for (const b of buttons) b.disabled = true;
+  const label = button.textContent;
+  button.textContent = "Sending…";
+  try {
+    const data = await api("/api/report", { text, backend: choice.name });
+    $("report-text").value = "";
+    button.textContent = label;
+    for (const b of buttons) b.disabled = false;
+    history.pushState({ session: data.id }, "");
+    show("session-view");
+    $("session-title").textContent = data.name;
+    followSession(data.id);
+    schedule();
+  } catch (e) {
+    $("report-note").textContent = "Error: " + e.message;
+    button.textContent = label;
+    for (const b of buttons) b.disabled = false;
+  }
+}
+
 // A failed step keeps the folder on show, so there is always a way on.
 async function browse(path) {
   const request = ++browseRequest;
@@ -1881,6 +1943,7 @@ $("restart-cancel").addEventListener("click", closeSheets);
 $("restart-go").addEventListener("click", doRestart);
 $("new").addEventListener("click", openNew);
 $("list-new").addEventListener("click", openNew);
+$("list-report").addEventListener("click", openReport);
 $("list-sort").addEventListener("change", (e) => setListSort(e.target.value, false));
 $("list-sort-direction").addEventListener("click",
   () => setListSort(listSort.by, !listSort.reverse));

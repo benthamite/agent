@@ -857,6 +857,17 @@ The page is =etc/agent-remote.html=, served from the source checkout. Every resp
 
 The =android/= directory holds a single-purpose Android app, "Agents", for phones without a browser. On first launch it asks for the server address, the computer's Tailscale address and port, so one build serves any computer; Change address on its connection-error screen asks again. It accepts plain http only to a Tailscale address, which the tailnet encrypts, and shows only that page. A tapped http or https link to another origin opens in the browser, and any other navigation away from the page is cancelled. =android/build.sh install= builds it with the Android command-line tools, without Gradle, and installs it over =adb=; =AGENT_REMOTE_URL=, when set, is pre-filled as the address. The newest release is always at [[https://github.com/benthamite/agent/releases/download/android-latest/agent-remote.apk]]. =android/release.sh VERSION CHANGES-FILE= publishes a new one: it bumps =android/version.env=, builds the app, refuses one signed with a different key from the previous release, publishes it as =android-vVERSION=, and moves that link to it; =--dry-run= shows the release notes without changing anything.
 
+** Reporting bugs and ideas
+:PROPERTIES:
+:CUSTOM_ID: h:reporting
+:END:
+
+#+findex: agent-report
+#+findex: agent-report-send
+#+findex: agent-report-cancel
+#+vindex: agent-report-prompt-file
+~agent-report~, =t b= in ~agent-menu~, turns a bug report or a feature idea into a pull request for the maintainer to review. It opens a buffer for the description; =C-c C-c= (~agent-report-send~) sends it and =C-c C-k= (~agent-report-cancel~) discards it. Sending asks for a backend when several are registered and starts a session of it in this package's source checkout, under an instance name of the form =report-N= when one of that backend already runs there. The session starts with the instructions in ~agent-report-prompt-file~, =etc/agent-report-prompt.md= by default, where ={{REPORT}}= stands for the description, ={{AGENT_DIR}}= for the source checkout and ={{EMACS_DIR}}= for ~user-emacs-directory~. They tell the agent to decide whether the change belongs in =benthamite/agent= or =benthamite/agent-emacs=, to check =gh auth status= and stop with instructions when the GitHub CLI is missing or logged out, to work in a fresh clone rather than in the checkouts Emacs runs from, to add a test where the repository has tests, and to open the pull request with =gh pr create=, forking when the user cannot push. The phone page's Report button, beside New, does the same through =/api/report=: it asks for the description, offers a button per backend, and then follows the new session. A cancelled report stays in the box until it is sent.
+
 ** Branch navigation
 :PROPERTIES:
 :CUSTOM_ID: h:branch-navigation

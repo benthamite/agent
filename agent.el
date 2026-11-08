@@ -50,6 +50,7 @@
 (autoload 'agent-act-on-email "agent-mu4e" nil t)
 (autoload 'agent-act-on-linear-issue "agent-org-linear" nil t)
 (autoload 'agent-setup-snippet-keys "agent-snippet" nil t)
+(autoload 'agent-report "agent-report" nil t)
 (autoload 'agent-setup "agent-setup" nil t)
 (autoload 'agent-slack-context "agent-slack")
 (autoload 'agent-slack-resume-context "agent-slack")
@@ -1230,11 +1231,14 @@ Signal a user error when no sessions are active."
 (defun agent-start-new-session ()
   "Start a new session, prompting for backend if multiple are registered."
   (interactive)
+  (agent--start-new-session-for-backend (agent-read-backend)))
+
+(defun agent-read-backend ()
+  "Return a registered backend symbol, asking only when there are several."
   (let ((backends agent-backends))
     (cond
      ((null backends) (user-error "No AI backends registered"))
-     ((= (length backends) 1)
-      (agent--start-new-session-for-backend (caar backends)))
+     ((= (length backends) 1) (caar backends))
      (t
       (agent--refuse-backend-prompt)
       (let* ((names (mapcar (lambda (e)
@@ -1242,9 +1246,8 @@ Signal a user error when no sessions are active."
                                         (symbol-name (car e)))
                                     (car e)))
                             backends))
-             (choice (completing-read "Backend: " (mapcar #'car names) nil t))
-             (backend-sym (cdr (assoc choice names))))
-        (agent--start-new-session-for-backend backend-sym))))))
+             (choice (completing-read "Backend: " (mapcar #'car names) nil t)))
+        (cdr (assoc choice names)))))))
 
 (defun agent--start-new-session-for-backend (backend)
   "Start a new BACKEND session in its ambient directory.
@@ -5166,6 +5169,7 @@ when it is not installed."
    ["Tools"
     ("t r" "run skill" agent-run-skill)
     ("t ." "act on thing at point" agent-act-on-thing-at-point)
+    ("t b" "report bug or idea" agent-report)
     ""
     "Prompts"
     ("p c" "capture prompt" agent-capture-prompt)
