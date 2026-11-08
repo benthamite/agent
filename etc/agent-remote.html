@@ -1726,7 +1726,10 @@ async function doExit(skills) {
   try {
     await api("/api/exit", { id: exitTarget, skills });
     closeSheets();
-    setTimeout(() => current ? refreshSession(true) : refreshList(), 800);
+    // With skills the session stays open, snoozed, until its before-exit
+    // skills finish; the phone still leaves it for the list at once.
+    if (exitTarget === current) history.back();
+    setTimeout(refreshList, 800);
   } catch (e) {
     $("exit-note").textContent = "Error: " + e.message;
     $("exit-skills").disabled = $("exit-plain").disabled = false;
