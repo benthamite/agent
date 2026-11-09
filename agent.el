@@ -1887,8 +1887,11 @@ nothing."
 
 (defun agent--session-face (buffer state)
   "Return the face for session BUFFER in display STATE, or nil for none.
-A snoozed session takes `agent-snoozed' in place of any state face."
-  (if (agent-session-snoozed-p buffer)
+A snoozed session takes `agent-snoozed' in place of any state face,
+except in the switcher's snoozed view, where every session listed is
+snoozed and the state face is what tells them apart."
+  (if (and (agent-session-snoozed-p buffer)
+           (not agent--listing-snoozed))
       'agent-snoozed
     (agent--session-state-face state)))
 

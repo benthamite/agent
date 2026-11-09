@@ -672,6 +672,19 @@ defaults to, so a test that hides them says so."
         (should (eq (nth 2 (car (last specs)))
                     'agent--switcher-toggle-snoozed-view))))))
 
+(ert-deftest agent-test-switcher-snoozed-view-uses-state-faces ()
+  "Color snoozed sessions by state, not `agent-snoozed', in the snoozed view."
+  (agent-test--with-two-sessions
+    (with-current-buffer a
+      (setq-local agent--session-state 'awaiting-input))
+    (agent-toggle-snooze a)
+    (let ((agent-hide-snoozed-sessions t))
+      (let ((agent--listing-snoozed t))
+        (should (eq (plist-get (cdddr (car (agent--switcher-specs))) :face)
+                    'agent-waiting)))
+      (should (eq (agent--session-face a (agent-session-display-state a))
+                  'agent-snoozed)))))
+
 (ert-deftest agent-test-session-keys-leave-z-to-the-switcher ()
   "Never assign `z', which the switcher binds to its view toggle."
   (should-not (member "z" agent--session-key-pool)))
