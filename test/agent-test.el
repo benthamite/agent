@@ -639,6 +639,20 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
     (agent-toggle-snooze a)
     (should (equal (mapcar #'car (agent--session-suffix-specs)) '("s" "a")))))
 
+(ert-deftest agent-test-hide-snoozed-sessions-drops-them-from-the-switcher ()
+  "Leave snoozed sessions out of the switcher when the option is set."
+  (agent-test--with-two-sessions
+    (agent-toggle-snooze a)
+    (let ((agent-hide-snoozed-sessions t))
+      (should (equal (mapcar #'car (agent--session-suffix-specs)) '("s")))
+      (agent-toggle-snooze b)
+      (should-error (agent-select-session) :type 'user-error))))
+
+(ert-deftest agent-test-menu-toggles-hide-snoozed-sessions ()
+  "Bind the hide-snoozed option to `-z' in `agent-menu'."
+  (should (eq (plist-get (cdr (transient-get-suffix 'agent-menu "-z")) :command)
+              'agent--infix-hide-snoozed-sessions)))
+
 (ert-deftest agent-test-snoozed-session-wears-the-snoozed-face ()
   "Render a snoozed session with `agent-snoozed' whatever its state."
   (agent-test--with-two-sessions

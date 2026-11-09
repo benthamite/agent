@@ -188,6 +188,7 @@ The global minor modes ~agent-claude-mode~ and ~agent-codex-mode~ own every hook
 #+vindex: agent-prompt-capture-directory
 #+vindex: agent-prompt-capture-auto-save-delay
 #+vindex: agent-sync-theme
+#+vindex: agent-hide-snoozed-sessions
 #+vindex: agent-sigwinch-delay
 #+vindex: agent-session-annotation-max-width
 The user option ~agent-protect-buffers~ is a boolean that defaults to ~t~. When enabled, killing a live AI session buffer prompts for confirmation through ~agent-protect-buffer~. Buffers whose processes have already exited are allowed to die without the prompt.
@@ -408,7 +409,7 @@ that option is set. It labels
 Tools use the =t= prefix: run skill (=t r=) and act on thing at point (=t .=).
 Prompts use =p=: capture (=p c=), insert one (=p i=), and insert all (=p a=).
 Options put account selection first, then buffer protection and branch warnings,
-followed by ready alerts and theme synchronization.
+followed by ready alerts, theme synchronization and hiding snoozed sessions (=-z=).
 
 #+findex: agent-history
 The command ~agent-history~, labeled “open log” and bound to =l= in the Sessions column, opens the Agent Log menu for browsing, opening, searching, and resuming historical sessions across backends. Agent Log is an optional package: loading =agent= never requires it, ~agent-history~ loads it on demand, and invoking the command without Agent Log installed signals a clear error. Neither ~agent-menu~ nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
@@ -419,7 +420,7 @@ The command ~agent-select-session~ opens the session switcher, which contains on
 
 The switcher lists every session in one flat list ordered by home-row key, whatever account each session runs under. The account is a column of its own, between the session name and its annotation, shown dimmed in the ~agent-session-account~ face. A session is therefore found at the key it always answers to, rather than at a position that moves when a neighbor's account changes. Sessions whose backend has no accounts configured leave the column blank, and when no session on screen records an account the column is left out altogether.
 
-A session that is waiting for something you can only do later can be set aside with ~agent-toggle-snooze~, bound to =z= in ~agent-menu~; invoking it again unsnoozes. The menu labels the key =snooze= or, when the session it was opened from is snoozed, =unsnooze=. A snoozed session keeps its key and its buffer, but the switcher lists it after every active session in the dimmed italic ~agent-snoozed~ face instead of a state color, ~agent-jump-to-waiting~ skips it, and it fires no ready alert when its turn ends. When snoozing, the command reads a duration in hours from the minibuffer; leaving it blank snoozes indefinitely. A timed snooze ends by itself when the hours run out, and if the session is waiting for input at that point, the ready alert that snoozing suppressed fires then. The command acts on the current session, and prompts for one when the current buffer is not a session or with a prefix argument. The mark survives ~agent-restart~, and resuming a session through ~agent-restore-sessions~ snoozes it again as it was when recorded; a timed snooze resumes with the time it had left, and one whose time ran out in the meantime is not restored. A handoff starts a new conversation, so it does not carry the mark over.
+A session that is waiting for something you can only do later can be set aside with ~agent-toggle-snooze~, bound to =z= in ~agent-menu~; invoking it again unsnoozes. The menu labels the key =snooze= or, when the session it was opened from is snoozed, =unsnooze=. A snoozed session keeps its key and its buffer, but the switcher lists it after every active session in the dimmed italic ~agent-snoozed~ face instead of a state color, ~agent-jump-to-waiting~ skips it, and it fires no ready alert when its turn ends. When snoozing, the command reads a duration in hours from the minibuffer; leaving it blank snoozes indefinitely. A timed snooze ends by itself when the hours run out, and if the session is waiting for input at that point, the ready alert that snoozing suppressed fires then. The command acts on the current session, and prompts for one when the current buffer is not a session or with a prefix argument. The mark survives ~agent-restart~, and resuming a session through ~agent-restore-sessions~ snoozes it again as it was when recorded; a timed snooze resumes with the time it had left, and one whose time ran out in the meantime is not restored. A handoff starts a new conversation, so it does not carry the mark over. The user option ~agent-hide-snoozed-sessions~, a boolean that defaults to ~nil~ and is toggled by =-z= in ~agent-menu~, leaves snoozed sessions out of the switcher and ~agent-tab-bar-mode~'s segment altogether; they keep their keys and reappear when unsnoozed or when the option is turned off. The phone page still lists them.
 
 #+findex: agent-toggle-wake-ups
 #+findex: agent-session-accepts-wake-ups-p

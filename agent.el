@@ -767,6 +767,13 @@ that function is available."
   :type 'boolean
   :group 'agent)
 
+(defcustom agent-hide-snoozed-sessions nil
+  "When non-nil, leave snoozed sessions out of the switcher and tab bar.
+A hidden session keeps its key and its buffer, and unsnoozing it brings
+it back.  Toggled by `-z' in `agent-menu'."
+  :type 'boolean
+  :group 'agent)
+
 (defcustom agent-review-file-function nil
   "Function that returns the review file of a session, or nil.
 It is called with the session buffer.  A tool that collects items
@@ -1236,6 +1243,8 @@ Signal a user error when no sessions are active."
   (unless (agent--find-all-buffers)
     (user-error "No active AI sessions"))
   (agent--ensure-all-session-keys)
+  (unless (agent--ordered-session-keys)
+    (user-error "All AI sessions are snoozed and hidden"))
   (transient-setup 'agent--session-switcher))
 
 (defun agent-start-new-session ()
@@ -1373,16 +1382,24 @@ the key it always answers to instead of by the account it happens to
 run under.  Snoozed sessions come after every active one, so the
 sessions worth toggling between sit together at the start; a snoozed
 session keeps its key, so moving it does not change how it is
-reached."
+reached.  When `agent-hide-snoozed-sessions' is non-nil, snoozed
+sessions are left out."
   (let (active snoozed)
     (maphash (lambda (buf key)
-               (when (buffer-live-p buf)
+               (when (agent--session-listed-p buf)
                  (if (agent-session-snoozed-p buf)
                      (push (cons key buf) snoozed)
                    (push (cons key buf) active))))
              agent--session-keys)
     (append (agent--sort-specs-by-key active)
             (agent--sort-specs-by-key snoozed))))
+
+(defun agent--session-listed-p (buffer)
+  "Return non-nil when session BUFFER belongs in the switcher and tab bar.
+That is when it is live and not hidden by `agent-hide-snoozed-sessions'."
+  (and (buffer-live-p buffer)
+       (not (and agent-hide-snoozed-sessions
+                 (agent-session-snoozed-p buffer)))))
 
 (defun agent--sort-specs-by-key (specs)
   "Return SPECS sorted by the position of their key in the key pool.
@@ -1721,7 +1738,7 @@ ignored, so a turn's last activity is caught when the session stops."
   (if (not (display-graphic-p)) 0
     (let ((extra 0))
       (maphash (lambda (buffer _key)
-                 (when (buffer-live-p buffer)
+                 (when (agent--session-listed-p buffer)
                    (let ((text (agent--session-label-base buffer)))
                      (setq extra
                            (max extra
@@ -1807,7 +1824,7 @@ whose icon renders wider than that would sit off the column shared by
 the rest."
   (let ((widths (list 0)))
     (maphash (lambda (buf _key)
-               (when (buffer-live-p buf)
+               (when (agent--session-listed-p buf)
                  (push (string-width (funcall cell buf)) widths)))
              agent--session-keys)
     (apply #'max widths)))
@@ -5204,10 +5221,10 @@ when it is not installed."
     ("-w" agent--infix-warn-kill-with-branches)
     ("-a" agent--infix-alert-on-ready)
     ("-t" agent--infix-sync-theme)
-    ;; Blank lines push Account down to the menu's last line: one for the
-    ;; Session groups column, one more when Monitor makes Current session
-    ;; the tallest column.
-    ""
+    ("-z" agent--infix-hide-snoozed-sessions)
+    ;; Blank lines push Account down to the menu's last line, level with
+    ;; the Session groups column, and one more when Monitor makes Current
+    ;; session the tallest column.
     ""
     (:info "" :format "%d" :if agent--monitor-menu-p)
     "Account"
@@ -5240,6 +5257,12 @@ the section's commands have nothing to work with."
   :class 'agent--boolean-variable
   :variable 'agent-alert-on-ready
   :description "alert on ready")
+
+(transient-define-infix agent--infix-hide-snoozed-sessions ()
+  "Toggle `agent-hide-snoozed-sessions'."
+  :class 'agent--boolean-variable
+  :variable 'agent-hide-snoozed-sessions
+  :description "hide snoozed sessions")
 
 (transient-define-infix agent--infix-protect-buffers ()
   "Toggle `agent-protect-buffers'."
