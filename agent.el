@@ -767,7 +767,7 @@ that function is available."
   :type 'boolean
   :group 'agent)
 
-(defcustom agent-hide-snoozed-sessions nil
+(defcustom agent-hide-snoozed-sessions t
   "When non-nil, leave snoozed sessions out of the switcher and tab bar.
 A hidden session keeps its key and its buffer, and unsnoozing it brings
 it back.  Toggled by `-z' in `agent-menu'."

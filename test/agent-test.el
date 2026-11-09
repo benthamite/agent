@@ -537,9 +537,12 @@ the frame fit."
 
 (defmacro agent-test--with-two-sessions (&rest body)
   "Run BODY with buffers `a' and `b' registered under one backend.
-They hold session keys \"a\" and \"s\" and are killed afterwards."
+They hold session keys \"a\" and \"s\" and are killed afterwards.
+Snoozed sessions are listed, whatever `agent-hide-snoozed-sessions'
+defaults to, so a test that hides them says so."
   (declare (indent 0) (debug t))
   `(let ((agent-backends nil)
+         (agent-hide-snoozed-sessions nil)
          (agent--session-keys (make-hash-table :test 'eq))
          (agent-session-annotation-functions nil)
          (a (generate-new-buffer "*one:~/repo/first/:default*"))
