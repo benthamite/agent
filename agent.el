@@ -936,10 +936,11 @@ the foreground to them."
 
 (defconst agent--fallback-keys
   '("g" "h" "q" "r" "t" "y" "u" "i" "o" "p"
-    "z" "x" "c" "v" "b" "n" "m")
+    "x" "c" "v" "b" "n" "m")
   "Fallback keys used when home-row keys are exhausted.
 Excludes \"w\" and \"e\", which are reserved for actions in
-`agent--session-switcher'.")
+`agent--session-switcher', and \"z\", which there switches between
+active and snoozed sessions.")
 
 (defconst agent--session-key-pool
   (append agent--home-row-keys agent--fallback-keys)
@@ -1243,8 +1244,6 @@ Signal a user error when no sessions are active."
   (unless (agent--find-all-buffers)
     (user-error "No active AI sessions"))
   (agent--ensure-all-session-keys)
-  (unless (agent--ordered-session-keys)
-    (user-error "All AI sessions are snoozed and hidden"))
   (transient-setup 'agent--session-switcher))
 
 (defun agent-start-new-session ()
@@ -1352,16 +1351,54 @@ are compared expanded, so an abbreviated DIRECTORY matches."
     :class transient-column
     :setup-children agent--session-switcher-children]])
 
+(defvar agent--listing-snoozed nil
+  "Non-nil while the switcher builds its view of snoozed sessions.
+`agent--session-listed-p' then admits snoozed sessions only.  Bound by
+`agent--session-switcher-children' from the switcher's scope, so that
+the tab bar, which never runs inside that binding, is unaffected.")
+
 (defun agent--session-switcher-children (_)
   "Build transient suffixes for the session switcher, one per session.
 Labels are built in two passes, because aligning the account and the
 annotation columns needs the widest name and the widest account, which
-are only known once every session has been measured."
-  (let ((name-pad (agent--session-label-pad))
-        (account-pad (agent--session-account-pad)))
+are only known once every session has been measured.  A switcher whose
+scope is `snoozed' lists the snoozed sessions instead of the others.
+The last suffix, when there is one, switches between the two views."
+  (let ((agent--listing-snoozed (eq (transient-scope) 'snoozed)))
     (transient-parse-suffixes
      'agent--session-switcher
-     (apply #'vector (agent--session-suffix-specs name-pad account-pad)))))
+     (apply #'vector (agent--switcher-specs)))))
+
+(defun agent--switcher-specs ()
+  "Return the switcher's suffix specs: its sessions, then its view toggle.
+Which sessions are listed follows `agent--listing-snoozed'."
+  (append (agent--session-suffix-specs (agent--session-label-pad)
+                                       (agent--session-account-pad))
+          (when-let* ((label (agent--switcher-view-toggle-label)))
+            (list (list "z" label 'agent--switcher-toggle-snoozed-view)))))
+
+(defun agent--switcher-view-toggle-label ()
+  "Return the label of the switcher's view toggle, or nil to omit it.
+The snoozed view always offers the way back.  The ordinary view offers
+the snoozed one only while `agent-hide-snoozed-sessions' keeps snoozed
+sessions out of it and at least one live session is snoozed."
+  (cond (agent--listing-snoozed "show active sessions")
+        ((and agent-hide-snoozed-sessions
+              (cl-some (lambda (buf)
+                         (and (buffer-live-p buf)
+                              (agent-session-snoozed-p buf)))
+                       (hash-table-keys agent--session-keys)))
+         "show snoozed sessions")))
+
+(transient-define-suffix agent--switcher-toggle-snoozed-view ()
+  "Reopen the session switcher on the other view.
+Switch from the active sessions to the snoozed ones, or back."
+  :transient 'transient--do-replace
+  (interactive)
+  (transient-setup 'agent--session-switcher nil nil
+                   :scope (unless (eq (transient-scope 'agent--session-switcher)
+                                      'snoozed)
+                            'snoozed)))
 
 (defun agent--session-suffix-specs (&optional name-pad account-pad)
   "Return the switcher's suffix specs, in `agent--ordered-session-keys' order.
@@ -1382,8 +1419,8 @@ the key it always answers to instead of by the account it happens to
 run under.  Snoozed sessions come after every active one, so the
 sessions worth toggling between sit together at the start; a snoozed
 session keeps its key, so moving it does not change how it is
-reached.  When `agent-hide-snoozed-sessions' is non-nil, snoozed
-sessions are left out."
+reached.  Sessions that `agent--session-listed-p' rejects are left
+out."
   (let (active snoozed)
     (maphash (lambda (buf key)
                (when (agent--session-listed-p buf)
@@ -1396,10 +1433,14 @@ sessions are left out."
 
 (defun agent--session-listed-p (buffer)
   "Return non-nil when session BUFFER belongs in the switcher and tab bar.
-That is when it is live and not hidden by `agent-hide-snoozed-sessions'."
+That is when it is live and not hidden by `agent-hide-snoozed-sessions'.
+While `agent--listing-snoozed' is non-nil, it is when BUFFER is live and
+snoozed."
   (and (buffer-live-p buffer)
-       (not (and agent-hide-snoozed-sessions
-                 (agent-session-snoozed-p buffer)))))
+       (if agent--listing-snoozed
+           (agent-session-snoozed-p buffer)
+         (not (and agent-hide-snoozed-sessions
+                   (agent-session-snoozed-p buffer))))))
 
 (defun agent--sort-specs-by-key (specs)
   "Return SPECS sorted by the position of their key in the key pool.

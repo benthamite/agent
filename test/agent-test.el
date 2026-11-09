@@ -644,9 +644,34 @@ They hold session keys \"a\" and \"s\" and are killed afterwards."
   (agent-test--with-two-sessions
     (agent-toggle-snooze a)
     (let ((agent-hide-snoozed-sessions t))
-      (should (equal (mapcar #'car (agent--session-suffix-specs)) '("s")))
+      (should (equal (mapcar #'car (agent--session-suffix-specs)) '("s"))))))
+
+(ert-deftest agent-test-switcher-offers-snoozed-view-only-when-hiding ()
+  "End the switcher with `z' to the snoozed view only when it hides any."
+  (agent-test--with-two-sessions
+    (let ((agent-hide-snoozed-sessions t))
+      (should (equal (mapcar #'car (agent--switcher-specs)) '("a" "s")))
+      (agent-toggle-snooze a)
+      (should (equal (mapcar #'car (agent--switcher-specs)) '("s" "z")))
       (agent-toggle-snooze b)
-      (should-error (agent-select-session) :type 'user-error))))
+      (should (equal (mapcar #'car (agent--switcher-specs)) '("z"))))
+    (let ((agent-hide-snoozed-sessions nil))
+      (should (equal (mapcar #'car (agent--switcher-specs)) '("a" "s"))))))
+
+(ert-deftest agent-test-switcher-snoozed-view-lists-snoozed-sessions ()
+  "List only snoozed sessions in the snoozed view, then `z' to go back."
+  (agent-test--with-two-sessions
+    (agent-toggle-snooze a)
+    (let ((agent-hide-snoozed-sessions t)
+          (agent--listing-snoozed t))
+      (let ((specs (agent--switcher-specs)))
+        (should (equal (mapcar #'car specs) '("a" "z")))
+        (should (eq (nth 2 (car (last specs)))
+                    'agent--switcher-toggle-snoozed-view))))))
+
+(ert-deftest agent-test-session-keys-leave-z-to-the-switcher ()
+  "Never assign `z', which the switcher binds to its view toggle."
+  (should-not (member "z" agent--session-key-pool)))
 
 (ert-deftest agent-test-menu-toggles-hide-snoozed-sessions ()
   "Bind the hide-snoozed option to `-z' in `agent-menu'."
