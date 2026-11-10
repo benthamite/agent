@@ -158,7 +158,7 @@ chain only once.  Only
   session-history screen-state
   ;; New slots go last: a running Emacs that reloads this file keeps its
   ;; registered backends, and earlier slots must stay where they were.
-  icon-svg interrupt)
+  icon-svg interrupt turn-end-background-p)
 
 (defvar agent-backends nil
   "Alist of registered AI backends.
@@ -230,6 +230,14 @@ non-nil when a source independent of that display reports the session
 idle, with nothing left for the user to answer.  A running before-exit
 chain whose stop event was lost advances only when both agree; see
 `agent--before-exit-timeout'.
+
+The optional `:turn-end-background-p' key is a function of a session
+buffer returning non-nil when the turn that just ended left background
+work running, such as a subagent or a background shell.  It is read the
+moment a stop event arrives, so it must not depend on a source that
+lags that event.  A before-exit skill that ends its turn this way has
+not finished, so its missing receipt is not yet a failure; see
+`agent--before-exit-accept-receipt-p'.
 
 Multi-account backends provide the optional account keys read by
 `agent-account': `:account-env-var' (environment variable naming
@@ -2946,17 +2954,25 @@ Ungated entries need no receipt.  A held receipt stops the chain
 without a warning and keeps BUFFER open for the user.  A missing,
 invalid, or failed receipt stops the chain with a warning and keeps
 BUFFER open.  A receipt that is
-missing while the backend still shows the session working is not a
-failure: the completion event belongs to an earlier turn (a late Stop
-hook or a stray idle notification), so the chain stays armed and
-re-checks on the next event."
+missing is not a failure while either of two things holds, so the chain
+stays armed and re-checks on the next event.  The backend may still
+show the session working: the completion event then belongs to an
+earlier turn (a late Stop hook or a stray idle notification).  Or the
+turn may have ended with background work still running: the skill is
+waiting on a subagent or a background shell, and will resume and write
+its receipt when that work reports back."
   (if-let* ((file (plist-get agent--before-exit :receipt-file)))
-      (let ((result (agent--before-exit-read-receipt file)))
+      (let ((result (agent--before-exit-read-receipt file))
+            (backend (agent--detect-backend buffer)))
         (cond
          ((and (eq (plist-get result :status) 'missing)
-               (agent--backend-denies-idle-p (agent--detect-backend buffer)
-                                             buffer))
+               (agent--backend-denies-idle-p backend buffer))
           (message "agent: no receipt yet and %s is still working; waiting"
+                   (buffer-name buffer))
+          nil)
+         ((and (eq (plist-get result :status) 'missing)
+               (agent--backend-turn-end-background-p backend buffer))
+          (message "agent: no receipt yet and %s has background work running; waiting"
                    (buffer-name buffer))
           nil)
          ((memq (plist-get result :status) '(success no-op))
@@ -2978,6 +2994,14 @@ no evidence for."
   (when-let* ((struct (agent-backend backend))
               (fn (agent-backend-idle-p struct)))
     (not (funcall fn buffer))))
+
+(defun agent--backend-turn-end-background-p (backend buffer)
+  "Return non-nil when BACKEND reports background work left by BUFFER's turn.
+A backend without a `:turn-end-background-p' probe returns nil, so it
+cannot defer a decision it has no evidence for."
+  (when-let* ((struct (agent-backend backend))
+              (fn (agent-backend-turn-end-background-p struct)))
+    (funcall fn buffer)))
 
 (defun agent--before-exit-read-receipt (file)
   "Return the validated closeout receipt from FILE.

@@ -172,6 +172,7 @@ Source: SVG Repo (CC0).")
   :usage-fetch #'agent-codex--usage-fetch
   :waiting-p #'agent-codex--waiting-p
   :background-tasks-p #'agent-codex--has-background-tasks-p
+  :turn-end-background-p #'agent-codex--has-background-tasks-p
   :busy-p #'agent-codex--busy-p
   :label "Codex"
   :run-prompt #'agent-codex-run-prompt

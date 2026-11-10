@@ -748,7 +748,12 @@ open and is marked as awaiting input (with the usual ready alert), and the echo
 area names the skill and shows the receipt's ~message~. A missing file, invalid
 JSON, unknown status, or ~failure~ stops the chain, keeps the session open, and
 shows a warning; a missing file is ignored while the backend's idle probe still shows
-the session working, since that completion event belongs to an earlier turn. After ~held~ or
+the session working, since that completion event belongs to an earlier turn. It
+is also ignored while the turn that just ended left background work running,
+such as a subagent or a background shell the skill is waiting on: the skill
+resumes when that work reports back and writes its receipt in a later turn. The
+Claude backend reads that work from the ~background_tasks~ list of the Stop
+hook payload, and Codex from its footer. After ~held~ or
 ~failure~, the next ~agent-exit~ starts the chain again from its first entry.
 Agent removes the temporary receipt directory after reading it or
 tearing down the session. Receipt gating is per entry: plain entries keep the

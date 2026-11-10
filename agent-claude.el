@@ -240,6 +240,7 @@ Source: lobehub/lobe-icons (MIT).")
   :usage-fetch #'agent-claude--usage-fetch
   :waiting-p #'agent-claude--reported-waiting-p
   :background-tasks-p #'agent-claude--reported-background-p
+  :turn-end-background-p #'agent-claude--has-background-tasks-p
   :status-unknown-p #'agent-claude--status-unknown-p
   :idle-p #'agent-claude--terminal-waiting-p
   :reported-idle-p #'agent-claude--reported-idle-p
