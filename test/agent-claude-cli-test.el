@@ -747,6 +747,17 @@ CONTENT is written as UTF-8."
     (should-not (plist-get (agent-claude-cli-test--state "✻ Done" 'rule box 'rule "  m")
                            :input))))
 
+(ert-deftest agent-claude-cli-test-state-input-box-faint-suggestion ()
+  "A suggestion drawn faint in an empty input box is not its text."
+  (let ((box (concat "❯ " (propertize "continue" 'agent-faint t))))
+    (should-not (plist-get (agent-claude-cli-test--state "✻ Done" 'rule box 'rule "  m")
+                           :input)))
+  (let ((box (concat "❯\u00a0typed " (propertize "rest" 'agent-faint t))))
+    (should (equal (plist-get (agent-claude-cli-test--state
+                               "✻ Done" 'rule box 'rule "  m")
+                              :input)
+                   "typed"))))
+
 (ert-deftest agent-claude-cli-test-state-mode-absent ()
   "A screen with nothing below the box has no mode."
   (should-not (plist-get (agent-claude-cli-test--state "✻ Done" 'rule "❯" 'rule)

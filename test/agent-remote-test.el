@@ -306,6 +306,20 @@ HOST overrides the Host header, which defaults to the server's own."
     (let ((agent-remote-output-lines 2))
       (should (equal (agent-remote--buffer-tail buffer) "c\nd")))))
 
+(ert-deftest agent-remote-test-buffer-tail-marks-faint-text ()
+  "Text a terminal draws faint is marked; other faces are dropped."
+  (agent-remote-test--with-session buffer
+    (with-current-buffer buffer
+      (insert (propertize "❯ " 'face '(:inherit (eat-term-font-0)))
+              (propertize "continue" 'face '(:foreground "#8a8a8a"
+                                             :inherit (eat-term-faint eat-term-font-0)))))
+    (let ((tail (agent-remote--buffer-tail buffer)))
+      (should (equal tail "❯ continue"))
+      (should-not (get-text-property 0 'agent-faint tail))
+      (should-not (get-text-property 0 'face tail))
+      (should (get-text-property 2 'agent-faint tail))
+      (should (get-text-property 9 'agent-faint tail)))))
+
 ;;;; History
 
 (defconst agent-remote-test--transcript
@@ -679,9 +693,11 @@ answer or dismiss it, and only the rest would reach the prompt."
                                           (agent-remote-test--http "GET" query)))
                     :false))
         (with-current-buffer buffer (setq-local eat-terminal 'fake-terminal))
-        (should (eq (alist-get 'terminal (agent-remote-test--json
-                                          (agent-remote-test--http "GET" query)))
-                    t))))))
+        (cl-letf (((symbol-function 'eat-term-size) (lambda (_) '(140 . 40))))
+          (let ((response (agent-remote-test--json
+                           (agent-remote-test--http "GET" query))))
+            (should (eq (alist-get 'terminal response) t))
+            (should (equal (alist-get 'columns response) 140))))))))
 
 (ert-deftest agent-remote-test-every-digit-is-a-key ()
   "A dialog's option or a notice's can have any digit."

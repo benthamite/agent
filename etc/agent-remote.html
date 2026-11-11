@@ -1022,7 +1022,8 @@ function renderScreenState(data, forceBottom) {
   const status = running ? state.status || "Working…" : state.mode || "";
   if ($("status-text").textContent !== status) $("status-text").textContent = status;
   renderWriting(running && showsConversation() ? state.writing : null);
-  renderCard(showsConversation() ? state.card : null, state.options || [], forceBottom);
+  renderCard(showsConversation() ? state.card : null, state.options || [],
+             data.columns, forceBottom);
   renderPending(showsConversation() ? state.input : null);
   $("stop").classList.toggle("shown", running);
 }
@@ -1038,11 +1039,11 @@ function renderWriting(text) {
   if (shown) box.append(messageElement({ role: "assistant", text: shown }));
 }
 
-function renderCard(text, options, forceBottom) {
+function renderCard(text, options, columns, forceBottom) {
   const card = $("card");
   const body = $("card-text");
   const atBottom = isAtBottom(body);
-  const content = text ? compactScreen(text.split("\n")) : "";
+  const content = text ? compactScreen(unwrapScreen(text.split("\n"), columns)) : "";
   if (body.textContent !== content) body.textContent = content;
   card.classList.toggle("open", !!text);
   renderCardKeys(options);
@@ -1087,6 +1088,31 @@ function safeGlyphs(text) {
 // Fits terminal lines to a phone without losing text: a full-width rule
 // would wrap to several lines, right-aligned text to a line of spaces,
 // and screens pad with blank lines.
+// Rejoins the lines the session wrapped at the terminal's COLUMNS, so the
+// phone wraps them at its own width instead of breaking them twice.  A
+// line was wrapped when the next line's first word would not have fit
+// after it; a line drawn with box characters is never joined.
+function unwrapScreen(lines, columns) {
+  if (!columns) return lines;
+  const width = (text) => [...text].length;
+  const drawn = /^[\u2500-\u259f]|[\u2500-\u259f]$/;
+  const result = [];
+  let last = null;
+  for (const line of lines) {
+    const head = last === null ? "" : last.trimEnd();
+    const rest = line.trim();
+    const word = rest.split(/\s/)[0];
+    if (head && rest && !drawn.test(head) && !drawn.test(rest)
+        && width(head) + 1 + width(word) > columns) {
+      result[result.length - 1] = result[result.length - 1].trimEnd() + " " + rest;
+    } else {
+      result.push(line);
+    }
+    last = line;
+  }
+  return result;
+}
+
 function compactScreen(lines) {
   return lines.map((line) => safeGlyphs(line).trimEnd()
                    .replace(/^[─▔╌]{20,}/, (rule) => rule.slice(0, 30))

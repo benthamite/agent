@@ -726,7 +726,9 @@ LINES is the screen as a vector and PANEL the result of
 (defun agent-claude-cli--screen-input (lines)
   "Return the text of input box LINES, those between its rules, or nil.
 The first line opens with the prompt mark and the rest are indented by
-two columns, which are left out, as is trailing space."
+two columns, which are left out, as is trailing space.  So is text with
+the `agent-faint' property: an empty box shows a placeholder or a
+suggested prompt faint, and Return would not submit it."
   (agent-claude-cli--non-empty-string
    (string-trim-right
     (string-join
@@ -735,9 +737,21 @@ two columns, which are left out, as is trailing space."
                 (replace-regexp-in-string
                  (concat "\\(?:" agent-claude-cli--screen-input-regexp
                          "\\|\\`  \\)")
-                 "" line)))
+                 "" (agent-claude-cli--without-faint line))))
              lines)
      "\n"))))
+
+(defun agent-claude-cli--without-faint (text)
+  "Return TEXT without its characters that have the `agent-faint' property."
+  (let ((position 0)
+        (parts nil))
+    (while (< position (length text))
+      (let ((next (next-single-property-change position 'agent-faint text
+                                               (length text))))
+        (unless (get-text-property position 'agent-faint text)
+          (push (substring-no-properties text position next) parts))
+        (setq position next)))
+    (apply #'concat (nreverse parts))))
 
 (defun agent-claude-cli--screen-plain (text)
   "Return TEXT without glyphs a phone's fonts may lack, and trimmed."

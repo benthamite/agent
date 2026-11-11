@@ -57,6 +57,7 @@
 (defvar agent-log-redact-enabled)
 (declare-function agent-log-redact-text "agent-log-redact" (text))
 (declare-function eat-term-send-string "eat" (terminal string))
+(declare-function eat-term-size "eat" (terminal))
 
 ;;;; User options
 
@@ -520,7 +521,8 @@ reloads instead of misreading the newer API's answers."
 (defun agent-remote--output (request)
   "Return the session summary and recent output named by REQUEST.
 `screen' is what the output shows that the transcript cannot, for a
-backend that can tell, and `terminal' whether the session takes keys.
+backend that can tell, `terminal' whether the session takes keys, and
+`columns' the terminal's width, at which the screen's lines wrap.
 When REQUEST has `after', `history' is what the session's transcript
 gained since that byte offset; the phone page polls this, so polling
 costs one file status check while nothing is new."
@@ -528,10 +530,14 @@ costs one file status check while nothing is new."
                   (agent-remote--query-param request "id")))
          (after (agent-remote--offset-param request "after"))
          (backend (agent-backend (agent--detect-backend buffer)))
-         (output (agent-remote--buffer-tail buffer)))
+         (output (agent-remote--buffer-tail buffer))
+         (terminal (agent-remote--terminal-p buffer)))
     (append (agent-remote--session-summary buffer)
-            (list :output output
-                  :terminal (if (agent-remote--terminal-p buffer) t :false))
+            (list :output (substring-no-properties output)
+                  :terminal (if terminal t :false)
+                  :columns (and terminal
+                                (with-current-buffer buffer
+                                  (car (eat-term-size eat-terminal)))))
             (agent-remote--output-screen backend output)
             (and after (agent-remote--output-history backend buffer after)))))
 
@@ -568,14 +574,30 @@ fields intact, and the next poll asks again from the same offset."
 (defun agent-remote--buffer-tail (buffer)
   "Return the last `agent-remote-output-lines' lines of BUFFER as text.
 Trailing blank lines, which terminal buffers pad their screens with,
-are dropped."
+are dropped.  The text has no properties but `agent-faint', which marks
+what the terminal draws faint: a placeholder or a suggestion in an input
+box is drawn so, and is not text the session holds."
   (with-current-buffer buffer
     (save-excursion
       (goto-char (point-max))
       (skip-chars-backward " \t\n")
-      (let ((end (point)))
-        (forward-line (- 1 agent-remote-output-lines))
-        (buffer-substring-no-properties (point) end)))))
+      (let* ((end (point))
+             (start (progn (forward-line (- 1 agent-remote-output-lines))
+                           (point)))
+             (text (buffer-substring-no-properties start end))
+             (position start))
+        (while (< position end)
+          (let ((next (next-single-property-change position 'face nil end)))
+            (when (agent-remote--faint-face-p (get-text-property position 'face))
+              (put-text-property (- position start) (- next start)
+                                 'agent-faint t text))
+            (setq position next)))
+        text))))
+
+(defun agent-remote--faint-face-p (face)
+  "Return non-nil when FACE, a terminal's face property, draws faint."
+  (and (consp face)
+       (memq 'eat-term-faint (ensure-list (plist-get face :inherit)))))
 
 (defun agent-remote--history (request)
   "Return a bounded stretch of the past conversation of REQUEST's session.

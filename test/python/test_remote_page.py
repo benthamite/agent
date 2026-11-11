@@ -221,6 +221,24 @@ class RemotePageTest(unittest.TestCase):
         self.assertTrue(visible)
         self.assertTrue(self.at_bottom())
 
+    def test_card_rejoins_lines_the_terminal_wrapped(self):
+        card = ("\u2500" * 40 + "\n"
+                "\u2726 Heads up \u00b7 Rejecting it drops the outreach that was\n"
+                "  promised to Max.\n"
+                "  1: Learn more   0: Dismiss")
+        data = output("waiting", {"card": card, "options": ["1", "0"]})
+        data["columns"] = 60
+        self.poll(data)
+        self.assertEqual(self.text("#card-text"),
+                         "\u2500" * 30 + "\n"
+                         "\u2726 Heads up \u00b7 Rejecting it drops the outreach that was"
+                         " promised to Max.\n"
+                         "  1: Learn more   0: Dismiss")
+
+    def test_card_keeps_its_lines_without_a_width(self):
+        self.poll(output("waiting", {"card": "a full line\n  and the next"}))
+        self.assertEqual(self.text("#card-text"), "a full line\n  and the next")
+
     def test_card_goes_away(self):
         self.poll(output("waiting", {"card": "A dialog"}))
         self.poll(output("waiting", {}))
@@ -262,7 +280,7 @@ class RemotePageTest(unittest.TestCase):
         self.poll(output("waiting", {"card": "A dialog", "options": ["1", "2", "3"]}))
         self.assertTrue(before.evaluate("b => b.isConnected"))
         self.poll(output("waiting", {"card": "A notice", "options": ["1", "0"]}))
-        self.assertEqual(self.labels("#card"), ["1", "0", "↑", "↓", "Enter", "Esc"])
+        self.assertEqual(self.labels("#card"), ["0", "1", "↑", "↓", "Enter", "Esc"])
 
     def test_more_keys_are_always_there_and_shift_nothing(self):
         self.scroll_to(1000)
