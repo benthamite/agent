@@ -59,6 +59,9 @@ class RemotePageTest(unittest.TestCase):
         self.sessions = [SESSION]
         self.sent_to = []
         self.send_error = None
+        self.bookmarks = [{"path": "~/emacs/sources/", "name": "sources", "removable": False}]
+        self.bookmarked = []
+        self.browsed = []
         context = self.browser.new_context(
             viewport={"width": 390, "height": 780}, has_touch=True, is_mobile=True)
         self.addCleanup(context.close)
@@ -85,6 +88,20 @@ class RemotePageTest(unittest.TestCase):
             if "after=" not in url:
                 data = {k: v for k, v in data.items() if k != "history"}
             route.fulfill(json=data)
+        elif "/api/backends" in url:
+            route.fulfill(json={"directory": "~/repos/", "bookmarks": self.bookmarks,
+                                "choices": [{"name": "claude", "label": "Claude",
+                                             "accounts": []}]})
+        elif "/api/directories" in url:
+            path = url.split("path=")[1].replace("%2F", "/").replace("%7E", "~")
+            self.browsed.append(path)
+            route.fulfill(json={"path": path, "parent": "~/",
+                                "folders": [{"name": "agent", "modified": 0}]})
+        elif "/api/bookmark" in url:
+            body = json.loads(route.request.post_data)
+            self.bookmarked.append(body)
+            mine = {"path": body["path"], "name": "agent", "removable": True}
+            route.fulfill(json={"bookmarks": self.bookmarks + ([mine] if body["bookmarked"] else [])})
         elif "/api/key" in url:
             self.keys.append(json.loads(route.request.post_data)["key"])
             route.fulfill(json={"ok": True})
@@ -238,6 +255,34 @@ class RemotePageTest(unittest.TestCase):
     def test_card_keeps_its_lines_without_a_width(self):
         self.poll(output("waiting", {"card": "a full line\n  and the next"}))
         self.assertEqual(self.text("#card-text"), "a full line\n  and the next")
+
+    def long_press(self, selector):
+        box = self.page.locator(selector).first.bounding_box()
+        self.page.mouse.move(box["x"] + 10, box["y"] + 10)
+        self.page.mouse.down()
+        self.page.wait_for_timeout(600)
+        self.page.mouse.up()
+        self.page.wait_for_timeout(50)
+
+    def test_new_sheet_bookmarks(self):
+        self.page.click("#new")
+        self.page.wait_for_selector(".folder")
+        self.assertEqual(self.labels("#bookmarks"), ["★ sources"])
+        self.long_press(".folder")
+        self.assertEqual(self.browsed, ["~/repos/"])
+        self.assertTrue(self.visible("#bookmark-ask"))
+        self.assertIn("~/repos/agent/", self.text("#bookmark-ask-text"))
+        self.page.click("#bookmark-ask-go")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(self.bookmarked, [{"path": "~/repos/agent/", "bookmarked": True}])
+        self.assertEqual(self.labels("#bookmarks"), ["★ sources", "★ agent"])
+        self.assertFalse(self.visible("#bookmark-ask"))
+        self.long_press("#bookmarks button")
+        self.assertFalse(self.visible("#bookmark-ask"))
+        self.assertIn("remove it there", self.text("#new-note"))
+        self.page.click("#bookmarks button")
+        self.page.wait_for_timeout(50)
+        self.assertEqual(self.browsed[-1], "~/emacs/sources/")
 
     def test_card_goes_away(self):
         self.poll(output("waiting", {"card": "A dialog"}))

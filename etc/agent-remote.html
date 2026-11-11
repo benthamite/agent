@@ -223,6 +223,12 @@
   #new-path { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
   #folder-bar { display: flex; flex-wrap: wrap; gap: 6px; }
   #folder-bar button:disabled { opacity: .45; }
+  #bookmarks { display: flex; flex-wrap: wrap; gap: 6px; }
+  #bookmarks:empty { display: none; }
+  #bookmarks button, .folder { -webkit-touch-callout: none; user-select: none; }
+  #bookmark-ask { display: none; align-items: center; gap: 8px; font-size: 13px; }
+  #bookmark-ask.shown { display: flex; }
+  #bookmark-ask-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   #new-note:empty { display: none; }
   #folders { flex: 1; min-height: 0; overflow-y: auto; display: flex;
     flex-direction: column; gap: 2px; }
@@ -333,6 +339,12 @@
       <button class="toggle" id="folder-hidden">Show hidden</button>
       <button class="toggle" id="folder-sort">Sort: name</button>
     </div>
+    <div id="bookmarks"></div>
+    <div id="bookmark-ask">
+      <span id="bookmark-ask-text"></span>
+      <button class="toggle" id="bookmark-ask-go"></button>
+      <button class="toggle" id="bookmark-ask-cancel">Cancel</button>
+    </div>
     <p class="note" id="new-note"></p>
     <div id="folders"></div>
     <div id="accounts"></div>
@@ -416,6 +428,9 @@ let past = null;
 let browsing = null;
 let browseRequest = 0;
 let showHidden = false;
+// The bookmarked folders, and the change to them a long press offers.
+let bookmarks = [];
+let bookmarkAsk = null;
 // How the new-session sheet orders folders, "name" or "recent", kept
 // across visits on this phone.
 const FOLDER_SORT_KEY = "agent-remote-folder-sort";
@@ -1800,6 +1815,7 @@ function followSession(id) {
 
 async function openNew() {
   browsing = null;
+  askBookmark(null);
   $("backends").replaceChildren();
   $("accounts").replaceChildren();
   renderFolders();
@@ -1818,6 +1834,8 @@ async function openNew() {
     }
     if (!data.choices.some((c) => c.accounts.length > 1))
       $("accounts").replaceChildren();
+    bookmarks = data.bookmarks || [];
+    renderBookmarks();
     await browse(data.directory);
   } catch (e) {
     $("new-note").textContent = "Error: " + e.message;
@@ -1863,6 +1881,7 @@ async function browse(path) {
     if (request !== browseRequest) return;
     browsing = data;
     $("new-note").textContent = "";
+    askBookmark(null);
     renderFolders();
     $("folders").scrollTop = 0;
   } catch (e) {
@@ -1909,7 +1928,12 @@ function renderFolders() {
     const b = document.createElement("button");
     b.className = "folder";
     b.textContent = f.name;
-    b.addEventListener("click", () => browse(browsing.path + f.name + "/"));
+    const path = browsing.path + f.name + "/";
+    onLongPress(b, () => {
+      const bookmark = bookmarks.find((m) => m.path === path);
+      askBookmark(path, !bookmark, !bookmark || bookmark.removable);
+    });
+    b.addEventListener("click", () => browse(path));
     return b;
   }));
   if (browsing && !shown.length) {
@@ -1918,6 +1942,73 @@ function renderFolders() {
     empty.textContent = "No folders here.";
     $("folders").append(empty);
   }
+}
+
+// A tap on a bookmark opens its folder; a long press offers to remove it.
+function renderBookmarks() {
+  $("bookmarks").replaceChildren(...bookmarks.map((m) => {
+    const b = document.createElement("button");
+    b.className = "toggle";
+    b.textContent = "★ " + m.name;
+    b.title = m.path;
+    onLongPress(b, () => askBookmark(m.path, false, m.removable));
+    b.addEventListener("click", () => browse(m.path));
+    return b;
+  }));
+}
+
+// Offers to add PATH to the bookmarks, or with ADD false to remove it,
+// above the folders.  A bookmark set in Emacs is removed there.  A null
+// PATH takes the offer away.
+function askBookmark(path, add, removable) {
+  bookmarkAsk = path && removable ? { path, add } : null;
+  if (path && !removable)
+    $("new-note").textContent = path + " is bookmarked in Emacs's configuration; remove it there.";
+  if (bookmarkAsk) {
+    $("bookmark-ask-text").textContent = (add ? "Bookmark " : "Remove the bookmark of ") + path + "?";
+    $("bookmark-ask-go").textContent = add ? "Bookmark" : "Remove";
+  }
+  $("bookmark-ask").classList.toggle("shown", !!bookmarkAsk);
+}
+
+async function doBookmark() {
+  const ask = bookmarkAsk;
+  if (!ask) return;
+  askBookmark(null);
+  try {
+    const data = await api("/api/bookmark", { path: ask.path, bookmarked: ask.add });
+    bookmarks = data.bookmarks;
+    renderBookmarks();
+  } catch (e) {
+    $("new-note").textContent = "Error: " + e.message;
+  }
+}
+
+// Calls HANDLER when EL is held still for LONG_PRESS_MS, and then keeps
+// the tap that ends the press from also counting as a click.  Register
+// it before EL's click listener.
+function onLongPress(el, handler) {
+  let timer = null;
+  let start = null;
+  let fired = false;
+  const cancel = () => { clearTimeout(timer); timer = null; };
+  el.addEventListener("pointerdown", (e) => {
+    cancel();
+    fired = false;
+    start = [e.clientX, e.clientY];
+    timer = setTimeout(() => { timer = null; fired = true; handler(); }, LONG_PRESS_MS);
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (timer && Math.hypot(e.clientX - start[0], e.clientY - start[1]) > 10) cancel();
+  });
+  for (const type of ["pointerup", "pointercancel", "pointerleave"])
+    el.addEventListener(type, cancel);
+  el.addEventListener("click", (e) => {
+    if (!fired) return;
+    fired = false;
+    e.stopImmediatePropagation();
+  });
+  el.addEventListener("contextmenu", (e) => e.preventDefault());
 }
 
 // The account a backend's new sessions start under, shown under its
@@ -2080,6 +2171,8 @@ renderSortControls();
 $("folder-up").addEventListener("click", () => browse(browsing.parent));
 $("folder-home").addEventListener("click", () => browse("~/"));
 $("folder-sort").addEventListener("click", toggleFolderSort);
+$("bookmark-ask-go").addEventListener("click", doBookmark);
+$("bookmark-ask-cancel").addEventListener("click", () => askBookmark(null));
 $("folder-hidden").addEventListener("click", () => {
   showHidden = !showHidden;
   renderFolders();

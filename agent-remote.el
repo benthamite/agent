@@ -111,6 +111,20 @@ Opened from a session, the sheet starts in that session's folder."
   :type 'directory
   :group 'agent-remote)
 
+(defcustom agent-remote-folder-bookmarks nil
+  "Folders the new-session sheet offers as bookmarks, besides its own.
+Each is a directory name.  Folders bookmarked from the phone, by a long
+press on a folder, are kept in `agent-remote-bookmarks-file' and follow
+these; the phone can remove those but not these."
+  :type '(repeat directory)
+  :group 'agent-remote)
+
+(defcustom agent-remote-bookmarks-file
+  (locate-user-emacs-file "agent-remote-bookmarks.eld")
+  "File keeping the folders bookmarked from the phone, as a list of names."
+  :type 'file
+  :group 'agent-remote)
+
 (defcustom agent-remote-history-bytes (* 4 1024 1024)
   "Most bytes of a session's transcript that one history request reads.
 A request runs on Emacs's main thread, at roughly 12 ms per MiB, so
@@ -450,6 +464,8 @@ must call it exactly once, without signaling."
           (agent-remote--json (agent-remote--exit request)))
          ((equal path "/api/snooze")
           (agent-remote--json (agent-remote--snooze request)))
+         ((equal path "/api/bookmark")
+          (agent-remote--json (agent-remote--bookmark request)))
          (t (agent-remote--error "404 Not Found" "Not found"))))
     (user-error (agent-remote--error "400 Bad Request" (cadr err)))
     (error (agent-remote--error "500 Internal Server Error"
@@ -804,7 +820,8 @@ REQUEST's `id', when given, names the session the sheet was opened
 from: the browser then starts in its directory and its backend comes
 first.  Without one the browser starts in
 `agent-remote-new-session-directory'.  Each backend lists the accounts
-and pools a session can start under, in `agent-account-select' order."
+and pools a session can start under, in `agent-account-select' order.
+`bookmarks' are the folders `agent-remote--bookmarks' returns."
   (let* ((id (agent-remote--query-param request "id"))
          (buffer (and id (agent-remote--session-buffer id)))
          (own (and buffer (agent--detect-backend buffer)))
@@ -812,6 +829,7 @@ and pools a session can start under, in `agent-account-select' order."
     (list :directory (if buffer
                          (agent-session-directory (agent-session buffer))
                        agent-remote-new-session-directory)
+          :bookmarks (agent-remote--bookmarks)
           :choices (vconcat
                     (mapcar (lambda (backend)
                               (list :name (symbol-name backend)
@@ -839,6 +857,64 @@ Emacs open a remote connection on its main thread."
           :parent (unless (equal parent directory)
                     (abbreviate-file-name parent))
           :folders (vconcat (agent-remote--subdirectories directory)))))
+
+(defun agent-remote--bookmarks ()
+  "Return the bookmarked folders as a vector of plists.
+Each has the folder's `:path', its `:name', and `:removable', true for
+a folder bookmarked from the phone.  Those set in
+`agent-remote-folder-bookmarks' come first, and a folder in both counts
+as set there."
+  (let ((seen nil)
+        (bookmarks nil))
+    (dolist (entry (append (mapcar (lambda (path) (cons path :false))
+                                   agent-remote-folder-bookmarks)
+                           (mapcar (lambda (path) (cons path t))
+                                   (agent-remote--phone-bookmarks))))
+      (let ((path (abbreviate-file-name
+                   (file-name-as-directory (expand-file-name (car entry) "~/")))))
+        (unless (member path seen)
+          (push path seen)
+          (push (list :path path
+                      :name (file-name-nondirectory (directory-file-name path))
+                      :removable (cdr entry))
+                bookmarks))))
+    (vconcat (nreverse bookmarks))))
+
+(defun agent-remote--phone-bookmarks ()
+  "Return the folders bookmarked from the phone, as directory names."
+  (agent--read-data-file agent-remote-bookmarks-file))
+
+(defun agent-remote--bookmark (request)
+  "Add or remove the bookmark REQUEST's JSON body names.
+The body's `path' is the folder and `bookmarked' true to add it or false
+to remove it, so that a repeated request cannot undo the first.  Only a
+folder bookmarked from the phone can be removed.  Return the bookmarks."
+  (let* ((args (agent-remote--json-body request))
+         (file-name-handler-alist nil)
+         (wanted (eq (alist-get 'bookmarked args) t))
+         (path (abbreviate-file-name
+                (if wanted
+                    (agent-remote--directory (alist-get 'path args))
+                  (file-name-as-directory
+                   (expand-file-name (or (alist-get 'path args) "") "~/")))))
+         (saved (agent-remote--phone-bookmarks))
+         (set-in-emacs (seq-find (lambda (folder)
+                                   (equal (file-name-as-directory
+                                           (expand-file-name folder "~/"))
+                                          (expand-file-name path)))
+                                 agent-remote-folder-bookmarks)))
+    (cond
+     (wanted
+      (unless (or set-in-emacs (member path saved))
+        (agent--write-data-file agent-remote-bookmarks-file
+                                (append saved (list path)))))
+     (set-in-emacs
+      (user-error "%s is bookmarked in Emacs's configuration; remove it there"
+                  path))
+     ((member path saved)
+      (agent--write-data-file agent-remote-bookmarks-file
+                              (remove path saved))))
+    (list :bookmarks (agent-remote--bookmarks))))
 
 (defun agent-remote--directory (path)
   "Return PATH as an absolute directory name, relative to home.

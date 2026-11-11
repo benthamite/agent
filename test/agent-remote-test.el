@@ -826,6 +826,54 @@ answer or dismiss it, and only the rest would reach the prompt."
           (should (equal (alist-get 'accounts (car (alist-get 'choices data)))
                          '("pool" "personal" "work"))))))))
 
+(defun agent-remote-test--bookmark (path bookmarked)
+  "Ask the server to set PATH's bookmark to BOOKMARKED; return the response."
+  (agent-remote-test--http
+   "POST" "/api/bookmark"
+   (json-serialize (list :path path :bookmarked bookmarked))
+   '("X-Agent-Remote: 1")))
+
+(ert-deftest agent-remote-test-bookmarks-from-emacs-and-the-phone ()
+  "Bookmarks set in Emacs come first; the phone adds and removes its own."
+  (let* ((root (file-name-as-directory
+                (file-truename (make-temp-file "agent-remote" t))))
+         (agent-remote-bookmarks-file (expand-file-name "bookmarks.eld" root))
+         (set (expand-file-name "set" root))
+         (added (abbreviate-file-name (expand-file-name "added/" root)))
+         (agent-remote-folder-bookmarks (list set))
+         (agent-backends (list (cons 'claude (agent-backend--create)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-account-selection-names) #'ignore))
+          (make-directory set)
+          (make-directory added)
+          (agent-remote-test--with-server
+            (let ((paths (lambda (response)
+                           (mapcar (lambda (m) (list (alist-get 'path m)
+                                                     (alist-get 'removable m)))
+                                   (alist-get 'bookmarks
+                                              (agent-remote-test--json response))))))
+              (should (equal (funcall paths (agent-remote-test--http "GET" "/api/backends"))
+                             (list (list (abbreviate-file-name (concat set "/")) :false))))
+              ;; Adding twice keeps one, and a folder set in Emacs is not added.
+              (agent-remote-test--bookmark added t)
+              (agent-remote-test--bookmark set t)
+              (should (equal (funcall paths (agent-remote-test--bookmark added t))
+                             (list (list (abbreviate-file-name (concat set "/")) :false)
+                                   (list added t))))
+              (should (equal (agent--read-data-file agent-remote-bookmarks-file)
+                             (list added)))
+              ;; Only the phone's own can be removed.
+              (should (= (agent-remote-test--status
+                          (agent-remote-test--bookmark set :false))
+                         400))
+              (should (equal (funcall paths (agent-remote-test--bookmark added :false))
+                             (list (list (abbreviate-file-name (concat set "/")) :false))))
+              (should (= (agent-remote-test--status
+                          (agent-remote-test--bookmark
+                           (expand-file-name "missing/" root) t))
+                         400)))))
+      (delete-directory root t))))
+
 (ert-deftest agent-remote-test-directories-lists-folders ()
   "The directories endpoint lists folders and links to them, and no files."
   (let ((root (file-name-as-directory
