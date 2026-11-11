@@ -915,7 +915,7 @@ so it must not be read as waiting."
   (let ((agent-alert-on-ready t)
         (agent-alert-style 'visual)
         visual)
-    (cl-letf (((symbol-function 'codex-default-notification) #'ignore)
+    (cl-letf (((symbol-function 'codex--pulse-modeline) #'ignore)
               ((symbol-function 'agent--alert-visual)
                (lambda (title message)
                  (setq visual (list title message)))))

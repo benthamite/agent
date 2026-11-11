@@ -3902,17 +3902,35 @@ Bind `buf', the session buffer; `sent', the commands submitted; and
 
 ;;;; Alerts
 
-(ert-deftest agent-test-alert-visual-preserves-echo-area-message ()
-  "Preserve the current echo-area message while the notifier runs."
+(ert-deftest agent-test-alert-visual-keeps-echo-area-quiet ()
+  "A style that also echoes the alert logs it to *Messages* only."
   (require 'alert)
-  (let ((agent-alert-style 'visual)
-        (clear-message-function (lambda () 'cleared))
+  (let ((agent-alert-on-ready t)
+        (agent-alert-style 'visual)
         result)
     (cl-letf (((symbol-function 'alert)
-               (lambda (&rest _)
-                 (setq result (funcall clear-message-function)))))
+               (lambda (&rest _) (setq result (list inhibit-message)))))
       (agent--alert-visual "Ready" "Waiting"))
-    (should (eq result 'dont-clear-message))))
+    (should (equal result '(t)))))
+
+(ert-deftest agent-test-notify-echoes-only-without-visual-alert ()
+  "Echo the notification only when no visual alert shows it."
+  (require 'alert)
+  (dolist (case '((t visual t) (t sound nil) (nil visual nil)))
+    (let ((agent-alert-on-ready (nth 0 case))
+          (agent-alert-style (nth 1 case))
+          (agent-alert-sound nil)
+          (pulsed nil)
+          messages)
+      (cl-letf (((symbol-function 'alert) #'ignore)
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args)
+                   (push (cons inhibit-message (apply #'format fmt args))
+                         messages))))
+        (agent-notify "Ready" "s: waiting" (lambda () (setq pulsed t))))
+      (should pulsed)
+      (should (equal messages
+                     (list (cons (nth 2 case) "Ready: s: waiting")))))))
 
 (ert-deftest agent-test-alert-sound-error-is-nonfatal ()
   "Report sound playback errors without signaling."

@@ -2324,11 +2324,16 @@ session."
 
 ;;;; Alert and notification system
 
-(defun agent-notify (title message)
+(defun agent-notify (title message &optional pulse)
   "Show notification with TITLE and MESSAGE.
-When `agent-alert-on-ready' is non-nil, dispatch to the
-configured alert style."
-  (message "%s: %s" title message)
+When `agent-alert-on-ready' is non-nil, dispatch to the configured
+alert style.  PULSE, when non-nil, is a function called with no
+arguments to pulse the mode line.  The text is echoed only when no
+visual alert carries it; otherwise it goes to the *Messages* buffer
+only, so one session event does not also fill the echo area."
+  (let ((inhibit-message (agent--alert-visual-p)))
+    (message "%s: %s" title message))
+  (when pulse (funcall pulse))
   (agent--alert-route title message))
 
 (defun agent--alert-route (title message)
@@ -2338,11 +2343,19 @@ configured alert style."
     (agent--alert-sound)))
 
 (defun agent--alert-visual (title message)
-  "Show a visual notification with TITLE and MESSAGE."
-  (when (memq agent-alert-style '(visual both))
-    (when (and (require 'alert nil t) (fboundp 'alert))
-      (let ((clear-message-function (lambda () 'dont-clear-message)))
-        (alert message :title title)))))
+  "Show a visual notification with TITLE and MESSAGE.
+Styles such as `osx-notifier' also echo the message; that copy goes to
+the *Messages* buffer only, since the notification already shows it."
+  (when (agent--alert-visual-p)
+    (let ((inhibit-message t))
+      (alert message :title title))))
+
+(defun agent--alert-visual-p ()
+  "Return non-nil when a ready alert is shown as a visual notification."
+  (and agent-alert-on-ready
+       (memq agent-alert-style '(visual both))
+       (require 'alert nil t)
+       (fboundp 'alert)))
 
 (defun agent--alert-sound ()
   "Play the configured alert sound."

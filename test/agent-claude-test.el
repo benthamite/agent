@@ -2972,12 +2972,14 @@ Claude Code still reports idle at the instant a prompt is sent."
                 ((symbol-function 'agent-claude--has-background-tasks-p)
                  (lambda (_) t))
                 ((symbol-function 'message)
-                 (lambda (&rest args) (push (apply #'format args) logged))))
+                 (lambda (&rest args)
+                   (push (cons inhibit-message (apply #'format args)) logged))))
         (agent-claude--log-status-disagreements "/cfg/")
         (agent-claude--log-status-disagreements "/cfg/")
         (should (= (length logged) 1))
+        (should (car (car logged)))
         (should (string-match-p "reports waiting, hooks alone say background-waiting"
-                                (car logged)))))))
+                                (cdr (car logged))))))))
 
 (ert-deftest agent-claude-test-query-finishes-outside-its-sentinel ()
   "The sentinel only schedules finishing, so finishing never nests in it.

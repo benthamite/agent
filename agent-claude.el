@@ -1238,8 +1238,7 @@ CACHE_READ_INPUT_TOKENS."
 TITLE is the notification title.  MESSAGE is the notification
 body.  When `agent-alert-on-ready' is non-nil, dispatch to
 the style configured in `agent-alert-style'."
-  (claude-code-default-notification title message)
-  (agent--alert-route title message))
+  (agent-notify title message #'claude-code--pulse-modeline))
 
 (defun agent-claude--payload-agent-id (json-str)
   "Return the `agent_id' in hook payload JSON-STR, or nil.
@@ -1781,7 +1780,8 @@ soon after this event."
   "Log each session of config DIR shown differently than hooks would show it.
 A message names the session, the state shown from Claude Code's report
 and the state the hooks alone would give.  It is logged once each time
-the difference changes."
+the difference changes, to the *Messages* buffer only: it is a
+diagnostic, not something the user acts on."
   (dolist (buffer (claude-code--find-all-claude-buffers))
     (when (equal (agent-claude--session-config-dir buffer) dir)
       (let* ((shown (agent-session-display-state buffer 'claude-code))
@@ -1793,8 +1793,9 @@ the difference changes."
           (with-current-buffer buffer
             (setq agent-claude--status-disagreement difference))
           (when difference
-            (message "agent: %s: Claude Code reports %s, hooks alone say %s"
-                     (buffer-name buffer) shown inferred)))))))
+            (let ((inhibit-message t))
+              (message "agent: %s: Claude Code reports %s, hooks alone say %s"
+                       (buffer-name buffer) shown inferred))))))))
 
 (defun agent-claude--inferred-display-state (buffer)
   "Return the display state the hooks alone would give session BUFFER."

@@ -771,8 +771,7 @@ non-nil when the file changed."
 TITLE is the notification title.  MESSAGE is the notification body.
 When `agent-alert-on-ready' is non-nil, dispatch to the style
 configured in `agent-alert-style'."
-  (codex-default-notification title message)
-  (agent--alert-route title message))
+  (agent-notify title message #'codex--pulse-modeline))
 
 (defun agent-codex--has-background-tasks-p (&optional buffer)
   "Return non-nil when Codex session BUFFER has active background work.
