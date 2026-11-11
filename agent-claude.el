@@ -1233,12 +1233,13 @@ CACHE_READ_INPUT_TOKENS."
 
 ;;;;; Alert
 
-(defun agent-claude-notify (title message)
+(defun agent-claude-notify (title message &optional blocking)
   "Notification function combining modeline pulse with optional alert.
 TITLE is the notification title.  MESSAGE is the notification
 body.  When `agent-alert-on-ready' is non-nil, dispatch to
-the style configured in `agent-alert-style'."
-  (agent-notify title message #'claude-code--pulse-modeline))
+the style configured in `agent-alert-style'.  BLOCKING is passed
+to `agent-notify'."
+  (agent-notify title message #'claude-code--pulse-modeline blocking))
 
 (defun agent-claude--payload-agent-id (json-str)
   "Return the `agent_id' in hook payload JSON-STR, or nil.
@@ -1304,12 +1305,14 @@ so that only that thread's next tool hook ends the wait."
            (agent-claude--block-on-dialog buf (plist-get message :json-data))
            (agent-claude-notify
             (format "%s needs approval" label)
-            (format "%s: permission request pending" name)))
+            (format "%s: permission request pending" name)
+            'blocking))
           ("elicitation_dialog"
            (agent-claude--block-on-dialog buf (plist-get message :json-data))
            (agent-claude-notify
             (format "%s needs input" label)
-            (format "%s: waiting for your input" name)))
+            (format "%s: waiting for your input" name)
+            'blocking))
           (_
            (agent-claude-notify
             label

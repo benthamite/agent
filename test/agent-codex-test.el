@@ -643,8 +643,8 @@ Writes a placeholder auth.json so the logged-out session guard in
         notified)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-codex-notify)
-                   (lambda (title message)
-                     (setq notified (list title message)))))
+                   (lambda (title message &optional blocking)
+                     (setq notified (list title message blocking)))))
           (with-current-buffer buf
             (setq-local agent--backend 'codex))
           (agent-codex--handle-notification
@@ -653,7 +653,8 @@ Writes a placeholder auth.json so the logged-out session guard in
                       'awaiting-input))
           (should (equal notified
                          '("Codex ready"
-                           "project: waiting for your response"))))
+                           "project: waiting for your response"
+                           nil))))
       (kill-buffer buf))))
 
 (ert-deftest agent-codex-test-permission-request-alerts-without-state-change ()
@@ -662,8 +663,8 @@ Writes a placeholder auth.json so the logged-out session guard in
         notified session-events)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-codex-notify)
-                   (lambda (title message)
-                     (setq notified (list title message))))
+                   (lambda (title message &optional blocking)
+                     (setq notified (list title message blocking))))
                   ((symbol-function 'agent-session-event)
                    (lambda (&rest args) (push args session-events))))
           (with-current-buffer buf
@@ -676,7 +677,8 @@ Writes a placeholder auth.json so the logged-out session guard in
                                     "\"tool_input\":{\"command\":\"touch /tmp/x\"}}")))
           (should (equal notified
                          '("Codex needs approval"
-                           "project: permission request pending")))
+                           "project: permission request pending"
+                           blocking)))
           (should-not session-events)
           (should (eq (buffer-local-value 'agent--session-state buf) 'unknown)))
       (kill-buffer buf))))
@@ -687,8 +689,8 @@ Writes a placeholder auth.json so the logged-out session guard in
         notified fallback)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-codex-notify)
-                   (lambda (title message)
-                     (setq notified (list title message))))
+                   (lambda (title message &optional blocking)
+                     (setq notified (list title message blocking))))
                   ((symbol-function 'agent-notify)
                    (lambda (&rest args) (setq fallback args))))
           (with-current-buffer buf
@@ -696,7 +698,8 @@ Writes a placeholder auth.json so the logged-out session guard in
           (agent--session-notify-ready buf)
           (should (equal notified
                          '("Codex ready"
-                           "project: waiting for your response")))
+                           "project: waiting for your response"
+                           nil)))
           (should-not fallback))
       (kill-buffer buf))))
 

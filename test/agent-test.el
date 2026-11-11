@@ -3932,6 +3932,20 @@ Bind `buf', the session buffer; `sent', the commands submitted; and
       (should (equal messages
                      (list (cons (nth 2 case) "Ready: s: waiting")))))))
 
+(ert-deftest agent-test-notify-always-echoes-blocking-request ()
+  "Echo a blocking request even when a visual alert shows it."
+  (require 'alert)
+  (let ((agent-alert-on-ready t)
+        (agent-alert-style 'visual)
+        messages)
+    (cl-letf (((symbol-function 'alert) #'ignore)
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (push (cons inhibit-message (apply #'format fmt args))
+                       messages))))
+      (agent-notify "Needs approval" "s: pending" nil 'blocking))
+    (should (equal messages '((nil . "Needs approval: s: pending"))))))
+
 (ert-deftest agent-test-alert-sound-error-is-nonfatal ()
   "Report sound playback errors without signaling."
   (let ((sound-file (make-temp-file "agent-test-sound" nil ".aiff"))

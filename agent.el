@@ -2324,14 +2324,17 @@ session."
 
 ;;;; Alert and notification system
 
-(defun agent-notify (title message &optional pulse)
+(defun agent-notify (title message &optional pulse blocking)
   "Show notification with TITLE and MESSAGE.
 When `agent-alert-on-ready' is non-nil, dispatch to the configured
 alert style.  PULSE, when non-nil, is a function called with no
-arguments to pulse the mode line.  The text is echoed only when no
-visual alert carries it; otherwise it goes to the *Messages* buffer
-only, so one session event does not also fill the echo area."
-  (let ((inhibit-message (agent--alert-visual-p)))
+arguments to pulse the mode line.  A ready notice is echoed only when
+no visual alert carries it; otherwise it goes to the *Messages* buffer
+only, so one session event does not also fill the echo area.  With
+BLOCKING non-nil, the session cannot continue until the user answers,
+such as an approval request, so the text is always echoed: a desktop
+notification can be hidden, for instance by Do Not Disturb."
+  (let ((inhibit-message (and (not blocking) (agent--alert-visual-p))))
     (message "%s: %s" title message))
   (when pulse (funcall pulse))
   (agent--alert-route title message))

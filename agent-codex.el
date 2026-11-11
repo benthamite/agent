@@ -766,12 +766,13 @@ non-nil when the file changed."
   "^• +Working[[:alnum:][:space:][:punct:]]*$"
   "Regexp matching Codex status lines for active response work.")
 
-(defun agent-codex-notify (title message)
+(defun agent-codex-notify (title message &optional blocking)
   "Notification function combining Codex pulse with optional alert.
 TITLE is the notification title.  MESSAGE is the notification body.
 When `agent-alert-on-ready' is non-nil, dispatch to the style
-configured in `agent-alert-style'."
-  (agent-notify title message #'codex--pulse-modeline))
+configured in `agent-alert-style'.  BLOCKING is passed to
+`agent-notify'."
+  (agent-notify title message #'codex--pulse-modeline blocking))
 
 (defun agent-codex--has-background-tasks-p (&optional buffer)
   "Return non-nil when Codex session BUFFER has active background work.
@@ -844,7 +845,8 @@ Every handled event also records the native session id reported by
             (format "%s needs approval"
                     (agent-backend-label (agent-backend 'codex)))
             (format "%s: permission request pending"
-                    (agent--buffer-session-name buf))))
+                    (agent--buffer-session-name buf))
+            'blocking))
           ("Notification"
            (agent-notify
             (agent-backend-label (agent-backend 'codex))
