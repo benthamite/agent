@@ -961,22 +961,24 @@ function isAtBottom(el) {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
 }
 
-// The padding an overlay adds lets what lies under it be scrolled into
-// view.  It is not part of the conversation's bottom.
+// The padding an overlay adds keeps the end of the conversation above
+// it: at the bottom, the last lines show just over a card, not under it.
 function isOutputAtBottom() {
-  const out = $("output");
-  return out.scrollHeight - past.overlay - out.scrollTop - out.clientHeight < 40;
+  return isAtBottom($("output"));
 }
 
 function scrollOutputToBottom() {
   const out = $("output");
-  out.scrollTop = out.scrollHeight - past.overlay - out.clientHeight;
+  out.scrollTop = out.scrollHeight;
 }
 
+// An overlay that opens or grows lifts a conversation followed to its end.
 function setOverlay(height) {
   if (height === past.overlay) return;
+  const follow = isOutputAtBottom();
   past.overlay = height;
   $("output").style.paddingBottom = height ? height + 18 + "px" : "";
+  if (follow) scrollOutputToBottom();
 }
 
 // A session has no transcript until its first prompt, and the first
