@@ -505,7 +505,8 @@ Polls carry no history for it."
                               (lambda (text)
                                 (should (equal text "screen"))
                                 (list :status "Forging…" :running t
-                                      :card "A dialog" :options '("1" "2")))))))
+                                      :card "A dialog" :options '("1" "2")
+                                      :input "Not sent"))))))
         (agent-remote-test--with-server
           (let ((state (alist-get 'screen
                                   (agent-remote-test--json
@@ -513,7 +514,8 @@ Polls carry no history for it."
             (should (equal (alist-get 'status state) "Forging…"))
             (should (eq (alist-get 'running state) t))
             (should (equal (alist-get 'card state) "A dialog"))
-            (should (equal (alist-get 'options state) '("1" "2"))))))
+            (should (equal (alist-get 'options state) '("1" "2")))
+            (should (equal (alist-get 'input state) "Not sent")))))
       (cl-letf (((symbol-function 'agent-backend)
                  (lambda (_) (agent-backend--create))))
         (agent-remote-test--with-server

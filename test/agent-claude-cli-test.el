@@ -735,6 +735,18 @@ CONTENT is written as UTF-8."
     (should-not (plist-get state :writing))
     (should (equal (plist-get state :mode) "manual mode on"))))
 
+;; The box opens with a no-break space; long text wraps indented.
+(ert-deftest agent-claude-cli-test-state-input-box-text ()
+  "Text in the input box, not yet submitted, is read without its marks."
+  (should (equal (plist-get (agent-claude-cli-test--state
+                             "✻ Done" 'rule "❯ Here is a note offered by a side   "
+                             "  agent: dates only" 'rule "  m")
+                            :input)
+                 "Here is a note offered by a side\nagent: dates only"))
+  (dolist (box '("❯ " "❯" "❯                 "))
+    (should-not (plist-get (agent-claude-cli-test--state "✻ Done" 'rule box 'rule "  m")
+                           :input))))
+
 (ert-deftest agent-claude-cli-test-state-mode-absent ()
   "A screen with nothing below the box has no mode."
   (should-not (plist-get (agent-claude-cli-test--state "✻ Done" 'rule "❯" 'rule)

@@ -135,6 +135,16 @@
   #more.open { display: flex; }
   #card-keys { display: flex; flex: 0 0 auto; gap: 2px; padding: 6px 8px 8px;
     overflow-x: auto; border-top: 1px solid var(--line); }
+  /* Text in the session's own input box: an option of a notice may put it
+     there, and the conversation shows it only once it is sent. */
+  #pending { display: none; flex: 0 0 auto; align-items: flex-start; gap: 8px;
+    padding: 8px 12px; background: var(--panel); border-top: 1px solid var(--line); }
+  #pending.shown { display: flex; }
+  #pending-body { flex: 1; min-width: 0; }
+  #pending-label { font-size: 13px; font-weight: 600; color: var(--waiting); }
+  #pending-text { margin: 2px 0 0; max-height: 30vh; overflow: auto; font-size: 14px;
+    white-space: pre-wrap; overflow-wrap: anywhere; }
+  #pending-send { flex: 0 0 auto; }
   #stop { display: none; flex: 0 0 auto; height: 32px; padding: 0 14px;
     background: var(--panel-2); border-radius: 10px; color: var(--error);
     font-size: 14px; font-weight: 600; }
@@ -279,6 +289,13 @@
       <div id="card-keys"></div>
     </div>
     <div id="more"></div>
+  </div>
+  <div id="pending">
+    <div id="pending-body">
+      <div id="pending-label">In the session's input box, not sent</div>
+      <div id="pending-text"></div>
+    </div>
+    <button class="send" id="pending-send">Send</button>
   </div>
   <div id="status">
     <span id="status-text"></span>
@@ -1006,6 +1023,7 @@ function renderScreenState(data, forceBottom) {
   if ($("status-text").textContent !== status) $("status-text").textContent = status;
   renderWriting(running && showsConversation() ? state.writing : null);
   renderCard(showsConversation() ? state.card : null, state.options || [], forceBottom);
+  renderPending(showsConversation() ? state.input : null);
   $("stop").classList.toggle("shown", running);
 }
 
@@ -1030,6 +1048,13 @@ function renderCard(text, options, forceBottom) {
   renderCardKeys(options);
   if (text && (forceBottom || atBottom)) body.scrollTop = body.scrollHeight;
   updateOverlay();
+}
+
+// The terminal shows the box's text; the conversation would not until sent.
+function renderPending(text) {
+  const shown = text || "";
+  if ($("pending-text").textContent !== shown) $("pending-text").textContent = shown;
+  $("pending").classList.toggle("shown", !!text);
 }
 
 // Rebuilt only when the options change, so a poll cannot swallow a tap.
@@ -1994,6 +2019,7 @@ for (const keys of MORE_KEYS) {
   $("more").appendChild(group);
 }
 $("stop").addEventListener("click", () => sendKey("esc"));
+$("pending-send").addEventListener("click", () => sendKey("enter"));
 $("more-toggle").addEventListener("click", toggleMore);
 $("send").addEventListener("click", sendText);
 $("text").addEventListener("input", () => {

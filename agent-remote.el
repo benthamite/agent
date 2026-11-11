@@ -546,7 +546,8 @@ shows the whole screen, so a failure here is safe to swallow."
                         :running (if (plist-get state :running) t :false)
                         :writing (plist-get state :writing)
                         :card (plist-get state :card)
-                        :options (vconcat (plist-get state :options))))))
+                        :options (vconcat (plist-get state :options))
+                        :input (plist-get state :input)))))
 
 (defun agent-remote--output-history (backend buffer after)
   "Return a plist with `:history' from byte offset AFTER, or nil.
