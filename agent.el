@@ -4438,8 +4438,9 @@ sessions of the last Emacs that died."
   "Resume the saved set of sessions CHOICE.
 Offer the session groups saved with `agent-save-session-group' and the
 sessions that were live when the previous Emacs closed, whether it quit,
-crashed, or went down with the machine.  Those are offered only in the
-Emacs that follows it, until they are resumed, so they do not pile up.
+crashed, was restarted, or went down with the machine.  Those are
+offered only in the Emacs that follows it, until they are resumed, so
+they do not pile up.
 CHOICE is the name of a group, or the symbol `previous'.  Each session
 is resumed with its backend, account, directory, instance, and session
 id; sessions already live in this Emacs are skipped.  A group is kept,
@@ -4642,22 +4643,33 @@ restoring."
                            (nreverse live)))))
 
 (defun agent--emacs-instance ()
-  "Return a plist identifying this Emacs process by `:pid' and `:start'."
+  "Return a plist identifying this Emacs by `:pid', `:start' and `:init'.
+`:init' is when this Emacs started up.  It tells this Emacs from one
+that `restart-emacs' replaced, which leaves the same process behind."
   (list :pid (emacs-pid)
-        :start (alist-get 'start (process-attributes (emacs-pid)))))
+        :start (alist-get 'start (process-attributes (emacs-pid)))
+        :init (float-time before-init-time)))
 
 (defun agent--same-emacs-instance-p (a b)
-  "Return non-nil when instance plists A and B name the same process."
+  "Return non-nil when instance plists A and B name the same Emacs.
+An instance recorded without `:init' matches on its process alone."
   (and (equal (plist-get a :pid) (plist-get b :pid))
-       (equal (plist-get a :start) (plist-get b :start))))
+       (equal (plist-get a :start) (plist-get b :start))
+       (or (null (plist-get a :init))
+           (null (plist-get b :init))
+           (equal (plist-get a :init) (plist-get b :init)))))
 
 (defun agent--emacs-instance-live-p (instance)
-  "Return non-nil when the Emacs process INSTANCE describes is running.
-Compare the process start time too, because a reboot reuses pids."
-  (when-let* ((start (plist-get instance :start))
-              (attributes (process-attributes (plist-get instance :pid)))
-              (actual (alist-get 'start attributes)))
-    (time-equal-p actual start)))
+  "Return non-nil when the Emacs INSTANCE describes is running.
+Compare the process start time too, because a reboot reuses pids.  An
+instance in this Emacs's process is live only if it is this Emacs, since
+`restart-emacs' keeps the process of the Emacs it replaces."
+  (if (eql (plist-get instance :pid) (emacs-pid))
+      (agent--same-emacs-instance-p instance (agent--emacs-instance))
+    (when-let* ((start (plist-get instance :start))
+                (attributes (process-attributes (plist-get instance :pid)))
+                (actual (alist-get 'start attributes)))
+      (time-equal-p actual start))))
 
 (defun agent--session-registry-entries ()
   "Return registry entries for this Emacs's resumable live sessions."

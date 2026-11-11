@@ -5936,6 +5936,36 @@ is itself a kind of `error' and nothing here should special-case it."
     (should-not (agent--emacs-instance-live-p
                  (list :pid (emacs-pid) :start '(0 1))))))
 
+(ert-deftest agent-test-session-registry-promotes-restarted-emacs ()
+  "The sessions of an Emacs that `restart-emacs' replaced become previous.
+The replaced Emacs leaves the same process behind, so only its start-up
+time tells it from the Emacs that replaced it."
+  (let* ((self (agent--emacs-instance))
+         (replaced (append (list :pid (plist-get self :pid)
+                                 :start (plist-get self :start)
+                                 :init (1- (plist-get self :init)))
+                           '(:saved 7.0 :sessions ((:id "before-restart")))))
+         (updated (agent--session-registry-update
+                   (list :instances (list replaced)) self nil 10.0)))
+    (should (equal (plist-get updated :previous)
+                   '(:saved 7.0 :sessions ((:id "before-restart")))))
+    (should (equal (plist-get updated :instances)
+                   (list (append self '(:saved 10.0 :sessions nil)))))))
+
+(ert-deftest agent-test-emacs-instance-live-p-rejects-replaced-emacs ()
+  "An earlier Emacs in this Emacs's process is not running."
+  (let ((self (agent--emacs-instance)))
+    (should-not (agent--emacs-instance-live-p
+                 (plist-put (copy-sequence self) :init
+                            (1- (plist-get self :init)))))))
+
+(ert-deftest agent-test-same-emacs-instance-p-without-init ()
+  "An instance recorded without a start-up time matches on its process."
+  (let ((self (agent--emacs-instance)))
+    (should (agent--same-emacs-instance-p
+             (list :pid (plist-get self :pid) :start (plist-get self :start))
+             self))))
+
 (ert-deftest agent-test-session-registry-entry-records-resume-state ()
   "Entries carry the identity and restart options of live sessions only."
   (let ((agent-backends nil))
