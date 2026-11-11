@@ -1033,12 +1033,15 @@ function renderCard(text, options, forceBottom) {
 }
 
 // Rebuilt only when the options change, so a poll cannot swallow a tap.
+// 0 comes first, so each digit keeps its place however many there are.
 function renderCardKeys(options) {
   const wanted = options.join();
   if (past.cardOptions === wanted) return;
   past.cardOptions = wanted;
+  const digits = options.filter((d) => d === "0")
+        .concat(options.filter((d) => d !== "0"));
   $("card-keys").replaceChildren(
-    ...options.map((digit) => keyButton(digit, digit)),
+    ...digits.map((digit) => keyButton(digit, digit)),
     ...CARD_KEYS.map(([key, label]) => keyButton(key, label)));
 }
 
