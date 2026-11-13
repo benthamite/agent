@@ -5026,6 +5026,33 @@ Such a key breaks the whole menu when it opens, not at definition."
                     buffer))
         (should (eq shown buffer))))))
 
+(ert-deftest agent-test-resume-context-shows-a-live-session-in-place ()
+  "A live session takes the selected window, or the window showing it.
+Popping it to another window split the frame, as the session switcher
+never does."
+  (save-window-excursion
+    (delete-other-windows)
+    (let ((origin (generate-new-buffer " *agent-test-origin*"))
+          (session (generate-new-buffer " *agent-test-session*"))
+          (context '(:resume-id "abc" :backend claude-code :directory "/w/")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'agent--buffer-for-session-id)
+                     (lambda (_id) session)))
+            (switch-to-buffer origin)
+            (agent--resume-context-session context)
+            (should (one-window-p))
+            (should (eq (window-buffer (selected-window)) session))
+            (switch-to-buffer origin)
+            (let ((origin-window (selected-window))
+                  (other (split-window)))
+              (set-window-buffer other session)
+              (agent--resume-context-session context)
+              (should (eq (selected-window) other))
+              (should (eq (window-buffer origin-window) origin))
+              (should (= (length (window-list)) 2))))
+        (kill-buffer origin)
+        (kill-buffer session)))))
+
 (ert-deftest agent-test-resume-context-resumes-a-closed-session ()
   "A resume context with no live buffer resumes the session in its directory."
   (with-temp-buffer

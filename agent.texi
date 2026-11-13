@@ -663,7 +663,8 @@ message is typically an alert reply posted for a background session that has
 stopped to ask for a decision. It is a thing at point of its own@comma{} checked before
 an ordinary Slack message@comma{} so @code{agent-act-on-thing-at-point} asks for no backend
 and no project: the command switches to that session's buffer when one is live@comma{}
-and otherwise resumes the session in a new buffer in the directory its
+in the window already showing it or else in the selected window@comma{} never in a new
+split@comma{} and otherwise resumes the session in a new buffer in the directory its
 transcript records@comma{} so the conversation continues where it stopped. The prefix
 argument makes no difference here. A resume command whose transcript cannot be
 found signals an error rather than starting a new session.

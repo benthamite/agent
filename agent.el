@@ -4015,6 +4015,8 @@ TARGET is the cons of backend and account resolved there."
 CONTEXT carries `:resume-id', `:backend' and `:directory'.  The instance
 name is derived from the session id, as for a resumed branch, so a
 directory that already has a session never stops to ask for one.
+A live session is shown in the window already showing it, else in the
+selected window, as the session switcher does, never in a new split.
 Return the session buffer."
   (let* ((session-id (plist-get context :resume-id))
          (buffer (or (agent--buffer-for-session-id session-id)
@@ -4027,7 +4029,8 @@ Return the session buffer."
                        :instance (format "resume-%s"
                                          (substring session-id 0 8)))
                       :resume-id session-id))))
-    (pop-to-buffer buffer)
+    (pop-to-buffer buffer '((display-buffer-reuse-window
+                             display-buffer-same-window)))
     buffer))
 
 (defun agent--deliver-to-new-session (context origin target)
