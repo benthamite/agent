@@ -635,6 +635,24 @@ Writes a placeholder auth.json so the logged-out session guard in
                    (list (list "$session-learning-capture"
                                expected-buffer))))))
 
+(ert-deftest agent-codex-test-sending-never-displays-session ()
+  "Insert text and send Return without showing a hidden session.
+Sends also come from timers and other programs, where showing the
+session would split the window the user is working in."
+  (let ((buf (generate-new-buffer " *agent-codex-test-hidden*"))
+        (codex-terminal-backend 'eat))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (cl-letf (((symbol-function 'codex--term-send-string) #'ignore)
+                    ((symbol-function 'codex--term-send-action) #'ignore)
+                    ((symbol-function 'sit-for) #'ignore))
+            (agent-codex-send-command "text" buf)
+            (agent-codex-send-return buf)
+            (should (one-window-p))
+            (should-not (get-buffer-window buf t))))
+      (kill-buffer buf))))
+
 ;;;; Session event translation
 
 (ert-deftest agent-codex-test-stop-marks-awaiting-input-and-alerts ()

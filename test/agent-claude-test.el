@@ -65,6 +65,27 @@
                          (list (list buf "/session-retro")
                                (list buf (kbd "RET"))))))))))
 
+(ert-deftest agent-claude-test-sending-never-displays-session ()
+  "Insert, submit and send Return without showing a hidden session.
+Sends also come from timers and other programs, where showing the
+session would split the window the user is working in."
+  (let ((buf (generate-new-buffer " *agent-claude-test-hidden*"))
+        (claude-code-terminal-backend 'eat))
+    (unwind-protect
+        (save-window-excursion
+          (delete-other-windows)
+          (cl-letf (((symbol-function 'claude-code--buffer-p)
+                     (lambda (candidate) (eq candidate buf)))
+                    ((symbol-function 'claude-code--term-send-string) #'ignore)
+                    ((symbol-function 'sleep-for) #'ignore)
+                    ((symbol-function 'run-at-time) #'ignore))
+            (agent-claude-send-command "text" buf)
+            (agent-claude-send-return buf)
+            (agent-claude-submit-command "/exit" buf)
+            (should (one-window-p))
+            (should-not (get-buffer-window buf t))))
+      (kill-buffer buf))))
+
 ;;;; Session event translation
 
 (ert-deftest agent-claude-test-handle-stop-marks-awaiting-input ()

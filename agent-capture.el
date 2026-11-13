@@ -102,7 +102,8 @@ already been inserted."
       (user-error "No captured prompts for this session"))
     (let ((prompt (agent-capture--select-prompt prompts)))
       (agent-send-string (plist-get prompt :text) session-buffer)
-      (agent-capture--delete-prompt prompt))))
+      (agent-capture--delete-prompt prompt)
+      (display-buffer session-buffer))))
 
 ;;;###autoload
 (defun agent-insert-all-captured-prompts (&optional buffer)
@@ -131,7 +132,8 @@ file's session, and switch to it."
       (save-buffer))
     (agent-send-string (agent-capture--combine-prompts prompts) session-buffer)
     (mapc #'agent-capture--delete-prompt prompts)
-    (when selected
+    (if (not selected)
+        (display-buffer session-buffer)
       (deactivate-mark)
       (pop-to-buffer session-buffer))
     (message "Inserted %d captured prompt%s"

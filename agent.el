@@ -2280,6 +2280,7 @@ current buffer is not a session or with a prefix argument."
       (with-current-buffer visiting
         (when (buffer-modified-p) (save-buffer))))
     (agent-submit (format agent-review-process-prompt file) buf)
+    (display-buffer buf)
     (message "Asked %s to process %s" (agent-display-name buf)
              (abbreviate-file-name file))))
 
@@ -2701,14 +2702,16 @@ ORIG-FN is the original escape command."
   "Insert STRING into session BUFFER's prompt without submitting it.
 BUFFER defaults to the current session buffer, prompting for one
 when the current buffer is not a session.  Emits a `submit'
-session event before dispatching so stale waiting state clears."
+session event before dispatching so stale waiting state clears.
+Never displays BUFFER, as `agent--dispatch-send' explains."
   (agent--dispatch-send :send-string (list string) buffer))
 
 (defun agent-submit (string &optional buffer)
   "Insert STRING into session BUFFER's prompt and submit it.
 BUFFER defaults to the current session buffer.  Prefer the
 backend's atomic `:submit'; fall back to `:send-string' followed
-by `:send-return' when the backend registers none."
+by `:send-return' when the backend registers none.  Never displays
+BUFFER, as `agent--dispatch-send' explains."
   (let* ((buf (agent--resolve-session-buffer buffer))
          (backend (agent--detect-backend buf))
          (struct (and backend (agent-backend backend))))
@@ -2717,19 +2720,25 @@ by `:send-return' when the backend registers none."
       (agent--dispatch-send :send-string (list string) buf)
       (when-let* ((send-return-fn (and struct
                                        (agent-backend-send-return struct))))
-        (funcall send-return-fn buf)))))
+        (agent--call-without-display send-return-fn buf)))))
 
 (defun agent-send-return (&optional buffer)
   "Submit the pending prompt in session BUFFER.
 BUFFER defaults to the current session buffer.  Emits a `submit'
-session event before dispatching to the backend's `:send-return'."
+session event before dispatching to the backend's `:send-return'.
+Never displays BUFFER, as `agent--dispatch-send' explains."
   (agent--dispatch-send :send-return nil buffer))
 
 (defun agent--dispatch-send (slot args buffer)
   "Emit a `submit' event for BUFFER and call its backend SLOT with ARGS.
 SLOT is one of `:send-string', `:submit', and `:send-return'.
 BUFFER is resolved with `agent--resolve-session-buffer' and
-appended to ARGS."
+appended to ARGS.
+
+The slot never displays BUFFER: sends also come from timers, the phone
+and other programs, and showing the session then would split whatever
+window the user is working in.  A command that wants the session shown
+displays it itself."
   (let* ((buf (agent--resolve-session-buffer buffer))
          (backend (agent--detect-backend buf))
          (fn (when-let* ((struct (and backend (agent-backend backend))))
@@ -2740,7 +2749,13 @@ appended to ARGS."
     (unless fn
       (user-error "Backend `%s' does not support `%s'" backend slot))
     (agent-session-event buf 'submit)
-    (apply fn (append args (list buf)))))
+    (apply #'agent--call-without-display fn (append args (list buf)))))
+
+(defun agent--call-without-display (function &rest args)
+  "Call FUNCTION with ARGS, keeping any buffer it displays out of windows."
+  (let ((display-buffer-overriding-action
+         '(display-buffer-no-window (allow-no-window . t))))
+    (apply function args)))
 
 (defun agent--resolve-session-buffer (&optional buffer)
   "Return an AI session buffer from BUFFER, current context, or prompt."
@@ -3164,9 +3179,7 @@ is submitted."
               (setq command
                     (concat command " --receipt-file "
                             (shell-quote-argument receipt-file)))))
-          (let ((display-buffer-overriding-action
-                 '(display-buffer-no-window (allow-no-window . t))))
-            (agent-submit command buffer))
+          (agent-submit command buffer)
           (message "Started %s; this session will close when the before-exit skills finish"
                    command)
           (setq sent t))))

@@ -98,11 +98,11 @@
       (delete-file file))))
 
 (ert-deftest agent-capture-test-insert-captured-prompt-sends-selected-text ()
-  "Insert the selected persisted prompt into the session."
+  "Insert the selected persisted prompt into the session, and show it."
   (let ((agent-backends nil)
         (agent-prompt-capture-directory
          (make-temp-file "agent-prompts" t))
-        sent)
+        sent displayed)
     (unwind-protect
         (with-temp-buffer
           (rename-buffer "*one:~/repo/project/:default*" t)
@@ -121,9 +121,12 @@
                 (insert "* Prompt B\n\nBeta\n")))
             (cl-letf (((symbol-function 'completing-read)
                        (lambda (_prompt candidates &rest _)
-                         (cadr candidates))))
+                         (cadr candidates)))
+                      ((symbol-function 'display-buffer)
+                       (lambda (buffer &rest _) (push buffer displayed))))
               (agent-insert-captured-prompt buf)
               (should (equal sent (list "Beta" buf)))
+              (should (equal displayed (list buf)))
               (let ((pending (agent-capture--prompts 'one buf)))
                 (should (= (length pending) 1))
                 (should (equal (plist-get (car pending) :text) "Alpha")))
@@ -167,12 +170,16 @@ PROMPTS is a list of (TITLE . TEXT).  `sent' collects what is sent."
        (delete-directory agent-prompt-capture-directory t))))
 
 (ert-deftest agent-capture-test-insert-all-sends-numbered-list ()
-  "Insert every pending prompt as one numbered message and clear them."
+  "Insert every pending prompt as one numbered message, clear them, show it."
   (agent-capture-test--with-session '(("Prompt A" . "Alpha\nsecond line")
                                       ("Prompt B" . "Beta"))
-    (agent-insert-all-captured-prompts buf)
-    (should (equal sent (list "1. Alpha\n   second line\n\n2. Beta" buf)))
-    (should-not (agent-capture--prompts 'one buf t))))
+    (let (displayed)
+      (cl-letf (((symbol-function 'display-buffer)
+                 (lambda (buffer &rest _) (push buffer displayed))))
+        (agent-insert-all-captured-prompts buf))
+      (should (equal sent (list "1. Alpha\n   second line\n\n2. Beta" buf)))
+      (should (equal displayed (list buf)))
+      (should-not (agent-capture--prompts 'one buf t)))))
 
 (ert-deftest agent-capture-test-insert-all-single-prompt-is-plain ()
   "A single pending prompt is inserted without a number."

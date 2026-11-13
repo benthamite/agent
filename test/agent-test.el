@@ -593,21 +593,24 @@ defaults to, so a test that hides them says so."
         (delete-file file)))))
 
 (ert-deftest agent-test-process-review-file-saves-and-submits ()
-  "Save the visited review file, then submit the prompt naming it."
+  "Save the visited review file, submit the prompt naming it, show the session."
   (agent-test--with-two-sessions
     (let* ((file (make-temp-file "agent-review" nil ".md"))
            (agent-review-file-function (lambda (_) file))
            (agent-review-process-prompt "process %s")
-           submitted)
+           submitted displayed)
       (unwind-protect
           (cl-letf (((symbol-function 'agent-submit)
-                     (lambda (string buf) (setq submitted (list string buf)))))
+                     (lambda (string buf) (setq submitted (list string buf))))
+                    ((symbol-function 'display-buffer)
+                     (lambda (buffer &rest _) (push buffer displayed))))
             (with-current-buffer (find-file-noselect file)
               (insert "{>>send<<}")
               (agent-process-review-file a)
               (should-not (buffer-modified-p))
               (kill-buffer))
-            (should (equal submitted (list (concat "process " file) a))))
+            (should (equal submitted (list (concat "process " file) a)))
+            (should (equal displayed (list a))))
         (delete-file file)))))
 
 (ert-deftest agent-test-open-review-file-requires-the-option ()
@@ -3296,6 +3299,31 @@ its turn, and writes its receipt only in the turn that work wakes."
                 (should (window-live-p other-window))))
           (when (buffer-live-p buf) (kill-buffer buf))
           (when (buffer-live-p other) (set-window-buffer nil other)))))))
+
+(ert-deftest agent-test-sending-never-displays-session ()
+  "Keep a hidden session out of windows even when its backend shows it.
+Sends also come from timers, the phone and other programs, where
+showing the session would split the window the user is working in."
+  (let ((agent-backends nil))
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((buf (generate-new-buffer "*one:~/repo/project/:default*"))
+            (show (lambda (&rest args) (display-buffer (car (last args))))))
+        (unwind-protect
+            (dolist (submit (list nil show))
+              (apply #'agent-register-backend
+                     'one
+                     (agent-test--backend
+                      :buffer-p (lambda (candidate) (eq candidate buf))
+                      :send-string show
+                      :send-return show
+                      :submit submit))
+              (agent-send-string "text" buf)
+              (agent-send-return buf)
+              (agent-submit "text" buf)
+              (should (one-window-p))
+              (should-not (get-buffer-window buf t)))
+          (kill-buffer buf))))))
 
 (ert-deftest agent-test-before-exit-skills-stay-in-background ()
   "Keep delayed before-exit skill submissions out of visible windows."

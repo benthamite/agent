@@ -279,8 +279,7 @@ Source: lobehub/lobe-icons (MIT).")
   "Insert CMD into BUFFER's Claude Code prompt without submitting it."
   (when-let* ((claude-buffer (agent-claude--target-buffer buffer)))
     (with-current-buffer claude-buffer
-      (claude-code--term-send-string claude-code-terminal-backend cmd)
-      (display-buffer claude-buffer))
+      (claude-code--term-send-string claude-code-terminal-backend cmd))
     claude-buffer))
 
 (defun agent-claude-send-return (&optional buffer)
@@ -291,8 +290,7 @@ text."
   (when-let* ((claude-buffer (agent-claude--target-buffer buffer)))
     (with-current-buffer claude-buffer
       (sleep-for agent-claude-submit-delay)
-      (claude-code--term-send-string claude-code-terminal-backend (kbd "RET"))
-      (display-buffer claude-buffer))
+      (claude-code--term-send-string claude-code-terminal-backend (kbd "RET")))
     claude-buffer))
 
 (defun agent-claude-submit-command (cmd &optional buffer)

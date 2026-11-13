@@ -195,8 +195,7 @@ Source: SVG Repo (CC0).")
   "Insert CMD into BUFFER's Codex prompt without submitting it."
   (when-let* ((codex-buffer (agent-codex--target-buffer buffer)))
     (with-current-buffer codex-buffer
-      (codex--term-send-string codex-terminal-backend cmd)
-      (display-buffer codex-buffer))
+      (codex--term-send-string codex-terminal-backend cmd))
     codex-buffer))
 
 (defun agent-codex-send-return (&optional buffer)
@@ -204,8 +203,7 @@ Source: SVG Repo (CC0).")
   (when-let* ((codex-buffer (agent-codex--target-buffer buffer)))
     (with-current-buffer codex-buffer
       (sit-for 0.1)
-      (codex--term-send-action codex-terminal-backend :return)
-      (display-buffer codex-buffer))
+      (codex--term-send-action codex-terminal-backend :return))
     codex-buffer))
 
 (defun agent-codex-submit-command (cmd &optional buffer)
