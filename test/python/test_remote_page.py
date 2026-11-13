@@ -252,6 +252,35 @@ class RemotePageTest(unittest.TestCase):
                          " promised to Max.\n"
                          "  1: Learn more   0: Dismiss")
 
+    def test_card_rejoins_a_wrapped_block_quote(self):
+        card = ("\u2502 When you delete an issue, what should happen? The plan\n"
+                "\u2502 said keep it.\n"
+                "\n"
+                "\u276f 1. Mark CANCELLED\n"
+                "     The heading stays with all its text, gets CANCELLED and\n"
+                "     loses its id.")
+        data = output("waiting", {"card": card, "options": ["1"]})
+        data["columns"] = 60
+        self.poll(data)
+        self.assertEqual(self.text("#card-text"),
+                         "\u2502 When you delete an issue, what should happen? The plan"
+                         " said keep it.\n"
+                         "\n"
+                         "\u276f 1. Mark CANCELLED\n"
+                         "     The heading stays with all its text, gets CANCELLED and"
+                         " loses its id.")
+        # A wrapped description continues under its text, not at the edge.
+        lefts = self.page.evaluate("""() => {
+          const line = document.querySelectorAll('#card-text .line')[3];
+          const range = document.createRange();
+          range.selectNodeContents(line);
+          const rows = [...range.getClientRects()].map(r => Math.round(r.left));
+          const first = line.textContent.indexOf('The');
+          range.setStart(line.firstChild, first);
+          range.setEnd(line.firstChild, first + 1);
+          return [Math.round(range.getBoundingClientRect().left), rows.length > 1 ? Math.min(...rows.slice(1)) : null]; }""")
+        self.assertEqual(lefts[0], lefts[1])
+
     def test_card_keeps_its_lines_without_a_width(self):
         self.poll(output("waiting", {"card": "a full line\n  and the next"}))
         self.assertEqual(self.text("#card-text"), "a full line\n  and the next")
@@ -292,7 +321,8 @@ class RemotePageTest(unittest.TestCase):
 
     def test_terminal_text_stays_unrendered(self):
         self.poll(output("waiting", {"card": "**not bold** ⏵⏵ mode"}))
-        self.assertEqual(self.page.evaluate("document.getElementById('card-text').children.length"), 0)
+        self.assertEqual(self.page.evaluate(
+            "document.querySelectorAll('#card-text :not(span.line), #card-text .line *').length"), 0)
         self.assertIn("**not bold** >> mode", self.text("#card-text"))
 
     def labels(self, selector):

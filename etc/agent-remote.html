@@ -91,6 +91,9 @@
   #card-label { padding: 6px 12px 2px; font-size: 13px; font-weight: 600;
     color: var(--waiting); }
   #card-text { flex: 0 1 auto; min-height: 0; overflow: auto; padding: 0 12px 8px; }
+  /* A card line the phone wraps continues under its own text, not at the
+     edge: its indent is padding, and the first row is pulled back by it. */
+  #card-text .line { display: block; }
   /* Without a transcript the whole screen is the only view. */
   #session-view.transcript #live { display: none; }
   #session-view.fresh #messages:empty::before { content: "No messages yet.";
@@ -1059,7 +1062,7 @@ function renderCard(text, options, columns, forceBottom) {
   const body = $("card-text");
   const atBottom = isAtBottom(body);
   const content = text ? compactScreen(unwrapScreen(text.split("\n"), columns)) : "";
-  if (body.textContent !== content) body.textContent = content;
+  if (body.textContent !== content) body.replaceChildren(...screenLines(content));
   card.classList.toggle("open", !!text);
   renderCardKeys(options);
   if (text && (forceBottom || atBottom)) body.scrollTop = body.scrollHeight;
@@ -1094,6 +1097,25 @@ function keyButton(key, label) {
   return b;
 }
 
+// TEXT's lines as blocks that keep their indent when the phone wraps
+// them: a dialog's option descriptions are indented, and a block quote's
+// lines start with a bar.  Each line keeps its newline, so the card's
+// text is still TEXT.
+function screenLines(text) {
+  const lines = text.split("\n");
+  return lines.map((line, i) => {
+    const span = document.createElement("span");
+    span.className = "line";
+    const hang = [...line.match(/^[ \u00a0]*(?:[\u2502\u276f>] *)?/)[0]].length;
+    if (hang && hang < line.length) {
+      span.style.paddingLeft = hang + "ch";
+      span.style.textIndent = -hang + "ch";
+    }
+    span.textContent = i < lines.length - 1 ? line + "\n" : line;
+    return span;
+  });
+}
+
 // Android's fonts lack these, which would show as empty boxes.
 function safeGlyphs(text) {
   const map = { "⏵": ">", "⏴": "<", "⏸": "||", "⏹": "[]", "⏺": "●" };
@@ -1106,18 +1128,22 @@ function safeGlyphs(text) {
 // Rejoins the lines the session wrapped at the terminal's COLUMNS, so the
 // phone wraps them at its own width instead of breaking them twice.  A
 // line was wrapped when the next line's first word would not have fit
-// after it; a line drawn with box characters is never joined.
+// after it; a line drawn with box characters is never joined, except a
+// block quote's, whose next line repeats the bar, which is dropped.
 function unwrapScreen(lines, columns) {
   if (!columns) return lines;
   const width = (text) => [...text].length;
   const drawn = /^[\u2500-\u259f]|[\u2500-\u259f]$/;
+  const bar = /^\s*\u2502 /;
   const result = [];
   let last = null;
   for (const line of lines) {
     const head = last === null ? "" : last.trimEnd();
-    const rest = line.trim();
+    const quoted = bar.test(head) && bar.test(line);
+    const rest = (quoted ? line.replace(bar, "") : line).trim();
     const word = rest.split(/\s/)[0];
-    if (head && rest && !drawn.test(head) && !drawn.test(rest)
+    const plain = (text) => !drawn.test(quoted ? text.replace(bar, "") : text);
+    if (head && rest && plain(head) && plain(rest)
         && width(head) + 1 + width(word) > columns) {
       result[result.length - 1] = result[result.length - 1].trimEnd() + " " + rest;
     } else {
