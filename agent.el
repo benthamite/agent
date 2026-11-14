@@ -158,7 +158,7 @@ chain only once.  Only
   session-history screen-state
   ;; New slots go last: a running Emacs that reloads this file keeps its
   ;; registered backends, and earlier slots must stay where they were.
-  icon-svg interrupt turn-end-background-p)
+  icon-svg interrupt turn-end-background-p step-effort)
 
 (defvar agent-backends nil
   "Alist of registered AI backends.
@@ -238,6 +238,12 @@ moment a stop event arrives, so it must not depend on a source that
 lags that event.  A before-exit skill that ends its turn this way has
 not finished, so its missing receipt is not yet a failure; see
 `agent--before-exit-accept-receipt-p'.
+
+The optional `:step-effort' key is a function of a session buffer and
+a nonzero integer DELTA that moves the session's reasoning effort DELTA
+levels up, or down when DELTA is negative, stopping at the highest or
+lowest level.  `agent-effort-increase' and `agent-effort-decrease'
+dispatch on it.
 
 Multi-account backends provide the optional account keys read by
 `agent-account': `:account-env-var' (environment variable naming
@@ -2695,6 +2701,85 @@ ORIG-FN is the original escape command."
       (when (agent--eat-terminal-p)
         (eat-term-send-string eat-terminal (kbd "ESC")))
     (funcall orig-fn)))
+
+;;;; Session keys
+
+(defvar-keymap agent-session-keys-mode-map
+  :doc "Keymap active in every agent session buffer.
+The package binds nothing here; bind session commands in it, such as
+`agent-effort-increase' and `agent-effort-decrease'.")
+
+(define-minor-mode agent-session-keys-mode
+  "Minor mode giving agent session buffers `agent-session-keys-mode-map'."
+  :keymap agent-session-keys-mode-map)
+
+(defun agent-setup-session-keys ()
+  "Enable `agent-session-keys-mode' in the current session buffer."
+  (when (agent--detect-backend (current-buffer))
+    (agent-session-keys-mode 1)))
+
+(defun agent-setup-session-keys-in-existing-buffers ()
+  "Enable `agent-session-keys-mode' in every live session buffer."
+  (dolist (buffer (agent--find-all-buffers))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (agent-setup-session-keys)))))
+
+;;;; Reasoning effort
+
+(defun agent-effort-increase ()
+  "Raise the current session's reasoning effort one level."
+  (interactive)
+  (agent--step-effort 1))
+
+(defun agent-effort-decrease ()
+  "Lower the current session's reasoning effort one level."
+  (interactive)
+  (agent--step-effort -1))
+
+(defun agent--step-effort (delta)
+  "Move the current session's reasoning effort DELTA levels.
+The current buffer must be a session buffer whose backend registers
+`:step-effort'."
+  (let* ((buffer (current-buffer))
+         (name (or (agent--detect-backend buffer)
+                   (user-error "Not in an agent session buffer")))
+         (backend (agent-backend name))
+         (function (or (agent-backend-step-effort backend)
+                       (user-error "%s sessions cannot change effort from Emacs"
+                                   (agent-backend-label backend)))))
+    (funcall function buffer delta)))
+
+;;;; Screen text
+
+(defun agent-screen-tail (buffer lines)
+  "Return the last LINES lines of session BUFFER's screen as text.
+Trailing blank lines, which terminal buffers pad their screens with,
+are dropped.  The text has no properties but `agent-faint', which marks
+what the terminal draws faint: a placeholder or a suggestion in an input
+box is drawn so, and is not text the session holds.  A backend's
+`:screen-state' function reads this text."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-max))
+      (skip-chars-backward " \t\n")
+      (let* ((end (point))
+             (start (progn (forward-line (- 1 lines))
+                           (point)))
+             (text (buffer-substring-no-properties start end))
+             (position start))
+        (while (< position end)
+          (let ((next (next-single-property-change position 'face nil end)))
+            (when (agent--faint-face-p (get-text-property position 'face))
+              (put-text-property (- position start) (- next start)
+                                 'agent-faint t text))
+            (setq position next)))
+        text))))
+
+(defun agent--faint-face-p (face)
+  "Return non-nil when FACE, a terminal's face property, draws faint."
+  (and (consp face)
+       (memq 'eat-term-faint (ensure-list (plist-get face :inherit)))))
 
 ;;;; Core send wrappers
 

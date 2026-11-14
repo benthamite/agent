@@ -196,6 +196,7 @@ ended in that window.")
 (defvar agent-codex-mode)
 (defvar eat-terminal)
 (defvar url-http-end-of-headers)
+(declare-function agent-screen-tail "agent" (buffer lines))
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
 (declare-function agent-act-on-slack-message "agent-slack"
                   (&optional existing))
@@ -258,6 +259,7 @@ Source: lobehub/lobe-icons (MIT).")
   :session-history #'agent-claude--session-history
   :screen-state #'agent-claude-cli-screen-state
   :interrupt #'agent-claude--interrupt
+  :step-effort #'agent-claude--step-effort
   :prepare-fork #'agent-claude--prepare-fork
   :resume #'claude-code-resume)
 
@@ -1157,6 +1159,92 @@ the account-wide usage poller is running."
   "Return the reasoning effort level from the status data."
   (when-let* ((effort (plist-get agent-claude--status-data :effort)))
     (plist-get effort :level)))
+
+(defconst agent-claude-effort-levels '("low" "medium" "high" "xhigh" "max")
+  "Claude Code's effort levels, lowest first, as `/effort' takes them.")
+
+(defvar-local agent-claude--requested-effort nil
+  "The last effort level stepped to, or nil.
+A cons (LEVEL . REPORTED): LEVEL was requested while the status line
+reported REPORTED.  The status line lags `/effort', so until it reports
+something other than REPORTED, LEVEL is the session's effort.")
+
+(defun agent-claude--current-effort ()
+  "Return the current Claude session's effort level, or nil.
+Prefer a level just requested that the status line has not yet caught
+up with, so that steps in quick succession add up."
+  (let ((reported (agent-claude-status-effort)))
+    (if (and agent-claude--requested-effort
+             (equal (cdr agent-claude--requested-effort) reported))
+        (car agent-claude--requested-effort)
+      reported)))
+
+(defcustom agent-claude-effort-delay 0.4
+  "Seconds after the last effort step before `/effort' is submitted.
+Steps in quick succession add up to one command."
+  :type 'number
+  :group 'agent-claude)
+
+(defvar-local agent-claude--pending-effort nil
+  "Effort level steps have reached but not yet submitted, or nil.")
+
+(defvar-local agent-claude--effort-timer nil
+  "Timer that submits `agent-claude--pending-effort'.")
+
+(defun agent-claude--step-effort (buffer delta)
+  "Move Claude session BUFFER's effort DELTA levels, as `:step-effort'.
+Steps from the level reached so far and submit `/effort LEVEL' once no
+step has come for `agent-claude-effort-delay' seconds.  Claude Code runs
+the command at once even mid-turn, and saves the level as the default
+for new sessions with this model, as its `/effort' picker does."
+  (with-current-buffer buffer
+    (let* ((current (or agent-claude--pending-effort
+                        (agent-claude--current-effort)))
+           (index (or (seq-position agent-claude-effort-levels current)
+                      (user-error "Unknown current effort %S" current)))
+           (target (nth (max 0 (min (1- (length agent-claude-effort-levels))
+                                    (+ index delta)))
+                        agent-claude-effort-levels)))
+      (setq agent-claude--pending-effort target)
+      (when (timerp agent-claude--effort-timer)
+        (cancel-timer agent-claude--effort-timer))
+      (setq agent-claude--effort-timer
+            (run-at-time agent-claude-effort-delay nil
+                         #'agent-claude--submit-pending-effort buffer 10))
+      (message "Effort: %s" target))))
+
+(defun agent-claude--submit-pending-effort (buffer tries)
+  "Submit BUFFER's pending effort level with `/effort'.
+Submit nothing when the level is already the session's.  Refuse when
+the screen shows a dialog or text in the input box, which the command
+would be typed into, except that the previous `/effort' still showing
+there is waited for, up to TRIES more times."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let* ((target agent-claude--pending-effort)
+             (current (agent-claude--current-effort))
+             (screen (agent-claude-cli-screen-state
+                      (agent-screen-tail buffer 300)))
+             (input (plist-get screen :input)))
+        (setq agent-claude--effort-timer nil)
+        (cond
+         ((null target))
+         ((equal target current)
+          (setq agent-claude--pending-effort nil))
+         ((and input (> tries 0)
+               (equal input (concat "/effort " current)))
+          (setq agent-claude--effort-timer
+                (run-at-time 0.3 nil #'agent-claude--submit-pending-effort
+                             buffer (1- tries))))
+         ((or input (plist-get screen :dialog))
+          (setq agent-claude--pending-effort nil)
+          (message "Effort left at %s: the session shows %s" current
+                   (if input "text in its input box" "a dialog")))
+         (t
+          (setq agent-claude--pending-effort nil)
+          (agent-claude-submit-command (concat "/effort " target) buffer)
+          (setq agent-claude--requested-effort
+                (cons target (agent-claude-status-effort)))))))))
 
 (defun agent-claude-status-cost ()
   "Return the total session cost in USD from the status data."
@@ -3306,6 +3394,7 @@ Signals an error if the status file is missing or incomplete."
     agent-disable-scrollback-truncation
     agent-setup-scroll-keys
     agent-setup-snippet-keys
+    agent-setup-session-keys
     agent--assign-session-key
     agent-claude--register-session-teardown)
   "Functions `agent-claude-mode' adds to `claude-code-start-hook'.")
@@ -3357,6 +3446,7 @@ symmetrically and restores `claude-code-notification-function'."
             #'agent-claude--derived-status)
   (agent-scroll-keys-global-mode 1)
   (agent-setup-scroll-keys-in-existing-buffers)
+  (agent-setup-session-keys-in-existing-buffers)
   (add-hook 'claude-code-process-environment-functions
             #'agent-claude-account-env)
   (add-hook 'claude-code-process-environment-functions

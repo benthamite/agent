@@ -589,31 +589,8 @@ fields intact, and the next poll asks again from the same offset."
 
 (defun agent-remote--buffer-tail (buffer)
   "Return the last `agent-remote-output-lines' lines of BUFFER as text.
-Trailing blank lines, which terminal buffers pad their screens with,
-are dropped.  The text has no properties but `agent-faint', which marks
-what the terminal draws faint: a placeholder or a suggestion in an input
-box is drawn so, and is not text the session holds."
-  (with-current-buffer buffer
-    (save-excursion
-      (goto-char (point-max))
-      (skip-chars-backward " \t\n")
-      (let* ((end (point))
-             (start (progn (forward-line (- 1 agent-remote-output-lines))
-                           (point)))
-             (text (buffer-substring-no-properties start end))
-             (position start))
-        (while (< position end)
-          (let ((next (next-single-property-change position 'face nil end)))
-            (when (agent-remote--faint-face-p (get-text-property position 'face))
-              (put-text-property (- position start) (- next start)
-                                 'agent-faint t text))
-            (setq position next)))
-        text))))
-
-(defun agent-remote--faint-face-p (face)
-  "Return non-nil when FACE, a terminal's face property, draws faint."
-  (and (consp face)
-       (memq 'eat-term-faint (ensure-list (plist-get face :inherit)))))
+See `agent-screen-tail' for the text's form."
+  (agent-screen-tail buffer agent-remote-output-lines))
 
 (defun agent-remote--history (request)
   "Return a bounded stretch of the past conversation of REQUEST's session.

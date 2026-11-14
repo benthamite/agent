@@ -118,6 +118,8 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (declare-function agent-svg-icon "agent" (svg-data &optional face))
 (declare-function agent-act-on-slack-message "agent-slack"
                   (&optional existing))
+(declare-function codex-app-server-reasoning-up "codex-app-server" ())
+(declare-function codex-app-server-reasoning-down "codex-app-server" ())
 (declare-function codex-start-session "codex")
 (declare-function codex-session-identity "codex" (&optional buffer))
 (declare-function codex-prompt-input "codex" (&optional buffer))
@@ -187,6 +189,7 @@ Source: SVG Repo (CC0).")
   :session-prompt #'agent-codex--session-prompt
   :session-history #'agent-codex--session-history
   :interrupt #'agent-codex--interrupt
+  :step-effort #'agent-codex--step-effort
   :resume #'codex-resume)
 
 ;;;; Functions
@@ -716,6 +719,18 @@ interactively."
   (or codex--app-server-current-model-id
       codex-model
       (agent-codex--read-config-model (agent-codex--session-account))))
+
+(defun agent-codex--step-effort (buffer delta)
+  "Move Codex session BUFFER's reasoning effort DELTA levels, as `:step-effort'.
+Only app-server sessions can change it; the levels are the current
+model's, and the change applies to upcoming turns."
+  (with-current-buffer buffer
+    (unless (derived-mode-p 'codex-app-server-mode)
+      (user-error "Only Codex app-server sessions can change effort from Emacs"))
+    (dotimes (_ (abs delta))
+      (if (> delta 0)
+          (codex-app-server-reasoning-up)
+        (codex-app-server-reasoning-down)))))
 
 (defun agent-codex-status-effort ()
   "Return the reasoning effort for the current Codex session."
@@ -1606,6 +1621,7 @@ backend renders branch trees."
     agent-disable-scrollback-truncation
     agent-setup-scroll-keys
     agent-setup-snippet-keys
+    agent-setup-session-keys
     agent-fix-rendering
     agent--assign-session-key
     agent-codex--record-start-time
@@ -1642,6 +1658,7 @@ removes them symmetrically and restores
   (add-hook 'doom-modeline-mode-hook #'agent-codex--reapply-modelines)
   (agent-scroll-keys-global-mode 1)
   (agent-setup-scroll-keys-in-existing-buffers)
+  (agent-setup-session-keys-in-existing-buffers)
   (add-hook 'codex-process-environment-functions
             #'agent-codex-account-env)
   (add-hook 'codex-process-environment-functions

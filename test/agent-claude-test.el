@@ -1273,6 +1273,75 @@ The value is (PROGRAM-SWITCHES-SEEN . EXTRA-SWITCHES-SEEN)."
   (let ((agent-claude--status-data nil))
     (should-not (agent-claude-status-effort))))
 
+;;;;; Effort stepping
+
+(defmacro agent-claude-test--with-effort-session (level screen &rest body)
+  "Run BODY in a session reporting effort LEVEL whose screen is SCREEN.
+Bind `sent' to the list of submitted commands, newest first.  Timers
+do not run; `submit' stands for the delayed submission."
+  (declare (indent 2))
+  `(with-temp-buffer
+     (setq-local agent-claude--status-data (list :effort (list :level ,level)))
+     (insert ,screen)
+     (let ((sent nil))
+       (cl-letf (((symbol-function 'agent-claude-submit-command)
+                  (lambda (cmd _buffer) (push cmd sent)))
+                 ((symbol-function 'run-at-time) #'ignore))
+         (cl-flet ((submit () (agent-claude--submit-pending-effort
+                               (current-buffer) 10)))
+           ,@body)))))
+
+(defconst agent-claude-test--empty-prompt-screen
+  "✻ Done\n────────────────────────\n❯\u00a0\n────────────────────────\n  ? for shortcuts"
+  "A Claude screen whose input box is empty.")
+
+(ert-deftest agent-claude-test-step-effort-quick-steps-submit-once ()
+  "Two quick steps up from medium submit xhigh alone."
+  (agent-claude-test--with-effort-session "medium"
+      agent-claude-test--empty-prompt-screen
+    (agent-claude--step-effort (current-buffer) 1)
+    (agent-claude--step-effort (current-buffer) 1)
+    (submit)
+    (should (equal sent '("/effort xhigh")))))
+
+(ert-deftest agent-claude-test-step-effort-stacks-before-status-catches-up ()
+  "A step after a submission starts from the level requested."
+  (agent-claude-test--with-effort-session "medium"
+      agent-claude-test--empty-prompt-screen
+    (agent-claude--step-effort (current-buffer) 1)
+    (submit)
+    (agent-claude--step-effort (current-buffer) 1)
+    (submit)
+    (should (equal sent '("/effort xhigh" "/effort high")))))
+
+(ert-deftest agent-claude-test-step-effort-follows-status-once-it-changes ()
+  "A level the status line reports after a step wins over the request."
+  (agent-claude-test--with-effort-session "medium"
+      agent-claude-test--empty-prompt-screen
+    (agent-claude--step-effort (current-buffer) 1)
+    (submit)
+    (setq-local agent-claude--status-data '(:effort (:level "low")))
+    (agent-claude--step-effort (current-buffer) 1)
+    (submit)
+    (should (equal (car sent) "/effort medium"))))
+
+(ert-deftest agent-claude-test-step-effort-stops-at-ends ()
+  "Stepping past the highest level submits nothing."
+  (agent-claude-test--with-effort-session "max"
+      agent-claude-test--empty-prompt-screen
+    (agent-claude--step-effort (current-buffer) 1)
+    (submit)
+    (should-not sent)))
+
+(ert-deftest agent-claude-test-step-effort-refuses-typed-input ()
+  "Text in the input box blocks the submission instead of being merged."
+  (agent-claude-test--with-effort-session "medium"
+      "✻ Done\n────────────────────────\n❯\u00a0half a prompt\n────────────────────────\n  ? for shortcuts"
+    (agent-claude--step-effort (current-buffer) 1)
+    (submit)
+    (should-not sent)
+    (should-not agent-claude--pending-effort)))
+
 (ert-deftest agent-claude-test-status-cost-present ()
   "Return total_cost_usd when cost data is present."
   (let ((agent-claude--status-data
