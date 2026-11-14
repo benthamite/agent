@@ -514,8 +514,8 @@ In EAT-backed Claude and Codex session buffers@comma{} @code{agent-setup-scroll-
 @code{agent-effort-increase} and @code{agent-effort-decrease} move the current session's reasoning effort one level up or down@comma{} stopping at the highest or lowest level. In a Claude session the levels are @samp{low}@comma{} @samp{medium}@comma{} @samp{high}@comma{} @samp{xhigh} and @samp{max}; presses add up@comma{} and @samp{/effort LEVEL} is submitted once none has come for @code{agent-claude-effort-delay} seconds. Claude Code runs it at once@comma{} even mid-turn@comma{} and saves the level as the default for new sessions with that model@comma{} as its own @samp{/effort} picker does. Nothing is sent while the input box holds text or a dialog is open@comma{} since the command would be typed into it. In a Codex app-server session the commands step through the current model's levels for upcoming turns. Neither command has a default key: the minor mode @code{agent-session-keys-mode}@comma{} on in every session buffer@comma{} provides @code{agent-session-keys-mode-map} for bindings that should apply in sessions only@comma{} for example:
 
 @lisp
-(keymap-set agent-session-keys-mode-map "H-<" #'agent-effort-decrease)
-(keymap-set agent-session-keys-mode-map "H->" #'agent-effort-increase)
+(keymap-set agent-session-keys-mode-map "H-@comma{}" #'agent-effort-decrease)
+(keymap-set agent-session-keys-mode-map "H-." #'agent-effort-increase)
 @end lisp
 
 The command @code{agent-select-session} opens the session switcher@comma{} which contains only existing session entries. If no sessions are active@comma{} it reports that there are none; use @code{agent-start-new-session} (@samp{n}) to start one. Sessions receive stable home-row keys where possible and display backend icons next to their labels.

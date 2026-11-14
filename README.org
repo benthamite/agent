@@ -424,8 +424,8 @@ In EAT-backed Claude and Codex session buffers, ~agent-setup-scroll-keys~ makes 
 ~agent-effort-increase~ and ~agent-effort-decrease~ move the current session's reasoning effort one level up or down, stopping at the highest or lowest level. In a Claude session the levels are =low=, =medium=, =high=, =xhigh= and =max=; presses add up, and =/effort LEVEL= is submitted once none has come for ~agent-claude-effort-delay~ seconds. Claude Code runs it at once, even mid-turn, and saves the level as the default for new sessions with that model, as its own =/effort= picker does. Nothing is sent while the input box holds text or a dialog is open, since the command would be typed into it. In a Codex app-server session the commands step through the current model's levels for upcoming turns. Neither command has a default key: the minor mode ~agent-session-keys-mode~, on in every session buffer, provides ~agent-session-keys-mode-map~ for bindings that should apply in sessions only, for example:
 
 #+begin_src emacs-lisp
-(keymap-set agent-session-keys-mode-map "H-<" #'agent-effort-decrease)
-(keymap-set agent-session-keys-mode-map "H->" #'agent-effort-increase)
+(keymap-set agent-session-keys-mode-map "H-," #'agent-effort-decrease)
+(keymap-set agent-session-keys-mode-map "H-." #'agent-effort-increase)
 #+end_src
 
 The command ~agent-select-session~ opens the session switcher, which contains only existing session entries. If no sessions are active, it reports that there are none; use ~agent-start-new-session~ (=n=) to start one. Sessions receive stable home-row keys where possible and display backend icons next to their labels.
