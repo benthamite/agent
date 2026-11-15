@@ -450,6 +450,23 @@ class RemotePageTest(unittest.TestCase):
         self.assertEqual(len(set(stripes)), 3)
         self.assertEqual(badges, ["rgb(63, 185, 80)", "rgb(181, 138, 60)", "rgb(248, 81, 73)"])
 
+    def test_names_have_the_whole_first_row(self):
+        rows = self.page.evaluate("""() => {
+          const box = (el) => el.getBoundingClientRect();
+          const header = { title: box($('session-title')), new: box($('new')),
+                           badge: box($('session-badge')) };
+          show('list-view');
+          const c = document.querySelector('.card');
+          const card = { name: box(c.querySelector('.name')),
+                         badge: box(c.querySelector('.badge')), card: box(c) };
+          return { header, card }; }""")
+        header, card = rows["header"], rows["card"]
+        self.assertGreaterEqual(header["new"]["top"], header["title"]["bottom"])
+        self.assertGreaterEqual(header["badge"]["top"], header["title"]["bottom"])
+        self.assertLess(header["new"]["right"], header["badge"]["left"])
+        self.assertGreaterEqual(card["badge"]["top"], card["name"]["bottom"])
+        self.assertGreater(card["name"]["width"], card["card"]["width"] * 0.8)
+
     def test_no_glyph_a_phone_font_lacks(self):
         page = self.page.evaluate("document.getElementById('session-view').textContent"
                                   " + MORE_KEYS.flat(2).join() + CARD_KEYS.flat().join()")

@@ -54,11 +54,16 @@
   /* A snoozed card is dimmed, not drained: its state still shows in color.
      The stripe is mixed into the panel as far as the opacity fades the rest. */
   .card.snoozed { border-left-color: color-mix(in srgb, var(--state) 55%, var(--panel)); }
-  .card.snoozed .main, .card.snoozed .badge { opacity: .55; }
+  .card.snoozed .main { opacity: .55; }
   .card .main { flex: 1; min-width: 0; }
   .card .name { font-size: 17px; font-weight: 600; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
-  .card .meta { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  /* The state badge shares the second row with the details, so the name
+     above has the card's whole width. */
+  .card .details { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+  .card .meta { flex: 1; min-width: 0; font-size: 13px; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .badge { padding: 2px 8px; }
   .card .icon { display: inline-block; width: 18px; height: 18px;
     margin-right: 6px; vertical-align: -2px; }
   .card .icon svg { width: 100%; height: 100%; display: block; }
@@ -191,7 +196,12 @@
     align-items: flex-start; gap: 3px; }
   .title h1 { flex: none; max-width: 100%; }
   .title .badge { font-size: 10px; padding: 2px 6px; }
+  /* The badge and the buttons share the second row, so the session's name
+     above has the header's whole width. */
+  .title-row { align-self: stretch; display: flex; align-items: center;
+    justify-content: space-between; gap: 8px; }
   .actions-bar { display: flex; gap: 6px; flex: 0 0 auto; }
+  .title-row .toggle { padding: 5px 10px; }
   .toggle { background: var(--panel-2); border-radius: 10px; padding: 8px 9px;
     font-size: 13px; }
   .toggle.danger { color: var(--error); }
@@ -276,12 +286,14 @@
     <button class="back" id="back" aria-label="Back">‹</button>
     <div class="title">
       <h1 id="session-title"></h1>
-      <span id="session-badge" class="badge"></span>
-    </div>
-    <div class="actions-bar">
-      <button class="toggle" id="new">New</button>
-      <button class="toggle" id="restart">Restart</button>
-      <button class="toggle danger" id="exit">Exit</button>
+      <div class="title-row">
+        <div class="actions-bar">
+          <button class="toggle" id="new">New</button>
+          <button class="toggle" id="restart">Restart</button>
+          <button class="toggle danger" id="exit">Exit</button>
+        </div>
+        <span id="session-badge" class="badge"></span>
+      </div>
     </div>
   </header>
   <div id="conversation">
@@ -694,11 +706,14 @@ function card(s) {
   meta.className = "meta";
   meta.textContent = [icon ? "" : s.backend, s.account, age(s.changed)]
     .filter(Boolean).join(" · ");
-  main.append(name, meta);
   const badge = document.createElement("span");
   badge.className = "badge " + s.state;
   badge.textContent = STATE_LABEL[s.state] || s.state;
-  button.append(main, badge);
+  const details = document.createElement("div");
+  details.className = "details";
+  details.append(meta, badge);
+  main.append(name, details);
+  button.append(main);
   button.addEventListener("click", () => openSession(s));
   return button;
 }
