@@ -676,8 +676,20 @@ defaults to, so a test that hides them says so."
         (should (eq (nth 2 (car (last specs)))
                     'agent--switcher-toggle-snoozed-view))))))
 
+(defmacro agent-test--with-face-colors (backgrounds &rest body)
+  "Run BODY with every face red and face backgrounds from BACKGROUNDS.
+BACKGROUNDS is an alist from face to color; any other face's background
+is white."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'face-foreground)
+              (lambda (&rest _) "#ff0000"))
+             ((symbol-function 'face-background)
+              (lambda (face &rest _)
+                (alist-get face ,backgrounds "#ffffff"))))
+     ,@body))
+
 (ert-deftest agent-test-switcher-snoozed-view-uses-state-faces ()
-  "Color snoozed sessions by state, not `agent-snoozed', in the snoozed view."
+  "Color snoozed sessions by state, unfaded, in the snoozed view."
   (agent-test--with-two-sessions
     (with-current-buffer a
       (setq-local agent--session-state 'awaiting-input))
@@ -686,8 +698,9 @@ defaults to, so a test that hides them says so."
       (let ((agent--listing-snoozed t))
         (should (eq (plist-get (cdddr (car (agent--switcher-specs))) :face)
                     'agent-waiting)))
-      (should (eq (agent--session-face a (agent-session-display-state a))
-                  'agent-snoozed)))))
+      (agent-test--with-face-colors '((default . "#000000"))
+        (should (equal (agent--session-face a (agent-session-display-state a))
+                       '(agent-snoozed (:foreground "#8c0000"))))))))
 
 (ert-deftest agent-test-session-keys-leave-z-to-the-switcher ()
   "Never assign `z', which the switcher binds to its view toggle."
@@ -699,15 +712,29 @@ defaults to, so a test that hides them says so."
               'agent--infix-hide-snoozed-sessions)))
 
 (ert-deftest agent-test-snoozed-session-wears-the-snoozed-face ()
-  "Render a snoozed session with `agent-snoozed' whatever its state."
+  "Render a snoozed session in `agent-snoozed' over its faded state color."
   (agent-test--with-two-sessions
     (with-current-buffer a
       (setq-local agent--session-state 'awaiting-input))
     (agent-toggle-snooze a)
-    (should (eq (plist-get (nthcdr 3 (agent--session-suffix-spec a "a")) :face)
-                'agent-snoozed))
+    (agent-test--with-face-colors '((default . "#000000"))
+      (let ((face (plist-get (nthcdr 3 (agent--session-suffix-spec a "a"))
+                             :face)))
+        (should (functionp face))
+        (should (equal (funcall face nil)
+                       '(agent-snoozed (:foreground "#8c0000"))))))
     (should (eq (plist-get (nthcdr 3 (agent--session-suffix-spec b "s")) :face)
                 'agent-unknown))))
+
+(ert-deftest agent-test-snoozed-face-keeps-the-state-without-rgb ()
+  "Keep a snoozed session's state face unfaded when a color is not RGB."
+  (agent-test--with-two-sessions
+    (with-current-buffer a
+      (setq-local agent--session-state 'awaiting-input))
+    (agent-toggle-snooze a)
+    (agent-test--with-face-colors '((default . nil))
+      (should (equal (agent--session-face a 'waiting)
+                     '(agent-snoozed agent-waiting))))))
 
 (ert-deftest agent-test-session-state-faces ()
   "Give each display state the face the phone page's color matches."
@@ -725,13 +752,15 @@ defaults to, so a test that hides them says so."
     (with-current-buffer b
       (setq-local agent--session-state 'awaiting-input))
     (agent-toggle-snooze a)
-    (let ((items (agent-tab-bar-format-sessions)))
+    (let ((items (agent-test--with-face-colors '((tab-bar . "#000000"))
+                   (agent-tab-bar-format-sessions))))
       (should (equal (mapcar (lambda (item) (get-text-property 1 'face (nth 2 item)))
                              items)
                      '(agent-tab-bar-key agent-tab-bar-key)))
       (should (equal (mapcar (lambda (item) (get-text-property 3 'face (nth 2 item)))
                              items)
-                     '(agent-waiting agent-snoozed)))
+                     '(agent-waiting
+                       (agent-snoozed (:foreground "#8c0000")))))
       (should (equal (mapcar (lambda (item) (substring-no-properties (nth 2 item)))
                              items)
                      (list (format " s %s " (agent-display-name b))

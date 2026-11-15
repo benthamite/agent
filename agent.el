@@ -32,6 +32,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'color)
 (require 'eieio)
 (require 'iso8601)
 (require 'json)
@@ -906,13 +907,19 @@ buffer, so that an unknown state is not presented as a known one."
   :group 'agent)
 
 (defface agent-snoozed
-  '((t :inherit shadow :slant italic))
+  '((t :slant italic))
   "Face for snoozed sessions in the session switcher.
 Applied to the whole entry of a session marked with
-`agent-toggle-snooze', in place of any state face, so that a session
-set aside as not actionable is not colored as one that wants
-attention."
+`agent-toggle-snooze', over its state color faded toward the
+background, so that a session set aside as not actionable stands back
+from those that want attention while its state still shows.  A
+foreground set here takes precedence over the faded state color."
   :group 'agent)
+
+(defconst agent--snoozed-color-strength 0.55
+  "How much of its state color a snoozed session's entry keeps, from 0 to 1.
+The rest is the background's color.  It matches the phone page, which
+fades a snoozed card's state color by the same proportion.")
 
 (defface agent-session-account
   '((t :inherit shadow))
@@ -1905,20 +1912,46 @@ nothing."
          (state (agent-session-display-state buf backend))
          (cmd (make-symbol (format "ai-switch-%s" key)))
          (spec (list key label cmd)))
+    ;; A transient suffix's face must be a face name or a function
+    ;; returning a face, so the list a snoozed session gets is wrapped.
     (when-let* ((face (agent--session-face buf state)))
-      (setq spec (append spec (list :face face))))
+      (setq spec (append spec (list :face (if (facep face)
+                                               face
+                                             (lambda (_suffix) face))))))
     (fset cmd (lambda () (interactive) (switch-to-buffer buf)))
     spec))
 
-(defun agent--session-face (buffer state)
+(defun agent--session-face (buffer state &optional background)
   "Return the face for session BUFFER in display STATE, or nil for none.
-A snoozed session takes `agent-snoozed' in place of any state face,
-except in the switcher's snoozed view, where every session listed is
-snoozed and the state face is what tells them apart."
-  (if (and (agent-session-snoozed-p buffer)
-           (not agent--listing-snoozed))
-      'agent-snoozed
-    (agent--session-state-face state)))
+A snoozed session takes `agent-snoozed' over its state face's color
+faded toward the background of face BACKGROUND, `default' when nil, so
+the result is then a list of faces.  In the switcher's snoozed view,
+where every session listed is snoozed, the state face is used as it is."
+  (let ((face (agent--session-state-face state)))
+    (if (and (agent-session-snoozed-p buffer)
+             (not agent--listing-snoozed))
+        (if-let* ((faded (agent--faded-face face (or background 'default))))
+            (list 'agent-snoozed faded)
+          'agent-snoozed)
+      face)))
+
+(defun agent--faded-face (face background)
+  "Return FACE's foreground faded toward BACKGROUND's background.
+The result is an anonymous face keeping `agent--snoozed-color-strength'
+of FACE's color.  When either color is not known as RGB, as for a
+terminal's unspecified background, return FACE itself, unfaded, so the
+state still shows.  Return nil when FACE is nil."
+  (when face
+    (let ((fg (when-let* ((color (face-foreground face nil t)))
+                (color-name-to-rgb color)))
+          (bg (when-let* ((color (face-background background nil t)))
+                (color-name-to-rgb color))))
+      (if (and fg bg)
+          (list :foreground
+                (apply #'color-rgb-to-hex
+                       (append (color-blend fg bg agent--snoozed-color-strength)
+                               '(2))))
+        face))))
 
 (defun agent--session-state-face (state)
   "Return the session-switcher face for display STATE, or nil for none."
@@ -2019,8 +2052,9 @@ Sessions appear in the order and with the faces of
 `agent-select-session': `agent-waiting' for a session waiting for
 input, `agent-waiting-with-background' for one waiting while
 background work runs, `agent-busy' for one working on a turn,
-`agent-unknown' for one never observed, and `agent-snoozed' for a
-snoozed one.
+`agent-unknown' for one never observed, and, for a snoozed one,
+`agent-snoozed' over its state color faded toward the tab bar's
+background.
 The session a frame's selected window shows also carries
 `agent-current-session' in that frame.  Clicking a session switches to
 it.  The segment is inserted into `tab-bar-format' before any
@@ -2092,7 +2126,7 @@ when it has none."
                     buf
                     (agent-display-name buf)
                     (agent--session-face
-                     buf (agent-session-display-state buf)))))
+                     buf (agent-session-display-state buf) 'tab-bar))))
           (agent--ordered-session-keys)))
 
 (defun agent-tab-bar-format-sessions ()
@@ -2178,7 +2212,7 @@ session unsnoozes by itself, firing the ready alert at that point if
 it is waiting for input.  Interactively, HOURS is read from the
 minibuffer; leave it blank to snooze indefinitely, as a nil HOURS
 does.  A snoozed session is set aside as not actionable for now: the
-switcher lists it last in the `agent-snoozed' face,
+switcher lists it last in `agent-snoozed' over its faded state color,
 `agent-jump-to-waiting' skips it, and it fires no ready alert, while
 its key and its buffer stay as they were.  The snooze, with what is
 left of its duration, survives `agent-restart' and is recorded by
