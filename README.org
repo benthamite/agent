@@ -1018,6 +1018,19 @@ The slots that carry the unified session commands are all optional, and a backen
 
 ~agent-svg-icon~ renders SVG strings as inline images, using the current face foreground when the SVG uses =currentColor=. Backends use this for modeline and transient display and can fall back to text abbreviations when SVG rendering is unavailable.
 
+** Reading and messaging sessions
+:PROPERTIES:
+:CUSTOM_ID: h:session-api
+:END:
+
+#+findex: agent-session-last-reply
+#+findex: agent-session-reply-status
+These functions let a program outside a session, such as an orchestrator, read what the session's agent last said and send it a message. They work with any backend that reads transcripts (~:session-history~), which both Claude and Codex do.
+
+~agent-session-last-reply~ returns the last prose the agent in a session buffer wrote, as a plist of ~:text~ and ~:timestamp~, the ISO 8601 time its transcript records for it. Tool calls and thinking are not prose. It returns nil when the session has no transcript yet or the agent has written nothing. A prompt may have been submitted since the reply, so it need not answer the latest prompt. The transcript is read backwards a quarter of a megabyte at a time, up to two megabytes, never whole, so a reply further back than that, behind long tool output, is not found.
+
+~agent-session-reply-status~ reads the status line that ends that reply. Every reply is expected to end with one of =Status: done=, =Status: done, pending verification: X at WHEN=, =Status: waiting on you: X= and =Status: in progress: X next=. The result is a plist of ~:status~, one of the symbols ~done~, ~pending-verification~, ~waiting~ and ~in-progress~; ~:detail~, the text after the status's name without its leading separator (empty for a bare =Status: done=); and ~:line~, the line as written. The last line of the reply that starts with =Status:= is the one read, after any list mark or emphasis and ignoring case, so =**Status: done**= counts. It returns nil when there is no reply, when the reply has no status line, or when its status line names none of the four statuses.
+
 ** Modeline and status helpers
 :PROPERTIES:
 :CUSTOM_ID: h:modeline-functions

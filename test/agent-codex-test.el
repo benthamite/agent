@@ -2218,6 +2218,47 @@ session that never restarts would otherwise keep every one of them."
                          (plist-get history :size))))))
       (delete-file file))))
 
+(ert-deftest agent-codex-test-reply-status-reads-the-rollout ()
+  "A Codex session's last reply and its status line come from its rollout."
+  (let ((file (make-temp-file "rollout" nil ".jsonl")))
+    (unwind-protect
+        (with-temp-buffer
+          (setq-local agent--backend 'codex)
+          (with-temp-file file
+            (insert
+             (agent-codex-test--rollout-line
+              "response_item"
+              (agent-codex-test--message "user" "input_text" "Ship it"))
+             (agent-codex-test--rollout-line
+              "response_item"
+              (agent-codex-test--message
+               "assistant" "output_text"
+               "Shipped.\n\nStatus: done, pending verification: CI at 15:00")
+              "2026-11-15T12:00:00Z")
+             (agent-codex-test--rollout-line
+              "response_item" '((type . "function_call") (name . "exec")))))
+          (cl-letf (((symbol-function 'agent-codex--session-identity)
+                     (lambda (_) "abc"))
+                    ((symbol-function 'codex--find-session-transcript)
+                     (lambda (id) (and (equal id "abc") file))))
+            (should (equal (plist-get (agent-session-last-reply (current-buffer))
+                                      :timestamp)
+                           "2026-11-15T12:00:00Z"))
+            (should (equal (agent-session-reply-status (current-buffer))
+                           (list :status 'pending-verification
+                                 :detail "CI at 15:00"
+                                 :line (concat "Status: done, pending "
+                                               "verification: CI at 15:00"))))))
+      (delete-file file))))
+
+(ert-deftest agent-codex-test-reply-status-nil-without-a-rollout ()
+  "A Codex session with no rollout yet has no reply and no status."
+  (with-temp-buffer
+    (setq-local agent--backend 'codex)
+    (cl-letf (((symbol-function 'agent-codex--session-identity) #'ignore))
+      (should-not (agent-session-last-reply (current-buffer)))
+      (should-not (agent-session-reply-status (current-buffer))))))
+
 (ert-deftest agent-codex-test-history-without-rollout-is-nil ()
   "A session with no id, or no rollout yet, has no history."
   (cl-letf (((symbol-function 'agent-codex--session-identity) #'ignore))

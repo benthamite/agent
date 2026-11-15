@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'agent)
 (require 'agent-capture)
+(require 'agent-util)
 
 (defvar server-eval-args-left)
 
@@ -6345,6 +6346,139 @@ time tells it from the Emacs that replaced it."
           (should (equal (mapcar #'car (agent--read-session-groups))
                          '("other"))))
       (delete-file agent-session-groups-file))))
+
+;;;; Session replies
+
+(defun agent-test--history-entry-messages (entry)
+  "Return the message a test transcript line ENTRY records."
+  (list (list :role (plist-get entry :role)
+              :text (plist-get entry :text)
+              :time (plist-get entry :time))))
+
+(defun agent-test--transcript-line (role text &optional time)
+  "Return a test transcript line of ROLE saying TEXT at TIME."
+  (concat (json-serialize (list :role role :text text :time (or time "t")))
+          "\n"))
+
+(defmacro agent-test--with-transcript-session (lines &rest body)
+  "Run BODY with `buf' a session whose transcript holds LINES.
+LINES is a list of strings evaluated once.  The session's backend reads
+the transcript with `agent-util-jsonl-history'."
+  (declare (indent 1) (debug t))
+  `(let ((file (make-temp-file "agent-test-transcript" nil ".jsonl")))
+     (unwind-protect
+         (progn
+           (with-temp-file file
+             (apply #'insert ,lines))
+           (agent-test--with-session-buffer "*one:~/repo/:default*"
+             (setf (agent-backend-session-history (agent-backend 'one))
+                   (lambda (_buffer bytes &optional before after)
+                     (agent-util-jsonl-history
+                      file bytes before after
+                      #'agent-test--history-entry-messages)))
+             ,@body))
+       (delete-file file))))
+
+(ert-deftest agent-test-reply-status-reads-each-status ()
+  "Each of the four statuses is read with its detail."
+  (dolist (case '(("Status: done" done "")
+                  ("Status: done, pending verification: deploy at 18:00"
+                   pending-verification "deploy at 18:00")
+                  ("Status: waiting on you: approve the merge"
+                   waiting "approve the merge")
+                  ("Status: in progress: CI run next" in-progress "CI run next")))
+    (let ((status (agent--reply-text-status
+                   (concat "Done the work.\n\n" (car case)))))
+      (should (equal status (list :status (nth 1 case)
+                                  :detail (nth 2 case)
+                                  :line (car case)))))))
+
+(ert-deftest agent-test-reply-status-tolerates-markup ()
+  "Emphasis, list marks, case and a final period do not hide the status."
+  (dolist (line '("**Status: done**" "Status: **done**." "- status: Done"
+                  "  Status: done.  "))
+    (should (eq (plist-get (agent--reply-text-status line) :status) 'done)))
+  (should (equal (plist-get (agent--reply-text-status
+                             "**Status: waiting on you:** pick a name**")
+                            :detail)
+                 "pick a name")))
+
+(ert-deftest agent-test-reply-status-last-status-line-wins ()
+  "Only the last status line counts, wherever it sits."
+  (let ((status (agent--reply-text-status
+                 (concat "Status: done\nI was wrong.\n"
+                         "Status: in progress: tests next\nTrailing note."))))
+    (should (eq (plist-get status :status) 'in-progress))
+    (should (equal (plist-get status :line) "Status: in progress: tests next"))))
+
+(ert-deftest agent-test-reply-status-nil-without-a-status-line ()
+  "A reply without a status line, or with an unknown status, reads nil."
+  (should-not (agent--reply-text-status "All finished, nothing else."))
+  (should-not (agent--reply-text-status "The Status: done line goes last."))
+  (should-not (agent--reply-text-status "Status: blocked on CI"))
+  (should-not (agent--reply-text-status "Status: donezo")))
+
+(ert-deftest agent-test-session-last-reply-is-the-last-assistant-prose ()
+  "The last reply skips later tool calls and prompts, and keeps its time."
+  (agent-test--with-transcript-session
+      (list (agent-test--transcript-line "user" "Do it" "t1")
+            (agent-test--transcript-line "assistant" "Working on it." "t2")
+            (agent-test--transcript-line "tool" "Bash" "t3")
+            (agent-test--transcript-line "assistant" "Done.\n\nStatus: done" "t4")
+            (agent-test--transcript-line "tool" "Read" "t5")
+            (agent-test--transcript-line "user" "Thanks" "t6"))
+    (should (equal (agent-session-last-reply buf)
+                   (list :text "Done.\n\nStatus: done" :timestamp "t4")))
+    (should (equal (agent-session-reply-status buf)
+                   (list :status 'done :detail "" :line "Status: done")))))
+
+(ert-deftest agent-test-session-last-reply-joins-one-entry ()
+  "Text blocks of one transcript entry, sharing its time, form one reply."
+  (agent-test--with-transcript-session
+      (list (agent-test--transcript-line "assistant" "Earlier." "t1")
+            (agent-test--transcript-line "assistant" "First part." "t2")
+            (agent-test--transcript-line "assistant" "Status: done" "t2"))
+    (should (equal (plist-get (agent-session-last-reply buf) :text)
+                   "First part.\nStatus: done"))))
+
+(ert-deftest agent-test-session-last-reply-reads-back-past-tool-output ()
+  "A reply further back than one read is found by reading further back."
+  (let ((agent--reply-chunk-bytes 200))
+    (agent-test--with-transcript-session
+        (cons (agent-test--transcript-line
+               "assistant" "Status: waiting on you: say yes" "t1")
+              (make-list 10 (agent-test--transcript-line
+                             "tool" (make-string 120 ?x) "t2")))
+      (should (eq (plist-get (agent-session-reply-status buf) :status)
+                  'waiting)))))
+
+(ert-deftest agent-test-session-last-reply-gives-up-at-the-limit ()
+  "A reply further back than `agent--reply-max-bytes' is not looked for."
+  (let ((agent--reply-chunk-bytes 200)
+        (agent--reply-max-bytes 400))
+    (agent-test--with-transcript-session
+        (cons (agent-test--transcript-line "assistant" "Status: done" "t1")
+              (make-list 10 (agent-test--transcript-line
+                             "tool" (make-string 120 ?x) "t2")))
+      (should-not (agent-session-last-reply buf)))))
+
+(ert-deftest agent-test-session-last-reply-nil-without-a-reply ()
+  "No transcript, a lost one, no reader or no assistant text reads nil."
+  (agent-test--with-transcript-session
+      (list (agent-test--transcript-line "user" "Hello" "t1"))
+    (should-not (agent-session-last-reply buf))
+    (should-not (agent-session-reply-status buf))
+    (setf (agent-backend-session-history (agent-backend 'one))
+          (lambda (&rest _) nil))
+    (should-not (agent-session-last-reply buf))
+    (setf (agent-backend-session-history (agent-backend 'one))
+          (lambda (&rest _) (list :lost "gone")))
+    (should-not (agent-session-reply-status buf))
+    (setf (agent-backend-session-history (agent-backend 'one)) nil)
+    (should-not (agent-session-last-reply buf)))
+  (let ((dead (generate-new-buffer " *dead*" t)))
+    (kill-buffer dead)
+    (should-not (agent-session-last-reply dead))))
 
 (provide 'agent-test)
 ;;; agent-test.el ends here

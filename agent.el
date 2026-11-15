@@ -2781,6 +2781,123 @@ box is drawn so, and is not text the session holds.  A backend's
   (and (consp face)
        (memq 'eat-term-faint (ensure-list (plist-get face :inherit)))))
 
+;;;; Session replies
+
+(defconst agent--reply-chunk-bytes 262144
+  "Bytes of transcript read at a time when looking for a session's last reply.")
+
+(defconst agent--reply-max-bytes 2097152
+  "Bytes of transcript read at most when looking for a session's last reply.
+A reply further back than this, behind long tool output, is not found.")
+
+(defconst agent--status-line-regexp
+  "\\`[^[:alnum:]]*Status:[ \t]*\\(.*?\\)[ \t*]*\\'"
+  "Regexp matching a reply's status line, such as \"Status: done\".
+Markup before the word, such as a list mark or emphasis, is allowed.
+Group 1 is what follows the colon, without trailing emphasis.")
+
+(defconst agent--reply-status-patterns
+  '((pending-verification
+     . "\\`\\(?:done[ \t]*[,;:—–-]?[ \t]*\\)?pending verification\\b")
+    (done . "\\`done\\b")
+    (waiting . "\\`waiting on you\\b")
+    (in-progress . "\\`in[ -]progress\\b"))
+  "Alist of each reply status to the regexp matching its status line.
+Each regexp is matched, ignoring case, against what follows \"Status:\",
+and the first that matches wins, so `done, pending verification' is not
+read as `done'.  What follows the match is the status's detail.")
+
+(defun agent-session-last-reply (buffer)
+  "Return the last prose the agent in session BUFFER wrote, or nil.
+The result is a plist of `:text', the text of the agent's last message,
+and `:timestamp', the ISO 8601 time its transcript records for it.  Tool
+calls and thinking are not prose.  A prompt may have been submitted
+since, so the reply need not answer the latest prompt.
+
+Nil when BUFFER is no live session, its backend reads no transcripts
+\(it has no `:session-history'), the session has no transcript yet, or
+the agent wrote nothing in the last `agent--reply-max-bytes' bytes of
+it.  The transcript is read backwards, `agent--reply-chunk-bytes' at a
+time, and never whole."
+  (when-let* ((reader (agent--session-history-reader buffer)))
+    (let ((before nil) (spent 0) (reply nil) (done nil))
+      (while (not (or reply done))
+        (let ((history (funcall reader buffer agent--reply-chunk-bytes before)))
+          (setq reply (agent--last-reply (plist-get history :messages))
+                before (plist-get history :before)
+                spent (+ spent agent--reply-chunk-bytes)
+                done (or (null before) (zerop before)
+                         (>= spent agent--reply-max-bytes)))))
+      reply)))
+
+(defun agent--session-history-reader (buffer)
+  "Return the `:session-history' function of session BUFFER's backend, or nil."
+  (when-let* ((name (and (buffer-live-p buffer) (agent--detect-backend buffer)))
+              (backend (agent-backend name)))
+    (agent-backend-session-history backend)))
+
+(defun agent--last-reply (messages)
+  "Return the last assistant message in MESSAGES as a reply plist, or nil.
+MESSAGES are as a `:session-history' function returns them.  The
+assistant messages just before it with the same time come from the same
+transcript entry, and are joined to it."
+  (let* ((reversed (reverse messages))
+         (tail (seq-drop-while (lambda (message)
+                                 (not (agent--assistant-message-p message)))
+                               reversed)))
+    (when tail
+      (let* ((time (plist-get (car tail) :time))
+             (parts (seq-take-while (lambda (message)
+                                      (and (agent--assistant-message-p message)
+                                           (equal (plist-get message :time) time)))
+                                    tail)))
+        (list :text (string-join (nreverse (mapcar (lambda (message)
+                                                     (plist-get message :text))
+                                                   parts))
+                                 "\n")
+              :timestamp time)))))
+
+(defun agent--assistant-message-p (message)
+  "Return non-nil when history MESSAGE is prose the agent wrote."
+  (equal (plist-get message :role) "assistant"))
+
+(defun agent-session-reply-status (buffer)
+  "Return the status the last reply in session BUFFER ends with, or nil.
+Every reply is expected to end with a status line, one of
+\"Status: done\", \"Status: done, pending verification: X at WHEN\",
+\"Status: waiting on you: X\" and \"Status: in progress: X next\".  The
+result is a plist of `:status', one of the symbols `done',
+`pending-verification', `waiting' and `in-progress'; `:detail', the text
+after the status's name without its leading separator, which is empty
+for a bare \"Status: done\"; and `:line', the status line as written.
+
+The last reply is the one `agent-session-last-reply' returns, and its
+last line that starts with \"Status:\", after any markup, is the one
+read, ignoring case.  Nil when there is no last reply, when it has no
+status line, or when that line names none of the four statuses."
+  (when-let* ((reply (agent-session-last-reply buffer)))
+    (agent--reply-text-status (plist-get reply :text))))
+
+(defun agent--reply-text-status (text)
+  "Return the status the last status line of reply TEXT reports, or nil.
+The result is as `agent-session-reply-status' documents."
+  (let ((case-fold-search t))
+    (when-let* ((line (seq-find (lambda (line)
+                                  (string-match-p agent--status-line-regexp line))
+                                (reverse (mapcar #'string-trim
+                                                 (split-string text "\n")))))
+                ((string-match agent--status-line-regexp line))
+                (body (replace-regexp-in-string
+                       "\\`[*_]+" "" (match-string 1 line))))
+      (seq-some (pcase-lambda (`(,status . ,regexp))
+                  (when (string-match regexp body)
+                    (list :status status
+                          :detail (replace-regexp-in-string
+                                   "\\`[ \t*]*[,;:.—–-]*[ \t*]*" ""
+                                   (substring body (match-end 0)))
+                          :line line)))
+                agent--reply-status-patterns))))
+
 ;;;; Core send wrappers
 
 (defun agent-send-string (string &optional buffer)

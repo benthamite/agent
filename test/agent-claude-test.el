@@ -3213,6 +3213,38 @@ With the UUID it is only waiting for its first status poll."
     (should (eq (agent-backend-session-history (agent-backend 'claude-code))
                 #'agent-claude--session-history))))
 
+(ert-deftest agent-claude-test-reply-status-reads-the-transcript ()
+  "A Claude session's last reply and its status line come from its transcript."
+  (agent-claude-test--with-transcripts config
+    (setq-local agent--backend 'claude-code)
+    (setq-local agent--session
+                (agent-session-create :backend 'claude-code :id "abc-123"
+                                      :directory "/p/"))
+    (let ((file (agent-claude-test--write-transcript config "-p" "abc-123")))
+      (should-not (agent-session-reply-status (current-buffer)))
+      (with-temp-buffer
+        (insert (json-serialize
+                 (list :type "assistant" :timestamp "2026-11-15T12:00:00Z"
+                       :message (list :role "assistant"
+                                      :content (vector
+                                                (list :type "text"
+                                                      :text "Merged.\n\nStatus: waiting on you: push it")))))
+                "\n"
+                (json-serialize
+                 (list :type "assistant"
+                       :message (list :role "assistant"
+                                      :content (vector
+                                                (list :type "tool_use"
+                                                      :name "Bash")))))
+                "\n")
+        (append-to-file (point-min) (point-max) file)))
+    (should (equal (agent-session-last-reply (current-buffer))
+                   (list :text "Merged.\n\nStatus: waiting on you: push it"
+                         :timestamp "2026-11-15T12:00:00Z")))
+    (should (equal (agent-session-reply-status (current-buffer))
+                   (list :status 'waiting :detail "push it"
+                         :line "Status: waiting on you: push it")))))
+
 (ert-deftest agent-claude-test-session-history-names-the-session ()
   "The result names the session, so a reader sees a change of transcript."
   (agent-claude-test--with-transcripts config

@@ -80,6 +80,7 @@ Commands
 Functions
 
 * Backend registration and display::
+* Reading and messaging sessions::
 * Modeline and status helpers::
 
 Indices
@@ -1065,6 +1066,7 @@ When @code{agent-restart} operates on a Codex session@comma{} it resumes codex.e
 
 @menu
 * Backend registration and display::
+* Reading and messaging sessions::
 * Modeline and status helpers::
 @end menu
 
@@ -1098,6 +1100,17 @@ The slots that carry the unified session commands are all optional@comma{} and a
 @code{agent-parse-skill-frontmatter} reads @samp{SKILL.md} frontmatter shared by Claude and Codex skill runners. It recognizes names@comma{} descriptions@comma{} argument hints@comma{} argument sources@comma{} argument choices@comma{} defaults@comma{} multiplicity@comma{} user-invocable flags@comma{} and model overrides.
 
 @code{agent-svg-icon} renders SVG strings as inline images@comma{} using the current face foreground when the SVG uses @samp{currentColor}. Backends use this for modeline and transient display and can fall back to text abbreviations when SVG rendering is unavailable.
+
+@node Reading and messaging sessions
+@section Reading and messaging sessions
+
+@findex agent-session-last-reply
+@findex agent-session-reply-status
+These functions let a program outside a session@comma{} such as an orchestrator@comma{} read what the session's agent last said and send it a message. They work with any backend that reads transcripts (@code{:session-history})@comma{} which both Claude and Codex do.
+
+@code{agent-session-last-reply} returns the last prose the agent in a session buffer wrote@comma{} as a plist of @code{:text} and @code{:timestamp}@comma{} the ISO 8601 time its transcript records for it. Tool calls and thinking are not prose. It returns nil when the session has no transcript yet or the agent has written nothing. A prompt may have been submitted since the reply@comma{} so it need not answer the latest prompt. The transcript is read backwards a quarter of a megabyte at a time@comma{} up to two megabytes@comma{} never whole@comma{} so a reply further back than that@comma{} behind long tool output@comma{} is not found.
+
+@code{agent-session-reply-status} reads the status line that ends that reply. Every reply is expected to end with one of @samp{Status: done}@comma{} @samp{Status: done@comma{} pending verification: X at WHEN}@comma{} @samp{Status: waiting on you: X} and @samp{Status: in progress: X next}. The result is a plist of @code{:status}@comma{} one of the symbols @code{done}@comma{} @code{pending-verification}@comma{} @code{waiting} and @code{in-progress}; @code{:detail}@comma{} the text after the status's name without its leading separator (empty for a bare @samp{Status: done}); and @code{:line}@comma{} the line as written. The last line of the reply that starts with @samp{Status:} is the one read@comma{} after any list mark or emphasis and ignoring case@comma{} so @samp{**Status: done**} counts. It returns nil when there is no reply@comma{} when the reply has no status line@comma{} or when its status line names none of the four statuses.
 
 @node Modeline and status helpers
 @section Modeline and status helpers
