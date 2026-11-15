@@ -5871,8 +5871,8 @@ being masked by a cleanup error."
             (setq-local agent--backend 'stub)
             (let ((err (should-error (agent-create-branch t) :type 'error)))
               (should (equal (cadr err) "boom"))))
-          (should-not (directory-files agent-branch-worktree-directory nil
-                                       directory-files-no-dot-files-regexp))
+          (should-not (directory-files-recursively
+                       agent-branch-worktree-directory ""))
           (let ((branches
                  (let ((default-directory repo))
                    (with-temp-buffer
@@ -5908,8 +5908,8 @@ is itself a kind of `error' and nothing here should special-case it."
             (let ((err (should-error (agent-create-branch t)
                                      :type 'user-error)))
               (should (equal (cadr err) "not forkable yet"))))
-          (should-not (directory-files agent-branch-worktree-directory nil
-                                       directory-files-no-dot-files-regexp))
+          (should-not (directory-files-recursively
+                       agent-branch-worktree-directory ""))
           (let ((branches
                  (let ((default-directory repo))
                    (with-temp-buffer
@@ -5920,6 +5920,51 @@ is itself a kind of `error' and nothing here should special-case it."
       (kill-buffer buffer)
       (delete-directory repo t)
       (delete-directory agent-branch-worktree-directory t))))
+
+(ert-deftest agent-test-branch-worktree-directory-default ()
+  "Branch worktrees go under ~/repos/.worktrees/ unless configured otherwise."
+  (should (equal (eval (car (get 'agent-branch-worktree-directory
+                                 'standard-value))
+                       t)
+                 "~/repos/.worktrees/")))
+
+(ert-deftest agent-test-branch-worktree-goes-under-the-repository-name ()
+  "A branch worktree lives at BASE/REPO/BRANCH, also when made from a worktree.
+REPO is the repository's name, not that of the worktree it was made from."
+  (let* ((root (file-name-as-directory (make-temp-file "agent-branch-test" t)))
+         (repo (file-name-as-directory (expand-file-name "myrepo" root)))
+         (agent-branch-worktree-directory
+          (file-name-as-directory (expand-file-name "worktrees" root))))
+    (unwind-protect
+        (progn
+          (make-directory repo)
+          (agent-test--init-git-repo repo)
+          (let* ((first (agent--make-branch-worktree repo "101010"))
+                 (second (agent--make-branch-worktree (car first) "202020")))
+            (should (equal first
+                           (cons (expand-file-name
+                                  "myrepo/agent-branch-101010/"
+                                  agent-branch-worktree-directory)
+                                 "agent-branch-101010")))
+            (should (file-exists-p (expand-file-name "README" (car first))))
+            (should (equal (agent--git-repository-name (car first)) "myrepo"))
+            (should (equal (car second)
+                           (expand-file-name "myrepo/agent-branch-202020/"
+                                             agent-branch-worktree-directory)))))
+      (delete-directory root t))))
+
+(ert-deftest agent-test-repository-name-of-a-separate-git-directory ()
+  "A git directory kept apart from its work tree names the repository."
+  (let* ((root (file-name-as-directory (make-temp-file "agent-branch-test" t)))
+         (work (expand-file-name "work" root)))
+    (unwind-protect
+        (progn
+          (call-process "git" nil nil nil "init" "-q"
+                        (concat "--separate-git-dir="
+                                (expand-file-name "store.git" root))
+                        work)
+          (should (equal (agent--git-repository-name work) "store")))
+      (delete-directory root t))))
 
 (ert-deftest agent-test-prepare-fork-is-skipped-without-a-slot ()
   "Do nothing when the backend registers no fork preparation."

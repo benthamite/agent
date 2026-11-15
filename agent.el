@@ -834,15 +834,13 @@ so it does not inject text into a running conversation."
   :type 'number
   :group 'agent)
 
-(defcustom agent-branch-worktree-directory
-  (expand-file-name "claude-worktrees"
-                    (or (getenv "XDG_CACHE_HOME")
-                        (expand-file-name ".cache" "~")))
+(defcustom agent-branch-worktree-directory "~/repos/.worktrees/"
   "Base directory for git worktrees created by `agent-create-branch'.
-Each isolated branch gets a sibling worktree under this directory,
-separating its filesystem and git state from the parent session.
-Defaults to a cache location to avoid cloud sync
-interference with concurrent git operations."
+Each isolated branch gets a worktree at REPO/BRANCH under this
+directory, where REPO is the name of the repository and BRANCH that of
+the branch, so a repository's worktrees sit together, apart from any
+checkout, and the branch's filesystem and git state stay separate from
+the parent session's."
   :type 'directory
   :group 'agent)
 
@@ -5579,16 +5577,39 @@ globally register no `prepare-fork' slot and nothing happens."
 
 (defun agent--make-branch-worktree (toplevel branch-id)
   "Create a git worktree of TOPLEVEL identified by BRANCH-ID.
-Returns a cons (PATH . BRANCH-NAME).  Signals an error on failure."
-  (let* ((repo-name (file-name-nondirectory (directory-file-name toplevel)))
-         (branch-name (format "agent-branch-%s" branch-id))
+It goes in `agent-branch-worktree-directory', under the repository's
+name and then the branch's.  Returns a cons (PATH . BRANCH-NAME).
+Signals an error on failure."
+  (let* ((branch-name (format "agent-branch-%s" branch-id))
+         (repo-directory (expand-file-name
+                          (agent--git-repository-name toplevel)
+                          agent-branch-worktree-directory))
          (worktree-path (file-name-as-directory
-                         (expand-file-name
-                          (format "%s-branch-%s" repo-name branch-id)
-                          agent-branch-worktree-directory))))
-    (make-directory agent-branch-worktree-directory t)
+                         (expand-file-name branch-name repo-directory))))
+    (make-directory repo-directory t)
     (agent--git-worktree-add toplevel branch-name worktree-path)
     (cons worktree-path branch-name)))
+
+(defun agent--git-repository-name (toplevel)
+  "Return the name of the repository checked out at TOPLEVEL.
+It is the name of the directory that holds the repository's common git
+directory, so a linked worktree gives the name of the repository it
+belongs to, not its own.  A git directory not named \".git\", as made
+with \"git init --separate-git-dir\", gives its own name less any
+\".git\" suffix.  Signals an error when git cannot tell."
+  (let ((default-directory toplevel))
+    (with-temp-buffer
+      (unless (zerop (call-process "git" nil t nil
+                                   "rev-parse" "--git-common-dir"))
+        (error "Cannot find the git directory of %s: %s"
+               toplevel (string-trim (buffer-string))))
+      (let ((common (directory-file-name
+                     (expand-file-name (string-trim (buffer-string))
+                                       toplevel))))
+        (if (equal (file-name-nondirectory common) ".git")
+            (file-name-nondirectory (directory-file-name
+                                     (file-name-directory common)))
+          (string-remove-suffix ".git" (file-name-nondirectory common)))))))
 
 (defun agent--git-worktree-add (toplevel branch-name worktree-path)
   "Run `git worktree add' in TOPLEVEL for BRANCH-NAME at WORKTREE-PATH."
