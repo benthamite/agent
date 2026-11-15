@@ -2251,6 +2251,39 @@ session that never restarts would otherwise keep every one of them."
                                                "verification: CI at 15:00"))))))
       (delete-file file))))
 
+(ert-deftest agent-codex-test-input-state-reads-the-composer ()
+  "A Codex app-server session's input box is its composer region."
+  (with-temp-buffer
+    (setq-local agent--backend 'codex)
+    (setq-local codex-terminal-backend 'app-server)
+    (let ((draft nil) (active t))
+      (cl-letf (((symbol-function 'codex-prompt-input)
+                 (lambda (&optional _buffer) draft))
+                ((symbol-function 'codex--app-server-input-active-p)
+                 (lambda () active)))
+        (should (equal (agent-codex--input-state (current-buffer))
+                       '(:box t :input nil :dialog nil)))
+        (should-not (agent-send-refusal (current-buffer)))
+        (setq draft "half a thought")
+        (should (equal (agent-send-refusal (current-buffer))
+                       "input box holds unsent text"))
+        (setq draft nil active nil)
+        (should (equal (agent-send-refusal (current-buffer))
+                       "the input box is not showing"))))))
+
+(ert-deftest agent-codex-test-input-state-in-a-terminal ()
+  "A Codex terminal session's box is taken to show, with its prompt as input."
+  (with-temp-buffer
+    (setq-local agent--backend 'codex)
+    (setq-local codex-terminal-backend 'eat)
+    (cl-letf (((symbol-function 'codex-prompt-input)
+               (lambda (&optional _buffer) "typed")))
+      (should (equal (agent-codex--input-state (current-buffer))
+                     '(:box t :input "typed" :dialog nil)))))
+  (with-temp-buffer
+    (setq-local agent--backend 'claude-code)
+    (should-not (agent-codex--input-state (current-buffer)))))
+
 (ert-deftest agent-codex-test-reply-status-nil-without-a-rollout ()
   "A Codex session with no rollout yet has no reply and no status."
   (with-temp-buffer

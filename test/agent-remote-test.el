@@ -578,10 +578,16 @@ Polls carry no history for it."
     (let ((agent-log-redact-enabled nil))
       (should-not (agent-remote--redactor)))))
 
+(defun agent-remote-test--input-state (state)
+  "Return an input-state hook function reporting STATE for every buffer."
+  (lambda (_buffer) state))
+
 (ert-deftest agent-remote-test-send-submits-text ()
   "The send endpoint submits the text to the named session."
   (agent-remote-test--with-session buffer
-    (let (submitted)
+    (let ((agent-session-input-state-functions
+           (list (agent-remote-test--input-state (list :box t))))
+          submitted)
       (cl-letf (((symbol-function 'agent-submit)
                  (lambda (text buf) (setq submitted (list text buf)))))
         (agent-remote-test--with-server
@@ -598,16 +604,11 @@ Polls carry no history for it."
 The dialog would take the text as keystrokes: its first characters would
 answer or dismiss it, and only the rest would reach the prompt."
   (agent-remote-test--with-session buffer
-    (with-current-buffer buffer (insert "the screen"))
-    (let (submitted)
+    (let ((agent-session-input-state-functions
+           (list (agent-remote-test--input-state (list :dialog t))))
+          submitted)
       (cl-letf (((symbol-function 'agent-submit)
-                 (lambda (text buf) (setq submitted (list text buf))))
-                ((symbol-function 'agent-backend)
-                 (lambda (_) (agent-backend--create
-                              :screen-state
-                              (lambda (text)
-                                (should (equal text "the screen"))
-                                (list :card "A question" :dialog t))))))
+                 (lambda (text buf) (setq submitted (list text buf)))))
         (agent-remote-test--with-server
           (let ((response (agent-remote-test--http
                            "POST" "/api/send"
@@ -620,19 +621,23 @@ answer or dismiss it, and only the rest would reach the prompt."
                                                (agent-remote-test--json response))))
             (should-not submitted)))))))
 
-(ert-deftest agent-remote-test-send-goes-ahead-without-a-dialog ()
-  "A card that leaves the input box in place does not stop a send."
+(ert-deftest agent-remote-test-send-refuses-over-unsent-text ()
+  "Text is not sent to a session whose input box holds unsent text.
+It would be joined to what is already in the box."
   (agent-remote-test--with-session buffer
-    (let (submitted)
+    (let ((agent-session-input-state-functions
+           (list (agent-remote-test--input-state
+                  (list :box t :input "half a thought"))))
+          submitted)
       (cl-letf (((symbol-function 'agent-submit)
-                 (lambda (text buf) (setq submitted (list text buf))))
-                ((symbol-function 'agent-backend)
-                 (lambda (_) (agent-backend--create
-                              :screen-state
-                              (lambda (_) (list :card "A notice"))))))
-        (agent-remote--send
-         (list :body (json-serialize (list :id (buffer-name buffer) :text "hi"))))
-        (should (equal submitted (list "hi" buffer)))))))
+                 (lambda (text buf) (setq submitted (list text buf)))))
+        (let ((err (should-error
+                    (agent-remote--send
+                     (list :body (json-serialize
+                                  (list :id (buffer-name buffer) :text "hi"))))
+                    :type 'user-error)))
+          (should (equal (cadr err) "Not sent: input box holds unsent text")))
+        (should-not submitted)))))
 
 (ert-deftest agent-remote-test-send-rejects-unknown-session ()
   "Sending to a buffer that is not a session is refused."

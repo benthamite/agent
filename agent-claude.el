@@ -1646,6 +1646,24 @@ id to look up.  Start a query when the result is missing or older than
   (with-current-buffer buffer
     (claude-code-send-escape)))
 
+(defconst agent-claude--input-screen-lines 300
+  "Lines of a Claude session's screen read to find its input box.")
+
+(defun agent-claude--input-state (buffer)
+  "Return what text sent to Claude session BUFFER now would reach, or nil.
+Nil when BUFFER is not a Claude session.  Otherwise the plist that
+`agent-session-input-state-functions' documents, read from the last
+`agent-claude--input-screen-lines' lines of its screen by
+`agent-claude-cli-screen-state'."
+  (when (eq (agent--detect-backend buffer) 'claude-code)
+    (let ((state (agent-claude-cli-screen-state
+                  (agent-screen-tail buffer agent-claude--input-screen-lines))))
+      (list :box (plist-get state :box)
+            :input (plist-get state :input)
+            :dialog (plist-get state :dialog)))))
+
+(add-hook 'agent-session-input-state-functions #'agent-claude--input-state)
+
 (defun agent-claude--session-history (buffer bytes &optional before after)
   "Return past conversation of Claude session BUFFER, or nil if it has none.
 BYTES, BEFORE and AFTER are as in `agent-claude-cli-transcript-history',

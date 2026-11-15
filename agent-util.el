@@ -81,16 +81,18 @@ Return a plist.  `:messages' lists the conversation oldest first, each a
 plist of `:role' (\"user\", \"assistant\" or \"tool\"), `:text' and
 `:time'.  `:before' is the offset to pass as BEFORE for the preceding
 stretch, 0 once the start of FILE is reached.  `:after' is the offset to
-pass as AFTER for what follows.  `:size' is FILE's size in bytes.
-`:gap' is non-nil when more than BYTES bytes followed AFTER, so the
-lines between AFTER and this stretch were not read.
+pass as AFTER for what follows.  `:size' is FILE's size in bytes, and
+`:modified' the time it last changed, as from `float-time'.  `:gap' is
+non-nil when more than BYTES bytes followed AFTER, so the lines between
+AFTER and this stretch were not read.
 
 ENTRY-MESSAGES is called with each line parsed as a plist, JSON null
 and false as nil, and returns the messages that line records.  A line
 that does not parse, or on which ENTRY-MESSAGES signals, is skipped.
 Each run of consecutive tool messages is merged into one."
   (let* ((truename (file-truename file))
-         (size (file-attribute-size (file-attributes truename)))
+         (attributes (file-attributes truename))
+         (size (file-attribute-size attributes))
          (end (min (or before size) size))
          (floor (min (or after 0) end))
          (start (max floor (- end bytes))))
@@ -108,6 +110,8 @@ Each run of consecutive tool messages is merged into one."
               :before (if (= first last) start (+ start first -1))
               :after (+ start last -1)
               :size size
+              :modified (float-time
+                         (file-attribute-modification-time attributes))
               :gap (and after (> start floor)))))))
 
 (defun agent-util--last-line-end ()

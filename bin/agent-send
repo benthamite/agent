@@ -73,7 +73,14 @@ Disclosure header
 
 Delivery
   Busy sessions receive the message too: Claude queues it, Codex steers the
-  running turn with it. The text crosses to Emacs through a private temporary
+  running turn with it. A session whose input box holds text not yet
+  submitted (someone is typing there), that shows a dialog or picker in place
+  of its input box, or whose input box is not showing, is refused and nothing
+  is sent: the message would join the unsent text, or its first characters
+  would answer the dialog. A faint suggested prompt in an empty box does not
+  count. These are agent.el's `agent-send-refusal' checks, made in the same
+  Emacs evaluation as the submit; the refusal names the reason. Try again
+  once the box is clear. The text crosses to Emacs through a private temporary
   file, not an Elisp string literal. The window layout is restored after the
   submit. Success is reported only when the recipient's own transcript
   records a user message with the delivery id (exact text match, or the id
@@ -265,6 +272,7 @@ def deliver(identity: dict[str, Any], prompt: str, message_id: str,
             transcript=transcript, transcript_offset=offset,
             delivery_marker=message_id, one_pass=True,
             expected_identity=identity, preserve_windows=True,
+            refuse_unsafe_input=True,
         )
     except session.EmacsClientError as error:
         # The CLI may record the text slightly normalized; the unique id in
@@ -331,6 +339,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except Refusal as error:
         print(f"agent-send: {error}", file=sys.stderr)
+        return 1
+    except session.DeliveryRefused as error:
+        # Raised only by deliver(), so TARGET is resolved.
+        print(f"agent-send: {target['buffer']} refused the message: {error}; "
+              "nothing was sent", file=sys.stderr)
         return 1
     except session.EmacsClientError as error:
         print(f"agent-send: Emacs request failed before sending: {error}", file=sys.stderr)

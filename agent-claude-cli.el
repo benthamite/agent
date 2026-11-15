@@ -664,13 +664,13 @@ when a spinner shows.  `:writing' is the text of the message just above
 the status, unwrapped, which the transcript lacks while it is being
 written, or nil.  `:card' is the text of a dialog, a picker or a notice
 that takes input, or nil.  `:options' lists as strings the digits that
-choose among the card's options.  `:input' is the text in the input
-box, typed or inserted but not yet submitted, or nil.  `:dialog' is
-non-nil when the card is a dialog or picker shown in place of the input
-box, recognized by its numbered options or its key hint: text typed
-then would go to it as keystrokes, not to the prompt.  A card under an
-input box, such as a notice, and a screen with nothing recognized are
-not dialogs.
+choose among the card's options.  `:box' is non-nil when SCREEN shows
+the input box.  `:input' is the text in the input box, typed or
+inserted but not yet submitted, or nil.  `:dialog' is non-nil when the
+card is a dialog or picker shown in place of the input box, recognized
+by its numbered options or its key hint: text typed then would go to it
+as keystrokes, not to the prompt.  A card under an input box, such as a
+notice, and a screen with nothing recognized are not dialogs.
 
 A screen with no input box always has a card, by the rules of
 `agent-claude-cli-screen-panel'.  A notice with no options takes no input
@@ -681,7 +681,8 @@ and is dropped."
     (if (plist-get panel :dialog)
         (let* ((card (append (seq-subseq lines start) nil))
                (options (agent-claude-cli--screen-options card)))
-          (list :card (string-join card "\n")
+          (list :box nil
+                :card (string-join card "\n")
                 :options options
                 :dialog (and (or options
                                  (seq-some
@@ -708,7 +709,8 @@ LINES is the screen as a vector and PANEL the result of
                              (string-match-p
                               agent-claude-cli--screen-notice-option-regexp line))
                            status)))
-    (list :status (and spinner (agent-claude-cli--screen-spinner-text spinner))
+    (list :box t
+          :status (and spinner (agent-claude-cli--screen-spinner-text spinner))
           :running (and spinner t)
           :mode (agent-claude-cli--screen-mode-text
                  (append (seq-subseq lines (1+ (car rules))) nil))

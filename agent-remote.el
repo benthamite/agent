@@ -668,28 +668,20 @@ unredacted."
                   text))))
 
 (defun agent-remote--send (request)
-  "Submit the text in REQUEST's JSON body to the session it names."
+  "Submit the text in REQUEST's JSON body to the session it names.
+Refuse, as every sender does, when `agent-send-refusal' finds the text
+could go astray: a dialog would take it as keystrokes, so its first
+characters would answer or dismiss the dialog, and text left unsent in
+the input box would be joined to it."
   (let* ((args (agent-remote--json-body request))
          (buffer (agent-remote--session-buffer (alist-get 'id args)))
          (text (alist-get 'text args)))
     (unless (and (stringp text) (not (string-blank-p text)))
       (user-error "Nothing to send"))
-    (when (agent-remote--shows-dialog-p buffer)
-      (user-error "The session shows a dialog; answer or dismiss it, then send"))
+    (when-let* ((refusal (agent-send-refusal buffer)))
+      (user-error "Not sent: %s" refusal))
     (agent-submit text buffer)
     (list :ok t)))
-
-(defun agent-remote--shows-dialog-p (buffer)
-  "Return non-nil when session BUFFER's screen shows a dialog.
-A dialog takes typed text as keystrokes: the first characters of a reply
-would answer or dismiss it, and only the rest would reach the prompt.
-This asks the backend's `:screen-state' for `:dialog'.  A backend
-without one, or a screen it fails to read, counts as no dialog, so the
-text is sent as it was before this check existed."
-  (when-let* ((backend (agent-backend (agent--detect-backend buffer)))
-              (function (agent-backend-screen-state backend)))
-    (plist-get (ignore-errors (funcall function (agent-remote--buffer-tail buffer)))
-               :dialog)))
 
 (defun agent-remote--attach (request)
   "Save the base64 image in REQUEST's JSON body and return its file name.

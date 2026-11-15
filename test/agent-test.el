@@ -6480,5 +6480,122 @@ the transcript with `agent-util-jsonl-history'."
     (kill-buffer dead)
     (should-not (agent-session-last-reply dead))))
 
+;;;; Guarded delivery
+
+(defmacro agent-test--with-delivery-session (input-state &rest body)
+  "Run BODY with `buf' a waiting session whose input box is INPUT-STATE.
+INPUT-STATE is the plist its input-state function returns.  The session
+changed state long ago and its transcript changed just now.  `sent'
+collects the texts submitted to it."
+  (declare (indent 1) (debug t))
+  `(agent-test--with-session-buffer "*one:~/repo/:default*"
+     (let* ((sent nil)
+            (modified (float-time))
+            (agent-session-input-state-functions
+             (list (lambda (buffer) (and (eq buffer buf) ,input-state)))))
+       (ignore modified)
+       (setf (agent-backend-submit (agent-backend 'one))
+             (lambda (text _buffer) (push text sent))
+             (agent-backend-session-history (agent-backend 'one))
+             (lambda (&rest _) (list :messages nil :modified modified)))
+       (setq-local agent--session-state 'awaiting-input
+                   agent--session-state-changed-at (- (float-time) 1000))
+       ,@body)))
+
+(ert-deftest agent-test-send-refusal-reads-the-input-box ()
+  "A dialog, a missing box or unsent text stop a send; an empty box does not."
+  (dolist (case '(((:box t) nil)
+                  ((:box nil :dialog t) "a dialog is open")
+                  ((:box t :dialog t) "a dialog is open")
+                  ((:box nil) "the input box is not showing")
+                  ((:box t :input "half a thought")
+                   "input box holds unsent text")))
+    (agent-test--with-delivery-session (car case)
+      (should (equal (agent-send-refusal buf) (cadr case))))))
+
+(ert-deftest agent-test-send-refusal-without-an-answer ()
+  "A session no input-state function answers for, or none at all, is refused."
+  (agent-test--with-delivery-session nil
+    (should (equal (agent-send-refusal buf) "the input box cannot be read")))
+  (with-temp-buffer
+    (let ((agent-backends nil))
+      (should (equal (agent-send-refusal (current-buffer)) "no live session"))))
+  (let ((dead (generate-new-buffer " *dead*" t)))
+    (kill-buffer dead)
+    (should (equal (agent-send-refusal dead) "no live session"))))
+
+(ert-deftest agent-test-send-refusal-ignores-a-busy-session ()
+  "Only the input box decides a send; a busy session queues it."
+  (agent-test--with-delivery-session (list :box t)
+    (setq-local agent--session-state 'busy)
+    (should-not (agent-send-refusal buf))
+    (should (equal (agent-deliver-refusal buf) "session is busy"))))
+
+(ert-deftest agent-test-deliver-submits-to-a-waiting-session ()
+  "A waiting session with an empty box, quiet for a while, gets the text."
+  (agent-test--with-delivery-session (list :box t)
+    (should-not (agent-deliver buf "Please continue."))
+    (should (equal sent '("Please continue.")))))
+
+(ert-deftest agent-test-deliver-refuses-an-unsafe-input-box ()
+  "Unsent text or a dialog stop a delivery, which then sends nothing."
+  (agent-test--with-delivery-session (list :box t :input "draft")
+    (should (equal (agent-deliver buf "hi") "input box holds unsent text"))
+    (should-not sent))
+  (agent-test--with-delivery-session (list :dialog t)
+    (should (equal (agent-deliver buf "hi") "a dialog is open"))
+    (should-not sent)))
+
+(ert-deftest agent-test-deliver-refuses-busy-and-unknown-sessions ()
+  "A busy session, or one in an unknown state, that is still writing is refused."
+  (agent-test--with-delivery-session (list :box t)
+    (setq-local agent--session-state 'busy)
+    (should (equal (agent-deliver buf "hi") "session is busy"))
+    (setq-local agent--session-state 'unknown)
+    (should (equal (agent-deliver buf "hi") "session state is unknown"))
+    (should-not sent)))
+
+(ert-deftest agent-test-deliver-reaches-a-stalled-session ()
+  "A session reading busy whose transcript is long still takes a delivery."
+  (agent-test--with-delivery-session (list :box t)
+    (setq-local agent--session-state 'busy)
+    (setq modified (- (float-time) (1+ agent-deliver-silence-time)))
+    (should-not (agent-deliver buf "Are you stuck?"))
+    (should (equal sent '("Are you stuck?"))))
+  (agent-test--with-delivery-session (list :box t)
+    (setq-local agent--session-state 'busy)
+    (setq modified (- (float-time) 100000))
+    (let ((agent-deliver-silence-time nil))
+      (should (equal (agent-deliver buf "hi") "session is busy")))
+    (setf (agent-backend-session-history (agent-backend 'one)) nil)
+    (should (equal (agent-deliver buf "hi") "session is busy"))))
+
+(ert-deftest agent-test-deliver-refuses-an-exiting-session ()
+  "A session running its before-exit chain is not delivered to."
+  (agent-test--with-delivery-session (list :box t)
+    (setq-local agent--before-exit (list :state 'waiting-for-idle))
+    (should (equal (agent-deliver buf "hi") "session is exiting"))
+    (setq-local agent--before-exit nil
+                agent--session-state 'closing)
+    (should (equal (agent-deliver buf "hi") "session is exiting"))
+    (should-not sent)))
+
+(ert-deftest agent-test-deliver-waits-after-a-change-of-state ()
+  "A delivery within the quiet time of a change of state is refused."
+  (agent-test--with-delivery-session (list :box t)
+    (setq-local agent--session-state-changed-at (- (float-time) 3))
+    (let ((agent-deliver-quiet-time 15))
+      (should (equal (agent-deliver buf "hi") "session changed state 3 s ago")))
+    (let ((agent-deliver-quiet-time 0))
+      (should-not (agent-deliver buf "hi")))
+    (should (equal sent '("hi")))))
+
+(ert-deftest agent-test-deliver-refuses-empty-text ()
+  "Nothing is sent when there is nothing to send."
+  (agent-test--with-delivery-session (list :box t)
+    (should (equal (agent-deliver buf "  \n") "nothing to send"))
+    (should (equal (agent-deliver buf nil) "nothing to send"))
+    (should-not sent)))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here

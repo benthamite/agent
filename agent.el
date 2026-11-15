@@ -635,6 +635,17 @@ leave the state unchanged.")
 (defvar agent-session-status-token-functions nil
   "Hook returning a backend's publisher process token for a session buffer.")
 
+(defvar agent-session-input-state-functions nil
+  "Hook telling what text sent to a session buffer now would reach.
+Each backend adds one function, called with a session buffer, which
+returns nil for a buffer of another backend and otherwise a plist:
+`:box' is non-nil when the session's input box shows; `:input' is the
+text in the box not yet submitted, or nil, a placeholder or suggestion
+that the box shows faint being no text; and `:dialog' is non-nil when a
+dialog or picker shows in place of the box, which would take typed text
+as keystrokes.  `agent-send-refusal' asks it, and refuses a session no
+function answers for.")
+
 (defvar-local agent--session-published-status nil
   "Concise current-state description explicitly published by this agent.")
 
@@ -2997,6 +3008,105 @@ displays it itself."
                     (agent-session-account session))))
     (string-join (delq nil (list label account (agent-display-name buffer)))
                  " ")))
+
+;;;; Guarded delivery
+
+(defcustom agent-deliver-silence-time 600
+  "Seconds of transcript silence after which a busy session takes a delivery.
+`agent-deliver' refuses a session that reads busy, or whose state is
+unknown, unless its transcript has not changed for this many seconds:
+such a session is most likely stalled, whatever its state reads, as
+when its stop event was lost.  Claude queues text delivered while it
+works, and Codex adds it to the running turn.  Nil means never: only a
+session that reads waiting takes a delivery."
+  :type '(choice (const :tag "Never" nil) number)
+  :group 'agent)
+
+(defcustom agent-deliver-quiet-time 15
+  "Seconds `agent-deliver' waits after a session's state changes.
+A delivery sooner than this after the session's last change of state,
+such as the end of a turn, is refused: a state just reached may not
+have settled, and the user may be about to answer the turn that just
+ended.  Zero turns the wait off."
+  :type 'number
+  :group 'agent)
+
+(defun agent-deliver (buffer text)
+  "Submit TEXT to session BUFFER, unless that is unsafe now.
+Return nil when TEXT was submitted, or else a short string naming why it
+was not: \"nothing to send\" when TEXT is empty, or a reason that
+`agent-deliver-refusal' gives.  This is how a program sends a message
+nobody in the session asked for: it never types into an input box
+holding unsent text or into an open dialog, never into a busy session,
+and never within `agent-deliver-quiet-time' of a change of state.  An
+error while submitting is signaled, not returned."
+  (or (and (or (not (stringp text)) (string-blank-p text)) "nothing to send")
+      (agent-deliver-refusal buffer)
+      (ignore (agent-submit text buffer))))
+
+(defun agent-deliver-refusal (buffer)
+  "Return why `agent-deliver' would refuse session BUFFER now, or nil.
+The reasons, in the order they are checked, are those of
+`agent-send-refusal'; \"session is exiting\" while its before-exit
+chain runs; \"session is busy\", or \"session state is unknown\", when
+it does not read waiting and its transcript changed within
+`agent-deliver-silence-time' seconds; and \"session changed state N s
+ago\" within `agent-deliver-quiet-time' seconds of a change of state."
+  (or (agent-send-refusal buffer)
+      (agent--deliver-state-refusal buffer)
+      (agent--deliver-quiet-refusal buffer)))
+
+(defun agent-send-refusal (buffer)
+  "Return why text sent to session BUFFER now could go astray, or nil.
+Every program that sends a message to a session asks this first: the
+phone page, `bin/agent-send' and `agent-deliver'.  The reasons are
+\"no live session\" when BUFFER is none; \"a dialog is open\" when a
+dialog or picker shows in place of the input box, which would take the
+text as keystrokes; \"the input box is not showing\"; \"input box holds
+unsent text\" when it holds text typed or inserted but not submitted,
+which the text sent would join; and \"the input box cannot be read\"
+when no function in `agent-session-input-state-functions' answers for
+BUFFER.  A suggestion that an empty box shows faint is not unsent text.
+Whether the session is busy is not checked: a busy session queues what
+it is sent."
+  (if (not (and (buffer-live-p buffer) (agent--detect-backend buffer)))
+      "no live session"
+    (let ((state (run-hook-with-args-until-success
+                  'agent-session-input-state-functions buffer)))
+      (cond ((null state) "the input box cannot be read")
+            ((plist-get state :dialog) "a dialog is open")
+            ((not (plist-get state :box)) "the input box is not showing")
+            ((plist-get state :input) "input box holds unsent text")))))
+
+(defun agent--deliver-state-refusal (buffer)
+  "Return why session BUFFER's state rules out a delivery now, or nil."
+  (let ((state (agent-session-display-state buffer)))
+    (cond ((or (buffer-local-value 'agent--before-exit buffer)
+               (eq (buffer-local-value 'agent--session-state buffer) 'closing))
+           "session is exiting")
+          ((memq state '(waiting background-waiting)) nil)
+          ((agent--session-stalled-p buffer) nil)
+          ((eq state 'busy) "session is busy")
+          (t "session state is unknown"))))
+
+(defun agent--session-stalled-p (buffer)
+  "Return non-nil when session BUFFER's transcript has long been still.
+Long means `agent-deliver-silence-time' seconds.  A session with no
+transcript, or whose backend reads none, is never stalled."
+  (when-let* ((limit agent-deliver-silence-time)
+              (reader (agent--session-history-reader buffer))
+              (modified (plist-get (funcall reader buffer 0) :modified)))
+    (>= (- (float-time) modified) limit)))
+
+(defun agent--deliver-quiet-refusal (buffer)
+  "Return why session BUFFER's recent change of state rules out a delivery.
+Return nil when its state last changed `agent-deliver-quiet-time'
+seconds ago or more."
+  (when-let* ((changed (buffer-local-value 'agent--session-state-changed-at
+                                           buffer))
+              (age (- (float-time) changed))
+              ((< age agent-deliver-quiet-time)))
+    (format "session changed state %d s ago" (floor age))))
 
 ;;;; Orchestration
 

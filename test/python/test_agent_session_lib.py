@@ -605,6 +605,39 @@ class GuardedDispatchTests(unittest.TestCase):
             with self.assertRaises(session.EmacsClientError):
                 self.submit()
 
+    def test_refusal_raises_and_waits_for_nothing(self):
+        with mock.patch.object(session, "run_emacs_eval",
+                               return_value="refused: input box holds unsent text") as rpc, \
+             mock.patch.object(session, "_wait_for_delivery") as wait:
+            with self.assertRaises(session.DeliveryRefused) as raised:
+                self.submit(refuse_unsafe_input=True)
+            self.assertEqual(str(raised.exception), "input box holds unsent text")
+            expr = rpc.call_args.args[0]
+            self.assertLess(expr.index("agent-send-refusal"), expr.index("(agent-submit"))
+            wait.assert_not_called()
+
+    def test_input_guard_is_asked_for_only_on_request(self):
+        with mock.patch.object(session, "run_emacs_eval", return_value="submitted") as rpc, \
+             mock.patch.object(session, "actor_identity", return_value=self.identity), \
+             mock.patch.object(session, "_wait_for_delivery", return_value=True):
+            self.submit()
+            self.assertNotIn("agent-send-refusal", rpc.call_args.args[0])
+            self.submit(refuse_unsafe_input=True)
+            self.assertIn("agent-send-refusal", rpc.call_args.args[0])
+
+    def test_native_refusal_dispatches_nothing(self):
+        def rpc(expr):
+            output = self.native_eval(f"(progn {self.native_prelude()} "
+                '(defun agent-send-refusal (buffer) '
+                '(and (equal (buffer-name buffer) "*fixture*") "a dialog is open")) '
+                f'(princ {expr}) '
+                '(princ (format "|%s" fixture-dispatched)))')
+            self.assertEqual(output, "refused: a dialog is open|0")
+            return output.split("|")[0]
+        with mock.patch.object(session, "run_emacs_eval", side_effect=rpc):
+            with self.assertRaises(session.DeliveryRefused):
+                self.submit(refuse_unsafe_input=True)
+
     def test_native_return_rechecks_full_composer_hash_before_dispatch(self):
         def rpc(expr):
             output = self.native_eval(f"(progn {self.native_prelude()} "

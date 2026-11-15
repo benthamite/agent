@@ -124,6 +124,7 @@ When nil, use `codex-sandbox-mode' or the CLI default."
 (declare-function codex-session-identity "codex" (&optional buffer))
 (declare-function codex-prompt-input "codex" (&optional buffer))
 (declare-function codex--send-tui-action "codex" (action))
+(declare-function codex--app-server-input-active-p "codex-app-server" ())
 
 (defconst agent-codex--shared-config-items
   '("hooks.json" "AGENTS.md" "rules"
@@ -224,6 +225,23 @@ Source: SVG Repo (CC0).")
   (if (buffer-live-p buffer)
       buffer
     (codex--get-or-prompt-for-buffer)))
+
+(defun agent-codex--input-state (buffer)
+  "Return what text sent to Codex session BUFFER now would reach, or nil.
+Nil when BUFFER is not a Codex session.  Otherwise the plist that
+`agent-session-input-state-functions' documents.  An app-server session
+shows its input box while its input region is live, and asks for
+approvals in the minibuffer, which text sent to it never reaches.  A
+terminal session's box is taken to show, and its approval dialogs are
+not recognized."
+  (when (eq (agent--detect-backend buffer) 'codex)
+    (with-current-buffer buffer
+      (list :box (or (not (eq codex-terminal-backend 'app-server))
+                     (and (codex--app-server-input-active-p) t))
+            :input (codex-prompt-input buffer)
+            :dialog nil))))
+
+(add-hook 'agent-session-input-state-functions #'agent-codex--input-state)
 
 ;;;;; Account selection
 

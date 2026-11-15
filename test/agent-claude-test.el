@@ -3245,6 +3245,46 @@ With the UUID it is only waiting for its first status poll."
                    (list :status 'waiting :detail "push it"
                          :line "Status: waiting on you: push it")))))
 
+(defun agent-claude-test--show-screen (&rest lines)
+  "Replace the current buffer's text with LINES, `rule' being a full rule."
+  (erase-buffer)
+  (dolist (line lines)
+    (insert (if (eq line 'rule) (make-string 40 ?─) line) "\n")))
+
+(ert-deftest agent-claude-test-input-state-reads-the-screen ()
+  "A Claude session's input box is read from its screen.
+A suggested prompt drawn faint in an empty box is not unsent text."
+  (with-temp-buffer
+    (setq-local agent--backend 'claude-code)
+    (let ((faint '(:foreground "#8a8a8a"
+                   :inherit (eat-term-faint eat-term-font-0))))
+      (agent-claude-test--show-screen
+       "⏺ Done." "" "✻ Worked for 3s" 'rule
+       (concat "❯ " (propertize "continue with the tests" 'face faint))
+       'rule "  ⏵⏵ auto mode on")
+      (should (equal (agent-claude--input-state (current-buffer))
+                     '(:box t :input nil :dialog nil)))
+      (should-not (agent-send-refusal (current-buffer)))
+      (agent-claude-test--show-screen
+       "⏺ Done." "" 'rule "❯ half a thought" 'rule "  ⏵⏵ auto mode on")
+      (should (equal (agent-send-refusal (current-buffer))
+                     "input box holds unsent text"))
+      (agent-claude-test--show-screen
+       "⏺ Bash(make clean)" 'rule " Do you want to proceed?"
+       " ❯ 1. Yes" "   2. No" "" " Esc to cancel")
+      (should (equal (agent-send-refusal (current-buffer)) "a dialog is open"))
+      (agent-claude-test--show-screen "Resuming the conversation")
+      (should (equal (agent-send-refusal (current-buffer))
+                     "the input box is not showing")))))
+
+(ert-deftest agent-claude-test-input-state-leaves-other-buffers ()
+  "The Claude input-state function answers only for Claude sessions."
+  (with-temp-buffer
+    (setq-local agent--backend 'codex)
+    (should-not (agent-claude--input-state (current-buffer))))
+  (should (memq #'agent-claude--input-state
+                agent-session-input-state-functions)))
+
 (ert-deftest agent-claude-test-session-history-names-the-session ()
   "The result names the session, so a reader sees a change of transcript."
   (agent-claude-test--with-transcripts config

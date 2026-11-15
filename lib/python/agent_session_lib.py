@@ -35,6 +35,16 @@ class EmacsClientError(RuntimeError):
     """An emacsclient request failed while the Emacs server may be transiently unavailable."""
 
 
+class DeliveryRefused(Exception):
+    """agent.el's `agent-send-refusal' refused the submit, so nothing was sent.
+
+    The message is the reason it gave, such as "input box holds unsent text".
+    """
+
+
+REFUSED_PREFIX = "refused: "
+
+
 def _write_all(fd: int, data: bytes) -> None:
     offset = 0
     while offset < len(data):
@@ -560,11 +570,18 @@ def submit_to_agent(
     one_pass: bool = False,
     expected_identity: dict[str, Any] | None = None,
     preserve_windows: bool = False,
+    refuse_unsafe_input: bool = False,
 ) -> str:
     """Submit PROMPT to BUFFER and return its transcript once acknowledged.
 
     PRESERVE_WINDOWS restores the user's window layout after dispatch, since
     both backends' submit functions call `display-buffer' on the target.
+
+    REFUSE_UNSAFE_INPUT asks agent.el's `agent-send-refusal', in the same
+    evaluation as the submit, whether the text could go astray: an open
+    dialog would take it as keystrokes, and text left unsent in the input
+    box would join it.  When it refuses, nothing is sent and DeliveryRefused
+    carries its reason.
     """
     fn = _submit_function(backend)
     if transcript is None and (
@@ -595,6 +612,11 @@ def submit_to_agent(
       (princ "submitted")))'''
         if preserve_windows:
             dispatch = f"(save-window-excursion\n  {dispatch})"
+        if refuse_unsafe_input:
+            dispatch = f'''(let ((refusal (agent-send-refusal (get-buffer {elisp_string(buffer)}))))
+    (if refusal
+        (concat {elisp_string(REFUSED_PREFIX)} refusal)
+      {dispatch}))'''
         expr = f'''
 (with-current-buffer {elisp_string(buffer)}
   {_identity_guard(buffer, backend, expected_identity)}
@@ -602,6 +624,8 @@ def submit_to_agent(
   {dispatch}))
 '''
         returned = run_emacs_eval(expr)
+        if refuse_unsafe_input and returned.startswith(REFUSED_PREFIX):
+            raise DeliveryRefused(returned[len(REFUSED_PREFIX):])
         if returned != "submitted":
             raise SystemExit(f"unexpected submit result: {returned!r}")
     finally:

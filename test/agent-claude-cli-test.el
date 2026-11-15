@@ -758,6 +758,21 @@ CONTENT is written as UTF-8."
                               :input)
                    "typed"))))
 
+(ert-deftest agent-claude-cli-test-state-says-whether-the-box-shows ()
+  "The box shows under a notice card, not under a dialog or nothing known."
+  (let ((notice (agent-claude-cli-test--state
+                 "✻ Done" "How is Claude doing? 1: Bad 2: Fine 0: Dismiss"
+                 'rule "❯" 'rule "  m")))
+    (should (plist-get notice :box))
+    (should-not (plist-get notice :dialog)))
+  (let ((dialog (agent-claude-cli-test--state
+                 "⏺ Bash(ls)" 'rule " Proceed?" " ❯ 1. Yes" "   2. No")))
+    (should-not (plist-get dialog :box))
+    (should (plist-get dialog :dialog)))
+  (let ((unknown (agent-claude-cli-test--state "Resuming the conversation")))
+    (should-not (plist-get unknown :box))
+    (should-not (plist-get unknown :dialog))))
+
 (ert-deftest agent-claude-cli-test-state-mode-absent ()
   "A screen with nothing below the box has no mode."
   (should-not (plist-get (agent-claude-cli-test--state "✻ Done" 'rule "❯" 'rule)

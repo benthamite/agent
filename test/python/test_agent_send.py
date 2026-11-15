@@ -218,6 +218,39 @@ class DeliveryTests(unittest.TestCase):
         with self.assertRaises(session.EmacsClientError):
             self.send("hi", lambda text: None)
 
+    def test_send_asks_the_input_guard_first(self):
+        self.send("hi", lambda text: text)
+        expr = self.expressions[0]
+        self.assertLess(expr.index("agent-send-refusal"), expr.index("(agent-submit"))
+
+    def test_unsafe_input_box_is_refused_and_nothing_sent(self):
+        def refuse(expr):
+            self.expressions.append(expr)
+            return "refused: input box holds unsent text"
+        prompt = agent_send.compose("hi", sender="me", cwd="/c", message_id="agent-send-x1")
+        before = self.transcript.read_text()
+        with mock.patch.object(session, "run_emacs_eval", side_effect=refuse):
+            with self.assertRaises(session.DeliveryRefused) as raised:
+                agent_send.deliver(dict(self.identity), prompt, "agent-send-x1", 0.3)
+        self.assertEqual(str(raised.exception), "input box holds unsent text")
+        self.assertEqual(len(self.expressions), 1)
+        self.assertEqual(self.transcript.read_text(), before)
+
+    def test_refusal_exits_one_and_names_the_reason(self):
+        target = SESSIONS[0]
+        stderr = io.StringIO()
+        with mock.patch.object(agent_send, "list_sessions", return_value=SESSIONS[:3]), \
+             mock.patch.object(agent_send, "confirmed_identity", return_value=dict(target)), \
+             mock.patch.object(agent_send, "deliver",
+                               side_effect=session.DeliveryRefused("a dialog is open")), \
+             mock.patch.object(agent_send.sys, "stdin", io.TextIOWrapper(io.BytesIO(b"hi\n"))), \
+             mock.patch.object(agent_send.sys, "stderr", stderr), \
+             mock.patch.dict(os.environ, {"CLAUDE_BUFFER_NAME": "", "CODEX_BUFFER_NAME": ""}):
+            status = agent_send.main([target["buffer"]])
+        self.assertEqual(status, 1)
+        self.assertIn(f"{target['buffer']} refused the message: a dialog is open; "
+                      "nothing was sent", stderr.getvalue())
+
     def test_identity_change_before_send_is_a_refusal(self):
         target = dict(self.identity)
         changed = {**self.identity, "session_id": "other"}

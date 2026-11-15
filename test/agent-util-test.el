@@ -34,6 +34,16 @@ chunk separately would corrupt it."
                                  (concat line "\nnext\n") 'utf-8)
       (should (equal (agent-util-read-first-line file) line)))))
 
+(ert-deftest agent-util-test-jsonl-history-reports-when-the-file-changed ()
+  "The history names the file's modification time, even when reading nothing."
+  (agent-util-test--with-file "{\"a\":1}\n"
+    (set-file-times file (seconds-to-time 1700000000))
+    (let ((history (agent-util-jsonl-history file 0 nil nil
+                                             (lambda (entry) (list entry)))))
+      (should (= (plist-get history :modified) 1700000000))
+      (should-not (plist-get history :messages))
+      (should (= (plist-get history :size) 8)))))
+
 (ert-deftest agent-util-test-read-first-line-without-newline ()
   "Return the whole file when it has no newline."
   (agent-util-test--with-file "only"
