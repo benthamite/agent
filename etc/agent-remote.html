@@ -44,15 +44,17 @@
   .slot.armed.swipe-right .reveal { background: var(--error); color: #1a1200; }
   .card { position: relative; display: flex; align-items: center; gap: 12px;
     width: 100%; text-align: left; background: var(--panel); border-radius: 14px;
-    padding: 16px 14px; border-left: 6px solid var(--unknown); min-height: 72px; }
+    padding: 16px 14px; --state: var(--unknown);
+    border-left: 6px solid var(--state); min-height: 72px; }
   .card.settling { transition: transform .15s; }
   .card:active { background: var(--panel-2); }
-  .card.waiting { border-left-color: var(--waiting); }
-  .card.background-waiting { border-left-color: var(--bg-waiting); }
-  .card.busy { border-left-color: var(--busy); }
-  .card.snoozed { border-left-color: var(--line); }
+  .card.waiting { --state: var(--waiting); }
+  .card.background-waiting { --state: var(--bg-waiting); }
+  .card.busy { --state: var(--busy); }
+  /* A snoozed card is dimmed, not drained: its state still shows in color.
+     The stripe is mixed into the panel as far as the opacity fades the rest. */
+  .card.snoozed { border-left-color: color-mix(in srgb, var(--state) 55%, var(--panel)); }
   .card.snoozed .main, .card.snoozed .badge { opacity: .55; }
-  .card.snoozed .badge { background: var(--panel-2); color: var(--muted); }
   .card .main { flex: 1; min-width: 0; }
   .card .name { font-size: 17px; font-weight: 600; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }

@@ -436,6 +436,20 @@ class RemotePageTest(unittest.TestCase):
         self.open_session("fixture")
         self.assertEqual(self.page.input_value("#text"), "a long reply")
 
+    def test_snoozed_cards_keep_their_state_colors(self):
+        colors = self.page.evaluate("""() => {
+          listSessions = ["waiting", "background-waiting", "busy"].map(
+            (state) => ({ id: state, name: state, backend: "claude-code", account: "a",
+                          state, changed: 0, snoozed: true }));
+          renderSessions();
+          return [...document.querySelectorAll('.card.snoozed')].map((c) => [
+            getComputedStyle(c).borderLeftColor,
+            getComputedStyle(c.querySelector('.badge')).backgroundColor]); }""")
+        stripes = [stripe for stripe, _ in colors]
+        badges = [badge for _, badge in colors]
+        self.assertEqual(len(set(stripes)), 3)
+        self.assertEqual(badges, ["rgb(63, 185, 80)", "rgb(181, 138, 60)", "rgb(248, 81, 73)"])
+
     def test_no_glyph_a_phone_font_lacks(self):
         page = self.page.evaluate("document.getElementById('session-view').textContent"
                                   " + MORE_KEYS.flat(2).join() + CARD_KEYS.flat().join()")
