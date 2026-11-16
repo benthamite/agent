@@ -1072,6 +1072,8 @@ indefinite snooze arms no timer.")
                   (backend buffer action))
 (declare-function agent-capture-pending-count "agent-capture"
                   (backend buffer))
+(declare-function agent-capture--file "agent-capture" (backend buffer))
+(declare-function agent-capture-move-file "agent-capture" (from to))
 (declare-function consult--read "consult" (table &rest options))
 
 ;;;; Theme sync
@@ -4701,18 +4703,18 @@ Preserves the session's directory, instance name, and any
 launch state the backend's `:restart-options' function captures; if
 the active account differs from the session account, prompt for
 which one to use.  Sessions in the selected account pool are routed
-again according to current usage, without prompting."
+again according to current usage, without prompting.  Captured
+prompts follow the session, also to a new account."
   (interactive)
   (let* ((session (or (agent-session)
                       (user-error "Not in an AI session buffer")))
          (backend (agent-session-backend session))
          (buffer (current-buffer)))
-    (when (agent--confirm-no-captured-prompts backend buffer "Restart")
-      (agent--restart-session
-       buffer (lambda ()
-                (agent-restart--account
-                 backend (agent-session-account session)
-                 (agent-session-directory session)))))))
+    (agent--restart-session
+     buffer (lambda ()
+              (agent-restart--account
+               backend (agent-session-account session)
+               (agent-session-directory session))))))
 
 ;;;###autoload
 (defun agent-rename-session (buffer name)
@@ -4723,7 +4725,8 @@ The CLI routes its hooks to Emacs by the buffer name it was started
 with, so renaming restarts the session under the new name, resuming
 the same conversation under the same account, as `agent-restart'
 does.  Ask first when BUFFER is not waiting for input, since the
-restart would cut its turn short."
+restart would cut its turn short.  Captured prompts follow the
+session to its new name."
   (interactive
    (let ((buf (agent--resolve-session-buffer
                (and current-prefix-arg (agent--read-session-buffer)))))
@@ -4735,10 +4738,9 @@ restart would cut its turn short."
      backend (agent-session-directory session) name buffer)
     (when (equal name (agent-session-instance session))
       (user-error "%s is already named %s" (agent-display-name buffer) name))
-    (when (and (agent--confirm-no-captured-prompts backend buffer "Rename")
-               (or (agent--session-waiting-p buffer backend)
-                   (y-or-n-p (format "%s is not waiting for input; renaming restarts it.  Rename anyway? "
-                                     (agent-display-name buffer)))))
+    (when (or (agent--session-waiting-p buffer backend)
+              (y-or-n-p (format "%s is not waiting for input; renaming restarts it.  Rename anyway? "
+                                (agent-display-name buffer))))
       (agent--restart-session
        buffer (lambda () (agent-session-account session)) name))))
 
@@ -4753,18 +4755,13 @@ restart would cut its turn short."
 Equivalent to selecting SELECTION with `agent-account-select' and then
 choosing it when `agent-restart' asks which account to use, so the
 selection also becomes the default for new sessions.  A pool is routed
-to one of its members.  Never prompts: refuse instead when BUFFER has
-captured prompts, which the account change would orphan.  Return the
-new session buffer."
+to one of its members.  Never prompts; captured prompts follow the
+session to its new account.  Return the new session buffer."
   (let* ((session (or (agent-session buffer)
                       (user-error "Not an AI session buffer: %s" buffer)))
          (backend (agent-session-backend session)))
     (unless (member selection (agent-account-selection-names backend))
       (user-error "No %s account or pool named `%s'" backend selection))
-    (when (and (require 'agent-capture nil t)
-               (> (agent-capture-pending-count backend buffer) 0))
-      (user-error "%s has captured prompts; restart it from Emacs"
-                  (agent-display-name buffer)))
     (agent--restart-session
      buffer (lambda ()
               (let ((account (agent-restart--ensure-account
@@ -4781,7 +4778,8 @@ new session buffer."
 ACCOUNT-FN is called with no arguments once BUFFER is known to be
 restartable, and returns the account to resume under.  INSTANCE, when
 non-nil, is the instance name the resumed session takes instead of
-BUFFER's."
+BUFFER's.  The session's captured prompts follow it to its new account
+and instance name."
   (let* ((session (agent-session buffer))
          (backend (agent-session-backend session))
          (struct (agent-backend backend))
@@ -4792,16 +4790,26 @@ BUFFER's."
           (when-let* ((fn (and struct (agent-backend-restart-options struct))))
             (funcall fn buffer)))
          (account (funcall account-fn))
-         (state (agent--session-user-state buffer)))
+         (state (agent--session-user-state buffer))
+         (capture-file (agent--captured-prompts-file backend buffer)))
     (agent-check-session-start backend account)
     (setf (agent-session-account session) account)
     (when instance
       (setf (agent-session-instance session) instance))
+    (when capture-file
+      (agent-capture-move-file capture-file
+                               (agent-capture--file backend buffer)))
     (agent--force-kill-buffer buffer)
     (let ((new (apply #'agent-start-session session
                       :resume-id session-id extra-options)))
       (agent--restore-session-user-states (list (cons new state)))
       new)))
+
+(defun agent--captured-prompts-file (backend buffer)
+  "Return the capture file of BACKEND session BUFFER, or nil.
+Return nil when `agent-capture' is not installed."
+  (and (require 'agent-capture nil t)
+       (agent-capture--file backend buffer)))
 
 (defun agent-restart--account (backend session-account &optional directory)
   "Return the account to restart a BACKEND session with.

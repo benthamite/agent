@@ -213,6 +213,65 @@ Return non-nil when ACTION may proceed."
    (concat (agent-capture--session-slug backend buffer) ".org")
    agent-prompt-capture-directory))
 
+(defun agent-capture-move-file (from to)
+  "Move the prompts captured in file FROM to file TO.
+A session's capture file is keyed by its identity, so a session whose
+name or account changes calls this to keep its prompts.  When TO
+already holds prompts, those in FROM are appended to them.  A buffer
+visiting FROM is saved first, then made to visit TO, or killed when
+the prompts were appended to an existing TO."
+  (let ((from-buffer (find-buffer-visiting from)))
+    (when (and from-buffer (buffer-modified-p from-buffer))
+      (with-current-buffer from-buffer (save-buffer)))
+    (when (and (file-exists-p from)
+               (not (file-equal-p from to)))
+      (if (file-exists-p to)
+          (agent-capture--merge-file from-buffer from to)
+        (make-directory (file-name-directory to) t)
+        (rename-file from to)
+        (when from-buffer
+          (with-current-buffer from-buffer
+            (set-visited-file-name to t t)))))))
+
+(defun agent-capture--merge-file (from-buffer from to)
+  "Append the entries of capture file FROM to capture file TO.
+Delete FROM afterwards and kill FROM-BUFFER, its visiting buffer, if
+non-nil."
+  (agent-capture--append-file-entries from to)
+  (delete-file from)
+  (when from-buffer
+    (with-current-buffer from-buffer
+      (set-buffer-modified-p nil))
+    (kill-buffer from-buffer)))
+
+(defun agent-capture--append-file-entries (from to)
+  "Append the entries of capture file FROM to the end of capture file TO.
+The entries are everything from FROM's first heading on, so its file
+header is dropped."
+  (let ((entries (with-temp-buffer
+                   (insert-file-contents from)
+                   (goto-char (point-min))
+                   (if (re-search-forward "^\\* " nil t)
+                       (buffer-substring (line-beginning-position) (point-max))
+                     "")))
+        (to-buffer (find-buffer-visiting to)))
+    (unless (string-empty-p entries)
+      (if to-buffer
+          (with-current-buffer to-buffer
+            (save-excursion
+              (agent-capture--insert-at-end entries))
+            (save-buffer))
+        (with-temp-buffer
+          (insert-file-contents to)
+          (agent-capture--insert-at-end entries)
+          (write-region nil nil to nil 'silent))))))
+
+(defun agent-capture--insert-at-end (text)
+  "Insert TEXT on a line of its own at the end of the current buffer."
+  (goto-char (point-max))
+  (unless (bolp) (insert "\n"))
+  (insert text))
+
 (defun agent-capture--session-slug (backend buffer)
   "Return a stable file slug for BACKEND session BUFFER."
   (format "%s-%s"

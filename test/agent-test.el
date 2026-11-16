@@ -2186,11 +2186,10 @@ sentinel has run."
             (should ran)))
       (delete-directory agent-prompt-capture-directory t))))
 
-(ert-deftest agent-test-restart-confirms-when-captured-prompts-pending ()
-  "Abort restart when pending captures exist and confirmation is declined."
+(ert-deftest agent-test-restart-keeps-captured-prompts-unprompted ()
+  "Restarting a session with captured prompts neither asks nor loses them."
   (let ((agent-backends nil)
         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
-        prompted
         killed)
     (unwind-protect
         (with-temp-buffer
@@ -2206,14 +2205,16 @@ sentinel has run."
               (with-temp-file file
                 (insert "* Prompt A\n\nAlpha\n")))
             (cl-letf (((symbol-function 'yes-or-no-p)
-                       (lambda (prompt)
-                         (setq prompted prompt)
-                         nil))
+                       (lambda (&rest _) (ert-fail "Unexpected prompt")))
+                      ((symbol-function 'agent-restart--account)
+                       (lambda (&rest _) nil))
+                      ((symbol-function 'agent-start-session)
+                       (lambda (&rest _) buf))
                       ((symbol-function 'agent--force-kill-buffer)
                        (lambda (_buffer) (setq killed t))))
               (agent-restart))
-            (should (string-match-p "1 captured prompt" prompted))
-            (should-not killed)))
+            (should killed)
+            (should (= (agent-capture-pending-count 'one buf) 1))))
       (delete-directory agent-prompt-capture-directory t))))
 
 (ert-deftest agent-test-restart-resumes-with-session-identity ()
@@ -2531,16 +2532,41 @@ session's account and id, and `synced' the synced selections."
     (should-not synced)
     (should (equal (agent-account-current 'one) "e2"))))
 
-(ert-deftest agent-test-restart-with-account-refuses-captured-prompts ()
-  "Pending captured prompts refuse the restart instead of prompting."
+(ert-deftest agent-test-restart-with-account-carries-captured-prompts ()
+  "Captured prompts follow the session to its new account, unprompted."
   (agent-test--with-restartable-session
-    (let ((file (agent-capture--file 'one (current-buffer))))
-      (make-directory (file-name-directory file) t)
-      (with-temp-file file
-        (insert "* Prompt A\n\nAlpha\n")))
-    (should-error (agent-restart-with-account (current-buffer) "personal")
-                  :type 'user-error)
-    (should-not killed)))
+    (let ((old (agent-capture--file 'one (current-buffer))))
+      (make-directory (file-name-directory old) t)
+      (with-temp-file old
+        (insert "* Prompt A\n\nAlpha\n"))
+      (agent-restart-with-account (current-buffer) "personal")
+      (should killed)
+      (should-not (file-exists-p old))
+      (should (equal (mapcar (lambda (p) (plist-get p :text))
+                             (agent-capture--prompts 'one (current-buffer)))
+                     '("Alpha"))))))
+
+(ert-deftest agent-test-rename-session-carries-captured-prompts ()
+  "Renaming a session moves its captured prompts to the new name, unprompted."
+  (agent-test--with-restartable-session
+    (let ((old (agent-capture--file 'one (current-buffer))))
+      (make-directory (file-name-directory old) t)
+      (with-temp-file old
+        (insert "* Prompt A\n\nAlpha\n"))
+      (cl-letf (((symbol-function 'agent--instance-holders)
+                 (lambda (_backend _directory) nil))
+                ((symbol-function 'agent--session-waiting-p)
+                 (lambda (&rest _) t))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (ert-fail "Unexpected prompt"))))
+        (agent-rename-session (current-buffer) "renamed"))
+      (should killed)
+      (should (equal (agent-session-instance (agent-session (current-buffer)))
+                     "renamed"))
+      (should-not (file-exists-p old))
+      (should (equal (mapcar (lambda (p) (plist-get p :text))
+                             (agent-capture--prompts 'one (current-buffer)))
+                     '("Alpha"))))))
 
 (defmacro agent-test--with-two-backends (&rest body)
   "Run BODY with backends `one' and `two' registered and prompts forbidden.

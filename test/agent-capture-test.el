@@ -46,6 +46,44 @@
           (expand-file-name "one-" temporary-file-directory)
           (agent-capture--file 'one buf)))))))
 
+(ert-deftest agent-capture-test-move-file-renames-and-follows-buffer ()
+  "Moving to a new file renames it, and a visiting buffer follows."
+  (let* ((dir (make-temp-file "agent-capture" t))
+         (from (expand-file-name "a.org" dir))
+         (to (expand-file-name "b.org" dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file from (insert "#+title: x\n\n* Prompt A\n\nAlpha\n"))
+          (let ((buffer (find-file-noselect from)))
+            (with-current-buffer buffer
+              (goto-char (point-max))
+              (insert "more\n"))
+            (agent-capture-move-file from to)
+            (should-not (file-exists-p from))
+            (should (equal (buffer-local-value 'buffer-file-name buffer) to))
+            (should (string-match-p "Alpha\nmore"
+                                    (with-temp-buffer
+                                      (insert-file-contents to)
+                                      (buffer-string))))
+            (kill-buffer buffer)))
+      (delete-directory dir t))))
+
+(ert-deftest agent-capture-test-move-file-appends-to-existing ()
+  "Moving onto a file that holds prompts appends the moved entries."
+  (let* ((dir (make-temp-file "agent-capture" t))
+         (from (expand-file-name "a.org" dir))
+         (to (expand-file-name "b.org" dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file from (insert "#+title: x\n\n* Prompt A\n\nAlpha\n"))
+          (with-temp-file to (insert "#+title: y\n\n* Prompt B\n\nBeta"))
+          (agent-capture-move-file from to)
+          (should-not (file-exists-p from))
+          (should (equal (mapcar (lambda (p) (plist-get p :text))
+                                 (agent-capture--read-prompts to))
+                         '("Beta" "Alpha"))))
+      (delete-directory dir t))))
+
 (ert-deftest agent-capture-test-open-file-leaves-point-below-new-heading ()
   "A capture buffer already shown in a window ends below the new heading."
   (let* ((file (make-temp-file "agent-capture" nil ".org"))
