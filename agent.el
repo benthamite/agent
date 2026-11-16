@@ -435,8 +435,8 @@ This is the entry point for starting sessions from Lisp.  Nothing here
 prompts for an account.  The one question left is the instance name of a
 second session in a directory, asked by `agent--read-instance-name' when
 SESSION names none, where an empty answer takes a free \"new-N\" name;
-bind `agent-inhibit-prompts' to get a `user-error' instead.  Return the
-new session buffer."
+with `agent-inhibit-prompts' bound, that name is taken without asking.
+Return the new session buffer."
   (ignore initial-prompt)
   (when (and (agent-session-id session) (not resume-id))
     (user-error "Session id `%s' would start a fresh session; pass :resume-id to resume it"
@@ -455,7 +455,6 @@ new session buffer."
       (user-error "Instance `%s' in %s is already taken by %s"
                   instance directory (buffer-name (cdr holder))))
     (unless (agent-session-instance session)
-      (agent--refuse-instance-prompt backend directory)
       (setf (agent-session-instance session)
             (agent--read-instance-name backend directory)))
     (agent-check-session-start backend account)
@@ -467,30 +466,22 @@ new session buffer."
       (apply (agent-backend-start-session (agent-backend backend))
              session options))))
 
-(defun agent--refuse-instance-prompt (backend directory)
-  "Signal a `user-error' if a BACKEND start in DIRECTORY would need to prompt.
-The backend asks for an instance name when a session already runs in
-DIRECTORY and none was given.  Call this only for a session naming no
-instance.  Do nothing unless `agent-inhibit-prompts' is non-nil."
-  (when-let* ((agent-inhibit-prompts)
-              ((stringp directory))
-              (holder (car (agent--instance-holders backend directory))))
-    (user-error "%s already runs in %s and `agent-inhibit-prompts' forbids asking for an instance name; give the session an instance"
-                (buffer-name (cdr holder)) directory)))
-
 (defun agent--read-instance-name (backend directory)
   "Read the instance name of a new BACKEND session in DIRECTORY.
 Return nil, the default instance, without asking when DIRECTORY is not
 a string or no BACKEND session runs there.  Otherwise offer the first
 free \"new-N\" name, which an empty answer takes, so a session can
-start without the user thinking of a name."
+start without the user thinking of a name.  With `agent-inhibit-prompts'
+non-nil, return that name without asking."
   (when-let* (((stringp directory))
               (default (agent--free-instance-name backend directory "new")))
-    (let ((name (string-trim
-                 (read-string
-                  (format-prompt "Name for the new session in %s" default
-                                 (abbreviate-file-name directory))
-                  nil nil default))))
+    (let ((name (if agent-inhibit-prompts
+                    default
+                  (string-trim
+                   (read-string
+                    (format-prompt "Name for the new session in %s" default
+                                   (abbreviate-file-name directory))
+                    nil nil default)))))
       (agent--check-instance-name
        backend directory (if (string-empty-p name) default name)))))
 

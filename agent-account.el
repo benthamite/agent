@@ -68,9 +68,10 @@
 Bind it around calls from Lisp that nobody is watching, such as
 `emacsclient --eval', where a prompt would block Emacs.  A question with
 a default takes it: an unset account selection falls to the backend's
-default account, and is not persisted.  A question with none signals a
-`user-error': the choice among several registered backends, and the name
-of a second session in a directory.  Interactive use leaves it nil.")
+default account, and is not persisted, and the name of a second session
+in a directory is the first free \"new-N\".  A question with none
+signals a `user-error': the choice among several registered backends.
+Interactive use leaves it nil.")
 
 (defvar agent-account--starting nil
   "Backend and account of the session currently being started.

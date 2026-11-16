@@ -2586,27 +2586,24 @@ Bind `started', the backends started; any completion prompt fails the test."
      (should asked)
      (should started))))
 
-(ert-deftest agent-test-inhibit-prompts-refuses-an-instance-prompt ()
-  "A second session in a directory must be named, not asked for."
+(ert-deftest agent-test-inhibit-prompts-takes-a-free-instance-name ()
+  "An inhibited second session in a directory takes new-N without asking."
   (agent-test--with-two-backends
    (cl-letf (((symbol-function 'agent--instance-holders)
               (lambda (_backend _directory)
-                (list (cons "default" (current-buffer))))))
-     (should-error
-      (agent-start-session
-       (agent-session-create :backend 'one :directory "/tmp/"))
-      :type 'user-error)
-     (should-not started)
-     (agent-start-session
-      (agent-session-create :backend 'one :directory "/tmp/" :instance "free"))
-     (should (equal started '(one)))
+                (list (cons "default" (current-buffer)) (cons "new-1" nil))))
+             ((symbol-function 'read-string)
+              (lambda (&rest _) (ert-fail "prompted"))))
+     (let ((session (agent-session-create :backend 'one :directory "/tmp/")))
+       (agent-start-session session)
+       (should (equal (agent-session-instance session) "new-2")))
      (let ((agent-inhibit-prompts nil)
            (session (agent-session-create :backend 'one :directory "/tmp/")))
        (cl-letf (((symbol-function 'read-string)
                   (lambda (_prompt &optional _initial _history default)
                     default)))
          (agent-start-session session))
-       (should (equal (agent-session-instance session) "new-1")))
+       (should (equal (agent-session-instance session) "new-2")))
      (should (equal started '(one one))))))
 
 (ert-deftest agent-test-second-session-takes-the-typed-name ()
