@@ -2600,10 +2600,78 @@ Bind `started', the backends started; any completion prompt fails the test."
      (agent-start-session
       (agent-session-create :backend 'one :directory "/tmp/" :instance "free"))
      (should (equal started '(one)))
-     (let ((agent-inhibit-prompts nil))
-       (agent-start-session
-        (agent-session-create :backend 'one :directory "/tmp/")))
+     (let ((agent-inhibit-prompts nil)
+           (session (agent-session-create :backend 'one :directory "/tmp/")))
+       (cl-letf (((symbol-function 'read-string)
+                  (lambda (_prompt &optional _initial _history default)
+                    default)))
+         (agent-start-session session))
+       (should (equal (agent-session-instance session) "new-1")))
      (should (equal started '(one one))))))
+
+(ert-deftest agent-test-second-session-takes-the-typed-name ()
+  "A name typed for a second session in a directory becomes its instance."
+  (agent-test--with-two-backends
+   (cl-letf (((symbol-function 'agent--instance-holders)
+              (lambda (_backend _directory)
+                (list (cons "default" (current-buffer)))))
+             ((symbol-function 'read-string)
+              (lambda (&rest _) " tests ")))
+     (let ((agent-inhibit-prompts nil)
+           (session (agent-session-create :backend 'one :directory "/tmp/")))
+       (agent-start-session session)
+       (should (equal (agent-session-instance session) "tests"))))))
+
+(ert-deftest agent-test-first-session-in-a-directory-is-not-asked-a-name ()
+  "Only a second session in a directory is asked for a name."
+  (agent-test--with-two-backends
+   (cl-letf (((symbol-function 'agent--instance-holders)
+              (lambda (_backend _directory) nil))
+             ((symbol-function 'read-string)
+              (lambda (&rest _) (ert-fail "prompted"))))
+     (let ((agent-inhibit-prompts nil)
+           (session (agent-session-create :backend 'one :directory "/tmp/")))
+       (agent-start-session session)
+       (should-not (agent-session-instance session))))))
+
+(ert-deftest agent-test-check-instance-name ()
+  "Refuse empty, unparsable and taken names; a session may keep its own."
+  (let ((mine (generate-new-buffer " mine"))
+        (other (generate-new-buffer " other")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent--instance-holders)
+                   (lambda (_backend _directory)
+                     (list (cons "a" mine) (cons "b" other)))))
+          (should (equal (agent--check-instance-name 'one "/tmp/" "c") "c"))
+          (should (equal (agent--check-instance-name 'one "/tmp/" "a" mine) "a"))
+          (dolist (bad '("" "x:y" "x*" "x/y" "x\\y" "b"))
+            (should-error (agent--check-instance-name 'one "/tmp/" bad mine)
+                          :type 'user-error)))
+      (kill-buffer mine)
+      (kill-buffer other))))
+
+(ert-deftest agent-test-rename-session-restarts-under-the-new-name ()
+  "Renaming restarts the session as NAME under its own account."
+  (let ((buffer (generate-new-buffer " session"))
+        restarted)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-session)
+                   (lambda (&optional _)
+                     (agent-session-create :backend 'one :directory "/tmp/"
+                                           :account "work" :instance "old")))
+                  ((symbol-function 'agent--instance-holders)
+                   (lambda (_backend _directory) (list (cons "old" buffer))))
+                  ((symbol-function 'agent--confirm-no-captured-prompts)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'agent--session-waiting-p)
+                   (lambda (&rest _) t))
+                  ((symbol-function 'agent--restart-session)
+                   (lambda (buf account-fn instance)
+                     (setq restarted (list buf (funcall account-fn) instance)))))
+          (agent-rename-session buffer "new")
+          (should (equal restarted (list buffer "work" "new")))
+          (should-error (agent-rename-session buffer "old") :type 'user-error))
+      (kill-buffer buffer))))
 
 (ert-deftest agent-test-inhibit-prompts-starts-the-first-session-in-a-directory ()
   "No session in the directory means no instance question."
@@ -4946,7 +5014,7 @@ Such a key breaks the whole menu when it opens, not at definition."
                    "t ." "t r" "p c" "p i" "p a"))
       (should (member key keys)))
     (dolist (key '("O" "b s" "H" "F" "U" "-x" "-A" "T" "K" "f" "S" "d" "m" "g" "t"
-                   "." "e" "N" "B" "L" "u" "a" "c" "R" "p" "i" "b n"
+                   "." "e" "N" "B" "L" "u" "a" "c" "p" "i" "b n"
                    "t a" "t c" "t o"))
       (should-not (member key keys))))
   (dolist (binding '(("o" . agent-resume)
@@ -4954,6 +5022,7 @@ Such a key breaks the whole menu when it opens, not at definition."
                      ("g s" . agent-save-session-group)
                      ("g d" . agent-delete-session-group)
                      ("r" . agent-restart)
+                     ("R" . agent-rename-session)
                      ("s" . agent-select-session)))
     (should (eq (plist-get (cdr (transient-get-suffix 'agent-menu (car binding)))
                            :command)

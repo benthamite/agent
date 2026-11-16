@@ -433,9 +433,10 @@ own conversation, and SESSION would overwrite its identity.
 
 This is the entry point for starting sessions from Lisp.  Nothing here
 prompts for an account.  The one question left is the instance name of a
-second session in a directory, which the backend asks when SESSION names
-none; bind `agent-inhibit-prompts' to get a `user-error' instead.  Return
-the new session buffer."
+second session in a directory, asked by `agent--read-instance-name' when
+SESSION names none, where an empty answer takes a free \"new-N\" name;
+bind `agent-inhibit-prompts' to get a `user-error' instead.  Return the
+new session buffer."
   (ignore initial-prompt)
   (when (and (agent-session-id session) (not resume-id))
     (user-error "Session id `%s' would start a fresh session; pass :resume-id to resume it"
@@ -454,7 +455,9 @@ the new session buffer."
       (user-error "Instance `%s' in %s is already taken by %s"
                   instance directory (buffer-name (cdr holder))))
     (unless (agent-session-instance session)
-      (agent--refuse-instance-prompt backend directory))
+      (agent--refuse-instance-prompt backend directory)
+      (setf (agent-session-instance session)
+            (agent--read-instance-name backend directory)))
     (agent-check-session-start backend account)
     (when (and resume-id (not (plist-get options :fork)))
       (setf (agent-session-id session) resume-id))
@@ -474,6 +477,37 @@ instance.  Do nothing unless `agent-inhibit-prompts' is non-nil."
               (holder (car (agent--instance-holders backend directory))))
     (user-error "%s already runs in %s and `agent-inhibit-prompts' forbids asking for an instance name; give the session an instance"
                 (buffer-name (cdr holder)) directory)))
+
+(defun agent--read-instance-name (backend directory)
+  "Read the instance name of a new BACKEND session in DIRECTORY.
+Return nil, the default instance, without asking when DIRECTORY is not
+a string or no BACKEND session runs there.  Otherwise offer the first
+free \"new-N\" name, which an empty answer takes, so a session can
+start without the user thinking of a name."
+  (when-let* (((stringp directory))
+              (default (agent--free-instance-name backend directory "new")))
+    (let ((name (string-trim
+                 (read-string
+                  (format-prompt "Name for the new session in %s" default
+                                 (abbreviate-file-name directory))
+                  nil nil default))))
+      (agent--check-instance-name
+       backend directory (if (string-empty-p name) default name)))))
+
+(defun agent--check-instance-name (backend directory name &optional buffer)
+  "Return NAME if it can name a BACKEND session in DIRECTORY.
+Signal a `user-error' when NAME is empty, contains a character that
+would break parsing it back out of the session's buffer name, or is
+held by a live BACKEND session in DIRECTORY other than BUFFER."
+  (when (string-empty-p name)
+    (user-error "Session name cannot be empty"))
+  (when (string-match-p "[:*/\\\n]" name)
+    (user-error "Session name cannot contain `:', `*', `/', `\\' or newlines"))
+  (when-let* ((holder (assoc name (agent--instance-holders backend directory)))
+              ((not (eq (cdr holder) buffer))))
+    (user-error "Session name `%s' in %s is already taken by %s"
+                name directory (buffer-name (cdr holder))))
+  name)
 
 (defun agent--ambient-directory (backend)
   "Return the directory a new BACKEND session would run in, or nil.
@@ -4689,6 +4723,40 @@ again according to current usage, without prompting."
                  backend (agent-session-account session)
                  (agent-session-directory session)))))))
 
+;;;###autoload
+(defun agent-rename-session (buffer name)
+  "Rename session BUFFER to NAME, the part of its name after the colon.
+BUFFER defaults to the current session buffer, and is prompted for
+when the current buffer is not a session or with a prefix argument.
+The CLI routes its hooks to Emacs by the buffer name it was started
+with, so renaming restarts the session under the new name, resuming
+the same conversation under the same account, as `agent-restart'
+does.  Ask first when BUFFER is not waiting for input, since the
+restart would cut its turn short."
+  (interactive
+   (let ((buf (agent--resolve-session-buffer
+               (and current-prefix-arg (agent--read-session-buffer)))))
+     (list buf (agent--read-new-session-name buf))))
+  (let* ((session (or (agent-session buffer)
+                      (user-error "Not an AI session buffer: %s" buffer)))
+         (backend (agent-session-backend session)))
+    (agent--check-instance-name
+     backend (agent-session-directory session) name buffer)
+    (when (equal name (agent-session-instance session))
+      (user-error "%s is already named %s" (agent-display-name buffer) name))
+    (when (and (agent--confirm-no-captured-prompts backend buffer "Rename")
+               (or (agent--session-waiting-p buffer backend)
+                   (y-or-n-p (format "%s is not waiting for input; renaming restarts it.  Rename anyway? "
+                                     (agent-display-name buffer)))))
+      (agent--restart-session
+       buffer (lambda () (agent-session-account session)) name))))
+
+(defun agent--read-new-session-name (buffer)
+  "Read a new instance name for session BUFFER."
+  (string-trim
+   (read-string (format "Rename %s to: " (agent-display-name buffer))
+                (agent-session-instance (agent-session buffer)))))
+
 (defun agent-restart-with-account (buffer selection)
   "Restart session BUFFER under the account or pool SELECTION.
 Equivalent to selecting SELECTION with `agent-account-select' and then
@@ -4717,10 +4785,12 @@ new session buffer."
                 (agent-account-sync-selection backend selection)
                 account)))))
 
-(defun agent--restart-session (buffer account-fn)
+(defun agent--restart-session (buffer account-fn &optional instance)
   "Kill session BUFFER and resume it; return the new session buffer.
 ACCOUNT-FN is called with no arguments once BUFFER is known to be
-restartable, and returns the account to resume under."
+restartable, and returns the account to resume under.  INSTANCE, when
+non-nil, is the instance name the resumed session takes instead of
+BUFFER's."
   (let* ((session (agent-session buffer))
          (backend (agent-session-backend session))
          (struct (agent-backend backend))
@@ -4734,6 +4804,8 @@ restartable, and returns the account to resume under."
          (state (agent--session-user-state buffer)))
     (agent-check-session-start backend account)
     (setf (agent-session-account session) account)
+    (when instance
+      (setf (agent-session-instance session) instance))
     (agent--force-kill-buffer buffer)
     (let ((new (apply #'agent-start-session session
                       :resume-id session-id extra-options)))
@@ -5674,6 +5746,7 @@ when it is not installed."
     ("z" agent-toggle-snooze :description agent--snooze-description)
     ("h" "handoff" agent-handoff)
     ("r" "restart" agent-restart)
+    ("R" "rename" agent-rename-session)
     ("x" "exit" agent-exit)
     ("X" "exit immediately" agent-exit-without-skills)
     ;; Display-only lines stand in for the "" and heading strings,
