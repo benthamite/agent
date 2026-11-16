@@ -259,7 +259,10 @@
   #report-backends button:disabled { opacity: .5; }
   /* One line: the backend buttons, icons in the style of the other small
      buttons, the account picker, and Start. */
-  #backends { display: flex; gap: 8px; }
+  #launch-row { display: flex; gap: 8px; }
+  #launch-row .close { flex: 0 0 auto; width: 38px; height: 38px; padding: 0;
+    color: var(--error); font-size: 18px; font-weight: 700; }
+  #backends { flex: 1; min-width: 0; display: flex; gap: 8px; }
   #backends .backend { border: 2px solid transparent; }
   #backends .backend.picked { border-color: var(--accent); }
   #backends .go { background: var(--accent); color: #fff; font-weight: 600;
@@ -379,9 +382,9 @@
     </div>
     <p class="note" id="new-note"></p>
     <div id="folders"></div>
-    <div id="backends"></div>
-    <div class="actions">
-      <button class="cancel">Cancel</button>
+    <div id="launch-row">
+      <div id="backends"></div>
+      <button class="toggle cancel close" aria-label="Cancel" title="Cancel">✕</button>
     </div>
   </div>
 </div>
