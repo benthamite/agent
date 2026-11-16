@@ -238,8 +238,9 @@
   #new-path { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
   #folder-bar { display: flex; flex-wrap: wrap; gap: 6px; }
   #folder-bar button:disabled { opacity: .45; }
-  #bookmarks { display: flex; flex-wrap: wrap; gap: 6px; }
-  #bookmarks:empty { display: none; }
+  /* The places to jump to: Home, then the bookmarks, on one row. */
+  #places { display: flex; flex-wrap: wrap; gap: 6px; }
+  #bookmarks { display: contents; }
   #bookmarks button, .folder { -webkit-touch-callout: none; user-select: none; }
   #bookmark-ask { display: none; align-items: center; gap: 8px; font-size: 13px; }
   #bookmark-ask.shown { display: flex; }
@@ -364,11 +365,13 @@
     <p id="new-path"></p>
     <div id="folder-bar">
       <button class="toggle" id="folder-up">‹ Up</button>
-      <button class="toggle" id="folder-home">Home</button>
       <button class="toggle" id="folder-hidden">Show hidden</button>
       <button class="toggle" id="folder-sort">Sort: name</button>
     </div>
-    <div id="bookmarks"></div>
+    <div id="places">
+      <button class="toggle" id="folder-home">Home</button>
+      <div id="bookmarks"></div>
+    </div>
     <div id="bookmark-ask">
       <span id="bookmark-ask-text"></span>
       <button class="toggle" id="bookmark-ask-go"></button>
