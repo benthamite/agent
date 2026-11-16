@@ -256,10 +256,14 @@
   #report-backends button { flex: 1; min-height: 48px; border-radius: 12px;
     background: var(--accent); color: #fff; font-weight: 600; }
   #report-backends button:disabled { opacity: .5; }
-  /* One line: each backend's start button, an icon in the style of the
-     other small buttons, with its account picker beside it. */
+  /* One line: the backend buttons, icons in the style of the other small
+     buttons, the account picker, and Start. */
   #backends { display: flex; gap: 8px; }
-  #backends .launch { flex: 1; min-width: 0; display: flex; gap: 6px; }
+  #backends .backend { border: 2px solid transparent; }
+  #backends .backend.picked { border-color: var(--accent); }
+  #backends .go { background: var(--accent); color: #fff; font-weight: 600;
+    margin-left: auto; padding: 0 16px; }
+  #backends select[hidden] { display: none; }
   #backends .toggle { flex: 0 0 auto; display: flex; align-items: center;
     justify-content: center; min-width: 44px; height: 38px; padding: 0 10px; }
   #backends .toggle:disabled { opacity: .4; }
@@ -459,6 +463,7 @@ let bookmarkAsk = null;
 // across visits on this phone.
 const FOLDER_SORT_KEY = "agent-remote-folder-sort";
 const ACCOUNT_KEY_PREFIX = "agent-remote-new-account-";
+const BACKEND_KEY = "agent-remote-new-backend";
 let folderSort = savedFolderSort();
 // Images chosen for the next reply; each has its file's path once saved.
 let attachments = [];
@@ -1873,7 +1878,7 @@ async function openNew() {
   try {
     const query = current ? "?id=" + encodeURIComponent(current) : "";
     const data = await api("/api/backends" + query);
-    for (const c of data.choices) $("backends").appendChild(launcher(c));
+    renderLaunchers(data.choices);
     bookmarks = data.bookmarks || [];
     renderBookmarks();
     await browse(data.directory);
@@ -1961,7 +1966,7 @@ function renderFolders() {
   $("folder-up").disabled = !(browsing && browsing.parent);
   $("folder-hidden").textContent = showHidden ? "Hide hidden" : "Show hidden";
   $("folder-sort").textContent = folderSort === "recent" ? "Sort: recent" : "Sort: name";
-  for (const b of startButtons()) b.disabled = !browsing;
+  syncStartButtons();
   const folders = browsing ? sortedFolders(browsing.folders) : [];
   const shown = folders.filter((f) => showHidden || !f.name.startsWith("."));
   $("folders").replaceChildren(...shown.map((f) => {
@@ -2051,69 +2056,111 @@ function onLongPress(el, handler) {
   el.addEventListener("contextmenu", (e) => e.preventDefault());
 }
 
-// A backend's start button, its icon (its name when it has none), with
-// the picker for the account it starts under beside it.
-function launcher(choice) {
-  const group = document.createElement("div");
-  group.className = "launch";
+// One line: a button per backend, its icon (its name when it has none),
+// that picks the backend; one picker for the account the picked backend
+// starts under; and Start.  "" leaves the account to Emacs, as a session
+// started there from Emacs would.  The picker lists only the picked
+// backend's accounts and pools, and is hidden when it has fewer than
+// two.  Opened from a session, the sheet picks that session's backend,
+// which Emacs lists first; opened from the list, the last one picked.
+// The account last picked is remembered per backend.
+let launchChoices = [];
+let pickedChoice = null;
+
+function renderLaunchers(choices) {
+  launchChoices = choices;
+  for (const c of choices) $("backends").appendChild(backendButton(c));
+  const select = document.createElement("select");
+  select.id = "new-account";
+  select.setAttribute("aria-label", "Account");
+  select.addEventListener("change", () => {
+    try {
+      localStorage.setItem(ACCOUNT_KEY_PREFIX + pickedChoice.name, select.value);
+    } catch (e) {
+      // The pick then lasts only while the sheet is open.
+    }
+  });
+  const go = document.createElement("button");
+  go.id = "new-start";
+  go.className = "toggle go";
+  go.textContent = "Start";
+  go.addEventListener("click", () => doNew(pickedChoice, go));
+  $("backends").append(select, go);
+  pickBackend(initialChoice(choices));
+}
+
+function initialChoice(choices) {
+  if (!current) {
+    try {
+      const saved = localStorage.getItem(BACKEND_KEY);
+      const choice = choices.find((c) => c.name === saved);
+      if (choice) return choice;
+    } catch (e) {
+      // Without storage the first backend is picked.
+    }
+  }
+  return choices[0] || null;
+}
+
+function backendButton(choice) {
   const b = document.createElement("button");
-  b.className = "toggle";
-  const label = "Start " + choice.label + " here";
-  b.title = label;
-  b.setAttribute("aria-label", label);
+  b.className = "toggle backend";
+  b.title = choice.label;
+  b.setAttribute("aria-label", choice.label);
   if (icons[choice.name]) b.innerHTML = icons[choice.name];
   else b.textContent = choice.label;
-  b.disabled = true;
-  b.addEventListener("click", () => doNew(choice, b));
-  group.appendChild(b);
-  const picker = accountPicker(choice);
-  if (picker) group.appendChild(picker);
-  return group;
+  b.choice = choice;
+  b.addEventListener("click", () => {
+    pickBackend(choice);
+    try {
+      localStorage.setItem(BACKEND_KEY, choice.name);
+    } catch (e) {
+      // The pick then lasts only while the sheet is open.
+    }
+  });
+  return b;
+}
+
+function pickBackend(choice) {
+  pickedChoice = choice;
+  for (const b of $("backends").querySelectorAll(".backend")) {
+    b.classList.toggle("picked", b.choice === choice);
+    b.setAttribute("aria-pressed", b.choice === choice);
+  }
+  const select = $("new-account");
+  const names = ["", ...(choice ? choice.accounts : [])];
+  select.replaceChildren(...names.map((name) => {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name || "Default account";
+    return option;
+  }));
+  try {
+    const saved = choice && localStorage.getItem(ACCOUNT_KEY_PREFIX + choice.name);
+    if (names.includes(saved)) select.value = saved;
+  } catch (e) {
+    // Without storage the picker starts at the default every time.
+  }
+  select.hidden = names.length < 3;
+  syncStartButtons();
 }
 
 function startButtons() {
   return $("backends").querySelectorAll("button");
 }
 
-// The account a backend's new sessions start under.  "" leaves the
-// choice to Emacs, as a session started there from Emacs would.  A
-// backend with one account or none has nothing to choose, and gets no
-// picker.  The last pick is remembered per backend.
-function accountPicker(choice) {
-  if (choice.accounts.length < 2) return null;
-  const select = document.createElement("select");
-  select.id = "account-" + choice.name;
-  select.setAttribute("aria-label", choice.label + " account");
-  const names = ["", ...choice.accounts];
-  for (const name of names) {
-    const option = document.createElement("option");
-    option.value = name;
-    option.textContent = name || "Default";
-    select.appendChild(option);
-  }
-  const key = ACCOUNT_KEY_PREFIX + choice.name;
-  try {
-    const saved = localStorage.getItem(key);
-    if (names.includes(saved)) select.value = saved;
-  } catch (e) {
-    // Without storage the picker starts at the default every time.
-  }
-  select.addEventListener("change", () => {
-    try {
-      localStorage.setItem(key, select.value);
-    } catch (e) {
-      // The pick then lasts only while the sheet is open.
-    }
-  });
-  return select;
+// Start is live once a folder is on show and a backend is picked.
+function syncStartButtons() {
+  for (const b of startButtons())
+    b.disabled = b.id === "new-start" ? !(browsing && pickedChoice) : false;
 }
 
 async function doNew(choice, button) {
   for (const b of startButtons()) b.disabled = true;
   button.classList.add("starting");
-  const picker = $("account-" + choice.name);
   const body = { directory: browsing.path, backend: choice.name };
-  if (picker && picker.value) body.account = picker.value;
+  const account = $("new-account").value;
+  if (account) body.account = account;
   try {
     const data = await api("/api/new", body);
     if (current) {
@@ -2128,7 +2175,7 @@ async function doNew(choice, button) {
   } catch (e) {
     $("new-note").textContent = "Error: " + e.message;
     button.classList.remove("starting");
-    for (const b of startButtons()) b.disabled = false;
+    syncStartButtons();
   }
 }
 
