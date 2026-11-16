@@ -3451,6 +3451,8 @@ symmetrically and restores `claude-code-notification-function'."
   (agent-claude--delete-stale-session-settings)
   (advice-add 'claude-code--start :around
               #'agent-claude--start-with-session-settings)
+  (advice-add 'claude-code-handle-hook :filter-args
+              #'agent-claude--route-hook-to-current-name)
   (setq agent-claude--saved-notification-function
         claude-code-notification-function)
   (setq claude-code-notification-function #'claude-code-default-notification)
@@ -3493,6 +3495,14 @@ symmetrically and restores `claude-code-notification-function'."
       (when agent-claude-mode (agent-claude--monet-install))))
   (agent-claude--register-existing-session-teardowns))
 
+(defun agent-claude--route-hook-to-current-name (args)
+  "Return hook ARGS naming the session buffer by its current name.
+ARGS are those of `claude-code-handle-hook', whose second is the buffer
+name the CLI was started under.  A session renamed since then answers
+to its new name."
+  (append (list (car args) (agent-session-current-name (cadr args)))
+          (cddr args)))
+
 (defun agent-claude--register-existing-session-teardowns ()
   "Register teardown for Claude buffers that predate mode enablement."
   (dolist (buf (claude-code--find-all-claude-buffers))
@@ -3525,6 +3535,8 @@ symmetrically and restores `claude-code-notification-function'."
   (remove-hook 'claude-code-process-environment-functions
                #'agent-claude--parent-session-env)
   (advice-remove 'claude-code--start #'agent-claude--start-with-session-settings)
+  (advice-remove 'claude-code-handle-hook
+                 #'agent-claude--route-hook-to-current-name)
   (advice-remove 'claude-code--eat-send-return #'agent-claude--note-user-submission)
   (advice-remove 'claude-code--vterm-send-return #'agent-claude--note-user-submission)
   (advice-remove 'claude-code--do-send-command #'agent-claude--note-submission)

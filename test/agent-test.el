@@ -2547,22 +2547,17 @@ session's account and id, and `synced' the synced selections."
                      '("Alpha"))))))
 
 (ert-deftest agent-test-rename-session-carries-captured-prompts ()
-  "Renaming a session moves its captured prompts to the new name, unprompted."
+  "Renaming a session moves its captured prompts to the new name."
   (agent-test--with-restartable-session
+    (rename-buffer "*one:~/repo/:test*" t)
     (let ((old (agent-capture--file 'one (current-buffer))))
       (make-directory (file-name-directory old) t)
       (with-temp-file old
         (insert "* Prompt A\n\nAlpha\n"))
       (cl-letf (((symbol-function 'agent--instance-holders)
-                 (lambda (_backend _directory) nil))
-                ((symbol-function 'agent--session-waiting-p)
-                 (lambda (&rest _) t))
-                ((symbol-function 'y-or-n-p)
-                 (lambda (&rest _) (ert-fail "Unexpected prompt"))))
+                 (lambda (_backend _directory) nil)))
         (agent-rename-session (current-buffer) "renamed"))
-      (should killed)
-      (should (equal (agent-session-instance (agent-session (current-buffer)))
-                     "renamed"))
+      (should-not killed)
       (should-not (file-exists-p old))
       (should (equal (mapcar (lambda (p) (plist-get p :text))
                              (agent-capture--prompts 'one (current-buffer)))
@@ -2673,28 +2668,45 @@ Bind `started', the backends started; any completion prompt fails the test."
       (kill-buffer mine)
       (kill-buffer other))))
 
-(ert-deftest agent-test-rename-session-restarts-under-the-new-name ()
-  "Renaming restarts the session as NAME under its own account."
-  (let ((buffer (generate-new-buffer " session"))
-        restarted)
+(ert-deftest agent-test-rename-session-renames-in-place ()
+  "Renaming changes the buffer name without restarting or asking."
+  (let ((agent-backends nil)
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t)))
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-session)
-                   (lambda (&optional _)
-                     (agent-session-create :backend 'one :directory "/tmp/"
-                                           :account "work" :instance "old")))
-                  ((symbol-function 'agent--instance-holders)
-                   (lambda (_backend _directory) (list (cons "old" buffer))))
-                  ((symbol-function 'agent--confirm-no-captured-prompts)
-                   (lambda (&rest _) t))
-                  ((symbol-function 'agent--session-waiting-p)
-                   (lambda (&rest _) t))
-                  ((symbol-function 'agent--restart-session)
-                   (lambda (buf account-fn instance)
-                     (setq restarted (list buf (funcall account-fn) instance)))))
-          (agent-rename-session buffer "new")
-          (should (equal restarted (list buffer "work" "new")))
-          (should-error (agent-rename-session buffer "old") :type 'user-error))
-      (kill-buffer buffer))))
+        (with-temp-buffer
+          (rename-buffer "*one:~/repo/:old*" t)
+          (let ((buf (current-buffer)))
+            (setq-local agent--session
+                        (agent-session-create :backend 'one :account "work"
+                                              :directory "~/repo/"
+                                              :instance "old"))
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))
+              :find-all-buffers (lambda () (list buf))))
+            (cl-letf (((symbol-function 'agent--restart-session)
+                       (lambda (&rest _) (ert-fail "Unexpected restart")))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (&rest _) (ert-fail "Unexpected prompt")))
+                      ((symbol-function 'yes-or-no-p)
+                       (lambda (&rest _) (ert-fail "Unexpected prompt"))))
+              (agent-rename-session buf "new")
+              (should (equal (buffer-name buf) "*one:~/repo/:new*"))
+              (should (equal (agent-session-instance (agent-session buf)) "new"))
+              (should (eq (agent-session-buffer-for-name "*one:~/repo/:old*") buf))
+              (should (equal (agent-session-current-name "*one:~/repo/:old*")
+                             "*one:~/repo/:new*"))
+              (should (equal (agent-session-current-name "*other*") "*other*"))
+              (should (equal (sort (mapcar #'car (agent--instance-holders
+                                                  'one "~/repo/"))
+                                   #'string<)
+                             '("new" "old")))
+              (agent-rename-session buf "third")
+              (should (equal (buffer-local-value 'agent--launch-name buf)
+                             "*one:~/repo/:old*"))
+              (should-error (agent-rename-session buf "third") :type 'user-error))))
+      (delete-directory agent-prompt-capture-directory t))))
 
 (ert-deftest agent-test-inhibit-prompts-starts-the-first-session-in-a-directory ()
   "No session in the directory means no instance question."

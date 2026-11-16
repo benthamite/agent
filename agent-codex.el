@@ -1683,8 +1683,20 @@ removes them symmetrically and restores
             #'agent-codex--sync-theme-before-start)
   (add-hook 'codex-command-submitted-hook #'agent-codex--note-submission)
   (advice-add 'codex--do-send-command :around #'agent-codex--intercept-exit)
+  (advice-add 'codex--dispatch-hook-message :filter-args
+              #'agent-codex--route-hook-to-current-name)
   (advice-add 'codex--send-command-to-buffer :around
               #'agent-codex--intercept-exit-to-buffer))
+
+(defun agent-codex--route-hook-to-current-name (args)
+  "Return hook ARGS naming the session buffer by its current name.
+ARGS hold the message of `codex--dispatch-hook-message', whose
+:buffer-name is the name the CLI was started under.  A session renamed
+since then answers to its new name."
+  (let ((message (car args)))
+    (list (plist-put (copy-sequence message) :buffer-name
+                     (agent-session-current-name
+                      (plist-get message :buffer-name))))))
 
 (defun agent-codex--mode-disable ()
   "Remove Codex backend hooks and advice."
@@ -1708,6 +1720,8 @@ removes them symmetrically and restores
                #'agent-codex--sync-theme-before-start)
   (remove-hook 'codex-command-submitted-hook #'agent-codex--note-submission)
   (advice-remove 'codex--do-send-command #'agent-codex--intercept-exit)
+  (advice-remove 'codex--dispatch-hook-message
+                 #'agent-codex--route-hook-to-current-name)
   (advice-remove 'codex--send-command-to-buffer
                  #'agent-codex--intercept-exit-to-buffer))
 

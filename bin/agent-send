@@ -111,6 +111,7 @@ LIST_EXPR = f'''
             (append identity
                     `((instance . ,(agent--session-instance-from-buffer-name
                                    (buffer-name)))
+                      (launch . ,agent--launch-name)
                       (agent_session_id
                        . ,(ignore-errors
                             (agent-session-id (agent-session (current-buffer))))))))
@@ -150,7 +151,7 @@ def format_sessions(records: list[dict[str, Any]], own: set[str]) -> str:
         return "No live agent.el sessions."
     lines = []
     for record in records:
-        mark = " (this session)" if record["buffer"] in own else ""
+        mark = " (this session)" if is_own(record, own) else ""
         if record.get("error"):
             lines.append(f"{record['buffer']}{mark}\n  error: {record['error']}")
             continue
@@ -167,6 +168,11 @@ def format_sessions(records: list[dict[str, Any]], own: set[str]) -> str:
 
 def own_buffers(environ=os.environ) -> set[str]:
     return {environ[name] for name in SENDER_VARIABLES if environ.get(name)}
+
+
+def is_own(record: dict[str, Any], own: set[str]) -> bool:
+    """A renamed session still carries the name it started under."""
+    return record["buffer"] in own or record.get("launch") in own
 
 
 def sender_label(environ=os.environ) -> str:
@@ -206,7 +212,7 @@ def resolve_target(target: str, records: list[dict[str, Any]],
         raise Refusal(f"{problem} {target!r}; candidates:\n{listing}\n"
                       "Pass an exact buffer name from `agent-send --list`.")
     chosen = matches[0]
-    if chosen["buffer"] in own:
+    if is_own(chosen, own):
         raise Refusal(f"refusing to send to this session's own buffer {chosen['buffer']}")
     if chosen.get("backend") not in session.VALID_BACKENDS:
         raise Refusal(f"{chosen['buffer']} has no supported backend")

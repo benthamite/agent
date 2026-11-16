@@ -1389,18 +1389,48 @@ DIRECTORY; otherwise return PREFIX-N for the smallest free N."
 (defun agent--instance-holders (backend directory)
   "Return (INSTANCE . BUFFER) for each live BACKEND session in DIRECTORY.
 INSTANCE is \"default\" for a session started without one.  Directories
-are compared expanded, so an abbreviated DIRECTORY matches."
+are compared expanded, so an abbreviated DIRECTORY matches.  A renamed
+session also holds the instance it was started with, since its CLI
+still names it by that name."
   (let ((dir (file-name-as-directory (expand-file-name directory))))
-    (delq nil
-          (mapcar (lambda (buf)
-                    (when-let* ((s (agent-session buf))
-                                ((eq (agent-session-backend s) backend))
-                                (own (agent-session-directory s))
-                                ((equal (file-name-as-directory
-                                         (expand-file-name own))
-                                        dir)))
-                      (cons (or (agent-session-instance s) "default") buf)))
-                  (agent-session-buffers)))))
+    (mapcan (lambda (buf)
+              (when-let* ((s (agent-session buf))
+                          ((eq (agent-session-backend s) backend))
+                          (own (agent-session-directory s))
+                          ((equal (file-name-as-directory
+                                   (expand-file-name own))
+                                  dir)))
+                (cons (cons (or (agent-session-instance s) "default") buf)
+                      (when-let* ((launch (and (bufferp buf)
+                                               (buffer-local-value
+                                                'agent--launch-name buf))))
+                        (list (cons (or (agent--session-instance-from-buffer-name
+                                         launch)
+                                        "default")
+                                    buf))))))
+            (agent-session-buffers))))
+
+(defvar-local agent--launch-name nil
+  "Name this session buffer had when its CLI started, once it is renamed.
+The CLI's hooks and helpers name the buffer by that name for as long as
+the process runs.")
+(put 'agent--launch-name 'permanent-local t)
+
+(defun agent-session-buffer-for-name (name)
+  "Return the live session buffer the CLI knows as NAME, or nil.
+That is the buffer named NAME or, for a renamed session, the buffer
+whose CLI was started under NAME."
+  (or (get-buffer name)
+      (seq-find (lambda (buf)
+                  (equal (buffer-local-value 'agent--launch-name buf) name))
+                (buffer-list))))
+
+(defun agent-session-current-name (name)
+  "Return the current name of the session buffer the CLI knows as NAME.
+Return NAME itself when no live session answers to it."
+  (if-let* ((buffer (and (stringp name) (agent-session-buffer-for-name name))))
+      (buffer-name buffer)
+    name))
 
 (transient-define-prefix agent--session-switcher ()
   "Switch to an existing AI session."
@@ -1663,7 +1693,7 @@ PROCESS-TOKEN, when supplied, must match the backend publisher process token.
 Reject missing sessions, mismatched identities, and text longer than 160
 characters.  Collapse whitespace; empty text clears the status.  This does
 not change the session's lifecycle state or its state-transition timestamp."
-  (let* ((buffer (get-buffer buffer-name))
+  (let* ((buffer (agent-session-buffer-for-name buffer-name))
          (session (and buffer (agent-session buffer))))
     (unless (and session (memq buffer (agent-session-buffers)))
       (user-error "No live agent session named %s" buffer-name))
@@ -3851,7 +3881,7 @@ passed as the initial prompt."
 Return nil when neither names a live session buffer."
   (cond
    ((and buffer-name (not (string-empty-p buffer-name)))
-    (let ((buffer (get-buffer buffer-name)))
+    (let ((buffer (agent-session-buffer-for-name buffer-name)))
       (unless buffer
         (user-error "No session buffer named `%s'" buffer-name))
       (unless (agent--detect-backend buffer)
@@ -4721,28 +4751,28 @@ prompts follow the session, also to a new account."
   "Rename session BUFFER to NAME, the part of its name after the colon.
 BUFFER defaults to the current session buffer, and is prompted for
 when the current buffer is not a session or with a prefix argument.
-The CLI routes its hooks to Emacs by the buffer name it was started
-with, so renaming restarts the session under the new name, resuming
-the same conversation under the same account, as `agent-restart'
-does.  Ask first when BUFFER is not waiting for input, since the
-restart would cut its turn short.  Captured prompts follow the
-session to its new name."
+The session keeps running: its CLI still names it by the name it was
+started with, and `agent-session-buffer-for-name' routes that name to
+the renamed buffer.  Captured prompts follow the session."
   (interactive
    (let ((buf (agent--resolve-session-buffer
                (and current-prefix-arg (agent--read-session-buffer)))))
      (list buf (agent--read-new-session-name buf))))
-  (let* ((session (or (agent-session buffer)
-                      (user-error "Not an AI session buffer: %s" buffer)))
-         (backend (agent-session-backend session)))
+  (let ((session (or (agent-session buffer)
+                     (user-error "Not an AI session buffer: %s" buffer))))
     (agent--check-instance-name
-     backend (agent-session-directory session) name buffer)
+     (agent-session-backend session) (agent-session-directory session)
+     name buffer)
     (when (equal name (agent-session-instance session))
       (user-error "%s is already named %s" (agent-display-name buffer) name))
-    (when (or (agent--session-waiting-p buffer backend)
-              (y-or-n-p (format "%s is not waiting for input; renaming restarts it.  Rename anyway? "
-                                (agent-display-name buffer))))
-      (agent--restart-session
-       buffer (lambda () (agent-session-account session)) name))))
+    (with-current-buffer buffer
+      (unless agent--launch-name
+        (setq agent--launch-name (buffer-name)))
+      (agent--change-session-identity
+       buffer (agent-session-account session) name)
+      (rename-buffer (agent-session-buffer-name session)))
+    (agent--refresh-display-names)
+    (agent--schedule-session-registry-save)))
 
 (defun agent--read-new-session-name (buffer)
   "Read a new instance name for session BUFFER."
@@ -4790,20 +4820,28 @@ and instance name."
           (when-let* ((fn (and struct (agent-backend-restart-options struct))))
             (funcall fn buffer)))
          (account (funcall account-fn))
-         (state (agent--session-user-state buffer))
-         (capture-file (agent--captured-prompts-file backend buffer)))
+         (state (agent--session-user-state buffer)))
     (agent-check-session-start backend account)
-    (setf (agent-session-account session) account)
-    (when instance
-      (setf (agent-session-instance session) instance))
-    (when capture-file
-      (agent-capture-move-file capture-file
-                               (agent-capture--file backend buffer)))
+    (agent--change-session-identity buffer account instance)
     (agent--force-kill-buffer buffer)
     (let ((new (apply #'agent-start-session session
                       :resume-id session-id extra-options)))
       (agent--restore-session-user-states (list (cons new state)))
       new)))
+
+(defun agent--change-session-identity (buffer account &optional instance)
+  "Record ACCOUNT, and INSTANCE when non-nil, on session BUFFER.
+The session's captured prompts are keyed by its identity, so they move
+to the file the new identity names."
+  (let* ((session (agent-session buffer))
+         (backend (agent-session-backend session))
+         (capture-file (agent--captured-prompts-file backend buffer)))
+    (setf (agent-session-account session) account)
+    (when instance
+      (setf (agent-session-instance session) instance))
+    (when capture-file
+      (agent-capture-move-file capture-file
+                               (agent-capture--file backend buffer)))))
 
 (defun agent--captured-prompts-file (backend buffer)
   "Return the capture file of BACKEND session BUFFER, or nil.
