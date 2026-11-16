@@ -252,15 +252,23 @@
     border-radius: 10px; overflow-wrap: anywhere; }
   .folder:active { background: var(--line); }
   #report-text { width: 100%; min-height: 140px; max-height: 40vh; margin: 10px 0; }
-  #backends, #report-backends { display: flex; gap: 8px; }
-  #backends button, #report-backends button { flex: 1; min-height: 48px; border-radius: 12px;
+  #report-backends { display: flex; gap: 8px; }
+  #report-backends button { flex: 1; min-height: 48px; border-radius: 12px;
     background: var(--accent); color: #fff; font-weight: 600; }
-  #backends button:disabled, #report-backends button:disabled { opacity: .5; }
-  #accounts { display: flex; gap: 8px; }
-  #accounts:empty { display: none; }
-  #accounts > * { flex: 1; min-width: 0; }
-  #accounts select { font: inherit; color: var(--text); background: var(--panel-2);
-    border: 0; border-radius: 10px; padding: 8px 9px; }
+  #report-backends button:disabled { opacity: .5; }
+  /* One line: each backend's start button, an icon in the style of the
+     other small buttons, with its account picker beside it. */
+  #backends { display: flex; gap: 8px; }
+  #backends .launch { flex: 1; min-width: 0; display: flex; gap: 6px; }
+  #backends .toggle { flex: 0 0 auto; display: flex; align-items: center;
+    justify-content: center; min-width: 44px; height: 38px; padding: 0 10px; }
+  #backends .toggle:disabled { opacity: .4; }
+  #backends .toggle.starting { animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .4; } }
+  #backends .toggle svg { width: 22px; height: 22px; display: block; }
+  #backends select { flex: 1; min-width: 0; height: 38px; font: inherit;
+    font-size: 13px; color: var(--text); background: var(--panel-2); border: 0;
+    border-radius: 10px; padding: 0 9px; }
 </style>
 </head>
 <body>
@@ -364,7 +372,6 @@
     </div>
     <p class="note" id="new-note"></p>
     <div id="folders"></div>
-    <div id="accounts"></div>
     <div id="backends"></div>
     <div class="actions">
       <button class="cancel">Cancel</button>
@@ -1860,23 +1867,13 @@ async function openNew() {
   browsing = null;
   askBookmark(null);
   $("backends").replaceChildren();
-  $("accounts").replaceChildren();
   renderFolders();
   $("new-note").textContent = "Loading…";
   $("new-sheet").classList.add("open");
   try {
     const query = current ? "?id=" + encodeURIComponent(current) : "";
     const data = await api("/api/backends" + query);
-    for (const c of data.choices) {
-      const b = document.createElement("button");
-      b.textContent = "Start " + c.label + " here";
-      b.disabled = true;
-      b.addEventListener("click", () => doNew(c, b));
-      $("backends").appendChild(b);
-      $("accounts").appendChild(accountPicker(c));
-    }
-    if (!data.choices.some((c) => c.accounts.length > 1))
-      $("accounts").replaceChildren();
+    for (const c of data.choices) $("backends").appendChild(launcher(c));
     bookmarks = data.bookmarks || [];
     renderBookmarks();
     await browse(data.directory);
@@ -1964,7 +1961,7 @@ function renderFolders() {
   $("folder-up").disabled = !(browsing && browsing.parent);
   $("folder-hidden").textContent = showHidden ? "Hide hidden" : "Show hidden";
   $("folder-sort").textContent = folderSort === "recent" ? "Sort: recent" : "Sort: name";
-  for (const b of $("backends").children) b.disabled = !browsing;
+  for (const b of startButtons()) b.disabled = !browsing;
   const folders = browsing ? sortedFolders(browsing.folders) : [];
   const shown = folders.filter((f) => showHidden || !f.name.startsWith("."));
   $("folders").replaceChildren(...shown.map((f) => {
@@ -2054,13 +2051,36 @@ function onLongPress(el, handler) {
   el.addEventListener("contextmenu", (e) => e.preventDefault());
 }
 
-// The account a backend's new sessions start under, shown under its
-// button.  "" leaves the choice to Emacs, as a session started there
-// from Emacs would.  A backend with one account or none has nothing to
-// choose, and gets an empty slot that keeps the pickers under their
-// buttons.  The last pick is remembered per backend.
+// A backend's start button, its icon (its name when it has none), with
+// the picker for the account it starts under beside it.
+function launcher(choice) {
+  const group = document.createElement("div");
+  group.className = "launch";
+  const b = document.createElement("button");
+  b.className = "toggle";
+  const label = "Start " + choice.label + " here";
+  b.title = label;
+  b.setAttribute("aria-label", label);
+  if (icons[choice.name]) b.innerHTML = icons[choice.name];
+  else b.textContent = choice.label;
+  b.disabled = true;
+  b.addEventListener("click", () => doNew(choice, b));
+  group.appendChild(b);
+  const picker = accountPicker(choice);
+  if (picker) group.appendChild(picker);
+  return group;
+}
+
+function startButtons() {
+  return $("backends").querySelectorAll("button");
+}
+
+// The account a backend's new sessions start under.  "" leaves the
+// choice to Emacs, as a session started there from Emacs would.  A
+// backend with one account or none has nothing to choose, and gets no
+// picker.  The last pick is remembered per backend.
 function accountPicker(choice) {
-  if (choice.accounts.length < 2) return document.createElement("span");
+  if (choice.accounts.length < 2) return null;
   const select = document.createElement("select");
   select.id = "account-" + choice.name;
   select.setAttribute("aria-label", choice.label + " account");
@@ -2068,7 +2088,7 @@ function accountPicker(choice) {
   for (const name of names) {
     const option = document.createElement("option");
     option.value = name;
-    option.textContent = name || "Default account";
+    option.textContent = name || "Default";
     select.appendChild(option);
   }
   const key = ACCOUNT_KEY_PREFIX + choice.name;
@@ -2089,9 +2109,8 @@ function accountPicker(choice) {
 }
 
 async function doNew(choice, button) {
-  for (const b of $("backends").children) b.disabled = true;
-  const label = button.textContent;
-  button.textContent = "Starting…";
+  for (const b of startButtons()) b.disabled = true;
+  button.classList.add("starting");
   const picker = $("account-" + choice.name);
   const body = { directory: browsing.path, backend: choice.name };
   if (picker && picker.value) body.account = picker.value;
@@ -2108,8 +2127,8 @@ async function doNew(choice, button) {
     schedule();
   } catch (e) {
     $("new-note").textContent = "Error: " + e.message;
-    button.textContent = label;
-    for (const b of $("backends").children) b.disabled = false;
+    button.classList.remove("starting");
+    for (const b of startButtons()) b.disabled = false;
   }
 }
 
