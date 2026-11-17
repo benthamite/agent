@@ -1281,29 +1281,43 @@ remembered, for `agent-auto--agenda-stale-p'."
                       (buffer (marker-buffer marker))
                       (mark (gethash (cons buffer (marker-position marker))
                                      tasks))
-                      (start (agent-auto--agenda-title-start))
+                      (start (agent-auto--agenda-title-start marker))
                       ((< start (line-end-position))))
             (agent-auto--put-mark start (1+ start)
                                   'before-string (concat mark " ")))
           (forward-line 1))))))
 
-(defun agent-auto--agenda-title-start ()
+(defun agent-auto--agenda-title-start (marker)
   "Return where the title of the task on the current agenda line starts.
-That is after the line's prefix, the task's TODO keyword and its
-priority cookie.  The agenda marks where the heading's text starts with
-the text property `org-heading'."
+MARKER is at the task's heading.  The title starts after the line's
+prefix, the task's TODO keyword and its priority cookie.  The agenda
+marks where the heading's text starts with the text property
+`org-heading'.  The keyword is the one the line's `todo-state' property
+names, or the one the heading has now: a line Org wrote again in place,
+as when the task's state is changed from the agenda, shows the heading's
+keyword and keeps the property of the line it replaced."
   (save-excursion
     (let ((end (line-end-position))
-          (keyword (get-text-property (point) 'todo-state))
+          (keywords (delq nil (list (get-text-property (point) 'todo-state)
+                                    (agent-auto--heading-keyword marker))))
           (case-fold-search nil))
       (goto-char (or (text-property-any (point) end 'org-heading t)
                      (progn (back-to-indentation) (point))))
-      (when (and keyword
-                 (looking-at (concat "\\.*" (regexp-quote keyword) "[ \t]+")))
+      (when (seq-some (lambda (keyword)
+                        (looking-at (concat "\\.*" (regexp-quote keyword)
+                                            "[ \t]+")))
+                      keywords)
         (goto-char (match-end 0)))
       (when (looking-at "\\[#[A-Z0-9]+\\][ \t]+")
         (goto-char (match-end 0)))
       (min (point) end))))
+
+(defun agent-auto--heading-keyword (marker)
+  "Return the TODO keyword of the heading at MARKER, or nil when it has none."
+  (with-current-buffer (marker-buffer marker)
+    (org-with-wide-buffer
+     (goto-char marker)
+     (org-get-todo-state))))
 
 (defun agent-auto--remove-marks ()
   "Remove every mark, from the Org buffers and the agenda buffers."

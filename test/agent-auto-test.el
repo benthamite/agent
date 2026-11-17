@@ -1686,6 +1686,29 @@ command that changed nothing."
         (should (equal (agent-auto-test--agenda-marks)
                        '(("▶ " . "Fix it :agent:"))))))))
 
+;; Org writes an agenda line again when the task's state is changed from
+;; the agenda, and gives the new line the text properties of the old one,
+;; the old keyword among them.  The mark, placed by that property, then
+;; stood before the new keyword until the agenda was rebuilt.
+(ert-deftest agent-auto-test-agenda-mark-follows-a-changed-keyword ()
+  "Keep the mark before the title when the task's state changes in the agenda."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file
+                 root (concat "#+TODO: TODO DOING | DONE\n"
+                              (agent-auto-test--task root)))))
+      (agent-auto-test--run)
+      (agent-auto-test--in-agenda file
+        (should (equal (agent-auto-test--agenda-marks)
+                       '(("▶ " . "Fix it :agent:"))))
+        (org-agenda-todo "DOING")
+        (should (string-match-p "DOING Fix it"
+                                (buffer-substring (pos-bol) (pos-eol))))
+        (should (equal (agent-auto-test--agenda-marks)
+                       '(("▶ " . "Fix it :agent:"))))
+        (agent-auto--refresh-marks)
+        (should (equal (agent-auto-test--agenda-marks)
+                       '(("▶ " . "Fix it :agent:"))))))))
+
 (ert-deftest agent-auto-test-closed-session-leaves-no-mark ()
   "Show no mark on a task whose recorded session is closed."
   (agent-auto-test--with root
