@@ -2607,6 +2607,65 @@ Bind `started', the backends started; any completion prompt fails the test."
      (should asked)
      (should started))))
 
+(defmacro agent-test--counting-backend-prompts (&rest body)
+  "Run BODY with two backends, prompts allowed, and `asked' counting them.
+The backends carry the labels \"One\" and \"Two\", and every prompt
+answers \"Two\"."
+  (declare (debug t))
+  `(agent-test--with-two-backends
+    (let ((agent-inhibit-prompts nil)
+          (asked 0))
+      (dolist (entry agent-backends)
+        (setf (agent-backend-label (cdr entry))
+              (capitalize (symbol-name (car entry)))))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (cl-incf asked) "Two")))
+        (with-temp-buffer
+          ,@body)))))
+
+(ert-deftest agent-test-reuse-backend-choice-asks-once-per-binding ()
+  "Inside one binding the backend is asked once; after it, asked again."
+  (agent-test--counting-backend-prompts
+   (let ((agent-reuse-backend-choice t))
+     (should (eq (agent--resolve-backend) 'two))
+     (should (eq (agent--resolve-backend) 'two))
+     (should (eq agent-reuse-backend-choice 'two)))
+   (should (= asked 1))
+   (should-not agent-reuse-backend-choice)
+   (should (eq (agent--resolve-backend) 'two))
+   (should (= asked 2))
+   (should (eq (agent--resolve-backend) 'two))
+   (should (= asked 3))
+   (should-not agent-reuse-backend-choice)))
+
+(ert-deftest agent-test-reuse-backend-choice-takes-a-named-backend ()
+  "A binding that names a registered backend never asks."
+  (agent-test--counting-backend-prompts
+   (let ((agent-reuse-backend-choice 'one))
+     (should (eq (agent--resolve-backend) 'one)))
+   (should (= asked 0))))
+
+(ert-deftest agent-test-reuse-backend-choice-leaves-a-lone-backend-alone ()
+  "With one backend registered nothing is asked and nothing is stored."
+  (agent-test--counting-backend-prompts
+   (setq agent-backends (list (assq 'one agent-backends)))
+   (let ((agent-reuse-backend-choice t))
+     (should (eq (agent--resolve-backend) 'one))
+     (should (eq (agent--resolve-backend) 'one))
+     (should (eq agent-reuse-backend-choice t)))
+   (should (= asked 0))))
+
+(ert-deftest agent-test-reuse-backend-choice-does-not-lift-inhibit-prompts ()
+  "An inhibited choice is refused, remembered backend or not."
+  (agent-test--counting-backend-prompts
+   (let ((agent-inhibit-prompts t))
+     (let ((agent-reuse-backend-choice t))
+       (should-error (agent--resolve-backend) :type 'user-error)
+       (should (eq agent-reuse-backend-choice t)))
+     (let ((agent-reuse-backend-choice 'two))
+       (should-error (agent--resolve-backend) :type 'user-error)))
+   (should (= asked 0))))
+
 (ert-deftest agent-test-inhibit-prompts-takes-a-free-instance-name ()
   "An inhibited second session in a directory takes new-N without asking."
   (agent-test--with-two-backends

@@ -3290,39 +3290,65 @@ core will start the session for.  Bound like
 `agent--context-wants-directory', and nil when no account is selected or
 the payload is bound for a session that is already running.")
 
+(defvar agent-reuse-backend-choice nil
+  "Non-nil means ask which backend to use once and reuse the answer.
+It is for callers that start several sessions in one command.  Bind it
+to t with `let' around the loop: the first choice among several
+registered backends is asked as usual and stored in this variable, and
+later choices inside the same binding return that backend without
+asking.  The stored backend goes away with the binding.  A caller that
+already knows the backend can bind the variable to its name instead.
+It does not lift `agent-inhibit-prompts', which still refuses the choice
+whatever this variable holds.")
+
 (defun agent--resolve-backend ()
   "Return the backend for the current context.
 If in a session buffer, use that backend.  If only one backend is
 registered, use it.  Otherwise, prompt, or signal a `user-error' when
-`agent-inhibit-prompts' is non-nil."
+`agent-inhibit-prompts' is non-nil.  While `agent-reuse-backend-choice'
+is non-nil, prompt once and return the same backend afterwards."
   (or (agent--detect-backend)
       (if (= (length agent-backends) 1)
           (caar agent-backends)
         (agent--refuse-backend-prompt)
-        (let* ((entries (mapcar (lambda (e)
-                                  (cons (or (agent-backend-label (cdr e))
-                                            (symbol-name (car e)))
-                                        (car e)))
-                                agent-backends))
-               (labels (mapcar #'car entries))
-               (affixate (lambda (cands)
-                           (mapcar (lambda (c)
-                                     (let* ((sym (cdr (assoc c entries)))
-                                            (icon (agent-backend-icon-string
-                                                   sym)))
-                                       (list c
-                                             (if (string-empty-p icon) ""
-                                               (concat icon " "))
-                                             "")))
-                                   cands)))
-               (choice (completing-read
-                        "Backend: "
-                        (lambda (str pred action)
-                          (if (eq action 'metadata)
-                              `(metadata (affixation-function . ,affixate))
-                            (complete-with-action action labels str pred)))
-                        nil t)))
-          (cdr (assoc choice entries))))))
+        (or (agent--reused-backend-choice)
+            (let ((backend (agent--read-backend)))
+              (when agent-reuse-backend-choice
+                (setq agent-reuse-backend-choice backend))
+              backend)))))
+
+(defun agent--reused-backend-choice ()
+  "Return the backend `agent-reuse-backend-choice' holds, or nil.
+The value t, which asks for the next choice to be remembered, and the
+name of a backend no longer registered both count as none."
+  (and (assq agent-reuse-backend-choice agent-backends)
+       agent-reuse-backend-choice))
+
+(defun agent--read-backend ()
+  "Read a registered backend in the minibuffer and return its name."
+  (let* ((entries (mapcar (lambda (e)
+                            (cons (or (agent-backend-label (cdr e))
+                                      (symbol-name (car e)))
+                                  (car e)))
+                          agent-backends))
+         (labels (mapcar #'car entries))
+         (affixate (lambda (cands)
+                     (mapcar (lambda (c)
+                               (let* ((sym (cdr (assoc c entries)))
+                                      (icon (agent-backend-icon-string sym)))
+                                 (list c
+                                       (if (string-empty-p icon) ""
+                                         (concat icon " "))
+                                       "")))
+                             cands)))
+         (choice (completing-read
+                  "Backend: "
+                  (lambda (str pred action)
+                    (if (eq action 'metadata)
+                        `(metadata (affixation-function . ,affixate))
+                      (complete-with-action action labels str pred)))
+                  nil t)))
+    (cdr (assoc choice entries))))
 
 (defun agent--run-before-exit-functions (backend buffer)
   "Return non-nil if BACKEND session BUFFER should exit."
