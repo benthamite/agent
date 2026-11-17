@@ -106,6 +106,27 @@ arguments, builds.  It is quit afterwards."
             (funcall function))
         (org-agenda-quit)))))
 
+(defun agent-test-helper-batch-eval (form)
+  "Evaluate FORM in a new batch Emacs and return its value.
+The new Emacs has the `load-path' of this one and loads source files as
+this one does, so what FORM requires and loads is the code under test.
+The value must be printable and readable.  This is for what cannot be
+tried in the Emacs running the tests without changing it for the tests
+that follow, such as loading a file of the package a second time."
+  (with-temp-buffer
+    (let* ((setup `(setq load-path ',load-path
+                         load-prefer-newer ,load-prefer-newer
+                         load-suffixes ',load-suffixes))
+           (status (call-process
+                    (expand-file-name invocation-name invocation-directory)
+                    nil '(t nil) nil "-Q" "--batch"
+                    "--eval" (prin1-to-string
+                              `(progn ,setup (prin1 ,form))))))
+      (unless (eql status 0)
+        (error "The batch Emacs exited with %s: %s" status (buffer-string)))
+      (goto-char (point-min))
+      (read (current-buffer)))))
+
 (provide 'agent-test-helper)
 
 ;;; agent-test-helper.el ends here

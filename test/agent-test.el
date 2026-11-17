@@ -5528,6 +5528,70 @@ not autoloaded, so the predicate must answer nil rather than raise."
                                  (always . second-extractor))))
     (should (eq (agent--extractor-at-point) 'first-extractor))))
 
+;; `defvar' leaves a variable that has a value alone, so an Emacs that
+;; loaded the file before a thing was added to the list never got it,
+;; however often the file was loaded again.
+(ert-deftest agent-test-at-point-things-gain-new-defaults-on-reload ()
+  "Load the file again and find the things it declares in the list.
+An Emacs that loaded an older version of the file, and whose user added
+a thing, gets the entries that version lacked, each in its place, and
+keeps the user's entry where it was.  Once the file knows what it
+declared before, an entry the user removed stays removed."
+  (pcase-let
+      ((`(,defaults ,upgraded ,pruned)
+        (agent-test-helper-batch-eval
+         '(progn
+            (require 'agent)
+            (let ((source (locate-library "agent.el"))
+                  (defaults (copy-sequence agent-at-point-things))
+                  (lacking '(agent--slack-resume-at-point-p
+                             agent--org-linear-issue-at-point-p))
+                  upgraded)
+              (setq agent-at-point-things
+                    (cons '(my-thing-p . my-thing-context)
+                          (seq-remove (lambda (thing)
+                                        (memq (car thing) lacking))
+                                      agent-at-point-things)))
+              (makunbound 'agent--at-point-things-declared)
+              (load source nil t)
+              (setq upgraded (copy-sequence agent-at-point-things))
+              (setq agent-at-point-things
+                    (seq-remove (lambda (thing)
+                                  (eq (car thing) 'agent--mu4e-message-at-point-p))
+                                agent-at-point-things))
+              (load source nil t)
+              (list defaults upgraded agent-at-point-things))))))
+    (should (assq 'agent--org-linear-issue-at-point-p defaults))
+    (should (equal upgraded (cons '(my-thing-p . my-thing-context) defaults)))
+    (should (equal pruned
+                   (seq-remove (lambda (thing)
+                                 (eq (car thing) 'agent--mu4e-message-at-point-p))
+                               upgraded)))))
+
+(ert-deftest agent-test-merge-default-things ()
+  "Bring a list of things up to date with the entries now declared.
+A new entry goes before the default that follows it, or at the end; an
+entry no longer declared goes; the user's entries, replacements and
+removals stay."
+  (let ((old '((a-p . a) (c-p . c)))
+        (new '((a-p . a) (b-p . b) (c-p . c) (d-p . d))))
+    (should (equal (agent--merge-default-things old old new) new))
+    (should (equal (agent--merge-default-things old nil new) new))
+    (should (equal (agent--merge-default-things
+                    '((mine-p . mine) (c-p . c) (a-p . a)) old new)
+                   '((mine-p . mine) (b-p . b) (c-p . c) (a-p . a) (d-p . d))))
+    (should (equal (agent--merge-default-things '((c-p . c)) old new)
+                   '((b-p . b) (c-p . c) (d-p . d))))
+    (should (equal (agent--merge-default-things
+                    '((a-p . a) (b-p . my-b) (c-p . c)) old new)
+                   '((a-p . a) (b-p . my-b) (c-p . c) (d-p . d))))
+    (should (equal (agent--merge-default-things
+                    '((a-p . a) (mine-p . mine) (c-p . c)) old '((c-p . c)))
+                   '((mine-p . mine) (c-p . c))))
+    (should (equal (agent--merge-default-things
+                    '((a-p . my-a) (c-p . c)) old '((c-p . c)))
+                   '((a-p . my-a) (c-p . c))))))
+
 (ert-deftest agent-test-act-on-thing-at-point-errors-without-a-thing ()
   "Signal a user error when nothing at point is actionable."
   (with-temp-buffer

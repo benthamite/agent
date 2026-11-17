@@ -4465,7 +4465,7 @@ agenda."
        (user-error "Nothing to act on at point; expected a backtrace, a Slack message, a Forge notification or topic, an email, a Linear issue, or an org TODO"))
    existing))
 
-(defvar agent-at-point-things
+(defconst agent-at-point-default-things
   '((agent--backtrace-at-point-p . agent--backtrace-context)
     (agent--slack-resume-at-point-p . agent-slack-resume-context)
     (agent--slack-message-at-point-p . agent-slack-context)
@@ -4473,11 +4473,24 @@ agenda."
     (agent--mu4e-message-at-point-p . agent-mu4e-context)
     (agent--org-linear-issue-at-point-p . agent-org-linear-context)
     (agent--org-todo-at-point-p . agent-todo-context))
+  "The things this file declares for `agent-at-point-things', in order.")
+
+(defvar agent--at-point-things-declared nil
+  "The `agent-at-point-default-things' of the version of this file last loaded.
+Nil before the file is first loaded, and in an Emacs whose last load of
+it was of a version older than this variable.")
+
+(defvar agent-at-point-things (copy-sequence agent-at-point-default-things)
   "Things `agent-act-on-thing-at-point' recognizes, in order.
 Each entry is a cons of a predicate called with no arguments in the
 current buffer and an extractor called with one continuation.  Every
 predicate answers from the buffer alone, without loading the module
 that owns its extractor.
+
+The entries this file declares are `agent-at-point-default-things'.
+Loading the file again, as when the package is updated in a running
+Emacs, brings the list up to date with them and keeps what the user made
+of it; see `agent--merge-default-things'.
 
 An extractor calls its continuation with a context plist: `:directory'
 when the thing carries a working directory, as an absolute path,
@@ -4506,6 +4519,47 @@ sources are offered.  One whose symbol has an `agent-backend-function'
 property names the backend a session started for its things runs on:
 that function, called the same way, returns a registered backend, and
 no backend is then asked for, or nil for the usual choice.")
+
+(defun agent--merge-default-things (things declared defaults)
+  "Return THINGS brought up to date with DEFAULTS, the entries now declared.
+DECLARED is the list of entries that were declared when THINGS was last
+brought up to date.  An entry of DEFAULTS that is not in DECLARED is
+new: it is put before the first of the defaults after it that THINGS
+has, else at the end, unless THINGS already has an entry with its
+predicate.  An entry of DECLARED that is no longer in DEFAULTS is
+removed.  Every other entry of THINGS stays where it is, so the entries
+the user added or changed are kept, and an entry the user removed stays
+away."
+  (let ((things (seq-remove (lambda (thing)
+                              (and (member thing declared)
+                                   (not (member thing defaults))))
+                            things))
+        (next nil))
+    (dolist (default (reverse defaults))
+      (cond ((assq (car default) things)
+             (setq next (car default)))
+            ((not (member default declared))
+             (setq things (agent--insert-thing default things next)
+                   next (car default)))))
+    things))
+
+(defun agent--insert-thing (thing things next)
+  "Return THINGS with THING before the entry whose predicate is NEXT.
+THING goes at the end when NEXT is nil."
+  (let ((tail (and next (seq-drop-while (lambda (entry)
+                                          (not (eq (car entry) next)))
+                                        things))))
+    (append (seq-take things (- (length things) (length tail)))
+            (list thing)
+            tail)))
+
+;; `defvar' leaves the list alone once it has a value, so the entries
+;; this version declares are merged into it each time the file is loaded.
+(setq agent-at-point-things
+      (agent--merge-default-things agent-at-point-things
+                                   agent--at-point-things-declared
+                                   agent-at-point-default-things)
+      agent--at-point-things-declared agent-at-point-default-things)
 
 (put 'agent-slack-resume-context 'agent-names-session t)
 (put 'agent-slack-context 'agent-origin-function #'agent-slack-origin)
