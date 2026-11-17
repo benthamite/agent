@@ -258,9 +258,12 @@ session unshown."
   "Rebuild the agenda when it is the current buffer.
 The state change was made in the heading's own buffer, which leaves the
 agenda line showing the old keyword, and in an agenda grouped by keyword
-on the wrong group."
+on the wrong group.  The rebuild is kept from seeing the prefix argument
+of the command that acted on the TODO: Org reads it as a request for a
+new query, asks for one, and replaces the agenda's own with the answer."
   (when (derived-mode-p 'org-agenda-mode)
-    (org-agenda-redo t)))
+    (let ((current-prefix-arg nil))
+      (org-agenda-redo t))))
 
 (provide 'agent-todo)
 ;;; agent-todo.el ends here

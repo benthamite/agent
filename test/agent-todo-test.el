@@ -633,6 +633,41 @@ name read."
       (should (equal sent "Fix the build"))
       (should-not sessions))))
 
+;; Org's rebuild of a list made from a query reads the prefix argument,
+;; and with one asks for a new query, which then replaces the list's own.
+(ert-deftest agent-todo-test-agenda-rebuild-ignores-the-prefix-argument ()
+  "Rebuild the agenda after acting on a TODO with a prefix argument.
+With a single prefix the TODO goes to a running session and with a
+double one to a new session.  Either way nothing is asked, and the
+agenda is rebuilt from its own query, with the TODO on its new keyword."
+  (dolist (prefix '((4) (16)))
+    (agent-test-helper-with-directory root
+      (let ((agent-todo-directory-property "DIR")
+            (agent-todo-in-progress-keyword "DOING")
+            asked delivered)
+        (agent-todo-test--with-sessions sessions
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt &rest _) (push prompt asked) "elsewhere"))
+                    ((symbol-function 'agent--read-session-buffer)
+                     (lambda () (current-buffer)))
+                    ((symbol-function 'agent-submit)
+                     (lambda (payload _buffer) (setq delivered payload))))
+            (agent-test-helper-with-org-file
+                (format "#+TODO: TODO DOING | DONE\n#+PROPERTY: DIR %s\n* TODO Fix the build :work:\n"
+                        root)
+              (agent-test-helper-in-tags-agenda "work" "Fix the build"
+                (let ((current-prefix-arg prefix))
+                  (call-interactively #'agent-act-on-thing-at-point))
+                (should-not asked)
+                (should (derived-mode-p 'org-agenda-mode))
+                (should (equal org-agenda-query-string "work"))
+                (goto-char (point-min))
+                (should (search-forward "Fix the build" nil t))
+                (should (equal (get-text-property (pos-bol) 'todo-state)
+                               "DOING")))))
+          (should (equal (if (equal prefix '(4)) delivered (length sessions))
+                         (if (equal prefix '(4)) "Fix the build" 1))))))))
+
 (ert-deftest agent-todo-test-missing-directory-leaves-the-project-choice ()
   "Choose the project from the TODO's text when its directory is gone.
 The project is read from the sources of the account selected, with

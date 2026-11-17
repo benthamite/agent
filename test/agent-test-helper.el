@@ -18,6 +18,7 @@
 (defvar org-agenda-sticky)
 (defvar org-agenda-window-setup)
 (declare-function org-todo-list "org-agenda" (&optional arg))
+(declare-function org-tags-view "org-agenda" (&optional todo-only match))
 (declare-function org-agenda-quit "org-agenda" ())
 
 (defun agent-test-helper--cancel-leftover-timers (run test)
@@ -79,15 +80,25 @@ The file and its buffer are deleted afterwards."
   (declare (indent 1) (debug (form body)))
   `(agent-test-helper--call-in-agenda ,heading (lambda () ,@body)))
 
-(defun agent-test-helper--call-in-agenda (heading function)
-  "Call FUNCTION in a TODO agenda of the current file, on the HEADING line.
-The agenda is quit afterwards."
+(defmacro agent-test-helper-in-tags-agenda (match heading &rest body)
+  "Evaluate BODY in an agenda of the current file's entries matching MATCH.
+Point is on the HEADING line.  Such an agenda is rebuilt from its query,
+as a custom list of tasks is, where the TODO agenda of
+`agent-test-helper-in-agenda' is rebuilt from a keyword."
+  (declare (indent 2) (debug (form form body)))
+  `(agent-test-helper--call-in-agenda ,heading (lambda () ,@body)
+                                      (lambda () (org-tags-view nil ,match))))
+
+(defun agent-test-helper--call-in-agenda (heading function &optional build)
+  "Call FUNCTION in an agenda of the current file, on the HEADING line.
+The agenda is the TODO agenda, or the one BUILD, a function of no
+arguments, builds.  It is quit afterwards."
   (require 'org-agenda)
   (let ((org-agenda-files (list (buffer-file-name)))
         (org-agenda-sticky nil)
         (org-agenda-window-setup 'current-window))
     (save-window-excursion
-      (org-todo-list)
+      (funcall (or build #'org-todo-list))
       (unwind-protect
           (progn
             (goto-char (point-min))
