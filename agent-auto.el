@@ -29,7 +29,9 @@
 ;; directory (`agent-todo-directory-property').  The task is the record:
 ;; it gets the session in a property, and when the session's turn ends
 ;; the tag is replaced by one saying how it ended, with a one-line
-;; result.  A task is started once, and never again.
+;; result.  A task is started once, and never again.  A task sent to a
+;; session by hand is recorded, and hears back from its session, the
+;; same way, whatever its tags.
 ;;
 ;; While a task's session is open, its heading and its agenda lines show
 ;; a mark that says whether the session is working or waiting.
@@ -63,7 +65,8 @@ count."
 (defcustom agent-auto-review-tag "review"
   "Org tag given to a task whose session reported it done.
 It replaces `agent-auto-ready-tag' when the session ends its turn with
-\"Status: done\" or \"Status: done, pending verification\"."
+\"Status: done\" or \"Status: done, pending verification\".  A task
+sent to a session by hand gets it too, whatever its tags."
   :type 'string
   :group 'agent-auto)
 
@@ -79,7 +82,9 @@ other dialog in place of its input box, or has its turn interrupted."
   "Org tag given to a task whose session ended with no result.
 It replaces `agent-auto-ready-tag' when the session could not be
 started, stopped without a status line, gave no sign of life for
-`agent-auto-silence-timeout', or is no longer running."
+`agent-auto-silence-timeout', or is no longer running.  Only a session
+the timer started is stuck for stopping without a status line: one
+started by hand, or resumed, is the user's to drive."
   :type 'string
   :group 'agent-auto)
 
@@ -195,6 +200,12 @@ directory, as one given a worktree; a session is resumed where it ran.")
 (defvar-local agent-auto--last-event nil
   "Float time of this session's last event, or nil before the first.")
 
+(defvar-local agent-auto--unattended nil
+  "Non-nil in a session the timer started, which nobody is watching.
+Such a session was told to end its replies with a status line, so a
+reply without one leaves its task stuck.  A session started by hand or
+resumed is the user's to drive, and its task is never stuck for that.")
+
 (defvar-local agent-auto--settled nil
   "Non-nil once this session's turn ended with a result written to its task.
 A session that works again is unsettled.")
@@ -273,7 +284,8 @@ started once.  When the session's turn ends, the tag is replaced by
 `agent-auto-review-tag', `agent-auto-blocked-tag' or
 `agent-auto-stuck-tag', and the result is written in
 `agent-auto-result-property'.  A task sent to a session by hand is
-recorded the same way.
+recorded the same way and gets its session's result the same way,
+whatever its tags, but is never stuck for a reply without a status line.
 
 While a task's session is open, its heading and its lines in an Org
 agenda show `agent-auto-working-mark' or `agent-auto-waiting-mark'."
@@ -292,6 +304,7 @@ agenda show `agent-auto-working-mark' or `agent-auto-waiting-mark'."
   (unless agent-todo-directory-property
     (message "agent-auto: no task has a directory while `agent-todo-directory-property' is nil"))
   (add-to-list 'agent-session-inherited-variables 'agent-auto--link)
+  (add-to-list 'agent-session-inherited-variables 'agent-auto--unattended)
   (add-hook 'agent-session-event-functions #'agent-auto--on-event)
   (add-hook 'agent-session-id-functions #'agent-auto--on-id)
   (add-hook 'agent-delivery-functions #'agent-auto--record-delivery)
@@ -309,7 +322,8 @@ agenda show `agent-auto-working-mark' or `agent-auto-waiting-mark'."
 (defun agent-auto--disable ()
   "Stop watching sessions."
   (setq agent-session-inherited-variables
-        (delq 'agent-auto--link agent-session-inherited-variables))
+        (seq-difference agent-session-inherited-variables
+                        '(agent-auto--link agent-auto--unattended)))
   (remove-hook 'agent-session-event-functions #'agent-auto--on-event)
   (remove-hook 'agent-session-id-functions #'agent-auto--on-id)
   (remove-hook 'agent-delivery-functions #'agent-auto--record-delivery)
@@ -658,7 +672,7 @@ Nothing is asked, and the windows are left as they are."
                      slug
                      :initial-prompt brief))))))
         (setq agent-auto--starting (delq start agent-auto--starting))
-        (agent-auto--attach buffer (car start))
+        (agent-auto--attach buffer (car start) t)
         (agent-auto--sync-session buffer)
         (run-with-timer agent-auto--start-check-delay nil
                         #'agent-auto--check-dialog buffer)
@@ -672,10 +686,13 @@ Nothing is asked, and the windows are left as they are."
   (message "agent-auto: could not start a session: %s" reason)
   (agent-auto--conclude (car start) 'stuck (concat "start failed: " reason) t))
 
-(defun agent-auto--attach (buffer link)
-  "Record that session BUFFER works on the task of LINK."
+(defun agent-auto--attach (buffer link &optional unattended)
+  "Record that session BUFFER works on the task of LINK.
+UNATTENDED is non-nil for a session the timer started; see
+`agent-auto--unattended'."
   (with-current-buffer buffer
     (setq agent-auto--link link
+          agent-auto--unattended unattended
           agent-auto--last-event (float-time)
           agent-auto--settled nil
           agent-auto--exiting nil))
@@ -816,7 +833,8 @@ A session being exited is left alone: the turns of its exit are not the
 task's result.  With RETRIES, a positive number, a session whose reply
 cannot be read yet is looked at again after `agent-auto--turn-end-delay',
 that many times at most, before it counts as stopped without a status
-line."
+line, which leaves the task stuck only when the timer started the
+session; see `agent-auto--unattended'."
   (when (and (buffer-live-p buffer)
              (buffer-local-value 'agent-auto--link buffer)
              (not (buffer-local-value 'agent-auto--exiting buffer)))
@@ -825,7 +843,8 @@ line."
         (if (and (null text) retries (> retries 0))
             (run-with-timer agent-auto--turn-end-delay nil
                             #'agent-auto--turn-end buffer (1- retries))
-          (agent-auto--apply-reply-text buffer text t))))))
+          (agent-auto--apply-reply-text
+           buffer text (buffer-local-value 'agent-auto--unattended buffer)))))))
 
 (defun agent-auto--apply-reply (buffer strict)
   "Write on its task what the last reply of session BUFFER reports.
@@ -986,8 +1005,9 @@ since its turn may have ended while nothing was watching."
   "Record session BUFFER on the Org task CONTEXT was made from.
 For `agent-delivery-functions': a task sent to a session by hand is
 recorded as one started by the timer is, so the timer starts no second
-session on it.  The user is at the task, so it is recorded at once, also
-in a buffer with unsaved edits, which is then left unsaved."
+session on it, and the session's result is written on it.  The user is
+at the task, so it is recorded at once, also in a buffer with unsaved
+edits, which is then left unsaved."
   (when-let* ((marker (plist-get context :todo))
               (org (marker-buffer marker))
               (org (or (buffer-base-buffer org) org))
@@ -1242,10 +1262,11 @@ the text property `org-heading'."
 (defun agent-auto--conclude (link kind text &optional only-ready)
   "Write the result KIND with TEXT on the task of LINK.
 KIND is `review', `blocked' or `stuck'.  With ONLY-READY non-nil the
-result is written only on a task that still carries the ready tag.  A
-result that cannot be written yet, because the task's buffer has unsaved
-edits, is kept and written once the buffer is saved; it replaces an
-earlier one still waiting for the same task."
+result is written only on a task that still carries the ready tag;
+otherwise on any task `agent-auto--write-result' does not leave alone.
+A result that cannot be written yet, because the task's buffer has
+unsaved edits, is kept and written once the buffer is saved; it replaces
+an earlier one still waiting for the same task."
   (setq agent-auto--pending
         (append (seq-remove (lambda (entry) (eq (car entry) link))
                             agent-auto--pending)
@@ -1265,16 +1286,21 @@ earlier one still waiting for the same task."
 
 (defun agent-auto--write-result (kind text only-ready)
   "Give the task at point the tag of result KIND and the result TEXT.
-The tag replaces whichever of the ready and result tags the task
-carries.  A task that carries none of them is left alone, so a tag the
-user removed is never added back, and so is a task that is closed.
-With ONLY-READY non-nil the task must carry the ready tag."
+The task is the one that records the session, whether the timer started
+it or the user did.  The tag replaces whichever of the ready and result
+tags the task carries, and a task that carries none of them and has no
+result yet, as one sent to a session by hand, gets it too.  A task that
+has a result and none of the tags is left alone, so a tag the user
+removed is never added back, and so is a task that is closed.  With
+ONLY-READY non-nil the task must carry the ready tag."
   (let ((tags (org-get-tags nil t))
         (lifecycle (list agent-auto-ready-tag agent-auto-review-tag
                          agent-auto-blocked-tag agent-auto-stuck-tag)))
     (when (and (org-entry-is-todo-p)
-               (seq-intersection tags lifecycle)
-               (or (not only-ready) (member agent-auto-ready-tag tags)))
+               (if only-ready
+                   (member agent-auto-ready-tag tags)
+                 (or (seq-intersection tags lifecycle)
+                     (not (org-entry-get nil agent-auto-result-property)))))
       (let ((new (append (seq-difference tags lifecycle)
                          (list (agent-auto--tag kind)))))
         (unless (equal new tags)

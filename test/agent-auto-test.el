@@ -94,7 +94,8 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-auto--marks-timer nil)
            (agent-auto-working-mark "▶")
            (agent-auto-waiting-mark "⏸")
-           (agent-session-inherited-variables '(agent-auto--link)))
+           (agent-session-inherited-variables
+            '(agent-auto--link agent-auto--unattended)))
        (agent-register-backend
         'stub
         :buffer-p (lambda (&optional buffer)
@@ -825,6 +826,83 @@ written as for one it started."
         (save-buffer))
       (agent-auto-test--run)
       (should (= (length agent-auto-test--started) 1)))))
+
+(defun agent-auto-test--hand-started-task (root &optional tags)
+  "Start by hand the one task of a new file under ROOT; return (FILE . BUFFER).
+The task carries TAGS, a tag string, and no tag when TAGS is nil."
+  (let ((file (agent-auto-test--file
+               root (agent-auto-test--task root nil (or tags "")))))
+    (with-current-buffer (find-file-noselect file)
+      (goto-char (point-min))
+      (agent-act-on-thing-at-point))
+    (should (= (length agent-auto-test--started) 1))
+    (cons file (car agent-auto-test--buffers))))
+
+;; A result was written only on a task that carried the ready tag or a
+;; result tag, so a task started by hand, which has none, never heard
+;; back from its session.
+(ert-deftest agent-auto-test-hand-started-session-reports-back ()
+  "Write the result of a session started by hand on a task that has no tag.
+The task records the session, and that is enough: it gets the tag and
+the result an unattended session's task gets, on disk, and a later turn
+replaces them."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--hand-started-task root)))
+      (should-not (agent-auto-test--tags file "Fix it"))
+      (agent-auto-test--end-turn buffer "Status: waiting on you: which account?")
+      (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "which account?"))
+      (should (string-match-p ":blocked:" (agent-auto-test--disk file)))
+      (agent-auto-test--end-turn buffer "Paid it.\n\nStatus: done: paid from the joint account")
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "paid from the joint account"))
+      (run-hook-with-args 'agent-session-event-functions buffer 'blocked)
+      (should (equal (agent-auto-test--tags file "Fix it") '("blocked"))))))
+
+(ert-deftest agent-auto-test-hand-started-result-tag-is-not-added-back ()
+  "Leave a task started by hand alone once the user removed its result tag.
+A task that has a result and none of the tags is one whose tag was
+removed, not one that never had any."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--hand-started-task root)))
+      (agent-auto-test--end-turn buffer "Status: done: fixed")
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (agent-auto-test--at file "Fix it" (lambda () (org-set-tags nil)))
+      (with-current-buffer (find-buffer-visiting file)
+        (save-buffer))
+      (agent-auto-test--end-turn buffer "Status: waiting on you: anything else?")
+      (should-not (agent-auto-test--tags file "Fix it"))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "fixed")))))
+
+(ert-deftest agent-auto-test-hand-started-session-is-never-stuck ()
+  "Leave a task alone when a session started by hand ends without a status line.
+The user is driving that session, and it was not told to end its replies
+with one.  That holds whether or not the task carries the ready tag, and
+across a handoff; a session the timer started is stuck as before."
+  (dolist (tags '(nil ":agent:"))
+    (agent-auto-test--with root
+      (pcase-let ((`(,file . ,buffer)
+                   (agent-auto-test--hand-started-task root tags)))
+        (agent-auto-test--end-turn buffer "Here is what I found so far.")
+        (should (equal (agent-auto-test--tags file "Fix it")
+                       (and tags '("agent"))))
+        (should-not (agent-auto-test--property file "Fix it" "AGENT_RESULT")))))
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (agent--note-session-id buffer "sid-1")
+      (let* ((handoff (expand-file-name "handoff.md" root))
+             (agent-handoff-files `((stub . ,handoff))))
+        (write-region "Continue the fix." nil handoff nil 'silent)
+        (cl-letf (((symbol-function 'agent--confirm-no-captured-prompts)
+                   (lambda (&rest _) t)))
+          (with-current-buffer buffer
+            (agent-handoff))))
+      (agent-auto-test--end-turn (car agent-auto-test--buffers)
+                                 "Here is what I found so far.")
+      (should (equal (agent-auto-test--tags file "Fix it") '("stuck"))))))
 
 (ert-deftest agent-auto-test-handoff-carries-the-task ()
   "Move the task's link to the session a handoff starts.
