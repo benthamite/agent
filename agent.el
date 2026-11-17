@@ -159,7 +159,7 @@ chain only once.  Only
   session-history screen-state
   ;; New slots go last: a running Emacs that reloads this file keeps its
   ;; registered backends, and earlier slots must stay where they were.
-  icon-svg interrupt turn-end-background-p step-effort)
+  icon-svg interrupt turn-end-background-p step-effort exit)
 
 (defvar agent-backends nil
   "Alist of registered AI backends.
@@ -245,6 +245,11 @@ a nonzero integer DELTA that moves the session's reasoning effort DELTA
 levels up, or down when DELTA is negative, stopping at the highest or
 lowest level.  `agent-effort-increase' and `agent-effort-decrease'
 dispatch on it.
+
+The optional `:exit' key is a function of a session buffer that ends
+the session itself and returns non-nil, or returns nil to have
+`agent--exit-session' submit `/exit'.  Claude Code's uses it for a
+background session, where `/exit' only detaches.
 
 Multi-account backends provide the optional account keys read by
 `agent-account': `:account-env-var' (environment variable naming
@@ -4917,13 +4922,24 @@ has already confirmed the exit."
   "Exit session BUFFER without re-running before-exit hooks.
 Submit `/exit', unless `agent--session-unstarted-p' holds: BUFFER may
 be showing a picker that would take the text as a search, so kill its
-process instead."
-  (if (agent--session-unstarted-p buffer)
-      (progn
-        (message "agent: %s has no conversation; killing it"
-                 (buffer-name buffer))
-        (agent--force-kill-buffer buffer))
-    (agent-submit "/exit" buffer)))
+process instead.  A backend whose `:exit' function ends the session
+itself, as Claude Code's does for a background session, also skips
+`/exit'."
+  (cond ((agent--session-unstarted-p buffer)
+         (message "agent: %s has no conversation; killing it"
+                  (buffer-name buffer))
+         (agent--force-kill-buffer buffer))
+        ((agent--backend-exit buffer))
+        (t (agent-submit "/exit" buffer))))
+
+(defun agent--backend-exit (buffer)
+  "Let the backend of session BUFFER end it; return non-nil if it did.
+Call the backend's optional `:exit' function with BUFFER.  It returns
+non-nil when it ended the session itself, and nil when `/exit' should."
+  (when-let* ((backend (agent--detect-backend buffer))
+              (struct (agent-backend backend))
+              (fn (agent-backend-exit struct)))
+    (funcall fn buffer)))
 
 ;;;###autoload
 (defun agent-restart ()

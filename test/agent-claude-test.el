@@ -3329,4 +3329,63 @@ A suggested prompt drawn faint in an empty box is not unsent text."
           (agent-claude--interrupt buffer)))
       (should (eq called-in buffer)))))
 
+;;;; Exiting a background session
+
+(defun agent-claude-test--exit-background (attach-id stop-ok)
+  "Run `agent-claude--exit-background' on a test buffer.
+ATTACH-ID is what the background query returns; STOP-OK is whether
+`claude stop' succeeds.  Return (RESULT STOPPED KILLED)."
+  (let ((buffer (generate-new-buffer " *claude-test-exit*"))
+        stopped killed result)
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude--session-identity)
+                   (lambda (_buffer) "abc-full"))
+                  ((symbol-function 'agent-claude--background-attach-id)
+                   (lambda (session-id _dir)
+                     (and (equal session-id "abc-full") attach-id)))
+                  ((symbol-function 'agent-claude--stop-background)
+                   (lambda (id _dir) (setq stopped id) stop-ok))
+                  ((symbol-function 'agent--force-kill-buffer)
+                   (lambda (b) (setq killed b))))
+          (setq result (agent-claude--exit-background buffer))
+          (list result stopped (eq killed buffer)))
+      (kill-buffer buffer))))
+
+(ert-deftest agent-claude-test-exit-background-stops-and-kills ()
+  "Stop a background session with `claude stop' and kill its buffer."
+  (should (equal (agent-claude-test--exit-background "abc" t)
+                 '(t "abc" t))))
+
+(ert-deftest agent-claude-test-exit-background-leaves-foreground ()
+  "Leave a session that is not in the background to `/exit'."
+  (should (equal (agent-claude-test--exit-background nil t)
+                 '(nil nil nil))))
+
+(ert-deftest agent-claude-test-exit-background-failed-stop ()
+  "Fall back to `/exit' when `claude stop' fails, without killing."
+  (let ((inhibit-message t))
+    (should (equal (agent-claude-test--exit-background "abc" nil)
+                   '(nil "abc" nil)))))
+
+(ert-deftest agent-claude-test-exit-session-prefers-backend-exit ()
+  "Submit no `/exit' when the backend's `:exit' ended the session."
+  (let (submitted)
+    (cl-letf (((symbol-function 'agent--session-unstarted-p) #'ignore)
+              ((symbol-function 'agent--backend-exit) (lambda (_b) t))
+              ((symbol-function 'agent-submit)
+               (lambda (text _b) (setq submitted text))))
+      (agent--exit-session (current-buffer))
+      (should-not submitted))
+    (cl-letf (((symbol-function 'agent--session-unstarted-p) #'ignore)
+              ((symbol-function 'agent--backend-exit) #'ignore)
+              ((symbol-function 'agent-submit)
+               (lambda (text _b) (setq submitted text))))
+      (agent--exit-session (current-buffer))
+      (should (equal submitted "/exit")))))
+
+(ert-deftest agent-claude-test-backend-registers-exit ()
+  "Register the background-session exit for Claude Code."
+  (should (eq (agent-backend-exit (agent-backend 'claude-code))
+              #'agent-claude--exit-background)))
+
 ;;; agent-claude-test.el ends here

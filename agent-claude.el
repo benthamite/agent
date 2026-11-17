@@ -261,6 +261,7 @@ Source: lobehub/lobe-icons (MIT).")
   :interrupt #'agent-claude--interrupt
   :step-effort #'agent-claude--step-effort
   :prepare-fork #'agent-claude--prepare-fork
+  :exit #'agent-claude--exit-background
   :resume #'claude-code-resume)
 
 ;;;; Functions
@@ -2331,6 +2332,33 @@ failed query returns nil, so the caller resumes as before."
       (when (eql 0 (apply #'call-process claude-code-program nil
                           '(t nil) nil agent-claude-cli-list-sessions-args))
         (agent-claude-cli-background-attach-id (buffer-string) session-id)))))
+
+(defun agent-claude--exit-background (buffer)
+  "Stop session BUFFER with `claude stop' if it runs in the background.
+In a terminal attached to a background session, `/exit' only detaches:
+the CLI shows its agent view and the session keeps running.  So stop
+the session and kill BUFFER, returning non-nil.  Return nil when BUFFER
+is not a background session, so the caller submits `/exit'.  When
+`claude stop' fails, say so and return nil."
+  (when-let* ((session-id (ignore-errors (agent-claude--session-identity buffer)))
+              (dir (buffer-local-value 'default-directory buffer))
+              (attach-id (agent-claude--background-attach-id session-id dir)))
+    (if (agent-claude--stop-background attach-id dir)
+        (progn
+          (let ((inhibit-message t))
+            (message "agent: stopped background session %s" attach-id))
+          (agent--force-kill-buffer buffer)
+          t)
+      (message "agent: `claude stop %s' failed; submitting /exit, which only detaches"
+               attach-id)
+      nil)))
+
+(defun agent-claude--stop-background (attach-id dir)
+  "Run `claude stop ATTACH-ID' under the account of session directory DIR.
+Return non-nil when the command succeeds."
+  (let ((process-environment
+         (append (agent-claude-account-env nil dir) process-environment)))
+    (eql 0 (call-process claude-code-program nil nil nil "stop" attach-id))))
 
 (defun agent-claude--start-with-overrides (dir instance switches)
   "Run `claude-code--start' with DIR and INSTANCE injected.

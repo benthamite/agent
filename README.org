@@ -904,6 +904,13 @@ event. Only one narrow case goes the other way: pressing =RET= in the picker
 counts as a prompt, so if that leaves the picker on screen, the session is treated
 as started.
 
+A Claude Code session that runs in the background (for example after =←= on an
+empty prompt or =/background=) is not closed by =/exit=: in an attached terminal
+that command only detaches and shows the CLI's agent view, and the session keeps
+running. Both exit commands therefore end such a session with =claude stop=,
+under the session's account, and then kill its buffer. If =claude stop= fails,
+they say so and submit =/exit= as before.
+
 The chain is driven by session stop events and guarded by a watchdog. Each
 submitted skill gets ~agent-before-exit-timeout~ seconds (default 600) before
 the watchdog looks at it, and the watchdog restarts when the next skill begins.

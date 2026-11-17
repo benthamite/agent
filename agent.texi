@@ -1015,6 +1015,13 @@ event. Only one narrow case goes the other way: pressing @samp{RET} in the picke
 counts as a prompt@comma{} so if that leaves the picker on screen@comma{} the session is treated
 as started.
 
+A Claude Code session that runs in the background (for example after @samp{←} on an
+empty prompt or @samp{/background}) is not closed by @samp{/exit}: in an attached terminal
+that command only detaches and shows the CLI's agent view@comma{} and the session keeps
+running. Both exit commands therefore end such a session with @samp{claude stop}@comma{}
+under the session's account@comma{} and then kill its buffer. If @samp{claude stop} fails@comma{}
+they say so and submit @samp{/exit} as before.
+
 The chain is driven by session stop events and guarded by a watchdog. Each
 submitted skill gets @code{agent-before-exit-timeout} seconds (default 600) before
 the watchdog looks at it@comma{} and the watchdog restarts when the next skill begins.
