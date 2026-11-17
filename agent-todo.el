@@ -25,8 +25,9 @@
 ;;; Commentary:
 
 ;; Route the org TODO at point to an AI session -- a new one in a
-;; project chosen from the TODO's own text, or a running one with a
-;; prefix argument.  It works with any registered backend.
+;; project chosen from the TODO's own text, or in the directory an org
+;; property names for it, or a running one with a prefix argument.  It
+;; works with any registered backend.
 
 ;;; Code:
 
@@ -56,6 +57,42 @@ in-progress keyword (e.g. DOING, IN-PROGRESS, STARTED) can set this
 option to that keyword."
   :type '(choice (const :tag "Don't change TODO state" nil)
                  (string :tag "Keyword"))
+  :group 'agent-todo)
+
+(defcustom agent-todo-directory-property nil
+  "Org property naming the directory a TODO's session starts in.
+When non-nil, it is the name of an org property, such as \"DIRECTORY\".
+A TODO routed to a new session starts that session in the directory the
+property names, without a project being ranked or asked for.  The
+property is read from the TODO's own heading, else from the nearest
+heading above it that has it, else from a PROPERTY keyword of the file
+or from `org-global-properties', whatever `org-use-property-inheritance'
+says.  A relative name is expanded against the directory of the org
+file.
+
+A value that is empty or \"nil\" names no directory, which exempts a
+heading from the value set above it.  A value naming a directory that
+does not exist is reported and ignored.  In both cases, as when this
+option is nil, the project is chosen from the TODO's text.
+
+The session's account is the one any session started in that directory
+gets: the one `agent-account-directory-rules' names for it, else the
+selected account."
+  :type '(choice (const :tag "Choose a project for every TODO" nil)
+                 (string :tag "Property"))
+  :group 'agent-todo)
+
+(defcustom agent-todo-submit-property nil
+  "Org property marking a TODO whose text is a ready prompt.
+When non-nil, it is the name of an org property.  A TODO whose own
+heading has that property, with any value but \"nil\", is submitted as
+it stands even when it is of a kind that is otherwise left in the
+prompt to be edited, as a Linear issue is; see
+`agent-org-linear-context'.  The property is not inherited from the
+headings above.  A plain TODO is submitted either way, so this option
+changes nothing for it."
+  :type '(choice (const :tag "Mark no TODO as a ready prompt" nil)
+                 (string :tag "Property"))
   :group 'agent-todo)
 
 ;;;; Functions
@@ -95,7 +132,8 @@ Handles verbatim (=…=) and code (~…~) to backticks."
 (defun agent-send-todo-at-point (&optional existing)
   "Route the org TODO at point to an AI session.
 With prefix argument EXISTING send it to a running session instead of
-starting one in a project chosen from the TODO's text."
+starting one in a project chosen from the TODO's text, or in the
+directory `agent-todo-directory-property' names for the TODO."
   (interactive "P")
   (agent--act-on-context #'agent-todo-context existing))
 
@@ -104,9 +142,11 @@ starting one in a project chosen from the TODO's text."
 The TODO is the heading at point in an org buffer, or the heading the
 line at point shows in an agenda.  It is both the text a project is
 chosen from and the request itself, so it is submitted rather than left
-for review.  The heading is remembered as a marker because choosing that
-project can take a model request and a prompt, by which time point has
-moved, or the agenda has been rebuilt."
+for review.  A TODO that `agent-todo-directory-property' names a
+directory for carries that directory, and no project is then chosen.
+The heading is remembered as a marker because choosing that project can
+take a model request and a prompt, by which time point has moved, or
+the agenda has been rebuilt."
   (let ((marker (or (agent--org-entry-marker)
                     (user-error "Must be called on an org heading or agenda entry"))))
     (unless (agent--at-org-entry #'org-get-todo-state)
@@ -114,10 +154,54 @@ moved, or the agenda has been rebuilt."
     (let ((prompt (agent-todo--format-prompt
                    (agent--at-org-entry #'agent-todo--collect-at-point))))
       (funcall callback
-               (list :text prompt
-                     :payload prompt
-                     :submit t
-                     :after (lambda () (agent-todo--mark-in-progress marker)))))))
+               (append (agent-todo--directory-context)
+                       (list :text prompt
+                             :payload prompt
+                             :submit t
+                             :after (lambda ()
+                                      (agent-todo--mark-in-progress
+                                       marker))))))))
+
+(defun agent-todo--directory-context ()
+  "Return the `:directory' part of the context for the TODO at point, or nil.
+The directory is the one `agent-todo-directory-property' names for the
+TODO.  It is imposed, where a Forge topic's clone is only suggested,
+because a property is the user's own answer to the question the project
+choice asks.  Nothing is returned, and the property is not read, when no
+directory is wanted; see `agent--context-wants-directory'."
+  (when-let* ((agent--context-wants-directory)
+              (agent-todo-directory-property)
+              (directory (agent--at-org-entry
+                          #'agent-todo--property-directory)))
+    (list :directory directory)))
+
+(defun agent-todo--property-directory ()
+  "Return the directory `agent-todo-directory-property' names at point, or nil.
+Point is on an org entry.  The property is inherited, so the entry's own
+value answers, else that of the nearest heading above it that has one.
+A relative name is expanded against the buffer's directory.  An empty
+value names no directory, and one naming a directory that does not
+exist is reported and ignored."
+  (when-let* ((name (org-entry-get nil agent-todo-directory-property t))
+              ((not (string-empty-p name)))
+              (directory (file-name-as-directory (expand-file-name name))))
+    (if (file-directory-p directory)
+        directory
+      (message "Ignoring the %s property: no directory %s"
+               agent-todo-directory-property
+               (abbreviate-file-name directory))
+      nil)))
+
+(defun agent-todo-ready-prompt-p ()
+  "Return non-nil when the TODO at point is marked as a ready prompt.
+It is when its own heading has the property `agent-todo-submit-property'
+names; the headings above it are not consulted.  The TODO is the heading
+at point in an org buffer, or the heading the line at point shows in an
+agenda."
+  (and agent-todo-submit-property
+       (agent--at-org-entry
+        (lambda () (org-entry-get nil agent-todo-submit-property)))
+       t))
 
 (defun agent-todo--mark-in-progress (marker)
   "Set the TODO state at MARKER to `agent-todo-in-progress-keyword'.

@@ -333,7 +333,28 @@ The candidates are ordered by a model before completion whenever there is someth
 @section Org TODO workflows
 
 @vindex agent-todo-in-progress-keyword
-The @samp{agent-todo} module has one option@comma{} formerly named after Claude. @code{agent-todo-in-progress-keyword} is the Org TODO keyword @code{agent-send-todo-at-point} moves a heading to once it has been sent@comma{} and it replaces @code{agent-claude-org-todo-in-progress-keyword}@comma{} which remains as an obsolete alias. The keyword defaults to @code{nil}@comma{} which leaves the TODO state alone@comma{} because Org ships with only TODO and DONE and has no intermediate state to move to; set it to whichever in-progress keyword your own @code{org-todo-keywords} declares.
+The @samp{agent-todo} module has three options. The first was formerly named after Claude. @code{agent-todo-in-progress-keyword} is the Org TODO keyword @code{agent-send-todo-at-point} moves a heading to once it has been sent@comma{} and it replaces @code{agent-claude-org-todo-in-progress-keyword}@comma{} which remains as an obsolete alias. The keyword defaults to @code{nil}@comma{} which leaves the TODO state alone@comma{} because Org ships with only TODO and DONE and has no intermediate state to move to; set it to whichever in-progress keyword your own @code{org-todo-keywords} declares.
+
+@vindex agent-todo-directory-property
+@code{agent-todo-directory-property} names an Org property that says where a TODO's session starts. It is for tasks filed under headings that already know their project@comma{} where ranking projects by the task's text would only be a chance to get it wrong. It defaults to @code{nil}@comma{} which leaves every TODO to the project choice. When it is set@comma{} a TODO routed to a new session starts that session in the directory the property names@comma{} and no project is ranked or asked for. The property is read from the TODO's own heading@comma{} else from the nearest heading above it that has one@comma{} else from a @samp{#+PROPERTY:} line of the file or from @code{org-global-properties}@comma{} whatever @code{org-use-property-inheritance} says@comma{} so one property on a project heading covers every task filed under it@comma{} and a task can still name a directory of its own. A relative name is expanded against the directory of the Org file. For example:
+
+@lisp
+(setopt agent-todo-directory-property "DIRECTORY")
+@end lisp
+
+@example
+* Website
+:PROPERTIES:
+:DIRECTORY: ~/repos/website
+:END:
+** TODO Fix the footer links
+The links to the archive in the footer return 404.  Find out why and fix them.
+@end example
+
+Acting on that TODO starts a session in @samp{~/repos/website} and submits its heading and body there. A value that is empty or @samp{nil} names no directory@comma{} which exempts a heading from the value set above it. A value naming a directory that does not exist is reported in the echo area and ignored; the nearest value is the only one read@comma{} so a heading further up does not stand in for it. In both cases the project is chosen from the TODO's text as before. The property is not read when the TODO goes to a running session@comma{} which has a directory of its own. The session's account is the one any session started in that directory gets: the one @code{agent-account-directory-rules} names for it@comma{} else the persisted selection (@ref{Account model, , Account model}). @code{agent-account-origin-rules} has no part in that: it picks the account whose project sources are offered@comma{} and a TODO that names its directory is offered none.
+
+@vindex agent-todo-submit-property
+@code{agent-todo-submit-property} names an Org property that marks a TODO whose text is a prompt ready to be sent. It defaults to @code{nil}. A plain TODO is submitted in any case@comma{} so the option matters only for a TODO of a kind that is otherwise typed into the prompt and left there to be edited@comma{} which is a Linear issue mirrored by @samp{org-linear} (@ref{Shared commands, , Shared commands}). When the issue's own heading has the property@comma{} with any value but @samp{nil}@comma{} its text is submitted as a plain TODO's is. The property is read from the TODO's own heading and is never inherited@comma{} since being a finished brief is a fact about one task@comma{} not about everything filed beside it. With both options set@comma{} a task whose heading carries the mark and sits under a heading naming a directory is routed the same way before and after @samp{org-linear} has given it a @samp{LINEAR_URL}: into that directory@comma{} submitted. The one difference is that the issue's URL then follows its text.
 
 @node Claude Code backend
 @section Claude Code backend
@@ -767,6 +788,13 @@ is ranked by its own text alone. And the issue's URL follows the prompt@comma{} 
 agent can reach the issue itself. The
 origin of an issue is @samp{linear:} followed by the workspace slug of its URL@comma{} so an
 entry in @code{agent-account-origin-rules} can tie a Linear workspace to an account.
+The two properties a TODO can carry apply to an issue as well
+(@ref{Org TODO workflows, , Org TODO workflows}). An issue that
+@code{agent-todo-directory-property} names a directory for@comma{} on its own heading or on
+one above it such as its project's@comma{} starts its session there@comma{} and nothing is
+suggested or ranked. An issue whose heading has the property
+@code{agent-todo-submit-property} names is submitted instead of being left in the
+prompt@comma{} with its URL still following its text.
 Its extractor@comma{} @code{agent-org-linear-context}@comma{} reads only the properties and outline
 @samp{org-linear} writes@comma{} so nothing of @samp{org-linear} is loaded.
 
@@ -1012,7 +1040,7 @@ Codex records subagent threads with the same @code{forked_from_id} field@comma{}
 @findex agent-send-todo-at-point
 The @samp{agent-todo} module turns an Org TODO entry into work for an AI session@comma{} with either backend.
 
-@code{agent-send-todo-at-point} formats the heading and body of the TODO at point@comma{} or of the TODO the agenda line at point shows@comma{} as a prompt and submits it to a session started for it; it is not a menu entry of its own@comma{} since the menu reaches the same routing through @code{agent-act-on-thing-at-point}. With a prefix argument it submits the prompt to a running session chosen by completion. Like a Slack message@comma{} a TODO names no directory@comma{} so the project is read from the account's sources and ranked by the TODO's own text (@ref{Project sources, , Project sources}). It no longer looks for the session belonging to the current file's project: an Org file of tasks rarely sits in the repository those tasks are about. When @code{agent-todo-in-progress-keyword} is set@comma{} the heading moves to that keyword once the prompt has been delivered. The heading is remembered as a marker@comma{} so the move lands on the heading the prompt came from however far point has travelled while the project was being chosen@comma{} and an agenda the command was called from is rebuilt so that its line shows the new keyword. A heading deleted in the meantime is left alone: the state change happens after the session exists but before it is shown@comma{} so an error there would leave a running session unshown.
+@code{agent-send-todo-at-point} formats the heading and body of the TODO at point@comma{} or of the TODO the agenda line at point shows@comma{} as a prompt and submits it to a session started for it; it is not a menu entry of its own@comma{} since the menu reaches the same routing through @code{agent-act-on-thing-at-point}. With a prefix argument it submits the prompt to a running session chosen by completion. Like a Slack message@comma{} a TODO names no directory@comma{} so the project is read from the account's sources and ranked by the TODO's own text (@ref{Project sources, , Project sources})@comma{} unless @code{agent-todo-directory-property} is set and the TODO@comma{} or a heading above it@comma{} names its directory in that property: the session then starts there with nothing to choose (@ref{Org TODO workflows, , Org TODO workflows}). It no longer looks for the session belonging to the current file's project: an Org file of tasks rarely sits in the repository those tasks are about. When @code{agent-todo-in-progress-keyword} is set@comma{} the heading moves to that keyword once the prompt has been delivered. The heading is remembered as a marker@comma{} so the move lands on the heading the prompt came from however far point has travelled while the project was being chosen@comma{} and an agenda the command was called from is rebuilt so that its line shows the new keyword. A heading deleted in the meantime is left alone: the state change happens after the session exists but before it is shown@comma{} so an error there would leave a running session unshown.
 
 @node Chief-of-staff commands
 @section Chief-of-staff commands

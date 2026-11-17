@@ -34,8 +34,11 @@
 ;; project's name leads the text the project is ranked by, since it is
 ;; the likeliest clue to the repository the issue is about, and the
 ;; issue's URL goes into the prompt, so the agent can reach the issue
-;; itself.  Nothing of `org-linear' is loaded: everything is read from
-;; the properties and outline it writes.
+;; itself.  The two org properties `agent-todo' reads apply to an issue
+;; as to any TODO: one names the directory to start in, and one marks
+;; the issue as a prompt ready to be submitted.  Nothing of `org-linear'
+;; is loaded: everything is read from the properties and outline it
+;; writes.
 
 ;;; Code:
 
@@ -50,8 +53,11 @@
 The issue is the heading at point in the file `org-linear' mirrors, or
 the heading the agenda line at point shows.  Start a session in a
 project ranked by the issue's Linear project and text, and type the
-issue into its prompt for editing before it is sent.  With prefix
-argument EXISTING type it into a running session's prompt instead."
+issue into its prompt for editing before it is sent.  An issue that
+`agent-todo-directory-property' names a directory for starts there
+instead, and one `agent-todo-submit-property' marks is submitted.  With
+prefix argument EXISTING type it into a running session's prompt
+instead."
   (interactive "P")
   (agent--act-on-context #'agent-org-linear-context existing))
 
@@ -61,23 +67,29 @@ The context is the issue's org TODO context, see `agent-todo-context',
 with the issue's URL added to the payload and its Linear project's name
 put first in the text the project is ranked by.  Unlike a TODO the
 payload is not submitted: an issue is written for the people tracking
-it, not as a prompt, so it is left in the prompt to be edited.  When a
-directory is wanted and the account has a project named like the Linear
-project, that directory is suggested, so the project reader opens on
-it; see `agent-project-named-directory'."
+it, not as a prompt, so it is left in the prompt to be edited.  An issue
+marked as a ready prompt is the exception, and is submitted; see
+`agent-todo-submit-property'.  When a directory is wanted and the
+account has a project named like the Linear project, that directory is
+suggested, so the project reader opens on it; see
+`agent-project-named-directory'.  Nothing is suggested for an issue
+whose TODO context already carries a directory; see
+`agent-todo-directory-property'."
   (let ((url (or (agent--at-org-entry (lambda () (org-entry-get nil "LINEAR_URL")))
                  (user-error "No Linear issue at point")))
-        (project (agent--at-org-entry #'agent-org-linear--project-name)))
+        (project (agent--at-org-entry #'agent-org-linear--project-name))
+        (submit (agent-todo-ready-prompt-p)))
     (agent-todo-context
      (lambda (context)
        (let ((payload (format "%s\n\nLinear issue: %s"
                               (plist-get context :payload) url)))
          (funcall callback
-                  (append (agent-org-linear--project-context project)
+                  (append (unless (plist-get context :directory)
+                            (agent-org-linear--project-context project))
                           (thread-first context
                                         (copy-sequence)
                                         (plist-put :payload payload)
-                                        (plist-put :submit nil)
+                                        (plist-put :submit submit)
                                         (plist-put :text
                                                    (if project
                                                        (format "Linear project: %s\n%s"

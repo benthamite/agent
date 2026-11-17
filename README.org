@@ -246,7 +246,28 @@ The candidates are ordered by a model before completion whenever there is someth
 :END:
 
 #+vindex: agent-todo-in-progress-keyword
-The =agent-todo= module has one option, formerly named after Claude. ~agent-todo-in-progress-keyword~ is the Org TODO keyword ~agent-send-todo-at-point~ moves a heading to once it has been sent, and it replaces ~agent-claude-org-todo-in-progress-keyword~, which remains as an obsolete alias. The keyword defaults to ~nil~, which leaves the TODO state alone, because Org ships with only TODO and DONE and has no intermediate state to move to; set it to whichever in-progress keyword your own ~org-todo-keywords~ declares.
+The =agent-todo= module has three options. The first was formerly named after Claude. ~agent-todo-in-progress-keyword~ is the Org TODO keyword ~agent-send-todo-at-point~ moves a heading to once it has been sent, and it replaces ~agent-claude-org-todo-in-progress-keyword~, which remains as an obsolete alias. The keyword defaults to ~nil~, which leaves the TODO state alone, because Org ships with only TODO and DONE and has no intermediate state to move to; set it to whichever in-progress keyword your own ~org-todo-keywords~ declares.
+
+#+vindex: agent-todo-directory-property
+~agent-todo-directory-property~ names an Org property that says where a TODO's session starts. It is for tasks filed under headings that already know their project, where ranking projects by the task's text would only be a chance to get it wrong. It defaults to ~nil~, which leaves every TODO to the project choice. When it is set, a TODO routed to a new session starts that session in the directory the property names, and no project is ranked or asked for. The property is read from the TODO's own heading, else from the nearest heading above it that has one, else from a =#+PROPERTY:= line of the file or from ~org-global-properties~, whatever ~org-use-property-inheritance~ says, so one property on a project heading covers every task filed under it, and a task can still name a directory of its own. A relative name is expanded against the directory of the Org file. For example:
+
+#+begin_src emacs-lisp
+(setopt agent-todo-directory-property "DIRECTORY")
+#+end_src
+
+#+begin_src org
+,* Website
+:PROPERTIES:
+:DIRECTORY: ~/repos/website
+:END:
+,** TODO Fix the footer links
+The links to the archive in the footer return 404.  Find out why and fix them.
+#+end_src
+
+Acting on that TODO starts a session in =~/repos/website= and submits its heading and body there. A value that is empty or =nil= names no directory, which exempts a heading from the value set above it. A value naming a directory that does not exist is reported in the echo area and ignored; the nearest value is the only one read, so a heading further up does not stand in for it. In both cases the project is chosen from the TODO's text as before. The property is not read when the TODO goes to a running session, which has a directory of its own. The session's account is the one any session started in that directory gets: the one ~agent-account-directory-rules~ names for it, else the persisted selection ([[#h:account-model][Account model]]). ~agent-account-origin-rules~ has no part in that: it picks the account whose project sources are offered, and a TODO that names its directory is offered none.
+
+#+vindex: agent-todo-submit-property
+~agent-todo-submit-property~ names an Org property that marks a TODO whose text is a prompt ready to be sent. It defaults to ~nil~. A plain TODO is submitted in any case, so the option matters only for a TODO of a kind that is otherwise typed into the prompt and left there to be edited, which is a Linear issue mirrored by =org-linear= ([[#h:shared-commands][Shared commands]]). When the issue's own heading has the property, with any value but =nil=, its text is submitted as a plain TODO's is. The property is read from the TODO's own heading and is never inherited, since being a finished brief is a fact about one task, not about everything filed beside it. With both options set, a task whose heading carries the mark and sits under a heading naming a directory is routed the same way before and after =org-linear= has given it a =LINEAR_URL=: into that directory, submitted. The one difference is that the issue's URL then follows its text.
 
 ** Claude Code backend
 :PROPERTIES:
@@ -672,6 +693,13 @@ is ranked by its own text alone. And the issue's URL follows the prompt, so the
 agent can reach the issue itself. The
 origin of an issue is =linear:= followed by the workspace slug of its URL, so an
 entry in ~agent-account-origin-rules~ can tie a Linear workspace to an account.
+The two properties a TODO can carry apply to an issue as well
+([[#h:todo-options][Org TODO workflows]]). An issue that
+~agent-todo-directory-property~ names a directory for, on its own heading or on
+one above it such as its project's, starts its session there, and nothing is
+suggested or ranked. An issue whose heading has the property
+~agent-todo-submit-property~ names is submitted instead of being left in the
+prompt, with its URL still following its text.
 Its extractor, ~agent-org-linear-context~, reads only the properties and outline
 =org-linear= writes, so nothing of =org-linear= is loaded.
 
@@ -925,7 +953,7 @@ Codex records subagent threads with the same ~forked_from_id~ field, and those a
 #+findex: agent-send-todo-at-point
 The =agent-todo= module turns an Org TODO entry into work for an AI session, with either backend.
 
-~agent-send-todo-at-point~ formats the heading and body of the TODO at point, or of the TODO the agenda line at point shows, as a prompt and submits it to a session started for it; it is not a menu entry of its own, since the menu reaches the same routing through ~agent-act-on-thing-at-point~. With a prefix argument it submits the prompt to a running session chosen by completion. Like a Slack message, a TODO names no directory, so the project is read from the account's sources and ranked by the TODO's own text ([[#h:project-options][Project sources]]). It no longer looks for the session belonging to the current file's project: an Org file of tasks rarely sits in the repository those tasks are about. When ~agent-todo-in-progress-keyword~ is set, the heading moves to that keyword once the prompt has been delivered. The heading is remembered as a marker, so the move lands on the heading the prompt came from however far point has travelled while the project was being chosen, and an agenda the command was called from is rebuilt so that its line shows the new keyword. A heading deleted in the meantime is left alone: the state change happens after the session exists but before it is shown, so an error there would leave a running session unshown.
+~agent-send-todo-at-point~ formats the heading and body of the TODO at point, or of the TODO the agenda line at point shows, as a prompt and submits it to a session started for it; it is not a menu entry of its own, since the menu reaches the same routing through ~agent-act-on-thing-at-point~. With a prefix argument it submits the prompt to a running session chosen by completion. Like a Slack message, a TODO names no directory, so the project is read from the account's sources and ranked by the TODO's own text ([[#h:project-options][Project sources]]), unless ~agent-todo-directory-property~ is set and the TODO, or a heading above it, names its directory in that property: the session then starts there with nothing to choose ([[#h:todo-options][Org TODO workflows]]). It no longer looks for the session belonging to the current file's project: an Org file of tasks rarely sits in the repository those tasks are about. When ~agent-todo-in-progress-keyword~ is set, the heading moves to that keyword once the prompt has been delivered. The heading is remembered as a marker, so the move lands on the heading the prompt came from however far point has travelled while the project was being chosen, and an agenda the command was called from is rebuilt so that its line shows the new keyword. A heading deleted in the meantime is left alone: the state change happens after the session exists but before it is shown, so an error there would leave a running session unshown.
 
 ** Chief-of-staff commands
 :PROPERTIES:
