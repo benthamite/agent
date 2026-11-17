@@ -114,14 +114,17 @@ Handles verbatim (=…=) and code (~…~) to backticks."
   (replace-regexp-in-string "[=~]\\([^=~\n]+\\)[=~]" "`\\1`" text))
 
 (defun agent-todo--collect-at-point ()
-  "Return a plist with :title and :body for the TODO at point."
+  "Return a plist with :title and :body for the TODO at point.
+The body is the text between the heading's own lines, which are its
+planning line and drawers, and the next heading.  It is empty for a TODO
+that has none, whatever the next heading holds."
   (save-excursion
     (org-back-to-heading t)
     (let* ((title (agent-todo--org-to-markdown
                    (org-get-heading t t t t)))
-           (body-start (progn (org-end-of-meta-data t) (point)))
-           (body-end (progn (outline-next-heading)
-                            (or (point) (point-max))))
+           (body-end (save-excursion (outline-next-heading) (point)))
+           (body-start (progn (org-end-of-meta-data t)
+                              (min (point) body-end)))
            (body (string-trim
                   (buffer-substring-no-properties body-start body-end))))
       (list :title title :body body))))

@@ -92,6 +92,42 @@ an error there would leave a running session unshown."
       (erase-buffer)
       (should-not (funcall (plist-get context :after))))))
 
+;; The body ran from the end of the heading's own lines to the heading
+;; after that point, which for a TODO without a body is the heading after
+;; the next one: the brief then carried the whole following entry.
+(ert-deftest agent-todo-test-empty-body-stops-at-the-next-heading ()
+  "Brief a TODO that has no body with its title alone.
+Whatever follows it belongs to another entry: a sibling with a drawer
+and a body of its own, or a child.  Blank lines, a drawer and a planning
+line under the TODO itself make no body either."
+  (let ((next "* TODO Renew the passport
+:PROPERTIES:
+:ID: abc
+:END:
+Bring two photos.
+* TODO Third task
+"))
+    (dolist (own '("" "\n\n" ":PROPERTIES:\n:ID: def\n:END:\n\n"
+                   "DEADLINE: <2026-11-20 Fri>\n"))
+      (let ((context (agent-todo-test--context-at
+                      "Pay the accountant"
+                      (concat "* TODO Pay the accountant\n" own next))))
+        (should (equal (plist-get context :payload) "Pay the accountant"))
+        (should (equal (plist-get context :text) "Pay the accountant"))))
+    (dolist (contents '("* TODO Pay the accountant\n** TODO A step\nIts body.\n"
+                        "* TODO Pay the accountant\n"
+                        "* TODO Pay the accountant"))
+      (should (equal (plist-get (agent-todo-test--context-at
+                                 "Pay the accountant" contents)
+                                :payload)
+                     "Pay the accountant")))
+    (should (equal (plist-get (agent-todo-test--context-at
+                               "Pay the accountant"
+                               (concat "* TODO Pay the accountant\nBy Friday.\n"
+                                       next))
+                              :payload)
+                   "Pay the accountant\n\nBy Friday."))))
+
 ;;;; Directory property
 
 (defun agent-todo-test--subdirectory (root name)

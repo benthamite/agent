@@ -258,6 +258,18 @@ Started by hand such a task is left in the prompt to be edited."
       (should (equal (plist-get (cdar agent-auto-test--started) :initial-prompt)
                      "Issue\n\nStanding.")))))
 
+(ert-deftest agent-auto-test-empty-body-stops-at-the-next-heading ()
+  "Brief a ready task that has no body with its title and the instructions.
+The task below it is no part of the brief."
+  (agent-auto-test--with root
+    (agent-auto-test--file
+     root (format "* TODO Pay the accountant :agent:\n:PROPERTIES:\n:DIR: %s\n:END:\n* TODO Renew the passport\nBring two photos.\n"
+                  root))
+    (agent-auto-test--run)
+    (should (= (length agent-auto-test--started) 1))
+    (should (equal (plist-get (cdar agent-auto-test--started) :initial-prompt)
+                   "Pay the accountant\n\nStanding."))))
+
 (ert-deftest agent-auto-test-starts-only-eligible-tasks ()
   "Leave alone every task that lacks one of the conditions.
 Only an open TODO that carries the tag itself, has a directory that
