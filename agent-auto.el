@@ -229,6 +229,11 @@ A session that works again is unsettled.")
 (defvar agent-auto--marks-timer nil
   "Timer running `agent-auto--refresh-marks', or nil when none is pending.")
 
+(defvar-local agent-auto--marked-tick nil
+  "The `buffer-chars-modified-tick' of this agenda when it was last marked.
+More exactly, when its marks were last brought up to date or asked for.
+Nil in an agenda that was never marked, or was built again since.")
+
 (defvar agent-auto--processes nil
   "The subprocesses now running.")
 
@@ -315,9 +320,13 @@ agenda show `agent-auto-working-mark' or `agent-auto-waiting-mark'."
     (agent-session-id-functions . agent-auto--schedule-marks)
     (kill-buffer-hook . agent-auto--session-killed)
     (org-mode-hook . agent-auto--schedule-marks)
-    (org-agenda-finalize-hook . agent-auto--mark-agenda))
+    (org-agenda-finalize-hook . agent-auto--mark-agenda)
+    (org-agenda-mode-hook . agent-auto--schedule-marks)
+    (post-command-hook . agent-auto--check-agenda))
   "The hooks of the mode, each a cons of a hook and the function it gets.
-The functions go on the global value of each hook.")
+The functions go on the global value of each hook.  An agenda is marked
+from three of them, since no one of them sees every change of its text:
+see `agent-auto--mark-agenda' and `agent-auto--check-agenda'.")
 
 (defconst agent-auto--inherited-variables
   '(agent-auto--link agent-auto--unattended)
@@ -1130,9 +1139,37 @@ For `kill-buffer-hook'."
 
 (defun agent-auto--mark-agenda ()
   "Mark the lines of the agenda just built whose tasks have an open session.
-For `org-agenda-finalize-hook'."
+For `org-agenda-finalize-hook', which marks an agenda before it is first
+shown.  It is on the hook's global value, and an agenda command can bind
+the hook to functions of its own for the build and for every redo, so
+the marks are also asked for from `org-agenda-mode-hook', which every
+build runs, and from `agent-auto--check-agenda'."
   (agent-auto--guard "marking an agenda"
     (agent-auto--refresh-marks)))
+
+(defun agent-auto--check-agenda ()
+  "Bring the marks up to date when the agenda at hand has lost some.
+For `post-command-hook'.  The agenda at hand is the current buffer or
+the one in the selected window.  A mark is an overlay that goes with its
+text, so an agenda whose text changed since it was marked may have lost
+marks, whatever changed it and whichever hooks that ran.  Comparing two
+numbers is all this costs after a command that changed no agenda, and
+the marks are asked for once for each change, also if bringing them up
+to date fails."
+  (agent-auto--guard "checking an agenda's marks"
+    (dolist (buffer (list (current-buffer) (window-buffer)))
+      (when (agent-auto--agenda-stale-p buffer)
+        (with-current-buffer buffer
+          (setq agent-auto--marked-tick (buffer-chars-modified-tick)))
+        (agent-auto--schedule-marks)))))
+
+(defun agent-auto--agenda-stale-p (buffer)
+  "Return non-nil when the text of agenda BUFFER changed since it was marked.
+Return nil for a buffer that is no agenda."
+  (and (provided-mode-derived-p (buffer-local-value 'major-mode buffer)
+                                'org-agenda-mode)
+       (not (eql (buffer-local-value 'agent-auto--marked-tick buffer)
+                 (buffer-chars-modified-tick buffer)))))
 
 (defun agent-auto--refresh-marks ()
   "Show a mark on every task whose session is open, and on no other.
@@ -1230,7 +1267,9 @@ its text does."
 (defun agent-auto--mark-agenda-buffer (tasks)
   "Mark the lines of the current agenda buffer whose tasks are in TASKS.
 TASKS is the table `agent-auto--mark-org-buffer' fills.  The mark goes
-just before the task's title."
+just before the task's title.  The state of the buffer's text is
+remembered, for `agent-auto--agenda-stale-p'."
+  (setq agent-auto--marked-tick (buffer-chars-modified-tick))
   (save-excursion
     (save-restriction
       (widen)

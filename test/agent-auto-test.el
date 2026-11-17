@@ -1580,6 +1580,102 @@ the mark, and closing the session removes it without a rebuild."
           (org-agenda-redo)
           (should-not (agent-auto-test--agenda-marks)))))))
 
+(defmacro agent-auto-test--with-agenda-hooks (&rest body)
+  "Evaluate BODY with what the mode puts on the hooks an agenda runs.
+Those are the hook run when an agenda's mode is set up and the one run
+after each command, bound to the functions `agent-auto--hooks' gives
+them.  `org-agenda-finalize-hook' is left as it is."
+  (declare (indent 0) (debug (body)))
+  `(let ((org-agenda-mode-hook
+          (agent-auto-test--hook-functions 'org-agenda-mode-hook))
+         (post-command-hook
+          (agent-auto-test--hook-functions 'post-command-hook)))
+     ,@body))
+
+(defun agent-auto-test--hook-functions (hook)
+  "Return the functions the mode installs on HOOK."
+  (mapcar #'cdr (seq-filter (lambda (entry) (eq (car entry) hook))
+                            agent-auto--hooks)))
+
+(defmacro agent-auto-test--in-custom-agenda (file &rest body)
+  "Evaluate BODY in an agenda of FILE whose command binds the finalize hook.
+The command binds `org-agenda-finalize-hook' to a function of its own,
+for the build and for every redo, as a custom agenda command can.  What
+the mode puts on the other hooks an agenda runs is in place."
+  (declare (indent 1) (debug (form body)))
+  `(agent-auto-test--with-agenda-hooks
+     (let ((org-agenda-finalize-hook (list #'agent-auto--mark-agenda))
+           (org-agenda-custom-commands
+            '(("x" "Tasks" todo "TODO"
+               ((org-agenda-finalize-hook '(ignore))))))
+           (org-agenda-files (list ,file))
+           (org-agenda-sticky nil)
+           (org-agenda-window-setup 'current-window))
+       (agent-auto-test--marks-due)
+       (save-window-excursion
+         (org-agenda nil "x")
+         (unwind-protect
+             (progn
+               (should (derived-mode-p 'org-agenda-mode))
+               (goto-char (point-min))
+               (search-forward "Fix it")
+               ,@body)
+           (org-agenda-quit))))))
+
+;; The mode's function on `org-agenda-finalize-hook' never ran in an
+;; agenda whose command binds that hook, and the marks came back only
+;; with the next search of the timer.
+(ert-deftest agent-auto-test-marks-return-after-a-rebuild-that-hides-the-hook ()
+  "Mark the lines of an agenda built with the finalize hook bound elsewhere.
+The marks are there once the build's command is over, and again after
+the agenda is redone."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,_buffer) (agent-auto-test--started-task root)))
+      (agent-auto-test--in-custom-agenda file
+        (agent-auto-test--marks-due)
+        (should (equal (agent-auto-test--agenda-marks)
+                       '(("▶ " . "Fix it :agent:"))))
+        (org-agenda-redo)
+        (agent-auto-test--marks-due)
+        (should (equal (agent-auto-test--agenda-marks)
+                       '(("▶ " . "Fix it :agent:"))))))))
+
+;; A mark is an overlay that goes with the text it was put on.  Org puts
+;; the marks back itself when it writes a line again, through the
+;; finalize hook; a package that writes agenda lines its own way took the
+;; marks with them until the next search of the timer.
+(ert-deftest agent-auto-test-marks-return-after-an-agenda-line-changes ()
+  "Mark an agenda line again once a command has written its text again.
+The change is noticed after the command, from the agenda's text having
+changed since it was marked, with no hook run by the change itself.
+The marks are asked for once for a change, and nothing is done after a
+command that changed nothing."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,_buffer) (agent-auto-test--started-task root)))
+      (agent-auto-test--with-agenda-hooks
+        (agent-auto-test--in-agenda file
+          (agent-auto-test--marks-due)
+          (should (equal (agent-auto-test--agenda-marks)
+                         '(("▶ " . "Fix it :agent:"))))
+          (run-hooks 'post-command-hook)
+          (should-not (timerp agent-auto--marks-timer))
+          (let ((inhibit-read-only t)
+                (line (buffer-substring (pos-bol) (pos-eol))))
+            (delete-region (pos-bol) (pos-eol))
+            (insert line))
+          (should-not (agent-auto-test--agenda-marks))
+          (run-hooks 'post-command-hook)
+          (should (timerp agent-auto--marks-timer))
+          (cancel-timer agent-auto--marks-timer)
+          (setq agent-auto--marks-timer nil)
+          (run-hooks 'post-command-hook)
+          (should-not (timerp agent-auto--marks-timer))
+          (agent-auto--refresh-marks)
+          (should (equal (agent-auto-test--agenda-marks)
+                         '(("▶ " . "Fix it :agent:"))))
+          (run-hooks 'post-command-hook)
+          (should-not (timerp agent-auto--marks-timer)))))))
+
 (ert-deftest agent-auto-test-agenda-mark-follows-the-priority ()
   "Put the agenda mark after the TODO keyword and the priority cookie."
   (agent-auto-test--with root
@@ -1679,7 +1775,9 @@ the mark, and closing the session removes it without a rebuild."
     (agent-session-id-functions . agent-auto--schedule-marks)
     (kill-buffer-hook . agent-auto--session-killed)
     (org-mode-hook . agent-auto--schedule-marks)
-    (org-agenda-finalize-hook . agent-auto--mark-agenda))
+    (org-agenda-finalize-hook . agent-auto--mark-agenda)
+    (org-agenda-mode-hook . agent-auto--schedule-marks)
+    (post-command-hook . agent-auto--check-agenda))
   "What the mode installs, each a cons of a hook and a function.")
 
 (defmacro agent-auto-test--with-clean-mode (&rest body)
@@ -1696,6 +1794,8 @@ and it is turned off afterwards."
          (kill-buffer-hook nil)
          (org-mode-hook nil)
          (org-agenda-finalize-hook nil)
+         (org-agenda-mode-hook nil)
+         (post-command-hook nil)
          (agent-auto--marks-timer nil)
          (agent-auto--timer nil)
          (agent-auto--queue-timer nil)
@@ -1746,6 +1846,8 @@ and it is turned off afterwards."
     (should-not kill-buffer-hook)
     (should-not org-mode-hook)
     (should-not org-agenda-finalize-hook)
+    (should-not org-agenda-mode-hook)
+    (should-not post-command-hook)
     (should-not agent-auto--marks-timer)
     (should-error (agent-auto-run-now) :type 'user-error)))
 

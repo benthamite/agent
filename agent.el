@@ -4592,9 +4592,9 @@ it for; see `agent--context-wants-directory' and
 names, when it names one; see `agent--extractor-backend'.  The account
 is the one the thing's origin names, when its extractor reports one, and
 otherwise the persisted selection; see `agent--extractor-origin'.  An
-extractor whose symbol has
-the `agent-names-session' property answers with an existing session, so
-no backend or account is resolved for it and nothing is prompted for."
+extractor whose symbol has the `agent-names-session' property answers
+with an existing session, so no backend or account is resolved for it
+and nothing is prompted for."
   (let* ((fresh (equal existing '(16)))
          (existing (and existing (not fresh))))
     (unless (and (not existing) (not fresh) (agent--show-recorded-session))
