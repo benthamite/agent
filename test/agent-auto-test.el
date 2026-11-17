@@ -1124,6 +1124,23 @@ From an Org buffer and from an agenda line."
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
                      (buffer-name buffer))))))
 
+(ert-deftest agent-auto-test-acting-on-a-closed-task-shows-its-session ()
+  "Show the session a task that is done records, and leave the task done.
+Starting a session on such a task is refused; going back to the one it
+has sends nothing and changes no state."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (agent-auto-test--at file "Fix it" (lambda () (org-todo 'done)))
+      (with-current-buffer (find-buffer-visiting file)
+        (save-buffer))
+      (agent-auto-test--acting shown
+        (agent-auto-test--act file)
+        (should (equal shown (list buffer))))
+      (should (= (length agent-auto-test--started) 1))
+      (should (agent-auto-test--at file "Fix it" #'org-entry-is-done-p))
+      (should-error (agent-auto-test--act file '(16)) :type 'user-error)
+      (should (= (length agent-auto-test--started) 1)))))
+
 (ert-deftest agent-auto-test-acting-resumes-the-closed-session ()
   "Resume the closed session a task records, in the task's directory.
 The same conversation is resumed with the backend that ran it, nothing

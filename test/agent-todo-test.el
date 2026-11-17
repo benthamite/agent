@@ -695,6 +695,48 @@ nothing suggested, and the session starts in the one chosen."
       (should (equal asked '("work" "Do it" nil)))
       (should (equal started (list root "Do it"))))))
 
+;; A TODO in a done state counted as a TODO like any other: a session was
+;; started on it and the move to the in-progress keyword reopened it.
+(ert-deftest agent-todo-test-closed-task-is-refused ()
+  "Refuse a TODO that is done or cancelled instead of reopening it.
+No session is started, nothing is sent to a running one, and the
+heading keeps its state.  An open TODO beside it is started as before."
+  (agent-test-helper-with-directory root
+    (let ((agent-todo-directory-property "DIR")
+          (agent-todo-in-progress-keyword "DOING")
+          (contents (format "#+TODO: TODO DOING | DONE CANCELLED
+#+PROPERTY: DIR %s
+* DONE Pay the accountant
+* CANCELLED Renew the passport
+* TODO Fix the build
+" root))
+          sent)
+      (agent-todo-test--with-sessions sessions
+        (cl-letf (((symbol-function 'agent--read-session-buffer)
+                   (lambda () (current-buffer)))
+                  ((symbol-function 'agent-submit)
+                   (lambda (payload _buffer) (setq sent payload))))
+          (with-temp-buffer
+            (insert contents)
+            (org-mode)
+            (dolist (closed '(("Pay the accountant" . "DONE")
+                              ("Renew the passport" . "CANCELLED")))
+              (dolist (prefix '(nil (4) (16)))
+                (goto-char (point-min))
+                (search-forward (car closed))
+                (should (equal (cadr (should-error
+                                      (agent-act-on-thing-at-point prefix)
+                                      :type 'user-error))
+                               "This task is closed"))
+                (should (equal (org-get-todo-state) (cdr closed)))))
+            (should-not sessions)
+            (should-not sent)
+            (goto-char (point-min))
+            (search-forward "Fix the build")
+            (agent-act-on-thing-at-point)
+            (should (= (length sessions) 1))
+            (should (equal (org-get-todo-state) "DOING"))))))))
+
 ;;;; Backend
 
 (defmacro agent-todo-test--with-two-backends (sessions asked &rest body)

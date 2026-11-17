@@ -161,7 +161,8 @@ directory `agent-todo-directory-property' names for the TODO.  A session
 started for the TODO is named after its heading.  A TODO
 that already records a session has that session shown or resumed
 instead, and a double prefix argument starts a new one all the same; see
-`agent-recorded-session-functions'."
+`agent-recorded-session-functions'.  A TODO that is done or cancelled
+is refused."
   (interactive "P")
   (agent--act-on-context #'agent-todo-context existing))
 
@@ -178,11 +179,14 @@ heading, which a session started for the TODO takes, so that a second
 TODO started in the same directory asks for no name.  The heading is
 remembered as a marker because choosing that project can take a model
 request and a prompt, by which time point has moved, or the agenda has
-been rebuilt."
+been rebuilt.  A TODO in a done state, as one done or cancelled, is
+refused: the move to `agent-todo-in-progress-keyword' would reopen it."
   (let ((marker (or (agent--org-entry-marker)
                     (user-error "Must be called on an org heading or agenda entry"))))
     (unless (agent--at-org-entry #'org-get-todo-state)
       (user-error "Point is not on a TODO heading"))
+    (when (agent--at-org-entry #'org-entry-is-done-p)
+      (user-error "This task is closed"))
     (let* ((entry (agent--at-org-entry #'agent-todo--collect-at-point))
            (prompt (agent-todo--format-prompt entry)))
       (funcall callback
