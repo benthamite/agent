@@ -3338,7 +3338,9 @@ ATTACH-ID is what the background query returns; STOP-OK is whether
   (let ((buffer (generate-new-buffer " *claude-test-exit*"))
         stopped killed result)
     (unwind-protect
-        (cl-letf (((symbol-function 'agent-claude--session-identity)
+        (cl-letf (((symbol-function 'agent--detect-backend)
+                   (lambda (_buffer) 'claude-code))
+                  ((symbol-function 'agent-claude--session-identity)
                    (lambda (_buffer) "abc-full"))
                   ((symbol-function 'agent-claude--background-attach-id)
                    (lambda (session-id _dir)
@@ -3383,9 +3385,17 @@ ATTACH-ID is what the background query returns; STOP-OK is whether
       (agent--exit-session (current-buffer))
       (should (equal submitted "/exit")))))
 
-(ert-deftest agent-claude-test-backend-registers-exit ()
+(ert-deftest agent-claude-test-registers-exit-function ()
   "Register the background-session exit for Claude Code."
-  (should (eq (agent-backend-exit (agent-backend 'claude-code))
-              #'agent-claude--exit-background)))
+  (should (memq #'agent-claude--exit-background
+                agent-exit-session-functions)))
+
+(ert-deftest agent-claude-test-exit-background-ignores-other-backends ()
+  "Leave a session of another backend alone."
+  (cl-letf (((symbol-function 'agent--detect-backend)
+             (lambda (_buffer) 'codex))
+            ((symbol-function 'agent-claude--session-identity)
+             (lambda (_buffer) (error "Should not be called"))))
+    (should-not (agent-claude--exit-background (current-buffer)))))
 
 ;;; agent-claude-test.el ends here

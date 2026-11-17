@@ -1020,7 +1020,9 @@ empty prompt or @samp{/background}) is not closed by @samp{/exit}: in an attache
 that command only detaches and shows the CLI's agent view@comma{} and the session keeps
 running. Both exit commands therefore end such a session with @samp{claude stop}@comma{}
 under the session's account@comma{} and then kill its buffer. If @samp{claude stop} fails@comma{}
-they say so and submit @samp{/exit} as before.
+they say so and submit @samp{/exit} as before. Claude Code does this through
+@samp{agent-exit-session-functions}: each function there is called with the session
+buffer and may end the session itself in place of @samp{/exit}.
 
 The chain is driven by session stop events and guarded by a watchdog. Each
 submitted skill gets @code{agent-before-exit-timeout} seconds (default 600) before

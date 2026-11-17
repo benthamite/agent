@@ -261,7 +261,6 @@ Source: lobehub/lobe-icons (MIT).")
   :interrupt #'agent-claude--interrupt
   :step-effort #'agent-claude--step-effort
   :prepare-fork #'agent-claude--prepare-fork
-  :exit #'agent-claude--exit-background
   :resume #'claude-code-resume)
 
 ;;;; Functions
@@ -2340,7 +2339,8 @@ the CLI shows its agent view and the session keeps running.  So stop
 the session and kill BUFFER, returning non-nil.  Return nil when BUFFER
 is not a background session, so the caller submits `/exit'.  When
 `claude stop' fails, say so and return nil."
-  (when-let* ((session-id (ignore-errors (agent-claude--session-identity buffer)))
+  (when-let* (((eq (agent--detect-backend buffer) 'claude-code))
+              (session-id (ignore-errors (agent-claude--session-identity buffer)))
               (dir (buffer-local-value 'default-directory buffer))
               (attach-id (agent-claude--background-attach-id session-id dir)))
     (if (agent-claude--stop-background attach-id dir)
@@ -2352,6 +2352,8 @@ is not a background session, so the caller submits `/exit'.  When
       (message "agent: `claude stop %s' failed; submitting /exit, which only detaches"
                attach-id)
       nil)))
+
+(add-hook 'agent-exit-session-functions #'agent-claude--exit-background)
 
 (defun agent-claude--stop-background (attach-id dir)
   "Run `claude stop ATTACH-ID' under the account of session directory DIR.
