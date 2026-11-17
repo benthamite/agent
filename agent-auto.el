@@ -649,14 +649,13 @@ Nothing is asked, and the windows are left as they are."
               (save-window-excursion
                 (save-current-buffer
                   (let ((agent-inhibit-prompts t))
-                    (agent-start-session
+                    (agent--start-named-session
                      (agent-session-create
                       :backend backend
                       :account (agent-account-resolve backend nil
                                                       account-directory)
-                      :directory directory
-                      :instance (agent--unique-instance-name
-                                 backend directory slug))
+                      :directory directory)
+                     slug
                      :initial-prompt brief))))))
         (setq agent-auto--starting (delq start agent-auto--starting))
         (agent-auto--attach buffer (car start))

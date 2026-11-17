@@ -1429,6 +1429,19 @@ SELECTION is an account or pool name; a pool is routed to a member."
   (agent-restart--ensure-account
    backend (agent-account--route-selection backend selection)))
 
+(defun agent--start-named-session (session name &rest options)
+  "Start SESSION under the instance name NAME and return its buffer.
+NAME becomes NAME-N when a live session of SESSION's backend in its
+directory holds NAME, so nothing is asked.  The session is marked as
+named, see `agent--named', so its display name always shows the
+instance.  OPTIONS are those of `agent-start-session'.  This is how a
+session started for a task takes the task's name."
+  (setf (agent-session-instance session)
+        (agent--unique-instance-name (agent-session-backend session)
+                                     (agent-session-directory session)
+                                     name))
+  (agent--mark-named (apply #'agent-start-session session options) t))
+
 (defun agent--unique-instance-name (backend directory name)
   "Return NAME, or NAME-N, as an instance name free in DIRECTORY.
 NAME itself is returned unless a live BACKEND session in DIRECTORY holds
@@ -1479,9 +1492,11 @@ the process runs.")
 (put 'agent--launch-name 'permanent-local t)
 
 (defvar-local agent--named nil
-  "Non-nil when the user chose this session's instance name.
-Set by `agent-rename-session', and when a session starts under a name
-typed at `agent--read-instance-name'.  The display name then shows the
+  "Non-nil when this session's instance name was chosen for it.
+Set by `agent-rename-session', when a session starts under a name typed
+at `agent--read-instance-name', and when it starts under the name of the
+task it was started for; see `agent--start-named-session'.  The display
+name then shows the
 instance even when no other session shares the directory.  A restart,
 a resume from the registry and a handoff carry it over.")
 (put 'agent--named 'permanent-local t)
@@ -4589,38 +4604,37 @@ CONTEXT carries `:resume-id', `:backend' and `:directory', and may carry
 `:account', the account to resume under when it is not the one the
 directory gets, and `:instance', the instance name to resume under, as
 the name the session had; a live session that holds that name makes it
-NAME-N.  Without `:instance' the name is derived from the session id, as
-for a resumed branch.  Either way a directory that already has a session
-never stops to ask for a name.  A live session is shown in the window
-already showing it, else in the selected window, as the session switcher
-does, never in a new split.
+NAME-N, and the resumed session's display name always shows it, as it
+did; see `agent--start-named-session'.  Without `:instance' the name is
+derived from the session id, as for a resumed branch.  Either way a
+directory that already has a session never stops to ask for a name.  A
+live session is shown in the window already showing it, else in the
+selected window, as the session switcher does, never in a new split.
 Return the session buffer."
   (let* ((session-id (plist-get context :resume-id))
          (backend (plist-get context :backend))
          (directory (file-name-as-directory
                      (expand-file-name (plist-get context :directory))))
+         (name (plist-get context :instance))
+         (session (agent-session-create
+                   :backend backend
+                   :account (plist-get context :account)
+                   :directory directory
+                   :instance (unless name
+                               (agent--resume-instance-name session-id))))
          (buffer (or (agent--buffer-for-session-id session-id)
-                     (agent-start-session
-                      (agent-session-create
-                       :backend backend
-                       :account (plist-get context :account)
-                       :directory directory
-                       :instance (agent--resume-instance-name
-                                  backend directory session-id
-                                  (plist-get context :instance)))
-                      :resume-id session-id))))
+                     (if name
+                         (agent--start-named-session
+                          session name :resume-id session-id)
+                       (agent-start-session session
+                                            :resume-id session-id)))))
     (pop-to-buffer buffer '((display-buffer-reuse-window
                              display-buffer-same-window)))
     buffer))
 
-(defun agent--resume-instance-name (backend directory session-id name)
-  "Return the instance name to resume SESSION-ID under in DIRECTORY.
-That is NAME, made unique among the live BACKEND sessions in DIRECTORY,
-or, when NAME is nil, a name derived from SESSION-ID."
-  (if name
-      (agent--unique-instance-name backend directory name)
-    (format "resume-%s"
-            (substring session-id 0 (min 8 (length session-id))))))
+(defun agent--resume-instance-name (session-id)
+  "Return an instance name derived from SESSION-ID to resume it under."
+  (format "resume-%s" (substring session-id 0 (min 8 (length session-id)))))
 
 (defun agent--deliver-to-new-session (context origin target)
   "Start a session for CONTEXT using TARGET and deliver it there.
@@ -4667,19 +4681,19 @@ one.  ORIGIN is the buffer the command was invoked from."
   "Start a BACKEND session in DIRECTORY and return its buffer.
 INITIAL-PROMPT, when non-nil, is submitted as the session's first user
 message.  NAME, when non-nil, is the session's instance name, or NAME-N
-when a live BACKEND session in DIRECTORY holds NAME, so nothing is asked.
+when a live BACKEND session in DIRECTORY holds NAME, so nothing is asked,
+and the session's display name always shows it.
 Without NAME the first session in DIRECTORY is the default instance and
 a later one has its name read."
   (let ((dir (file-name-as-directory (expand-file-name directory)))
         (label (when-let* ((struct (agent-backend backend)))
                  (agent-backend-label struct))))
     (message "Starting %s in %s..." label (abbreviate-file-name dir))
-    (agent-start-session
-     (agent-session-create
-      :backend backend
-      :directory dir
-      :instance (and name (agent--unique-instance-name backend dir name)))
-     :initial-prompt initial-prompt)))
+    (let ((session (agent-session-create :backend backend :directory dir)))
+      (if name
+          (agent--start-named-session session name
+                                      :initial-prompt initial-prompt)
+        (agent-start-session session :initial-prompt initial-prompt)))))
 
 (defun agent--deliver-to (context buffer origin)
   "Deliver CONTEXT's payload to running session BUFFER and return it.

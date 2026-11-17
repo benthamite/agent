@@ -483,6 +483,29 @@ Neither is the default instance, and nothing is asked."
         (should (equal (agent-todo-test--instances sessions)
                        '("fix-the-build" "write-the-docs")))))))
 
+(ert-deftest agent-todo-test-a-task-session-shows-its-name ()
+  "Mark the session of a TODO as named, so that it shows the task's name.
+A session started for a thing that is no TODO is left unmarked."
+  (agent-test-helper-with-directory root
+    (let ((agent-todo-directory-property "DIR")
+          (extractor (lambda (callback)
+                       (funcall callback (list :directory root
+                                               :payload "Look"
+                                               :submit t)))))
+      (dolist (command '(agent-act-on-thing-at-point agent-send-todo-at-point))
+        (agent-todo-test--with-sessions sessions
+          (with-temp-buffer
+            (insert (format "#+PROPERTY: DIR %s\n* TODO Fix the build\n" root))
+            (org-mode)
+            (search-backward "Fix")
+            (funcall command)
+            (should agent--named))))
+      (agent-todo-test--with-sessions sessions
+        (with-temp-buffer
+          (agent--act-on-context extractor nil)
+          (should (= (length sessions) 1))
+          (should-not agent--named))))))
+
 (ert-deftest agent-todo-test-a-taken-task-name-is-numbered ()
   "Number the name of a TODO whose heading names a live session there."
   (agent-test-helper-with-directory root

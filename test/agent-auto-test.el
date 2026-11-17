@@ -231,6 +231,10 @@ submitted.  The task records the session and when it started, on disk."
                   (buffer (car agent-auto-test--buffers)))
         (should (equal (agent-session-directory session) root))
         (should (equal (agent-session-instance session) "fix-it"))
+        (should (buffer-local-value 'agent--named buffer))
+        (should (equal (agent-display-name buffer)
+                       (format "%s:fix-it"
+                               (agent--directory-project-name root))))
         (should (equal (plist-get options :initial-prompt)
                        "Fix it\n\nThe body.\n\nStanding."))
         (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
@@ -989,6 +993,8 @@ in the directory that holds the name makes it NAME-N."
                      "fix-it"))
       (should (string-suffix-p ":fix-it*"
                                (buffer-name (car agent-auto-test--buffers))))
+      (should (buffer-local-value 'agent--named
+                                  (car agent-auto-test--buffers)))
       (let ((kill-buffer-query-functions nil))
         (kill-buffer (car agent-auto-test--buffers)))
       (agent-start-session

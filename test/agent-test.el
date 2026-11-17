@@ -2252,6 +2252,79 @@ sentinel has run."
       (kill-buffer new)
       (delete-directory agent-prompt-capture-directory t))))
 
+;; A session started for a task shows the task's name even when it is
+;; alone in its directory, and has to keep showing it afterwards.
+(ert-deftest agent-test-restart-keeps-a-session-named ()
+  "Restart a named session into one that is still named."
+  (let ((agent-backends nil)
+        (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+        (new (generate-new-buffer " *agent-restarted*")))
+    (unwind-protect
+        (with-temp-buffer
+          (rename-buffer "*one:~/repo/project/:fix-it*" t)
+          (let ((buf (current-buffer)))
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))
+              :session-identity (lambda (_buffer) "sid-123")))
+            (cl-letf (((symbol-function 'agent--force-kill-buffer) #'ignore)
+                      ((symbol-function 'agent-restart--account)
+                       (lambda (_backend _account _directory) nil))
+                      ((symbol-function 'agent-start-session)
+                       (lambda (&rest _) new)))
+              (agent--mark-named buf t)
+              (agent-restart))
+            (should (buffer-local-value 'agent--named new))))
+      (kill-buffer new)
+      (delete-directory agent-prompt-capture-directory t))))
+
+(ert-deftest agent-test-start-named-session-shows-its-name ()
+  "Start a session under a given name and show that name when it is alone.
+A live session holding the name makes it NAME-N.  A session started
+without a name shows its project alone."
+  (let ((agent-backends nil)
+        (agent-account-directory-rules nil)
+        buffers)
+    (unwind-protect
+        (progn
+          (apply #'agent-register-backend
+                 'one
+                 (agent-test--backend
+                  :buffer-p (lambda (&optional b) (memq b buffers))
+                  :find-all-buffers (lambda () buffers)
+                  :start-session
+                  (lambda (session &rest _)
+                    (let ((buffer (generate-new-buffer " *agent-named*")))
+                      (agent--set-session buffer session)
+                      (push buffer buffers)
+                      buffer))))
+          (cl-letf (((symbol-function 'agent-session-buffers)
+                     (lambda () buffers))
+                    ((symbol-function 'read-string)
+                     (lambda (&rest _) (error "Asked for a name"))))
+            (let ((plain (agent-start-session
+                          (agent-session-create :backend 'one
+                                                :directory "/tmp/plain/")))
+                  (first (agent--start-named-session
+                          (agent-session-create :backend 'one
+                                                :directory "/tmp/repo/")
+                          "fix-it"))
+                  (second (agent--start-named-session
+                           (agent-session-create :backend 'one
+                                                 :directory "/tmp/repo/")
+                           "fix-it" :initial-prompt "Go")))
+              (should (equal (agent-display-name plain) "plain"))
+              (should-not (buffer-local-value 'agent--named plain))
+              (should (equal (agent-display-name first) "repo:fix-it"))
+              (should (equal (agent-display-name second) "repo:fix-it-1"))
+              (kill-buffer second)
+              (setq buffers (delq second buffers))
+              (agent--refresh-display-names)
+              (should (equal (agent-display-name first) "repo:fix-it"))
+              (should (plist-get (agent--session-user-state first) :named)))))
+      (mapc #'kill-buffer (seq-filter #'buffer-live-p buffers)))))
+
 (ert-deftest agent-test-restart-without-identity-does-not-kill ()
   "Restart refuses to kill the buffer when no session id exists."
   (let ((agent-backends nil)
@@ -2867,6 +2940,40 @@ answers \"Two\"."
                 (agent-handoff)))
             (should (eq killed buf))
             (should (equal started (list "work" dir "continue")))))
+      (delete-directory agent-prompt-capture-directory t)
+      (delete-directory dir t))))
+
+(ert-deftest agent-test-handoff-keeps-a-session-named ()
+  "Hand a named session off to one that is still named."
+  (let* ((agent-backends nil)
+         (agent-prompt-capture-directory (make-temp-file "agent-prompts" t))
+         (dir (file-name-as-directory (make-temp-file "agent-handoff" t)))
+         (handoff-file (expand-file-name "handoff.md" dir))
+         (new (generate-new-buffer " *agent-handed-off*")))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((buf (current-buffer)))
+            (setq default-directory dir)
+            (apply #'agent-register-backend
+             'one
+             (agent-test--backend
+              :buffer-p (lambda (candidate) (eq candidate buf))))
+            (with-temp-file handoff-file (insert "continue\n"))
+            (let ((agent-handoff-files '((one . "handoff.md"))))
+              (cl-letf (((symbol-function 'agent--handoff-file)
+                         (lambda (_backend) handoff-file))
+                        ((symbol-function 'agent-session)
+                         (lambda (&optional _buffer)
+                           (agent-session-create :backend 'one
+                                                 :directory dir
+                                                 :instance "fix-it")))
+                        ((symbol-function 'agent--force-kill-buffer) #'ignore)
+                        ((symbol-function 'agent-start-session)
+                         (lambda (&rest _) new)))
+                (setq agent--named t)
+                (agent-handoff)))
+            (should (buffer-local-value 'agent--named new))))
+      (kill-buffer new)
       (delete-directory agent-prompt-capture-directory t)
       (delete-directory dir t))))
 
