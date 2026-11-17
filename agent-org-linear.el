@@ -57,7 +57,9 @@ issue into its prompt for editing before it is sent.  An issue that
 `agent-todo-directory-property' names a directory for starts there
 instead, and one `agent-todo-submit-property' marks is submitted.  With
 prefix argument EXISTING type it into a running session's prompt
-instead."
+instead.  An issue that already records a session has that session shown
+or resumed instead, and a double prefix argument starts a new one all
+the same; see `agent-recorded-session-functions'."
   (interactive "P")
   (agent--act-on-context #'agent-org-linear-context existing))
 

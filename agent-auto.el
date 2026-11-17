@@ -145,6 +145,15 @@ session is started until this names one of them, such as `claude-code'."
 Its value is the session's id, or the name of its buffer until the id
 is known.  A task that has it is never started.")
 
+(defconst agent-auto-backend-property "AGENT_BACKEND"
+  "Org property recording the backend of a task's session.
+A session can be resumed only by the backend that ran it.")
+
+(defconst agent-auto-directory-property "AGENT_DIRECTORY"
+  "Org property recording where a task's session runs.
+It is recorded only for a session that does not run in the task's own
+directory, as one given a worktree; a session is resumed where it ran.")
+
 (defconst agent-auto-started-property "AGENT_STARTED"
   "Org property recording when a task's session was started.")
 
@@ -250,6 +259,7 @@ recorded the same way."
   (add-hook 'agent-session-event-functions #'agent-auto--on-event)
   (add-hook 'agent-session-id-functions #'agent-auto--on-id)
   (add-hook 'agent-delivery-functions #'agent-auto--record-delivery)
+  (add-hook 'agent-recorded-session-functions #'agent-auto--recorded-session)
   (setq agent-auto--timer
         (run-with-timer agent-auto-interval agent-auto-interval
                         #'agent-auto--tick)))
@@ -260,7 +270,9 @@ recorded the same way."
         (delq 'agent-auto--link agent-session-inherited-variables))
   (remove-hook 'agent-session-event-functions #'agent-auto--on-event)
   (remove-hook 'agent-session-id-functions #'agent-auto--on-id)
-  (remove-hook 'agent-delivery-functions #'agent-auto--record-delivery))
+  (remove-hook 'agent-delivery-functions #'agent-auto--record-delivery)
+  (remove-hook 'agent-recorded-session-functions
+               #'agent-auto--recorded-session))
 
 (defun agent-auto--reset ()
   "Cancel the timers and subprocesses and forget the steps waiting.
@@ -488,12 +500,16 @@ A session being started counts."
   (or (seq-some (lambda (start)
                   (equal (agent-auto-link-recorded (car start)) recorded))
                 agent-auto--starting)
-      (seq-some (lambda (buffer)
-                  (or (member recorded (agent-auto--session-values buffer))
-                      (when-let* ((link (buffer-local-value 'agent-auto--link
-                                                            buffer)))
-                        (equal (agent-auto-link-recorded link) recorded))))
-                (agent-session-buffers))))
+      (agent-auto--session-buffer recorded)))
+
+(defun agent-auto--session-buffer (recorded)
+  "Return the live buffer of the session a task records as RECORDED, or nil."
+  (seq-find (lambda (buffer)
+              (or (member recorded (agent-auto--session-values buffer))
+                  (when-let* ((link (buffer-local-value 'agent-auto--link
+                                                        buffer)))
+                    (equal (agent-auto-link-recorded link) recorded))))
+            (agent-session-buffers)))
 
 ;;;; Starting
 
@@ -505,7 +521,7 @@ never started twice."
          (entry (agent-todo--collect-at-point))
          (link (agent-auto-link-create :file file
                                        :recorded (agent-auto--placeholder))))
-    (agent-auto--record (agent-auto-link-recorded link))
+    (agent-auto--record (agent-auto-link-recorded link) backend)
     (agent-auto--save)
     (agent-auto--launch link backend directory
                         (agent-auto--slug (plist-get entry :title))
@@ -529,10 +545,11 @@ never started twice."
   (format "starting-%s-%04x" (format-time-string "%Y%m%dT%H%M%S")
           (random #x10000)))
 
-(defun agent-auto--record (value)
-  "Record VALUE as the session of the task at point, started now."
+(defun agent-auto--record (value backend)
+  "Record VALUE as the BACKEND session of the task at point, started now."
   (let ((inhibit-message t))
     (org-entry-put nil agent-auto-session-property value)
+    (org-entry-put nil agent-auto-backend-property (symbol-name backend))
     (org-entry-put nil agent-auto-started-property
                    (format-time-string "[%Y-%m-%d %a %H:%M]"))))
 
@@ -842,11 +859,29 @@ from.  A session whose task is gone is unlinked."
         (value (car (agent-auto--session-values buffer))))
     (unless (equal value (agent-auto-link-recorded link))
       (pcase (agent-auto--edit-task
-              link (lambda ()
-                     (org-entry-put nil agent-auto-session-property value)))
+              link (lambda () (agent-auto--put-session buffer)))
         ('done (setf (agent-auto-link-recorded link) value))
         ('missing (with-current-buffer buffer
                     (setq agent-auto--link nil)))))))
+
+(defun agent-auto--put-session (buffer)
+  "Record on the task at point what session BUFFER is now.
+That is its id, or its buffer's name until the id is known, its backend,
+and its directory when that is not the task's own."
+  (let* ((session (agent-session buffer))
+         (directory (agent-session-directory session))
+         (own (let ((inhibit-message t))
+                (and agent-todo-directory-property
+                     (agent-todo--property-directory)))))
+    (org-entry-put nil agent-auto-session-property
+                   (car (agent-auto--session-values buffer)))
+    (org-entry-put nil agent-auto-backend-property
+                   (symbol-name (agent-session-backend session)))
+    (if (and directory
+             (not (and own (file-equal-p directory own))))
+        (org-entry-put nil agent-auto-directory-property
+                       (abbreviate-file-name directory))
+      (org-entry-delete nil agent-auto-directory-property))))
 
 (defun agent-auto--attach-recorded (file)
   "Link each unlinked session that a task in the current buffer records.
@@ -884,12 +919,67 @@ in a buffer with unsaved edits, which is then left unsaved."
            (let ((clean (not (buffer-modified-p))))
              (unless (equal (org-entry-get nil agent-auto-session-property)
                             value)
-               (agent-auto--record value))
+               (agent-auto--record
+                value (agent-session-backend (agent-session buffer)))
+               (let ((inhibit-message t))
+                 (agent-auto--put-session buffer)))
              (when clean
                (agent-auto--save)))))
         (unless (buffer-local-value 'agent-auto--link buffer)
           (agent-auto--attach
            buffer (agent-auto-link-create :file file :recorded value)))))))
+
+(defun agent-auto--recorded-session ()
+  "Return a context naming the session the Org task at point records, or nil.
+For `agent-recorded-session-functions': acting on a task that already
+has a session shows that session instead of starting another.  The
+context names the session's buffer when it is live, and otherwise the
+session to resume, by its id, with the backend that ran it, where it
+ran, on the account the task's directory gets.  A task that records a
+session by no id, since it never got one, records nothing that can be
+resumed: that is said, and nil returned, so a new session is started."
+  (when-let* ((marker (agent--org-entry-marker))
+              (task (agent--at-org-entry #'agent-auto--recorded-at-point)))
+    (let ((recorded (plist-get task :session))
+          (backend (plist-get task :backend))
+          (directory (or (plist-get task :ran-in) (plist-get task :directory))))
+      (cond
+       ((when-let* ((buffer (agent-auto--session-buffer recorded)))
+          (list :buffer buffer :todo marker)))
+       ((and backend directory (agent-auto--session-id-p recorded))
+        (list :resume-id recorded :backend backend :directory directory
+              :account (let ((agent-inhibit-prompts t))
+                         (agent-account-resolve
+                          backend nil
+                          (or (plist-get task :directory) directory)))
+              :todo marker))
+       (t (message "The session this task records (%s) cannot be resumed; starting a new one"
+                   recorded)
+          nil)))))
+
+(defun agent-auto--recorded-at-point ()
+  "Return what the task at point records of its session, or nil.
+The result is a plist of `:session', the recorded value; `:backend', a
+registered backend, or nil; `:ran-in', the directory recorded for the
+session when it exists, or nil; and `:directory', the task's own."
+  (when-let* ((recorded (org-entry-get nil agent-auto-session-property)))
+    (let ((backend (org-entry-get nil agent-auto-backend-property))
+          (ran-in (org-entry-get nil agent-auto-directory-property)))
+      (list :session recorded
+            :backend (and backend (agent-backend (intern backend))
+                          (intern backend))
+            :ran-in (and ran-in (file-directory-p ran-in)
+                         (file-name-as-directory (expand-file-name ran-in)))
+            :directory (let ((inhibit-message t))
+                         (and agent-todo-directory-property
+                              (agent-todo--property-directory)))))))
+
+(defun agent-auto--session-id-p (recorded)
+  "Return non-nil when RECORDED, a task's recorded session, is a session id.
+A start that never got a session leaves a placeholder, and a session
+whose id the backend never reported leaves its buffer's name."
+  (not (or (string-prefix-p "starting-" recorded)
+           (string-prefix-p "*" recorded))))
 
 ;;;; Results
 

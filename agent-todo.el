@@ -133,7 +133,10 @@ Handles verbatim (=…=) and code (~…~) to backticks."
   "Route the org TODO at point to an AI session.
 With prefix argument EXISTING send it to a running session instead of
 starting one in a project chosen from the TODO's text, or in the
-directory `agent-todo-directory-property' names for the TODO."
+directory `agent-todo-directory-property' names for the TODO.  A TODO
+that already records a session has that session shown or resumed
+instead, and a double prefix argument starts a new one all the same; see
+`agent-recorded-session-functions'."
   (interactive "P")
   (agent--act-on-context #'agent-todo-context existing))
 

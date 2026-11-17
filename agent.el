@@ -696,6 +696,20 @@ and before the context's `:after' thunk.  It is run for a session
 started for the thing and for a running session it was sent to; see
 `agent-at-point-things' for the context.")
 
+(defvar agent-recorded-session-functions nil
+  "Abnormal hook finding the session the thing at point already has.
+`agent-act-on-thing-at-point' and the commands built on it run it before
+anything is extracted or asked, with no arguments, in the buffer the
+command was invoked from.  The first function to return non-nil decides:
+its value is a context plist naming a session, which is shown, and
+nothing is sent.  A context with `:buffer' names a live session buffer.
+One with `:resume-id', `:backend' and `:directory', and optionally
+`:account', names a past session, which is resumed; when resuming it
+signals an error, the error is reported and the thing is routed as if
+no function had answered.  `agent-delivery-functions' then run with the
+context and the session buffer, so the context can carry what they need,
+such as `:todo'.  The hook is not run with a prefix argument.")
+
 (defvar agent-session-status-token-functions nil
   "Hook returning a backend's publisher process token for a session buffer.")
 
@@ -4377,7 +4391,11 @@ capped at `agent--debug-backtrace-size-limit'."
 (defun agent-act-on-thing-at-point (&optional existing)
   "Route the thing at point to an AI session.
 Start a new session for it, or with prefix argument EXISTING send it to
-a running session chosen by completion.  The thing is the first entry
+a running session chosen by completion.  A thing that already has a
+session, as an org task that records one, has that session shown
+instead, and resumed if need be, with nothing sent; a double prefix
+argument starts a new session for it all the same.  The thing is the
+first entry
 in `agent-at-point-things' whose predicate matches: a backtrace, a
 Slack message naming a session to resume, a Slack message, a Forge
 notification or topic, an email, a Linear issue mirrored by
@@ -4438,7 +4456,11 @@ sources are offered.")
 (defun agent--act-on-context (extractor existing)
   "Extract a context with EXTRACTOR and deliver it to a session.
 With EXISTING non-nil the context goes to a running session chosen by
-completion; otherwise a new session is started for it.  Extraction can
+completion; otherwise a new session is started for it, unless the thing
+already has a session, which is then shown and nothing is extracted; see
+`agent-recorded-session-functions'.  EXISTING is a raw prefix argument,
+and a double one, (16), asks for a new session whatever the thing
+already has.  Extraction can
 be asynchronous, so the buffer the command was invoked from and the
 backend and account resolved there are captured now and threaded through
 delivery: by the time the continuation runs, the user may have moved or
@@ -4450,17 +4472,51 @@ names, when its extractor reports one, and otherwise the persisted
 selection; see `agent--extractor-origin'.  An extractor whose symbol has
 the `agent-names-session' property answers with an existing session, so
 no backend or account is resolved for it and nothing is prompted for."
-  (let* ((origin (current-buffer))
-         (names-session (and (symbolp extractor)
-                             (get extractor 'agent-names-session)))
-         (target (unless (or existing names-session)
-                   (agent--resolve-backend-account
-                    (agent--extractor-origin extractor))))
-         (agent--context-wants-directory (not (or existing names-session)))
-         (agent--context-account (cdr target)))
-    (funcall extractor
-             (lambda (context)
-               (agent--deliver-context context existing origin target)))))
+  (let* ((fresh (equal existing '(16)))
+         (existing (and existing (not fresh))))
+    (unless (and (not existing) (not fresh) (agent--show-recorded-session))
+      (let* ((origin (current-buffer))
+             (names-session (and (symbolp extractor)
+                                 (get extractor 'agent-names-session)))
+             (target (unless (or existing names-session)
+                       (agent--resolve-backend-account
+                        (agent--extractor-origin extractor))))
+             (agent--context-wants-directory
+              (not (or existing names-session)))
+             (agent--context-account (cdr target)))
+        (funcall extractor
+                 (lambda (context)
+                   (agent--deliver-context context existing origin
+                                           target)))))))
+
+(defun agent--show-recorded-session ()
+  "Show the session the thing at point already has; return its buffer, or nil.
+The session is the one `agent-recorded-session-functions' name.  Nil
+when they name none, and when the one they name cannot be resumed, which
+is reported."
+  (when-let* ((origin (current-buffer))
+              (context (run-hook-with-args-until-success
+                        'agent-recorded-session-functions))
+              (buffer (agent--recorded-session-buffer context)))
+    (when (buffer-live-p origin)
+      (with-current-buffer origin
+        (run-hook-with-args 'agent-delivery-functions context buffer)))
+    buffer))
+
+(defun agent--recorded-session-buffer (context)
+  "Show the session CONTEXT names and return its buffer, or nil.
+CONTEXT is as `agent-recorded-session-functions' return it.  A session
+that cannot be resumed is reported, and nil returned."
+  (if-let* ((buffer (plist-get context :buffer)))
+      (pop-to-buffer buffer '((display-buffer-reuse-window
+                              display-buffer-same-window)))
+    (condition-case err
+        (let ((agent-inhibit-prompts t))
+          (agent--resume-context-session context))
+      (error
+       (message "Could not resume session %s (%s); starting a new one"
+                (plist-get context :resume-id) (error-message-string err))
+       nil))))
 
 (defun agent--extractor-origin (extractor)
   "Return the origin of the thing EXTRACTOR reads at point, or nil.
@@ -4491,7 +4547,9 @@ TARGET is the cons of backend and account resolved there."
 
 (defun agent--resume-context-session (context)
   "Show the session CONTEXT names, resuming it when it has no buffer.
-CONTEXT carries `:resume-id', `:backend' and `:directory'.  The instance
+CONTEXT carries `:resume-id', `:backend' and `:directory', and may carry
+`:account', the account to resume under when it is not the one the
+directory gets.  The instance
 name is derived from the session id, as for a resumed branch, so a
 directory that already has a session never stops to ask for one.
 A live session is shown in the window already showing it, else in the
@@ -4502,11 +4560,13 @@ Return the session buffer."
                      (agent-start-session
                       (agent-session-create
                        :backend (plist-get context :backend)
+                       :account (plist-get context :account)
                        :directory (file-name-as-directory
                                    (expand-file-name
                                     (plist-get context :directory)))
                        :instance (format "resume-%s"
-                                         (substring session-id 0 8)))
+                                         (substring session-id 0
+                                                    (min 8 (length session-id)))))
                       :resume-id session-id))))
     (pop-to-buffer buffer '((display-buffer-reuse-window
                              display-buffer-same-window)))

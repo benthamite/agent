@@ -13,6 +13,7 @@
 (require 'cl-lib)
 (require 'org)
 (require 'agent-auto)
+(require 'agent-org-linear)
 
 (defvar agent-prompt-capture-directory)
 
@@ -28,6 +29,9 @@ Each is a cons of the `agent-session' and the options it was started with.")
 (defvar agent-auto-test--start-error nil
   "When non-nil, the message of the error the stub backend's start signals.")
 
+(defvar agent-auto-test--resume-error nil
+  "When non-nil, the message of the error resuming a stub session signals.")
+
 (defvar-local agent-auto-test--reply nil
   "The last reply of this stub session.")
 
@@ -35,6 +39,8 @@ Each is a cons of the `agent-session' and the options it was started with.")
   "Start a stub session for SESSION with OPTIONS and return its buffer."
   (when agent-auto-test--start-error
     (error "%s" agent-auto-test--start-error))
+  (when (and agent-auto-test--resume-error (plist-get options :resume-id))
+    (error "%s" agent-auto-test--resume-error))
   (let ((buffer (generate-new-buffer (agent-session-buffer-name session))))
     (push (cons session options) agent-auto-test--started)
     (push buffer agent-auto-test--buffers)
@@ -58,6 +64,7 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-auto-test--started nil)
            (agent-auto-test--buffers nil)
            (agent-auto-test--start-error nil)
+           (agent-auto-test--resume-error nil)
            (agent-todo-directory-property "DIR")
            (agent-todo-in-progress-keyword nil)
            (agent-account-directory-rules nil)
@@ -78,6 +85,8 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-session-event-functions (list #'agent-auto--on-event))
            (agent-session-id-functions (list #'agent-auto--on-id))
            (agent-delivery-functions (list #'agent-auto--record-delivery))
+           (agent-recorded-session-functions
+            (list #'agent-auto--recorded-session))
            (agent-session-inherited-variables '(agent-auto--link)))
        (agent-register-backend
         'stub
@@ -776,6 +785,250 @@ the task.  A session resumed while waiting has its last reply read."
       (agent-auto-test--end-turn buffer "Logged the session.")
       (should (equal (agent-auto-test--tags file "Fix it") '("agent"))))))
 
+;;;; Acting on a task that records a session
+
+(defmacro agent-auto-test--keeping-buffer (&rest body)
+  "Evaluate BODY and return to the current buffer and windows.
+A command that shows a session leaves it current, and the agenda
+fixture then quits whatever buffer that is."
+  (declare (indent 0) (debug (body)))
+  `(save-window-excursion (save-current-buffer ,@body)))
+
+(defmacro agent-auto-test--acting (shown &rest body)
+  "Evaluate BODY with SHOWN bound to the buffers `pop-to-buffer' is given.
+Nothing may be typed into or submitted to a session."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let ((pop (symbol-function 'pop-to-buffer))
+         ,shown)
+     (cl-letf (((symbol-function 'pop-to-buffer)
+                (lambda (buffer &rest arguments)
+                  (when (memq buffer agent-auto-test--buffers)
+                    (push buffer ,shown))
+                  (apply pop buffer arguments)))
+               ((symbol-function 'agent-submit)
+                (lambda (&rest _) (ert-fail "Submitted to a session")))
+               ((symbol-function 'agent-send-string)
+                (lambda (&rest _) (ert-fail "Typed into a session"))))
+       ,@body)))
+
+(defun agent-auto-test--act (file &optional prefix command heading)
+  "Call COMMAND with PREFIX on HEADING of FILE, else on its first heading.
+COMMAND defaults to `agent-act-on-thing-at-point'."
+  (save-window-excursion
+    (with-current-buffer (find-file-noselect file)
+      (goto-char (point-min))
+      (when heading
+        (search-forward heading))
+      (funcall (or command #'agent-act-on-thing-at-point) prefix))))
+
+(defun agent-auto-test--closed-task (root id)
+  "Start the one task under ROOT, give its session ID and close the session.
+Return the task's file."
+  (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root))
+              (kill-buffer-query-functions nil))
+    (agent--note-session-id buffer id)
+    (kill-buffer buffer)
+    file))
+
+(ert-deftest agent-auto-test-acting-shows-the-live-session ()
+  "Show the live session a task records, and send it nothing.
+From an Org buffer and from an agenda line."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (agent-auto-test--acting shown
+        (agent-auto-test--act file)
+        (should (equal shown (list buffer)))
+        (with-current-buffer (find-buffer-visiting file)
+          (agent-test-helper-in-agenda "Fix it"
+            (agent-auto-test--keeping-buffer (agent-act-on-thing-at-point))))
+        (should (equal shown (list buffer buffer))))
+      (should (= (length agent-auto-test--started) 1))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                     (buffer-name buffer))))))
+
+(ert-deftest agent-auto-test-acting-resumes-the-closed-session ()
+  "Resume the closed session a task records, in the task's directory.
+The same conversation is resumed with the backend that ran it, nothing
+is sent, and the task is linked to the resumed buffer."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--closed-task root "sid-00001")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_BACKEND")
+                     "stub"))
+      (agent-auto-test--acting shown
+        (agent-auto-test--act file)
+        (should (equal shown (list (car agent-auto-test--buffers)))))
+      (should (= (length agent-auto-test--started) 2))
+      (pcase-let ((`(,session . ,options) (car agent-auto-test--started))
+                  (resumed (car agent-auto-test--buffers)))
+        (should (equal (plist-get options :resume-id) "sid-00001"))
+        (should-not (plist-get options :initial-prompt))
+        (should (eq (agent-session-backend session) 'stub))
+        (should (equal (agent-session-directory session) root))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                       "sid-00001"))
+        (agent-auto-test--end-turn resumed "Status: done: finished on resume")
+        (should (equal (agent-auto-test--tags file "Fix it") '("review")))))))
+
+(ert-deftest agent-auto-test-acting-resumes-from-the-agenda ()
+  "Resume the closed session of the task an agenda line shows."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--closed-task root "sid-00001")))
+      (agent-auto-test--acting shown
+        (with-current-buffer (find-buffer-visiting file)
+          (agent-test-helper-in-agenda "Fix it"
+            (agent-auto-test--keeping-buffer (agent-send-todo-at-point))))
+        (should (equal shown (list (car agent-auto-test--buffers)))))
+      (should (equal (plist-get (cdar agent-auto-test--started) :resume-id)
+                     "sid-00001"))
+      (should (buffer-local-value 'agent-auto--link
+                                  (car agent-auto-test--buffers))))))
+
+(ert-deftest agent-auto-test-acting-resumes-a-linear-issue ()
+  "Show or resume the session a Linear issue records, as for a plain TODO.
+Started fresh, such an issue is typed into the prompt; here nothing is."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file
+                 root (format "* TODO Issue :agent:\n:PROPERTIES:\n:DIR: %s\n:LINEAR_URL: https://linear.app/a/issue/A-1\n:END:\n"
+                              root))))
+      (agent-auto-test--run)
+      (let ((buffer (car agent-auto-test--buffers))
+            (kill-buffer-query-functions nil))
+        (agent--note-session-id buffer "sid-00001")
+        (agent-auto-test--acting shown
+          (agent-auto-test--act file)
+          (should (equal shown (list buffer)))
+          (kill-buffer buffer)
+          (agent-auto-test--act file nil #'agent-act-on-linear-issue)
+          (should (equal (plist-get (cdar agent-auto-test--started) :resume-id)
+                         "sid-00001"))
+          (with-current-buffer (find-buffer-visiting file)
+            (let ((kill-buffer-query-functions nil))
+              (kill-buffer (car agent-auto-test--buffers)))
+            (agent-test-helper-in-agenda "Issue"
+              (agent-auto-test--keeping-buffer (agent-act-on-thing-at-point))))
+          (should (= (length agent-auto-test--started) 3))
+          (should (equal (plist-get (cdar agent-auto-test--started) :resume-id)
+                         "sid-00001")))))))
+
+(ert-deftest agent-auto-test-acting-resumes-where-the-session-ran ()
+  "Resume a session given a worktree in that worktree.
+The account is still the one the task's own directory gets."
+  (agent-auto-test--with root
+    (let* ((repo (agent-auto-test--repository root "repo"))
+           (agent-account-directory-rules `((,repo . "work")))
+           (agent-account--current (make-hash-table :test #'eq))
+           (file (agent-auto-test--file
+                  root (concat (agent-auto-test--task repo "One")
+                               (agent-auto-test--task repo "Two")))))
+      (setf (agent-backend-accounts (agent-backend 'stub))
+            '(("work" . "/tmp/agent-test-work/")
+              ("personal" . "/tmp/agent-test-personal/")))
+      (puthash 'stub "personal" agent-account--current)
+      (cl-letf (((symbol-function 'agent-account-sync) #'ignore)
+                ((symbol-function 'agent-account-logged-in-p)
+                 (lambda (&rest _) t)))
+        (agent-auto-test--run)
+        (let* ((buffer (seq-find (lambda (buffer)
+                                   (string-match-p ":two\\*\\'"
+                                                   (buffer-name buffer)))
+                                 agent-auto-test--buffers))
+               (worktree (agent-session-directory (agent-session buffer)))
+               (kill-buffer-query-functions nil))
+          (should-not (file-equal-p worktree repo))
+          (agent--note-session-id buffer "sid-00002")
+          (should (file-equal-p (agent-auto-test--property
+                                 file "Two" "AGENT_DIRECTORY")
+                                worktree))
+          (should-not (agent-auto-test--property file "One" "AGENT_DIRECTORY"))
+          (kill-buffer buffer)
+          (agent-auto-test--acting _shown
+            (agent-auto-test--act file nil nil "Two"))
+          (let ((session (caar agent-auto-test--started)))
+            (should (equal (plist-get (cdar agent-auto-test--started)
+                                      :resume-id)
+                           "sid-00002"))
+            (should (equal (agent-session-directory session) worktree))
+            (should (equal (agent-session-account session) "work"))))))))
+
+(ert-deftest agent-auto-test-acting-starts-anew-without-an-id ()
+  "Say so and start a new session when the recorded one has no id.
+A placeholder and a buffer's name name no conversation to resume.  The
+task is linked to the new session."
+  (dolist (recorded '(nil "starting-20261117T120000-0a1b"))
+    (agent-auto-test--with root
+      (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root))
+                  (kill-buffer-query-functions nil))
+        (kill-buffer buffer)
+        (when recorded
+          (agent-auto-test--at
+           file "Fix it" (lambda () (org-entry-put nil "AGENT_SESSION" recorded)))
+          (with-current-buffer (find-buffer-visiting file)
+            (save-buffer)))
+        (agent-test-helper-with-messages messages
+          (agent-auto-test--act file)
+          (should (string-match-p "cannot be resumed; starting a new one"
+                                  messages)))
+        (should (= (length agent-auto-test--started) 2))
+        (let ((new (car agent-auto-test--buffers)))
+          (should (equal (plist-get (cdar agent-auto-test--started)
+                                    :initial-prompt)
+                         "Fix it\n\nThe body."))
+          (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                         (buffer-name new)))
+          (agent-auto-test--end-turn new "Status: done: fixed anew")
+          (should (equal (agent-auto-test--tags file "Fix it") '("review"))))))))
+
+(ert-deftest agent-auto-test-acting-starts-anew-when-resuming-fails ()
+  "Report a failed resume and start a new session, linked to the task."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--closed-task root "sid-00001"))
+          (agent-auto-test--resume-error "no such conversation"))
+      (agent-test-helper-with-messages messages
+        (agent-auto-test--act file)
+        (should (string-match-p
+                 "Could not resume session sid-00001 (no such conversation); starting a new one"
+                 messages)))
+      (should (= (length agent-auto-test--started) 2))
+      (let ((new (car agent-auto-test--buffers)))
+        (should (equal (plist-get (cdar agent-auto-test--started) :initial-prompt)
+                       "Fix it\n\nThe body."))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                       (buffer-name new)))
+        (should (buffer-local-value 'agent-auto--link new))))))
+
+(ert-deftest agent-auto-test-double-prefix-starts-a-new-session ()
+  "Start a new session with a double prefix, whatever the task records.
+The task is linked to the new session, also while the old one is live."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (agent--note-session-id buffer "sid-00001")
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+        (agent-auto-test--act file '(16)))
+      (should (= (length agent-auto-test--started) 2))
+      (should (buffer-live-p buffer))
+      (let ((new (car agent-auto-test--buffers)))
+        (should (equal (plist-get (cdar agent-auto-test--started) :initial-prompt)
+                       "Fix it\n\nThe body."))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                       (buffer-name new)))
+        (agent-auto-test--end-turn new "Status: done: second attempt")
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                       "second attempt"))))))
+
+(ert-deftest agent-auto-test-single-prefix-still-picks-a-running-session ()
+  "Send the task to a session chosen by completion with a single prefix.
+The session the task records is not shown in its place."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (let (sent)
+        (cl-letf (((symbol-function 'agent--read-session-buffer)
+                   (lambda (&rest _) buffer))
+                  ((symbol-function 'agent-submit)
+                   (lambda (text target) (setq sent (list text target)))))
+          (agent-auto-test--act file '(4)))
+        (should (equal sent (list "Fix it\n\nThe body." buffer)))
+        (should (= (length agent-auto-test--started) 1))))))
+
 ;;;; Where to look
 
 (ert-deftest agent-auto-test-looks-in-the-agenda-files-by-default ()
@@ -822,6 +1075,7 @@ fraction of a second however many files there are."
   (let ((agent-session-event-functions nil)
         (agent-session-id-functions nil)
         (agent-delivery-functions nil)
+        (agent-recorded-session-functions nil)
         (agent-session-inherited-variables nil)
         (agent-auto--timer nil)
         (agent-auto--queue-timer nil)
@@ -839,6 +1093,8 @@ fraction of a second however many files there are."
           (should (memq #'agent-auto--on-event agent-session-event-functions))
           (should (memq #'agent-auto--on-id agent-session-id-functions))
           (should (memq #'agent-auto--record-delivery agent-delivery-functions))
+          (should (memq #'agent-auto--recorded-session
+                        agent-recorded-session-functions))
           (should (memq 'agent-auto--link agent-session-inherited-variables))
           (let ((timer agent-auto--timer))
             (agent-auto-mode -1)
@@ -847,6 +1103,7 @@ fraction of a second however many files there are."
           (should-not agent-session-event-functions)
           (should-not agent-session-id-functions)
           (should-not agent-delivery-functions)
+          (should-not agent-recorded-session-functions)
           (should-not agent-session-inherited-variables)
           (should-error (agent-auto-run-now) :type 'user-error))
       (agent-auto-mode -1))))
