@@ -5187,6 +5187,44 @@ Such a key breaks the whole menu when it opens, not at definition."
                     buffer))
         (should (eq shown buffer))))))
 
+;; A session resumed from a thing took a name made from its id, which
+;; nobody recognises in a list of sessions.  A context can now give the
+;; name the session had.
+(ert-deftest agent-test-resume-context-takes-the-name-given ()
+  "Resume under the instance name the context gives, for either backend.
+A live session holding the name makes it NAME-N, and a context that
+gives none still gets a name made from the session id."
+  (dolist (backend '(claude-code codex))
+    (let ((holders nil) started)
+      (cl-letf (((symbol-function 'agent--buffer-for-session-id) #'ignore)
+                ((symbol-function 'agent--instance-holders)
+                 (lambda (holder-backend directory)
+                   (should (eq holder-backend backend))
+                   (should (equal directory "/w/"))
+                   holders))
+                ((symbol-function 'agent-start-session)
+                 (lambda (session &rest options)
+                   (push (cons session options) started)
+                   (current-buffer)))
+                ((symbol-function 'pop-to-buffer) #'ignore))
+        (let ((context (list :resume-id "0f46dece-80e4" :backend backend
+                             :directory "/w" :instance "fix-the-build")))
+          (agent--resume-context-session context)
+          (should (equal (agent-session-instance (caar started))
+                         "fix-the-build"))
+          (should (eq (agent-session-backend (caar started)) backend))
+          (should (equal (plist-get (cdar started) :resume-id)
+                         "0f46dece-80e4"))
+          (setq holders (list (cons "fix-the-build" (current-buffer))
+                              (cons "fix-the-build-1" (current-buffer))))
+          (agent--resume-context-session context)
+          (should (equal (agent-session-instance (caar started))
+                         "fix-the-build-2")))
+        (agent--resume-context-session
+         (list :resume-id "0f46dece-80e4" :backend backend :directory "/w"))
+        (should (equal (agent-session-instance (caar started))
+                       "resume-0f46dece"))))))
+
 (ert-deftest agent-test-resume-context-shows-a-live-session-in-place ()
   "A live session takes the selected window, or the window showing it.
 Popping it to another window split the frame, as the session switcher

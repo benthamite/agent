@@ -67,8 +67,8 @@ It replaces `agent-auto-ready-tag' when the session ends its turn with
 (defcustom agent-auto-blocked-tag "blocked"
   "Org tag given to a task whose session waits on the user.
 It replaces `agent-auto-ready-tag' when the session ends its turn with
-\"Status: waiting on you\", shows a permission or input prompt, or has
-its turn interrupted."
+\"Status: waiting on you\", shows a permission or input prompt or any
+other dialog in place of its input box, or has its turn interrupted."
   :type 'string
   :group 'agent-auto)
 
@@ -212,6 +212,16 @@ The key is a cons of the task's file and the recorded value.")
   "Seconds after a session's turn ends before its last reply is read.
 The transcript is written a moment after the event.")
 
+(defvar agent-auto--turn-end-retries 5
+  "Times a turn's end is looked at again while its reply cannot be read.
+A turn that ends within seconds of the session's start can end before
+the backend has reported the session's id, by which its transcript is
+found.")
+
+(defvar agent-auto--start-check-delay 10
+  "Seconds after a session starts before it is checked for a dialog.
+See `agent-auto--check-dialog'.")
+
 (defmacro agent-auto--guard (what &rest body)
   "Evaluate BODY, reporting an error instead of signalling it.
 WHAT says what was being done.  Code run from a timer, a sentinel or a
@@ -304,6 +314,7 @@ Results not yet written are kept."
   "Bring the tasks and their sessions up to date, then look for ready tasks."
   (agent-auto--guard "updating tasks"
     (mapc #'agent-auto--sync-session (agent-auto--linked-buffers))
+    (mapc #'agent-auto--check-dialog (agent-auto--linked-buffers))
     (agent-auto--check-silence)
     (agent-auto--flush-pending))
   (agent-auto--guard "searching for tasks"
@@ -610,20 +621,17 @@ Nothing is asked, and the windows are left as they are."
                       :account (agent-account-resolve backend nil
                                                       account-directory)
                       :directory directory
-                      :instance (agent-auto--instance backend directory slug))
+                      :instance (agent--unique-instance-name
+                                 backend directory slug))
                      :initial-prompt brief))))))
         (setq agent-auto--starting (delq start agent-auto--starting))
         (agent-auto--attach buffer (car start))
         (agent-auto--sync-session buffer)
+        (run-with-timer agent-auto--start-check-delay nil
+                        #'agent-auto--check-dialog buffer)
         (agent-auto--log "started %s in %s" (buffer-name buffer)
                          (abbreviate-file-name directory)))
     (error (agent-auto--start-failed start (error-message-string err)))))
-
-(defun agent-auto--instance (backend directory slug)
-  "Return an instance name from SLUG free for a BACKEND session in DIRECTORY."
-  (if (assoc slug (agent--instance-holders backend directory))
-      (agent--free-instance-name backend directory slug)
-    slug))
 
 (defun agent-auto--start-failed (start reason)
   "Mark the task of START stuck because its session did not start for REASON."
@@ -750,7 +758,8 @@ For `agent-session-event-functions'."
         (pcase event
           ((or 'stop 'idle-prompt)
            (run-with-timer agent-auto--turn-end-delay nil
-                           #'agent-auto--turn-end buffer))
+                           #'agent-auto--turn-end buffer
+                           agent-auto--turn-end-retries))
           ('blocked
            (agent-auto--settle
             buffer 'blocked
@@ -767,23 +776,36 @@ For `agent-session-id-functions'."
     (agent-auto--guard "recording a session id"
       (agent-auto--sync-session buffer))))
 
-(defun agent-auto--turn-end (buffer)
+(defun agent-auto--turn-end (buffer &optional retries)
   "Write on its task how the turn of session BUFFER ended.
 A session being exited is left alone: the turns of its exit are not the
-task's result."
+task's result.  With RETRIES, a positive number, a session whose reply
+cannot be read yet is looked at again after `agent-auto--turn-end-delay',
+that many times at most, before it counts as stopped without a status
+line."
   (when (and (buffer-live-p buffer)
              (buffer-local-value 'agent-auto--link buffer)
              (not (buffer-local-value 'agent-auto--exiting buffer)))
     (agent-auto--guard "reading a session's reply"
-      (agent-auto--apply-reply buffer t))))
+      (let ((text (plist-get (agent-session-last-reply buffer) :text)))
+        (if (and (null text) retries (> retries 0))
+            (run-with-timer agent-auto--turn-end-delay nil
+                            #'agent-auto--turn-end buffer (1- retries))
+          (agent-auto--apply-reply-text buffer text t))))))
 
 (defun agent-auto--apply-reply (buffer strict)
   "Write on its task what the last reply of session BUFFER reports.
-Done and done pending verification are a review, waiting is blocked, and
-in progress changes nothing.  With STRICT non-nil, a reply without a
-status line is stuck; otherwise it changes nothing either."
-  (let* ((text (plist-get (agent-session-last-reply buffer) :text))
-         (status (and text (agent--reply-text-status text)))
+STRICT is as for `agent-auto--apply-reply-text'."
+  (agent-auto--apply-reply-text
+   buffer (plist-get (agent-session-last-reply buffer) :text) strict))
+
+(defun agent-auto--apply-reply-text (buffer text strict)
+  "Write on its task what TEXT, the last reply of session BUFFER, reports.
+TEXT is nil when the session has no reply that can be read.  Done and
+done pending verification are a review, waiting is blocked, and in
+progress changes nothing.  With STRICT non-nil, a reply without a status
+line is stuck; otherwise it changes nothing either."
+  (let* ((status (and text (agent--reply-text-status text)))
          (detail (agent-auto--one-line (plist-get status :detail))))
     (pcase (plist-get status :status)
       ('done
@@ -825,6 +847,32 @@ KIND, TEXT and ONLY-READY are as for `agent-auto--conclude'."
     (setq agent-auto--settled t))
   (agent-auto--conclude (buffer-local-value 'agent-auto--link buffer)
                         kind text only-ready))
+
+(defun agent-auto--check-dialog (buffer)
+  "Mark the task of session BUFFER blocked when the session shows a dialog.
+A dialog a session opens before its first turn, as the question whether
+to trust a directory it has not seen, comes with no event: the brief
+waits behind it and nothing reports the wait.  The screen is therefore
+looked at, once a moment after the session starts and then on every
+search, for as long as the session has no result.  Answering the dialog
+lets the turn run, and its end writes the result as usual."
+  (when (and (buffer-live-p buffer)
+             (buffer-local-value 'agent-auto--link buffer)
+             (not (buffer-local-value 'agent-auto--settled buffer))
+             (not (buffer-local-value 'agent-auto--exiting buffer)))
+    (agent-auto--guard "looking at a session's screen"
+      (when (agent-auto--dialog-p buffer)
+        (message "agent-auto: %s waits at a dialog that needs an answer"
+                 (buffer-name buffer))
+        (agent-auto--settle
+         buffer 'blocked
+         "the session waits at a dialog that needs an answer, such as whether to trust its directory")))))
+
+(defun agent-auto--dialog-p (buffer)
+  "Return non-nil when session BUFFER shows a dialog in place of its input box."
+  (plist-get (run-hook-with-args-until-success
+              'agent-session-input-state-functions buffer)
+             :dialog))
 
 (defun agent-auto--check-silence ()
   "Mark stuck the tasks whose sessions gave no sign of life for too long."
@@ -935,7 +983,8 @@ For `agent-recorded-session-functions': acting on a task that already
 has a session shows that session instead of starting another.  The
 context names the session's buffer when it is live, and otherwise the
 session to resume, by its id, with the backend that ran it, where it
-ran, on the account the task's directory gets.  A task that records a
+ran, on the account the task's directory gets, under the name a session
+started on the task gets, which is made from its heading.  A task that records a
 session by no id, since it never got one, records nothing that can be
 resumed: that is said, and nil returned, so a new session is started."
   (when-let* ((marker (agent--org-entry-marker))
@@ -952,6 +1001,7 @@ resumed: that is said, and nil returned, so a new session is started."
                          (agent-account-resolve
                           backend nil
                           (or (plist-get task :directory) directory)))
+              :instance (plist-get task :instance)
               :todo marker))
        (t (message "The session this task records (%s) cannot be resumed; starting a new one"
                    recorded)
@@ -961,7 +1011,8 @@ resumed: that is said, and nil returned, so a new session is started."
   "Return what the task at point records of its session, or nil.
 The result is a plist of `:session', the recorded value; `:backend', a
 registered backend, or nil; `:ran-in', the directory recorded for the
-session when it exists, or nil; and `:directory', the task's own."
+session when it exists, or nil; `:directory', the task's own; and
+`:instance', the name a session started on the task gets."
   (when-let* ((recorded (org-entry-get nil agent-auto-session-property)))
     (let ((backend (org-entry-get nil agent-auto-backend-property))
           (ran-in (org-entry-get nil agent-auto-directory-property)))
@@ -972,7 +1023,9 @@ session when it exists, or nil; and `:directory', the task's own."
                          (file-name-as-directory (expand-file-name ran-in)))
             :directory (let ((inhibit-message t))
                          (and agent-todo-directory-property
-                              (agent-todo--property-directory)))))))
+                              (agent-todo--property-directory)))
+            :instance (agent-auto--slug
+                       (plist-get (agent-todo--collect-at-point) :title))))))
 
 (defun agent-auto--session-id-p (recorded)
   "Return non-nil when RECORDED, a task's recorded session, is a session id.

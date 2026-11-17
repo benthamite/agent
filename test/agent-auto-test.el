@@ -516,6 +516,101 @@ The next search does not try again."
       (run-hook-with-args 'agent-session-event-functions buffer 'blocked)
       (should (equal (agent-auto-test--tags file "Fix it") '("blocked"))))))
 
+;; A session started in a directory its CLI had not seen sat at the
+;; question whether to trust it for three minutes, with the brief behind
+;; the dialog and the task still marked ready: no event reports a dialog
+;; that opens before the first turn.
+(ert-deftest agent-auto-test-startup-dialog-is-blocked ()
+  "Mark a task blocked when its session shows a dialog no event reported.
+The dialog is said in the echo area, since somebody has to answer it.  A
+session whose input box shows is left alone, and once the dialog is
+answered the end of the turn writes the result."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root))
+                (dialog nil))
+      (let ((agent-session-input-state-functions
+             (list (lambda (session)
+                     (and (eq session buffer)
+                          (list :box (not dialog) :dialog dialog))))))
+        (agent-auto-test--run)
+        (should (equal (agent-auto-test--tags file "Fix it") '("agent")))
+        (setq dialog t)
+        (agent-test-helper-with-messages messages
+          (agent-auto-test--run)
+          (should (string-match-p "waits at a dialog" messages)))
+        (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
+        (should (string-match-p
+                 "waits at a dialog"
+                 (agent-auto-test--property file "Fix it" "AGENT_RESULT")))
+        (agent-test-helper-with-messages messages
+          (agent-auto-test--run)
+          (should-not (string-match-p "waits at a dialog" messages)))
+        (setq dialog nil)
+        (run-hook-with-args 'agent-session-event-functions buffer 'activity)
+        (agent-auto-test--end-turn buffer "Status: done: trusted and finished")
+        (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+        (setq dialog t)
+        (agent-auto-test--run)
+        (should (equal (agent-auto-test--tags file "Fix it") '("review")))))))
+
+(ert-deftest agent-auto-test-started-session-is-checked-for-a-dialog ()
+  "Look at a session's screen a moment after it starts, not at the next search."
+  (agent-auto-test--with root
+    (let ((timer-function (symbol-function 'run-with-timer))
+          checks)
+      (cl-letf (((symbol-function 'run-with-timer)
+                 (lambda (seconds repeat function &rest arguments)
+                   (if (eq function #'agent-auto--check-dialog)
+                       (push (cons seconds arguments) checks)
+                     (apply timer-function seconds repeat function
+                            arguments)))))
+        (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+          (should (equal checks
+                         (list (list agent-auto--start-check-delay buffer))))
+          (let ((agent-session-input-state-functions
+                 (list (lambda (_session) (list :dialog t)))))
+            (agent-auto--check-dialog buffer))
+          (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
+          (let ((kill-buffer-query-functions nil))
+            (kill-buffer buffer))
+          (agent-auto--check-dialog buffer))))))
+
+;; A turn that ends within seconds of the session's start can end before
+;; the backend has reported the id by which the transcript is found; the
+;; task was then stuck for want of a status line nobody had read.
+(ert-deftest agent-auto-test-unreadable-reply-is-read-again ()
+  "Look again at a turn's end while the session's reply cannot be read.
+Only once the looks are used up does the task count as stuck."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root))
+                (timer-function (symbol-function 'run-with-timer))
+                (again nil))
+      (cl-letf (((symbol-function 'run-with-timer)
+                 (lambda (seconds repeat function &rest arguments)
+                   (if (eq function #'agent-auto--turn-end)
+                       (push (cons seconds arguments) again)
+                     (apply timer-function seconds repeat function
+                            arguments)))))
+        (run-hook-with-args 'agent-session-event-functions buffer 'stop)
+        (should (equal again (list (list agent-auto--turn-end-delay buffer
+                                         agent-auto--turn-end-retries))))
+        (setq again nil)
+        (agent-auto--turn-end buffer 2)
+        (should (equal again (list (list agent-auto--turn-end-delay buffer 1))))
+        (should (equal (agent-auto-test--tags file "Fix it") '("agent")))
+        (setq again nil)
+        (agent-auto--turn-end buffer 0)
+        (should-not again)
+        (should (equal (agent-auto-test--tags file "Fix it") '("stuck")))
+        (with-current-buffer buffer
+          (setq agent-auto-test--reply "Status: done: read at the second look"))
+        (setq again nil)
+        (agent-auto--turn-end buffer 1)
+        (should-not again)
+        (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                       "read at the second look"))))))
+
 (ert-deftest agent-auto-test-silence-is-stuck ()
   "Mark a task stuck after the silence timeout, and not before.
 Activity in the transcript counts as a sign of life."
@@ -868,6 +963,36 @@ is sent, and the task is linked to the resumed buffer."
                        "sid-00001"))
         (agent-auto-test--end-turn resumed "Status: done: finished on resume")
         (should (equal (agent-auto-test--tags file "Fix it") '("review")))))))
+
+;; The resumed session was named resume-ID, which says nothing in a list
+;; of sessions; the session the timer started was named after the task.
+(ert-deftest agent-auto-test-resumed-session-takes-the-task-name ()
+  "Resume a task's closed session under the name made from its heading.
+That is the name the session had when it was started.  A live session
+in the directory that holds the name makes it NAME-N."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--closed-task root "sid-00001")))
+      (should (equal (agent-session-instance (caar agent-auto-test--started))
+                     "fix-it"))
+      (agent-auto-test--acting shown
+        (agent-auto-test--act file))
+      (should (equal (plist-get (cdar agent-auto-test--started) :resume-id)
+                     "sid-00001"))
+      (should (equal (agent-session-instance (caar agent-auto-test--started))
+                     "fix-it"))
+      (should (string-suffix-p ":fix-it*"
+                               (buffer-name (car agent-auto-test--buffers))))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer (car agent-auto-test--buffers)))
+      (agent-start-session
+       (agent-session-create :backend 'stub :directory root
+                             :instance "fix-it"))
+      (agent-auto-test--acting shown
+        (agent-auto-test--act file))
+      (should (equal (plist-get (cdar agent-auto-test--started) :resume-id)
+                     "sid-00001"))
+      (should (equal (agent-session-instance (caar agent-auto-test--started))
+                     "fix-it-1")))))
 
 (ert-deftest agent-auto-test-acting-resumes-from-the-agenda ()
   "Resume the closed session of the task an agenda line shows."

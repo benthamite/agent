@@ -704,9 +704,10 @@ command was invoked from.  The first function to return non-nil decides:
 its value is a context plist naming a session, which is shown, and
 nothing is sent.  A context with `:buffer' names a live session buffer.
 One with `:resume-id', `:backend' and `:directory', and optionally
-`:account', names a past session, which is resumed; when resuming it
-signals an error, the error is reported and the thing is routed as if
-no function had answered.  `agent-delivery-functions' then run with the
+`:account' and `:instance', names a past session, which is resumed,
+under the instance name `:instance' gives when it gives one; when
+resuming it signals an error, the error is reported and the thing is
+routed as if no function had answered.  `agent-delivery-functions' then run with the
 context and the session buffer, so the context can carry what they need,
 such as `:todo'.  The hook is not run with a prefix argument.")
 
@@ -1427,6 +1428,14 @@ SELECTION is an account or pool name; a pool is routed to a member."
     (user-error "No %s account or pool named `%s'" backend selection))
   (agent-restart--ensure-account
    backend (agent-account--route-selection backend selection)))
+
+(defun agent--unique-instance-name (backend directory name)
+  "Return NAME, or NAME-N, as an instance name free in DIRECTORY.
+NAME itself is returned unless a live BACKEND session in DIRECTORY holds
+it, and then NAME-N for the smallest free N."
+  (if (assoc name (agent--instance-holders backend directory))
+      (agent--free-instance-name backend directory name)
+    name))
 
 (defun agent--free-instance-name (backend directory prefix)
   "Return an instance name no live BACKEND session in DIRECTORY uses.
@@ -4549,28 +4558,40 @@ TARGET is the cons of backend and account resolved there."
   "Show the session CONTEXT names, resuming it when it has no buffer.
 CONTEXT carries `:resume-id', `:backend' and `:directory', and may carry
 `:account', the account to resume under when it is not the one the
-directory gets.  The instance
-name is derived from the session id, as for a resumed branch, so a
-directory that already has a session never stops to ask for one.
-A live session is shown in the window already showing it, else in the
-selected window, as the session switcher does, never in a new split.
+directory gets, and `:instance', the instance name to resume under, as
+the name the session had; a live session that holds that name makes it
+NAME-N.  Without `:instance' the name is derived from the session id, as
+for a resumed branch.  Either way a directory that already has a session
+never stops to ask for a name.  A live session is shown in the window
+already showing it, else in the selected window, as the session switcher
+does, never in a new split.
 Return the session buffer."
   (let* ((session-id (plist-get context :resume-id))
+         (backend (plist-get context :backend))
+         (directory (file-name-as-directory
+                     (expand-file-name (plist-get context :directory))))
          (buffer (or (agent--buffer-for-session-id session-id)
                      (agent-start-session
                       (agent-session-create
-                       :backend (plist-get context :backend)
+                       :backend backend
                        :account (plist-get context :account)
-                       :directory (file-name-as-directory
-                                   (expand-file-name
-                                    (plist-get context :directory)))
-                       :instance (format "resume-%s"
-                                         (substring session-id 0
-                                                    (min 8 (length session-id)))))
+                       :directory directory
+                       :instance (agent--resume-instance-name
+                                  backend directory session-id
+                                  (plist-get context :instance)))
                       :resume-id session-id))))
     (pop-to-buffer buffer '((display-buffer-reuse-window
                              display-buffer-same-window)))
     buffer))
+
+(defun agent--resume-instance-name (backend directory session-id name)
+  "Return the instance name to resume SESSION-ID under in DIRECTORY.
+That is NAME, made unique among the live BACKEND sessions in DIRECTORY,
+or, when NAME is nil, a name derived from SESSION-ID."
+  (if name
+      (agent--unique-instance-name backend directory name)
+    (format "resume-%s"
+            (substring session-id 0 (min 8 (length session-id))))))
 
 (defun agent--deliver-to-new-session (context origin target)
   "Start a session for CONTEXT using TARGET and deliver it there.
