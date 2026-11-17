@@ -126,6 +126,14 @@ Handles verbatim (=…=) and code (~…~) to backticks."
                   (buffer-substring-no-properties body-start body-end))))
       (list :title title :body body))))
 
+(defun agent-todo--slug (title)
+  "Return a short name made from TITLE, safe for a session and a branch."
+  (let* ((slug (replace-regexp-in-string "[^a-z0-9]+" "-" (downcase title)))
+         (slug (string-trim (truncate-string-to-width
+                             (string-trim slug "-+" "-+") 40)
+                            "-+" "-+")))
+    (if (string-empty-p slug) "task" slug)))
+
 ;;;;; Commands
 
 ;;;###autoload
@@ -133,7 +141,8 @@ Handles verbatim (=…=) and code (~…~) to backticks."
   "Route the org TODO at point to an AI session.
 With prefix argument EXISTING send it to a running session instead of
 starting one in a project chosen from the TODO's text, or in the
-directory `agent-todo-directory-property' names for the TODO.  A TODO
+directory `agent-todo-directory-property' names for the TODO.  A session
+started for the TODO is named after its heading.  A TODO
 that already records a session has that session shown or resumed
 instead, and a double prefix argument starts a new one all the same; see
 `agent-recorded-session-functions'."
@@ -148,21 +157,26 @@ chosen from and the request itself, so it is submitted rather than left
 for review.  A TODO that `agent-todo-directory-property' names a
 directory for carries that directory, and no project is then chosen.
 The context's `:todo' is a marker at the heading, for
-`agent-delivery-functions'.  The heading is remembered as a marker
-because choosing that project can take a model request and a prompt, by
-which time point has moved, or the agenda has been rebuilt."
+`agent-delivery-functions', and its `:instance' is a name made from the
+heading, which a session started for the TODO takes, so that a second
+TODO started in the same directory asks for no name.  The heading is
+remembered as a marker because choosing that project can take a model
+request and a prompt, by which time point has moved, or the agenda has
+been rebuilt."
   (let ((marker (or (agent--org-entry-marker)
                     (user-error "Must be called on an org heading or agenda entry"))))
     (unless (agent--at-org-entry #'org-get-todo-state)
       (user-error "Point is not on a TODO heading"))
-    (let ((prompt (agent-todo--format-prompt
-                   (agent--at-org-entry #'agent-todo--collect-at-point))))
+    (let* ((entry (agent--at-org-entry #'agent-todo--collect-at-point))
+           (prompt (agent-todo--format-prompt entry)))
       (funcall callback
                (append (agent-todo--directory-context)
                        (list :text prompt
                              :payload prompt
                              :submit t
                              :todo marker
+                             :instance (agent-todo--slug
+                                        (plist-get entry :title))
                              :after (lambda ()
                                       (agent-todo--mark-in-progress
                                        marker))))))))

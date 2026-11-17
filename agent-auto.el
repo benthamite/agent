@@ -577,7 +577,7 @@ never started twice."
     (agent-auto--record (agent-auto-link-recorded link) backend)
     (agent-auto--save)
     (agent-auto--launch link backend directory
-                        (agent-auto--slug (plist-get entry :title))
+                        (agent-todo--slug (plist-get entry :title))
                         (agent-auto--brief entry))))
 
 (defun agent-auto--backend ()
@@ -613,14 +613,6 @@ It is the task's heading and body, then `agent-auto-instructions'."
     (if (member agent-auto-instructions '(nil ""))
         task
       (concat task "\n\n" agent-auto-instructions))))
-
-(defun agent-auto--slug (title)
-  "Return a short name made from TITLE, safe for a session and a branch."
-  (let* ((slug (replace-regexp-in-string "[^a-z0-9]+" "-" (downcase title)))
-         (slug (string-trim (truncate-string-to-width
-                             (string-trim slug "-+" "-+") 40)
-                            "-+" "-+")))
-    (if (string-empty-p slug) "task" slug)))
 
 (defun agent-auto--launch (link backend directory slug brief)
   "Start a BACKEND session named after SLUG on LINK's task, with BRIEF.
@@ -1067,7 +1059,7 @@ session when it exists, or nil; `:directory', the task's own; and
             :directory (let ((inhibit-message t))
                          (and agent-todo-directory-property
                               (agent-todo--property-directory)))
-            :instance (agent-auto--slug
+            :instance (agent-todo--slug
                        (plist-get (agent-todo--collect-at-point) :title))))))
 
 (defun agent-auto--session-id-p (recorded)

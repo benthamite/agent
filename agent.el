@@ -4462,8 +4462,11 @@ when the thing carries a working directory, as an absolute path,
 be asked, `:text' when it carries only text for a project to be chosen
 from, `:payload' for what to send, `:submit' for whether to submit it,
 an optional `:after' thunk run once the payload is delivered, in the
-buffer the command was invoked from, and `:todo', a marker at the org
-entry the thing is, when it is one.  A context that names an existing
+buffer the command was invoked from, `:todo', a marker at the org
+entry the thing is, when it is one, and `:instance', the instance name a
+session started for the thing takes, made unique among the live sessions
+in its directory; without it the session is named as any other started
+there.  A context that names an existing
 session instead carries `:resume-id', `:backend' and `:directory', and
 that session is shown or resumed with no payload.  The continuation is
 called rather than returned to because extraction can require network
@@ -4647,26 +4650,35 @@ Typing it in instead would race the session's startup: nothing sequences
 terminal input against a CLI that has only just been spawned, and a
 directory the CLI has not seen before opens with a trust prompt that the
 typed text would answer.  An unsubmitted payload is typed in, since it
-is meant to sit in the prompt for the user to edit.  ORIGIN is the
-buffer the command was invoked from."
+is meant to sit in the prompt for the user to edit.  The session takes
+the instance name the context carries as `:instance', when it carries
+one.  ORIGIN is the buffer the command was invoked from."
   (let* ((payload (plist-get context :payload))
          (submit (plist-get context :submit))
          (buffer (agent--start-session-in backend directory
-                                          (and submit payload))))
+                                          (and submit payload)
+                                          (plist-get context :instance))))
     (unless submit
       (agent-send-string payload buffer))
     (agent--finish-delivery context buffer origin)))
 
-(defun agent--start-session-in (backend directory &optional initial-prompt)
+(defun agent--start-session-in (backend directory
+                                        &optional initial-prompt name)
   "Start a BACKEND session in DIRECTORY and return its buffer.
 INITIAL-PROMPT, when non-nil, is submitted as the session's first user
-message."
+message.  NAME, when non-nil, is the session's instance name, or NAME-N
+when a live BACKEND session in DIRECTORY holds NAME, so nothing is asked.
+Without NAME the first session in DIRECTORY is the default instance and
+a later one has its name read."
   (let ((dir (file-name-as-directory (expand-file-name directory)))
         (label (when-let* ((struct (agent-backend backend)))
                  (agent-backend-label struct))))
     (message "Starting %s in %s..." label (abbreviate-file-name dir))
     (agent-start-session
-     (agent-session-create :backend backend :directory dir)
+     (agent-session-create
+      :backend backend
+      :directory dir
+      :instance (and name (agent--unique-instance-name backend dir name)))
      :initial-prompt initial-prompt)))
 
 (defun agent--deliver-to (context buffer origin)

@@ -389,6 +389,158 @@ persisted selection, as for any session started in that directory."
           (agent-act-on-thing-at-point)))
       (should (equal captured (list root "work" "Do it"))))))
 
+;;;; Session names
+
+(defmacro agent-todo-test--with-sessions (sessions &rest body)
+  "Evaluate BODY with one backend whose sessions are collected in SESSIONS.
+The backend is `one'.  SESSIONS is a symbol, bound to the `agent-session'
+of each session started, the latest first, and each of them counts as
+live.  Every function that asks the user something signals an error, as
+does the project reader."
+  (declare (indent 1) (debug (symbolp body)))
+  `(let ((agent-backends nil)
+         (agent-account-directory-rules nil)
+         (,sessions nil))
+     (agent-register-backend
+      'one
+      :buffer-p #'ignore
+      :find-all-buffers #'ignore
+      :label "Test"
+      :start-session (lambda (session &rest _)
+                       (push session ,sessions)
+                       (current-buffer)))
+     (cl-letf (((symbol-function 'agent-session-buffers)
+                (lambda () (copy-sequence ,sessions)))
+               ((symbol-function 'agent-session) #'identity)
+               ((symbol-function 'read-string)
+                (lambda (&rest _) (error "Asked with `read-string'")))
+               ((symbol-function 'completing-read)
+                (lambda (&rest _) (error "Asked with `completing-read'")))
+               ((symbol-function 'y-or-n-p)
+                (lambda (&rest _) (error "Asked with `y-or-n-p'")))
+               ((symbol-function 'yes-or-no-p)
+                (lambda (&rest _) (error "Asked with `yes-or-no-p'")))
+               ((symbol-function 'agent-project-read)
+                (lambda (&rest _) (error "Consulted the project reader")))
+               ((symbol-function 'display-buffer) #'ignore))
+       ,@body)))
+
+(defun agent-todo-test--start (command contents &rest headings)
+  "Call COMMAND on each of HEADINGS in an org buffer holding CONTENTS."
+  (with-temp-buffer
+    (insert contents)
+    (org-mode)
+    (dolist (heading headings)
+      (goto-char (point-min))
+      (search-forward heading)
+      (funcall command))))
+
+(defun agent-todo-test--instances (sessions)
+  "Return the instance names of SESSIONS, the first started first."
+  (reverse (mapcar #'agent-session-instance sessions)))
+
+(ert-deftest agent-todo-test-slug ()
+  "Make a short name of lower-case letters, digits and hyphens."
+  (should (equal (agent-todo--slug "Fix the Build!") "fix-the-build"))
+  (should (equal (agent-todo--slug "!!!") "task"))
+  (should (<= (length (agent-todo--slug (make-string 80 ?a))) 40)))
+
+(ert-deftest agent-todo-test-context-carries-the-task-name ()
+  "Name the session of a TODO after its heading."
+  (let ((context (agent-todo-test--context-at
+                  "Fix it" "* TODO Fix it: now\nBody.\n")))
+    (should (equal (plist-get context :instance) "fix-it-now"))))
+
+(ert-deftest agent-todo-test-two-todos-in-one-directory-ask-for-no-name ()
+  "Start two TODOs of one directory as two sessions named after them.
+Neither is the default instance, and nothing is asked."
+  (dolist (command '(agent-act-on-thing-at-point agent-send-todo-at-point))
+    (agent-test-helper-with-directory root
+      (let ((agent-todo-directory-property "DIR"))
+        (agent-todo-test--with-sessions sessions
+          (agent-todo-test--start
+           command
+           (format "* Project\n:PROPERTIES:\n:DIR: %s\n:END:\n** TODO Fix the build\n** TODO Write the docs\n"
+                   root)
+           "Fix the build" "Write the docs")
+          (should (equal (agent-todo-test--instances sessions)
+                         '("fix-the-build" "write-the-docs")))
+          (should (equal (mapcar #'agent-session-directory sessions)
+                         (list root root))))))))
+
+(ert-deftest agent-todo-test-two-todos-start-with-prompts-inhibited ()
+  "Start two TODOs of one directory where nothing may be asked."
+  (agent-test-helper-with-directory root
+    (let ((agent-todo-directory-property "DIR")
+          (agent-inhibit-prompts t)
+          (inhibit-interaction t))
+      (agent-todo-test--with-sessions sessions
+        (agent-todo-test--start
+         #'agent-act-on-thing-at-point
+         (format "* Project\n:PROPERTIES:\n:DIR: %s\n:END:\n** TODO Fix the build\n** TODO Write the docs\n"
+                 root)
+         "Fix the build" "Write the docs")
+        (should (equal (agent-todo-test--instances sessions)
+                       '("fix-the-build" "write-the-docs")))))))
+
+(ert-deftest agent-todo-test-a-taken-task-name-is-numbered ()
+  "Number the name of a TODO whose heading names a live session there."
+  (agent-test-helper-with-directory root
+    (let ((agent-todo-directory-property "DIR"))
+      (agent-todo-test--with-sessions sessions
+        (agent-todo-test--start
+         #'agent-act-on-thing-at-point
+         (format "#+PROPERTY: DIR %s\n* TODO Do it\n* TODO Do it!\n" root)
+         "Do it" "Do it!")
+        (should (equal (agent-todo-test--instances sessions)
+                       '("do-it" "do-it-1")))))))
+
+(ert-deftest agent-todo-test-a-chosen-project-takes-the-task-name ()
+  "Name the session after the TODO when its project was chosen, too."
+  (agent-test-helper-with-directory root
+    (agent-todo-test--with-sessions sessions
+      (cl-letf (((symbol-function 'agent-project-read)
+                 (lambda (_account _text _prompt callback &rest _)
+                   (funcall callback root))))
+        (agent-todo-test--start #'agent-act-on-thing-at-point
+                                "* TODO Fix the build\n" "Fix the build"))
+      (should (equal (agent-todo-test--instances sessions)
+                     '("fix-the-build"))))))
+
+(ert-deftest agent-todo-test-another-thing-is-named-as-before ()
+  "Leave the name of a session started for a thing that is no TODO.
+The first in a directory is the default instance, and the second has its
+name read."
+  (agent-test-helper-with-directory root
+    (agent-todo-test--with-sessions sessions
+      (let ((extractor (lambda (callback)
+                         (funcall callback (list :directory root
+                                                 :payload "Look"
+                                                 :submit t))))
+            asked)
+        (agent--act-on-context extractor nil)
+        (should (equal (agent-todo-test--instances sessions) '(nil)))
+        (should-error (agent--act-on-context extractor nil))
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (&rest _) (setq asked t) "")))
+          (agent--act-on-context extractor nil))
+        (should asked)
+        (should (equal (agent-todo-test--instances sessions)
+                       '(nil "new-1")))))))
+
+(ert-deftest agent-todo-test-a-running-session-keeps-its-name ()
+  "Send a TODO to a running session without starting or naming one."
+  (agent-todo-test--with-sessions sessions
+    (let (sent)
+      (cl-letf (((symbol-function 'agent--read-session-buffer)
+                 (lambda () (current-buffer)))
+                ((symbol-function 'agent-submit)
+                 (lambda (payload _buffer) (setq sent payload))))
+        (agent-todo-test--start (lambda () (agent-send-todo-at-point '(4)))
+                                "* TODO Fix the build\n" "Fix the build"))
+      (should (equal sent "Fix the build"))
+      (should-not sessions))))
+
 (ert-deftest agent-todo-test-missing-directory-leaves-the-project-choice ()
   "Choose the project from the TODO's text when its directory is gone.
 The project is read from the sources of the account selected, with
@@ -403,7 +555,7 @@ nothing suggested, and the session starts in the one chosen."
                    (setq asked (list account text suggestion))
                    (funcall callback root)))
                 ((symbol-function 'agent--start-session-in)
-                 (lambda (_backend directory &optional prompt)
+                 (lambda (_backend directory &optional prompt _name)
                    (setq started (list directory prompt))
                    (current-buffer)))
                 ((symbol-function 'display-buffer) #'ignore))

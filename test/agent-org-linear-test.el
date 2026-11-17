@@ -97,6 +97,49 @@ The file is written to disk so that an agenda can be built from it."
       (should (equal (plist-get context :text) (plist-get context :payload)))
       (should (string-suffix-p "AS-34/loose" (plist-get context :payload))))))
 
+(ert-deftest agent-org-linear-test-issues-in-one-directory-ask-for-no-name ()
+  "Start two issues of one directory as two sessions named after them.
+Nothing is asked, also where nothing may be."
+  (agent-test-helper-with-directory root
+    (let ((agent-backends nil)
+          (agent-account-directory-rules nil)
+          (agent-account-origin-rules nil)
+          (agent-todo-directory-property "DIR")
+          (agent-inhibit-prompts t)
+          (inhibit-interaction t)
+          sessions)
+      (agent-register-backend
+       'one
+       :buffer-p #'ignore
+       :find-all-buffers #'ignore
+       :label "Test"
+       :start-session (lambda (session &rest _)
+                        (push session sessions)
+                        (current-buffer)))
+      (cl-letf (((symbol-function 'agent-session-buffers)
+                 (lambda () (copy-sequence sessions)))
+                ((symbol-function 'agent-session) #'identity)
+                ((symbol-function 'read-string)
+                 (lambda (&rest _) (error "Asked with `read-string'")))
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "Asked with `completing-read'")))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (error "Asked with `y-or-n-p'")))
+                ((symbol-function 'agent-project-read)
+                 (lambda (&rest _) (error "Consulted the project reader")))
+                ((symbol-function 'agent-send-string) #'ignore)
+                ((symbol-function 'display-buffer) #'ignore))
+        (agent-org-linear-test--with-file
+          (goto-char (point-min))
+          (insert (format "#+PROPERTY: DIR %s\n" root))
+          (org-mode-restart)
+          (dolist (heading '("Agree on the pipeline version" "Loose issue"))
+            (goto-char (point-min))
+            (search-forward heading)
+            (agent-act-on-linear-issue))))
+      (should (equal (reverse (mapcar #'agent-session-instance sessions))
+                     '("agree-on-the-pipeline-version" "loose-issue"))))))
+
 (ert-deftest agent-org-linear-test-agenda-after-thunk-marks-the-heading ()
   "Move the issue's own heading to the in-progress keyword from the agenda.
 The agenda is rebuilt, so its line shows the new keyword."
