@@ -2636,9 +2636,33 @@ Bind `started', the backends started; any completion prompt fails the test."
              ((symbol-function 'read-string)
               (lambda (&rest _) " tests ")))
      (let ((agent-inhibit-prompts nil)
-           (session (agent-session-create :backend 'one :directory "/tmp/")))
-       (agent-start-session session)
-       (should (equal (agent-session-instance session) "tests"))))))
+           (session (agent-session-create :backend 'one :directory "/tmp/"))
+           (buffer (generate-new-buffer " new")))
+       (unwind-protect
+           (cl-letf (((agent-backend-start-session (agent-backend 'one))
+                      (lambda (&rest _) buffer)))
+             (should (eq (agent-start-session session) buffer))
+             (should (equal (agent-session-instance session) "tests"))
+             (should (buffer-local-value 'agent--named buffer)))
+         (kill-buffer buffer))))))
+
+(ert-deftest agent-test-offered-instance-name-is-not-named ()
+  "Taking the offered new-N name leaves the session unnamed."
+  (agent-test--with-two-backends
+   (cl-letf (((symbol-function 'agent--instance-holders)
+              (lambda (_backend _directory)
+                (list (cons "default" (current-buffer))))))
+     (let ((session (agent-session-create :backend 'one :directory "/tmp/")))
+       (should-not (agent--read-typed-instance-name session))
+       (should (equal (agent-session-instance session) "new-1"))))))
+
+(ert-deftest agent-test-named-flag-survives-a-resume ()
+  "A renamed session's resumed buffer still shows its instance name."
+  (with-temp-buffer
+    (let ((agent--session-keys (make-hash-table :test #'eq)))
+      (agent--restore-session-user-states
+       (list (cons (current-buffer) (list :named t))))
+      (should agent--named))))
 
 (ert-deftest agent-test-first-session-in-a-directory-is-not-asked-a-name ()
   "Only a second session in a directory is asked for a name."
@@ -2691,8 +2715,11 @@ Bind `started', the backends started; any completion prompt fails the test."
                        (lambda (&rest _) (ert-fail "Unexpected prompt")))
                       ((symbol-function 'yes-or-no-p)
                        (lambda (&rest _) (ert-fail "Unexpected prompt"))))
+              (should (equal (agent-display-name buf) "repo"))
               (agent-rename-session buf "new")
               (should (equal (buffer-name buf) "*one:~/repo/:new*"))
+              (should (equal (agent-display-name buf) "repo:new"))
+              (should (plist-get (agent--session-user-state buf) :named))
               (should (equal (agent-session-instance (agent-session buf)) "new"))
               (should (eq (agent-session-buffer-for-name "*one:~/repo/:old*") buf))
               (should (equal (agent-session-current-name "*one:~/repo/:old*")
@@ -6255,7 +6282,8 @@ time tells it from the Emacs that replaced it."
                                   :instance "default" :id "sid-1"
                                   :options (:terminal-backend eat)
                                   :state (:snoozed nil :snooze-until nil
-                                                   :wake-ups nil :key nil))))
+                                                   :wake-ups nil :key nil
+                                                   :named nil))))
         (setq agent--teardown-done t)
         (should-not (agent--session-registry-entry buf))))))
 

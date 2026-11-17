@@ -454,17 +454,39 @@ Return the new session buffer."
                                (agent--instance-holders backend directory))))
       (user-error "Instance `%s' in %s is already taken by %s"
                   instance directory (buffer-name (cdr holder))))
-    (unless (agent-session-instance session)
-      (setf (agent-session-instance session)
-            (agent--read-instance-name backend directory)))
-    (agent-check-session-start backend account)
-    (when (and resume-id (not (plist-get options :fork)))
-      (setf (agent-session-id session) resume-id))
-    (when account
-      (agent-account-sync backend account))
-    (let ((agent-account--starting (and account (cons backend account))))
-      (apply (agent-backend-start-session (agent-backend backend))
-             session options))))
+    (let ((typed (unless (agent-session-instance session)
+                   (agent--read-typed-instance-name session))))
+      (agent-check-session-start backend account)
+      (when (and resume-id (not (plist-get options :fork)))
+        (setf (agent-session-id session) resume-id))
+      (when account
+        (agent-account-sync backend account))
+      (let ((agent-account--starting (and account (cons backend account))))
+        (agent--mark-named
+         (apply (agent-backend-start-session (agent-backend backend))
+                session options)
+         typed)))))
+
+(defun agent--read-typed-instance-name (session)
+  "Set SESSION's instance from `agent--read-instance-name'.
+Return non-nil when the user typed a name rather than taking the
+\"new-N\" name offered."
+  (let* ((backend (agent-session-backend session))
+         (directory (agent-session-directory session))
+         (offered (and (stringp directory)
+                       (agent--free-instance-name backend directory "new")))
+         (name (agent--read-instance-name backend directory)))
+    (setf (agent-session-instance session) name)
+    (and name (not (equal name offered)))))
+
+(defun agent--mark-named (buffer named)
+  "Record on session BUFFER that the user chose its name, when NAMED.
+Return BUFFER."
+  (when named
+    (with-current-buffer buffer
+      (setq agent--named t))
+    (agent--refresh-display-names))
+  buffer)
 
 (defun agent--read-instance-name (backend directory)
   "Read the instance name of a new BACKEND session in DIRECTORY.
@@ -1249,8 +1271,8 @@ the buffer's name."
 (defun agent-display-name (&optional buffer)
   "Return the display name for BUFFER.
 Use the project name alone when it is unique among active sessions,
-or \"project:instance\" when multiple sessions share the same
-project.  Appends the backend's display suffix when provided.
+or \"project:instance\" when multiple sessions share the same project
+or the user chose BUFFER's instance name, as `agent--named' records.  Appends the backend's display suffix when provided.
 Returns the cached value when available."
   (let ((buf (or buffer (current-buffer))))
     (or (buffer-local-value 'agent--display-name-cache buf)
@@ -1266,7 +1288,8 @@ Returns the cached value when available."
                      (agent--find-all-buffers)))
          (others (cl-remove buffer all-bufs))
          (sibling-names (mapcar #'agent--buffer-session-name others))
-         (base (if (member name sibling-names)
+         (base (if (or (member name sibling-names)
+                       (buffer-local-value 'agent--named buffer))
                    (agent--qualified-session-name buffer)
                  name)))
     (agent--display-name-with-suffix buffer backend base)))
@@ -1415,6 +1438,14 @@ still names it by that name."
 The CLI's hooks and helpers name the buffer by that name for as long as
 the process runs.")
 (put 'agent--launch-name 'permanent-local t)
+
+(defvar-local agent--named nil
+  "Non-nil when the user chose this session's instance name.
+Set by `agent-rename-session', and when a session starts under a name
+typed at `agent--read-instance-name'.  The display name then shows the
+instance even when no other session shares the directory.  A restart,
+a resume from the registry and a handoff carry it over.")
+(put 'agent--named 'permanent-local t)
 
 (defun agent-session-buffer-for-name (name)
   "Return the live session buffer the CLI knows as NAME, or nil.
@@ -3872,9 +3903,12 @@ passed as the initial prompt."
                (not (agent--confirm-no-captured-prompts
                      backend source "Handoff")))
       (user-error "Handoff aborted"))
-    (agent--kill-handoff-source backend source source-directory)
-    (agent-start-session session :initial-prompt
-                         (plist-get handoff :prompt))))
+    (let ((named (and source (buffer-local-value 'agent--named source))))
+      (agent--kill-handoff-source backend source source-directory)
+      (agent--mark-named
+       (agent-start-session session :initial-prompt
+                            (plist-get handoff :prompt))
+       named))))
 
 (defun agent--handoff-source-buffer (buffer-name)
   "Return the session buffer named BUFFER-NAME, or the current buffer.
@@ -4770,6 +4804,7 @@ the renamed buffer.  Captured prompts follow the session."
         (setq agent--launch-name (buffer-name)))
       (agent--change-session-identity
        buffer (agent-session-account session) name)
+      (setq agent--named t)
       (rename-buffer (agent-session-buffer-name session)))
     (agent--refresh-display-names)
     (agent--schedule-session-registry-save)))
@@ -5031,13 +5066,15 @@ session gets back the state recorded in the entry's `:state', as
   "Return the state the user set on session BUFFER, as a plist.
 `:snoozed' is non-nil when BUFFER is snoozed, and `:snooze-until' is the
 `float-time' at which a timed snooze ends.  `:wake-ups' is non-nil when
-BUFFER accepts wake-ups, and `:key' is its switcher key.  A resumed
-session gets this state back from `agent--restore-session-user-states'."
+BUFFER accepts wake-ups, `:key' is its switcher key, and `:named' is
+non-nil when the user chose its instance name.  A resumed session gets
+this state back from `agent--restore-session-user-states'."
   (let ((remaining (agent--snooze-remaining buffer)))
     (list :snoozed (agent-session-snoozed-p buffer)
           :snooze-until (and remaining (+ (float-time) remaining))
           :wake-ups (agent-session-accepts-wake-ups-p buffer)
-          :key (gethash buffer agent--session-keys))))
+          :key (gethash buffer agent--session-keys)
+          :named (buffer-local-value 'agent--named buffer))))
 
 (defun agent--restore-session-user-states (pairs)
   "Give resumed sessions back their recorded user state.
@@ -5071,6 +5108,8 @@ STATE has the form `agent--session-user-state' returns."
       (agent--set-snoozed buffer t (and until (- until (float-time))))))
   (with-current-buffer buffer
     (setq agent--accepts-wake-ups (and (plist-get state :wake-ups) t))
+    (when (plist-get state :named)
+      (setq agent--named t))
     (force-mode-line-update)))
 
 (defun agent--free-entry-instance (entry)
