@@ -1670,61 +1670,109 @@ the mark, and closing the session removes it without a rebuild."
 
 ;;;; The mode
 
+(defconst agent-auto-test--installed
+  '((agent-session-event-functions . agent-auto--on-event)
+    (agent-session-id-functions . agent-auto--on-id)
+    (agent-delivery-functions . agent-auto--record-delivery)
+    (agent-recorded-session-functions . agent-auto--recorded-session)
+    (agent-session-state-change-functions . agent-auto--schedule-marks)
+    (agent-session-id-functions . agent-auto--schedule-marks)
+    (kill-buffer-hook . agent-auto--session-killed)
+    (org-mode-hook . agent-auto--schedule-marks)
+    (org-agenda-finalize-hook . agent-auto--mark-agenda))
+  "What the mode installs, each a cons of a hook and a function.")
+
+(defmacro agent-auto-test--with-clean-mode (&rest body)
+  "Evaluate BODY with the mode off and nothing of it installed.
+Everything the mode installs is bound, so BODY can turn it on and off,
+and it is turned off afterwards."
+  (declare (indent 0) (debug (body)))
+  `(let ((agent-session-event-functions nil)
+         (agent-session-id-functions nil)
+         (agent-delivery-functions nil)
+         (agent-recorded-session-functions nil)
+         (agent-session-inherited-variables nil)
+         (agent-session-state-change-functions nil)
+         (kill-buffer-hook nil)
+         (org-mode-hook nil)
+         (org-agenda-finalize-hook nil)
+         (agent-auto--marks-timer nil)
+         (agent-auto--timer nil)
+         (agent-auto--queue-timer nil)
+         (agent-auto--queue nil)
+         (agent-auto--processes nil)
+         (agent-auto--starting nil)
+         (agent-todo-directory-property "DIR")
+         (agent-auto-interval 3600)
+         (agent-auto-mode nil))
+     (unwind-protect (progn ,@body)
+       (agent-auto-mode -1))))
+
+(defun agent-auto-test--tick-timers ()
+  "Return the timers that run the mode's search."
+  (seq-filter (lambda (timer)
+                (eq (timer--function timer) #'agent-auto--tick))
+              timer-list))
+
+(defun agent-auto-test--should-be-installed ()
+  "Fail unless everything the mode installs is installed exactly once."
+  (pcase-dolist (`(,hook . ,function) agent-auto-test--installed)
+    (should (equal (cons hook (seq-count (lambda (entry) (eq entry function))
+                                         (symbol-value hook)))
+                   (cons hook 1))))
+  (dolist (variable '(agent-auto--link agent-auto--unattended))
+    (should (= (seq-count (lambda (entry) (eq entry variable))
+                          agent-session-inherited-variables)
+               1)))
+  (should (equal (agent-auto-test--tick-timers) (list agent-auto--timer))))
+
 (ert-deftest agent-auto-test-mode-installs-and-removes-itself ()
   "Turn the timer and the hooks on and off with the mode."
-  (let ((agent-session-event-functions nil)
-        (agent-session-id-functions nil)
-        (agent-delivery-functions nil)
-        (agent-recorded-session-functions nil)
-        (agent-session-inherited-variables nil)
-        (agent-session-state-change-functions nil)
-        (kill-buffer-hook nil)
-        (org-mode-hook nil)
-        (org-agenda-finalize-hook nil)
-        (agent-auto--marks-timer nil)
-        (agent-auto--timer nil)
-        (agent-auto--queue-timer nil)
-        (agent-auto--queue nil)
-        (agent-auto--processes nil)
-        (agent-auto--starting nil)
-        (agent-todo-directory-property "DIR")
-        (agent-auto-interval 3600)
-        (agent-auto-mode nil))
-    (unwind-protect
-        (progn
-          (agent-auto-mode 1)
-          (should (timerp agent-auto--timer))
-          (should (memq agent-auto--timer timer-list))
-          (should (memq #'agent-auto--on-event agent-session-event-functions))
-          (should (memq #'agent-auto--on-id agent-session-id-functions))
-          (should (memq #'agent-auto--record-delivery agent-delivery-functions))
-          (should (memq #'agent-auto--recorded-session
-                        agent-recorded-session-functions))
-          (should (memq 'agent-auto--link agent-session-inherited-variables))
-          (should (memq #'agent-auto--schedule-marks
-                        agent-session-state-change-functions))
-          (should (memq #'agent-auto--schedule-marks
-                        agent-session-id-functions))
-          (should (memq #'agent-auto--session-killed kill-buffer-hook))
-          (should (memq #'agent-auto--schedule-marks org-mode-hook))
-          (should (memq #'agent-auto--mark-agenda org-agenda-finalize-hook))
-          (should (timerp agent-auto--marks-timer))
-          (let ((timer agent-auto--timer))
-            (agent-auto-mode -1)
-            (should-not (memq timer timer-list)))
-          (should-not agent-auto--timer)
-          (should-not agent-session-event-functions)
-          (should-not agent-session-id-functions)
-          (should-not agent-delivery-functions)
-          (should-not agent-recorded-session-functions)
-          (should-not agent-session-inherited-variables)
-          (should-not agent-session-state-change-functions)
-          (should-not kill-buffer-hook)
-          (should-not org-mode-hook)
-          (should-not org-agenda-finalize-hook)
-          (should-not agent-auto--marks-timer)
-          (should-error (agent-auto-run-now) :type 'user-error))
-      (agent-auto-mode -1))))
+  (agent-auto-test--with-clean-mode
+    (agent-auto-mode 1)
+    (should (timerp agent-auto--timer))
+    (agent-auto-test--should-be-installed)
+    (should (timerp agent-auto--marks-timer))
+    (let ((timer agent-auto--timer))
+      (agent-auto-mode -1)
+      (should-not (memq timer timer-list)))
+    (should-not agent-auto--timer)
+    (should-not agent-session-event-functions)
+    (should-not agent-session-id-functions)
+    (should-not agent-delivery-functions)
+    (should-not agent-recorded-session-functions)
+    (should-not agent-session-inherited-variables)
+    (should-not agent-session-state-change-functions)
+    (should-not kill-buffer-hook)
+    (should-not org-mode-hook)
+    (should-not org-agenda-finalize-hook)
+    (should-not agent-auto--marks-timer)
+    (should-error (agent-auto-run-now) :type 'user-error)))
+
+;; The mode's function runs only when the mode is toggled, so an Emacs
+;; that had the mode on kept the hooks and the timer of the version it
+;; turned it on with, however often the file was loaded again.
+(ert-deftest agent-auto-test-reload-installs-what-the-mode-needs ()
+  "Load the file again while the mode is on and find everything installed.
+Whatever the version that turned the mode on did not install is there,
+and nothing is there twice, the timer included, however often the file
+is loaded.  Loading it while the mode is off installs nothing."
+  (let ((source (locate-library "agent-auto.el")))
+    (agent-auto-test--with-clean-mode
+      (load source nil t)
+      (should-not (agent-auto-test--tick-timers))
+      (should-not org-agenda-finalize-hook)
+      (agent-auto-mode 1)
+      (let ((timer agent-auto--timer))
+        (remove-hook 'org-agenda-finalize-hook #'agent-auto--mark-agenda)
+        (remove-hook 'agent-delivery-functions #'agent-auto--record-delivery)
+        (setq agent-session-inherited-variables nil)
+        (load source nil t)
+        (agent-auto-test--should-be-installed)
+        (should-not (memq timer timer-list)))
+      (load source nil t)
+      (agent-auto-test--should-be-installed)
+      (should agent-auto-mode))))
 
 (ert-deftest agent-auto-test-mode-needs-ripgrep ()
   "Refuse to turn on without ripgrep, and stay off."

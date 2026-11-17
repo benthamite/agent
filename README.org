@@ -1056,7 +1056,7 @@ The =agent-todo= module turns an Org TODO entry into work for an AI session, wit
 :END:
 
 #+findex: agent-auto-mode
-~agent-auto-mode~ is a global minor mode, off by default. While it is on, a timer looks every ~agent-auto-interval~ seconds for Org tasks tagged as ready for an agent and starts a session on each, and the sessions of tasks are followed until their turns end; a task whose session is open shows a mark on its heading and its agenda lines ([[#h:auto-options][Unattended sessions on tagged tasks]]). It refuses to turn on without ripgrep. Turning it off stops the timer and the following; sessions already started keep running, and their tasks are picked up again when it is turned back on.
+~agent-auto-mode~ is a global minor mode, off by default. While it is on, a timer looks every ~agent-auto-interval~ seconds for Org tasks tagged as ready for an agent and starts a session on each, and the sessions of tasks are followed until their turns end; a task whose session is open shows a mark on its heading and its agenda lines ([[#h:auto-options][Unattended sessions on tagged tasks]]). It refuses to turn on without ripgrep. Turning it off stops the timer and the following; sessions already started keep running, and their tasks are picked up again when it is turned back on. Loading =agent-auto.el= again while the mode is on, as happens when the package is updated in a running Emacs, installs the hooks and the timer of the version just loaded, each of them once, so the mode does not have to be turned off and on to pick up what an update added.
 
 #+findex: agent-auto-run-now
 ~agent-auto-run-now~ looks for ready tasks at once instead of waiting for the timer. It needs the mode to be on.

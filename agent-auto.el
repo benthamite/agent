@@ -304,18 +304,40 @@ agenda show `agent-auto-working-mark' or `agent-auto-waiting-mark'."
     (user-error "`agent-auto-mode' needs ripgrep (rg) to search for tasks"))
   (unless agent-todo-directory-property
     (message "agent-auto: no task has a directory while `agent-todo-directory-property' is nil"))
-  (add-to-list 'agent-session-inherited-variables 'agent-auto--link)
-  (add-to-list 'agent-session-inherited-variables 'agent-auto--unattended)
-  (add-hook 'agent-session-event-functions #'agent-auto--on-event)
-  (add-hook 'agent-session-id-functions #'agent-auto--on-id)
-  (add-hook 'agent-delivery-functions #'agent-auto--record-delivery)
-  (add-hook 'agent-recorded-session-functions #'agent-auto--recorded-session)
-  (add-hook 'agent-session-state-change-functions #'agent-auto--schedule-marks)
-  (add-hook 'agent-session-id-functions #'agent-auto--schedule-marks)
-  (add-hook 'kill-buffer-hook #'agent-auto--session-killed)
-  (add-hook 'org-mode-hook #'agent-auto--schedule-marks)
-  (add-hook 'org-agenda-finalize-hook #'agent-auto--mark-agenda)
+  (agent-auto--install))
+
+(defconst agent-auto--hooks
+  '((agent-session-event-functions . agent-auto--on-event)
+    (agent-session-id-functions . agent-auto--on-id)
+    (agent-delivery-functions . agent-auto--record-delivery)
+    (agent-recorded-session-functions . agent-auto--recorded-session)
+    (agent-session-state-change-functions . agent-auto--schedule-marks)
+    (agent-session-id-functions . agent-auto--schedule-marks)
+    (kill-buffer-hook . agent-auto--session-killed)
+    (org-mode-hook . agent-auto--schedule-marks)
+    (org-agenda-finalize-hook . agent-auto--mark-agenda))
+  "The hooks of the mode, each a cons of a hook and the function it gets.
+The functions go on the global value of each hook.")
+
+(defconst agent-auto--inherited-variables
+  '(agent-auto--link agent-auto--unattended)
+  "The variables of a session that the session replacing it takes over.
+See `agent-session-inherited-variables'.")
+
+(defun agent-auto--install ()
+  "Install everything the mode needs while it is on, each thing once.
+That is its hooks, the variables its sessions pass on, and its timer,
+which replaces any timer already running the search.  Calling this
+again changes nothing but the timer, so the end of this file calls it
+when the file is loaded while the mode is on: an Emacs that turned the
+mode on with an older version of the file then has what this version
+installs, without the mode being toggled."
+  (dolist (variable agent-auto--inherited-variables)
+    (add-to-list 'agent-session-inherited-variables variable))
+  (pcase-dolist (`(,hook . ,function) agent-auto--hooks)
+    (add-hook hook function))
   (agent-auto--schedule-marks)
+  (cancel-function-timers #'agent-auto--tick)
   (setq agent-auto--timer
         (run-with-timer agent-auto-interval agent-auto-interval
                         #'agent-auto--tick)))
@@ -324,18 +346,9 @@ agenda show `agent-auto-working-mark' or `agent-auto-waiting-mark'."
   "Stop watching sessions."
   (setq agent-session-inherited-variables
         (seq-difference agent-session-inherited-variables
-                        '(agent-auto--link agent-auto--unattended)))
-  (remove-hook 'agent-session-event-functions #'agent-auto--on-event)
-  (remove-hook 'agent-session-id-functions #'agent-auto--on-id)
-  (remove-hook 'agent-delivery-functions #'agent-auto--record-delivery)
-  (remove-hook 'agent-recorded-session-functions
-               #'agent-auto--recorded-session)
-  (remove-hook 'agent-session-state-change-functions
-               #'agent-auto--schedule-marks)
-  (remove-hook 'agent-session-id-functions #'agent-auto--schedule-marks)
-  (remove-hook 'kill-buffer-hook #'agent-auto--session-killed)
-  (remove-hook 'org-mode-hook #'agent-auto--schedule-marks)
-  (remove-hook 'org-agenda-finalize-hook #'agent-auto--mark-agenda)
+                        agent-auto--inherited-variables))
+  (pcase-dolist (`(,hook . ,function) agent-auto--hooks)
+    (remove-hook hook function))
   (agent-auto--remove-marks))
 
 (defun agent-auto--reset ()
@@ -1385,6 +1398,14 @@ and without the question about file-local variables."
                         (find-file-noselect file t)))))
       (and (with-current-buffer buffer (derived-mode-p 'org-mode))
            buffer))))
+
+;;;; Loading again
+
+;; The mode's own function runs only when the mode is toggled.  Loading
+;; this file again while the mode is on, as when the package is updated
+;; in a running Emacs, therefore installs what this version needs.
+(when agent-auto-mode
+  (agent-auto--install))
 
 (provide 'agent-auto)
 ;;; agent-auto.el ends here
