@@ -827,6 +827,56 @@ written as for one it started."
       (agent-auto-test--run)
       (should (= (length agent-auto-test--started) 1)))))
 
+;; The session was recorded and the buffer saved, and then the keyword
+;; was changed, which left the file modified: until it was saved by hand
+;; the session's id and its result waited, and so did every other edit
+;; meant for that file.
+(ert-deftest agent-auto-test-manual-start-leaves-a-saved-buffer-saved ()
+  "Save a task's buffer after a session is started on it by hand.
+The task is recorded and moved to the in-progress keyword, on disk, when
+its buffer had no unsaved edits, from its heading and from an agenda
+line.  The session's id is then recorded as soon as it is known.  A
+buffer that had unsaved edits is left unsaved, with both changes in it."
+  (dolist (from '(heading agenda))
+    (agent-auto-test--with root
+      (let* ((agent-todo-in-progress-keyword "DOING")
+             (file (agent-auto-test--file
+                    root (concat "#+TODO: TODO DOING | DONE\n"
+                                 (agent-auto-test--task root nil ""))))
+             (org (find-file-noselect file)))
+        (with-current-buffer org
+          (goto-char (point-min))
+          (search-forward "Fix it")
+          (if (eq from 'heading)
+              (agent-act-on-thing-at-point)
+            (agent-test-helper-in-agenda "Fix it"
+              (agent-auto-test--keeping-buffer (agent-act-on-thing-at-point)))))
+        (should (= (length agent-auto-test--started) 1))
+        (should-not (buffer-modified-p org))
+        (should (string-match-p "^\\* DOING Fix it" (agent-auto-test--disk file)))
+        (should (string-match-p "AGENT_SESSION" (agent-auto-test--disk file)))
+        (agent--note-session-id (car agent-auto-test--buffers) "sid-1")
+        (should (string-match-p ":AGENT_SESSION: +sid-1"
+                                (agent-auto-test--disk file))))))
+  (agent-auto-test--with root
+    (let* ((agent-todo-in-progress-keyword "DOING")
+           (file (agent-auto-test--file
+                  root (concat "#+TODO: TODO DOING | DONE\n"
+                               (agent-auto-test--task root nil ""))))
+           (org (find-file-noselect file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n")
+        (goto-char (point-min))
+        (search-forward "Fix it")
+        (agent-act-on-thing-at-point)
+        (should (buffer-modified-p))
+        (should (equal (org-get-todo-state) "DOING"))
+        (should (org-entry-get nil "AGENT_SESSION")))
+      (should (string-match-p "^\\* TODO Fix it" (agent-auto-test--disk file)))
+      (should-not (string-match-p "AGENT_SESSION\\|Typing"
+                                  (agent-auto-test--disk file))))))
+
 (defun agent-auto-test--hand-started-task (root &optional tags)
   "Start by hand the one task of a new file under ROOT; return (FILE . BUFFER).
 The task carries TAGS, a tag string, and no tag when TAGS is nil."

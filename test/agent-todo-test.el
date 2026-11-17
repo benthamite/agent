@@ -92,6 +92,39 @@ an error there would leave a running session unshown."
       (erase-buffer)
       (should-not (funcall (plist-get context :after))))))
 
+(defun agent-todo-test--file-contents (file)
+  "Return the contents of FILE on disk."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (buffer-string)))
+
+(ert-deftest agent-todo-test-marking-in-progress-keeps-a-saved-buffer-saved ()
+  "Save the buffer after the state change when it had no unsaved edits.
+A buffer that had unsaved edits is left unsaved, and one that visits no
+file is only changed."
+  (let ((agent-todo-in-progress-keyword "DOING")
+        (contents "#+TODO: TODO DOING | DONE\n* TODO Fix it\n"))
+    (agent-test-helper-with-org-file contents
+      (search-forward "Fix it")
+      (funcall (plist-get (agent-todo-test--context) :after))
+      (should-not (buffer-modified-p))
+      (should (string-match-p "^\\* DOING Fix it"
+                              (agent-todo-test--file-contents
+                               (buffer-file-name)))))
+    (agent-test-helper-with-org-file contents
+      (goto-char (point-max))
+      (insert "Typing.\n")
+      (goto-char (point-min))
+      (search-forward "Fix it")
+      (funcall (plist-get (agent-todo-test--context) :after))
+      (should (buffer-modified-p))
+      (should (equal (org-get-todo-state) "DOING"))
+      (should (equal (agent-todo-test--file-contents (buffer-file-name))
+                     contents)))
+    (agent-todo-test--at "Fix it" contents
+      (funcall (plist-get (agent-todo-test--context) :after))
+      (should (equal (org-get-todo-state) "DOING")))))
+
 ;; The body ran from the end of the heading's own lines to the heading
 ;; after that point, which for a TODO without a body is the heading after
 ;; the next one: the brief then carried the whole following entry.

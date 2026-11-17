@@ -227,18 +227,32 @@ agenda."
 
 (defun agent-todo--mark-in-progress (marker)
   "Set the TODO state at MARKER to `agent-todo-in-progress-keyword'.
-A heading deleted while the session was starting leaves MARKER pointing
-at text that is no longer a TODO entry, and there is then nothing to
-mark: this runs after the session exists but before it is displayed, so
-signalling here would leave a running session unshown."
+The heading's buffer is then saved when it had no unsaved edits before,
+so that acting on a task leaves a saved file saved; a buffer with
+unsaved edits is left unsaved.  A heading deleted while the session was
+starting leaves MARKER pointing at text that is no longer a TODO entry,
+and there is then nothing to mark: this runs after the session exists
+but before it is displayed, so signalling here would leave a running
+session unshown."
   (when (and agent-todo-in-progress-keyword (marker-buffer marker))
     (with-current-buffer (marker-buffer marker)
       (save-excursion
         (goto-char marker)
         (when (and (not (org-before-first-heading-p))
                    (org-get-todo-state))
-          (org-todo agent-todo-in-progress-keyword))))
+          (let ((clean (not (buffer-modified-p))))
+            (org-todo agent-todo-in-progress-keyword)
+            (when clean
+              (agent-todo--save))))))
     (agent-todo--redo-agenda)))
+
+(defun agent-todo--save ()
+  "Save the current buffer, quietly, when it visits a file and was changed."
+  (when (and (buffer-modified-p)
+             (buffer-file-name (or (buffer-base-buffer) (current-buffer))))
+    (let ((inhibit-message t)
+          (save-silently t))
+      (save-buffer))))
 
 (defun agent-todo--redo-agenda ()
   "Rebuild the agenda when it is the current buffer.

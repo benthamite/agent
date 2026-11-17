@@ -589,7 +589,7 @@ never started twice."
          (link (agent-auto-link-create :file file
                                        :recorded (agent-auto--placeholder))))
     (agent-auto--record (agent-auto-link-recorded link) backend)
-    (agent-auto--save)
+    (agent-todo--save)
     (agent-auto--launch link backend directory
                         (agent-todo--slug (plist-get entry :title))
                         (agent-auto--brief entry))))
@@ -1026,7 +1026,7 @@ edits, which is then left unsaved."
                (let ((inhibit-message t))
                  (agent-auto--put-session buffer)))
              (when clean
-               (agent-auto--save)))))
+               (agent-todo--save)))))
         (unless (buffer-local-value 'agent-auto--link buffer)
           (agent-auto--attach
            buffer (agent-auto-link-create :file file :recorded value)))))))
@@ -1335,7 +1335,7 @@ moving point or touching a window."
                'missing
              (let ((inhibit-message t))
                (funcall function))
-             (agent-auto--save)
+             (agent-todo--save)
              'done)))))))
 
 (defun agent-auto--goto-recorded (value)
@@ -1380,13 +1380,6 @@ and without the question about file-local variables."
                         (find-file-noselect file t)))))
       (and (with-current-buffer buffer (derived-mode-p 'org-mode))
            buffer))))
-
-(defun agent-auto--save ()
-  "Save the current buffer, quietly, when it was changed."
-  (when (buffer-modified-p)
-    (let ((inhibit-message t)
-          (save-silently t))
-      (save-buffer))))
 
 (provide 'agent-auto)
 ;;; agent-auto.el ends here
