@@ -58,6 +58,7 @@
 (autoload 'agent-forge-context "agent-forge")
 (autoload 'agent-mu4e-context "agent-mu4e")
 (autoload 'agent-todo-context "agent-todo")
+(autoload 'agent-todo-chosen-backend "agent-todo")
 (autoload 'agent-org-linear-context "agent-org-linear")
 (autoload 'agent-org-linear-origin "agent-org-linear")
 (autoload 'agent-slack-origin "agent-slack")
@@ -4501,12 +4502,18 @@ An extractor whose symbol has an `agent-origin-function' property names
 where its things come from: that function, called with no arguments in
 the current buffer, returns the origin string matched against
 `agent-account-origin-rules', which picks the account whose project
-sources are offered.")
+sources are offered.  One whose symbol has an `agent-backend-function'
+property names the backend a session started for its things runs on:
+that function, called the same way, returns a registered backend, and
+no backend is then asked for, or nil for the usual choice.")
 
 (put 'agent-slack-resume-context 'agent-names-session t)
 (put 'agent-slack-context 'agent-origin-function #'agent-slack-origin)
 (put 'agent-mu4e-context 'agent-origin-function #'agent-mu4e-origin)
 (put 'agent-org-linear-context 'agent-origin-function #'agent-org-linear-origin)
+(put 'agent-todo-context 'agent-backend-function #'agent-todo-chosen-backend)
+(put 'agent-org-linear-context 'agent-backend-function
+     #'agent-todo-chosen-backend)
 
 (defun agent--extractor-at-point ()
   "Return the extractor for the thing at point, or nil when there is none."
@@ -4527,9 +4534,11 @@ delivery: by the time the continuation runs, the user may have moved or
 selected another account.  A running session brings its own directory, so
 extraction is told not to resolve one, and told which account to resolve
 it for; see `agent--context-wants-directory' and
-`agent--context-account'.  The account is the one the thing's origin
-names, when its extractor reports one, and otherwise the persisted
-selection; see `agent--extractor-origin'.  An extractor whose symbol has
+`agent--context-account'.  The backend is the one the thing's extractor
+names, when it names one; see `agent--extractor-backend'.  The account
+is the one the thing's origin names, when its extractor reports one, and
+otherwise the persisted selection; see `agent--extractor-origin'.  An
+extractor whose symbol has
 the `agent-names-session' property answers with an existing session, so
 no backend or account is resolved for it and nothing is prompted for."
   (let* ((fresh (equal existing '(16)))
@@ -4540,7 +4549,8 @@ no backend or account is resolved for it and nothing is prompted for."
                                  (get extractor 'agent-names-session)))
              (target (unless (or existing names-session)
                        (agent--resolve-backend-account
-                        (agent--extractor-origin extractor))))
+                        (agent--extractor-origin extractor)
+                        (agent--extractor-backend extractor))))
              (agent--context-wants-directory
               (not (or existing names-session)))
              (agent--context-account (cdr target)))
@@ -4607,12 +4617,23 @@ property, called in the current buffer."
               (function (get extractor 'agent-origin-function)))
     (funcall function)))
 
-(defun agent--resolve-backend-account (&optional thing-origin)
+(defun agent--extractor-backend (extractor)
+  "Return the backend a session started for EXTRACTOR's thing runs on, or nil.
+The backend comes from the function in EXTRACTOR's
+`agent-backend-function' property, called in the current buffer.  Nil
+leaves the choice to `agent--resolve-backend'."
+  (when-let* (((symbolp extractor))
+              (function (get extractor 'agent-backend-function)))
+    (funcall function)))
+
+(defun agent--resolve-backend-account (&optional thing-origin backend)
   "Return the current context's backend and its account.
-The account is the selection `agent-account-origin-rules' gives
-THING-ORIGIN, the origin string of the thing being routed, and
-otherwise the persisted selection."
-  (let ((backend (agent--resolve-backend)))
+The backend is BACKEND when non-nil, and nothing is then asked;
+otherwise the one `agent--resolve-backend' returns.  The account is the
+selection `agent-account-origin-rules' gives THING-ORIGIN, the origin
+string of the thing being routed, and otherwise the persisted
+selection."
+  (let ((backend (or backend (agent--resolve-backend))))
     (cons backend (or (agent-account-origin-selection backend thing-origin)
                       (agent-account-current backend)))))
 

@@ -74,6 +74,7 @@ directory in the property DIR, and worktrees go under ROOT."
            (org-agenda-files nil)
            (agent-auto-eligible-functions nil)
            (agent-auto-backend nil)
+           (agent-todo-backend nil)
            (agent-auto-instructions "Standing.")
            (agent-auto-silence-timeout 30)
            (agent-auto--pending nil)
@@ -468,6 +469,37 @@ The next search does not try again."
       (let ((agent-auto-backend 'stub))
         (agent-auto-test--run))
       (should (= (length agent-auto-test--started) 1)))))
+
+(ert-deftest agent-auto-test-backend-falls-back-to-the-todo-backend ()
+  "Start unattended sessions with `agent-todo-backend' when no own one is set.
+`agent-auto-backend' wins when both are set, and a fallback that names
+no registered backend starts nothing and records nothing."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file root (agent-auto-test--task root))))
+      (agent-register-backend 'other :buffer-p #'ignore
+                              :find-all-buffers #'ignore
+                              :start-session #'ignore)
+      (let ((agent-todo-backend 'gone))
+        (agent-test-helper-with-messages messages
+          (agent-auto-test--run)
+          (should (string-match-p "agent-todo-backend.* names .*gone" messages))))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_SESSION"))
+      (let ((agent-todo-backend 'stub))
+        (agent-auto-test--run))
+      (should (= (length agent-auto-test--started) 1))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_BACKEND")
+                     "stub"))))
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file root (agent-auto-test--task root)))
+          (agent-auto-backend 'stub)
+          (agent-todo-backend 'other))
+      (agent-register-backend 'other :buffer-p #'ignore
+                              :find-all-buffers #'ignore
+                              :start-session #'ignore)
+      (agent-auto-test--run)
+      (should (= (length agent-auto-test--started) 1))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_BACKEND")
+                     "stub")))))
 
 ;;;; Results
 

@@ -143,9 +143,10 @@ an empty string adds nothing."
 
 (defcustom agent-auto-backend nil
   "The backend unattended sessions are started with.
-Nil means the only registered backend; with several registered, no
-session is started until this names one of them, such as `claude-code'."
-  :type '(choice (const :tag "The only registered backend" nil) symbol)
+Nil means the one `agent-todo-backend' names, else the only registered
+backend; with several registered, no session is started until one of
+the two options names one of them, such as `claude-code'."
+  :type '(choice (const :tag "As for a TODO started by hand" nil) symbol)
   :group 'agent-auto)
 
 (defcustom agent-auto-working-mark "▶"
@@ -595,17 +596,21 @@ never started twice."
                         (agent-auto--brief entry))))
 
 (defun agent-auto--backend ()
-  "Return the backend to start sessions with, or signal an error."
-  (cond (agent-auto-backend
-         (if (agent-backend agent-auto-backend)
-             agent-auto-backend
-           (error "`agent-auto-backend' names `%s', which is not registered"
-                  agent-auto-backend)))
-        ((= (length agent-backends) 1) (caar agent-backends))
-        (t (error "Set `agent-auto-backend': %s"
-                  (if agent-backends
-                      "several backends are registered"
-                    "no backend is registered")))))
+  "Return the backend to start sessions with, or signal an error.
+It is the one `agent-auto-backend' names, else the one
+`agent-todo-backend' names, else the only registered backend."
+  (let ((option (cond (agent-auto-backend 'agent-auto-backend)
+                      (agent-todo-backend 'agent-todo-backend))))
+    (cond (option
+           (if (agent-backend (symbol-value option))
+               (symbol-value option)
+             (error "`%s' names `%s', which is not registered"
+                    option (symbol-value option))))
+          ((= (length agent-backends) 1) (caar agent-backends))
+          (t (error "Set `agent-auto-backend' or `agent-todo-backend': %s"
+                    (if agent-backends
+                        "several backends are registered"
+                      "no backend is registered"))))))
 
 (defun agent-auto--placeholder ()
   "Return a value recording a session that is being started."

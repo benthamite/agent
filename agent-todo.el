@@ -95,6 +95,19 @@ changes nothing for it."
                  (string :tag "Property"))
   :group 'agent-todo)
 
+(defcustom agent-todo-backend nil
+  "The backend a session started for a TODO runs on.
+Nil means the usual choice: the only registered backend, else the one
+read in the minibuffer.  When it names a registered backend, such as
+`claude-code', a session started for a TODO, or for a Linear issue, runs
+on it and no backend is asked for, also where nothing may be asked.
+Unattended sessions run on it too, unless `agent-auto-backend' names
+another.  It has no part in a TODO sent to a running session, or going
+back to the session it records: those have a backend already."
+  :type '(choice (const :tag "The only registered backend, else ask" nil)
+                 symbol)
+  :group 'agent-todo)
+
 ;;;; Functions
 
 ;;;;; Entry collection
@@ -183,6 +196,17 @@ been rebuilt."
                              :after (lambda ()
                                       (agent-todo--mark-in-progress
                                        marker))))))))
+
+(defun agent-todo-chosen-backend ()
+  "Return the backend `agent-todo-backend' names, or nil when it names none.
+Signal a `user-error' when it names a backend that is not registered.
+It is the `agent-backend-function' of the TODO extractors; see
+`agent-at-point-things'."
+  (when agent-todo-backend
+    (if (agent-backend agent-todo-backend)
+        agent-todo-backend
+      (user-error "`agent-todo-backend' names `%s', which is not registered"
+                  agent-todo-backend))))
 
 (defun agent-todo--directory-context ()
   "Return the `:directory' part of the context for the TODO at point, or nil.

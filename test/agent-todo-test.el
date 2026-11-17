@@ -695,6 +695,79 @@ nothing suggested, and the session starts in the one chosen."
       (should (equal asked '("work" "Do it" nil)))
       (should (equal started (list root "Do it"))))))
 
+;;;; Backend
+
+(defmacro agent-todo-test--with-two-backends (sessions asked &rest body)
+  "Evaluate BODY with the backends `one' and `two' registered.
+SESSIONS is as for `agent-todo-test--with-sessions'.  ASKED is a symbol,
+bound to the prompts the backend was read with, the latest first; the
+answer is always `one'."
+  (declare (indent 2) (debug (symbolp symbolp body)))
+  `(let (,asked)
+     (agent-todo-test--with-sessions ,sessions
+       (agent-register-backend
+        'two
+        :buffer-p #'ignore
+        :find-all-buffers #'ignore
+        :label "Second"
+        :start-session (lambda (session &rest _)
+                         (push session ,sessions)
+                         (current-buffer)))
+       (cl-letf (((symbol-function 'completing-read)
+                  (lambda (prompt &rest _) (push prompt ,asked) "Test"))
+                 ((symbol-function 'agent-send-string) #'ignore))
+         ,@body))))
+
+;; With several backends registered, every TODO asked which to use, also
+;; when the user had named one for the sessions started unattended.
+(ert-deftest agent-todo-test-backend-option-starts-without-asking ()
+  "Start the session of a TODO with `agent-todo-backend', asking nothing.
+That holds for a plain TODO and for a Linear issue, from either command,
+and where nothing may be asked.  Unset, the backend is asked as before."
+  (agent-test-helper-with-directory root
+    (let ((agent-todo-directory-property "DIR")
+          (contents (format "#+PROPERTY: DIR %s
+* TODO Fix the build
+* TODO Agree on the version
+:PROPERTIES:
+:LINEAR_URL: https://linear.app/acme/issue/AS-33/agree
+:END:
+" root)))
+      (agent-todo-test--with-two-backends sessions asked
+        (let ((agent-todo-backend 'two))
+          (agent-todo-test--start #'agent-act-on-thing-at-point contents
+                                  "Fix the build" "Agree on the version")
+          (agent-todo-test--start #'agent-send-todo-at-point contents
+                                  "Fix the build")
+          (let ((agent-inhibit-prompts t))
+            (agent-todo-test--start #'agent-act-on-thing-at-point contents
+                                    "Fix the build")))
+        (should-not asked)
+        (should (equal (mapcar #'agent-session-backend sessions)
+                       '(two two two two)))
+        (let ((agent-todo-backend nil))
+          (agent-todo-test--start #'agent-act-on-thing-at-point contents
+                                  "Fix the build"))
+        (should (equal asked '("Backend: ")))
+        (should (eq (agent-session-backend (car sessions)) 'one))))))
+
+(ert-deftest agent-todo-test-backend-option-must-name-a-registered-backend ()
+  "Refuse to start a TODO while `agent-todo-backend' names no backend."
+  (agent-test-helper-with-directory root
+    (agent-todo-test--with-two-backends sessions asked
+      (let ((agent-todo-directory-property "DIR")
+            (agent-todo-backend 'three))
+        (should (string-match-p
+                 "agent-todo-backend.* names .*three"
+                 (cadr (should-error
+                        (agent-todo-test--start
+                         #'agent-act-on-thing-at-point
+                         (format "#+PROPERTY: DIR %s\n* TODO Fix the build\n" root)
+                         "Fix the build")
+                        :type 'user-error)))))
+      (should-not asked)
+      (should-not sessions))))
+
 ;;;; Submit property
 
 (ert-deftest agent-todo-test-ready-prompt-reads-the-heading-alone ()
