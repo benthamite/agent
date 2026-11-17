@@ -31,6 +31,9 @@
 ;; the tag is replaced by one saying how it ended, with a one-line
 ;; result.  A task is started once, and never again.
 ;;
+;; While a task's session is open, its heading and its agenda lines show
+;; a mark that says whether the session is working or waiting.
+;;
 ;; A timer does the looking.  It searches the files with ripgrep and
 ;; visits only those that have a ready task, edits an Org file only in
 ;; the buffer visiting it and only when that buffer has no unsaved
@@ -140,6 +143,23 @@ session is started until this names one of them, such as `claude-code'."
   :type '(choice (const :tag "The only registered backend" nil) symbol)
   :group 'agent-auto)
 
+(defcustom agent-auto-working-mark "▶"
+  "Mark shown on a task whose session is open and working.
+It is shown after the TODO keyword of the task's heading, and before the
+task's title on its lines in an Org agenda, for as long as the session
+the task records has a live buffer.  A session whose state is not known
+yet, as before its first event, shows this mark too.  Nil shows no mark
+for such a session."
+  :type '(choice (const :tag "No mark" nil) string)
+  :group 'agent-auto)
+
+(defcustom agent-auto-waiting-mark "⏸"
+  "Mark shown on a task whose session is open and waiting for input.
+It is shown where `agent-auto-working-mark' is.  Nil shows no mark for
+such a session."
+  :type '(choice (const :tag "No mark" nil) string)
+  :group 'agent-auto)
+
 (defconst agent-auto-session-property "AGENT_SESSION"
   "Org property recording a task's session.
 Its value is the session's id, or the name of its buffer until the id
@@ -193,6 +213,9 @@ A session that works again is unsettled.")
 
 (defvar agent-auto--queue-timer nil
   "Timer running the next step of `agent-auto--queue'.")
+
+(defvar agent-auto--marks-timer nil
+  "Timer running `agent-auto--refresh-marks', or nil when none is pending.")
 
 (defvar agent-auto--processes nil
   "The subprocesses now running.")
@@ -250,7 +273,10 @@ started once.  When the session's turn ends, the tag is replaced by
 `agent-auto-review-tag', `agent-auto-blocked-tag' or
 `agent-auto-stuck-tag', and the result is written in
 `agent-auto-result-property'.  A task sent to a session by hand is
-recorded the same way."
+recorded the same way.
+
+While a task's session is open, its heading and its lines in an Org
+agenda show `agent-auto-working-mark' or `agent-auto-waiting-mark'."
   :global t
   :group 'agent-auto
   (agent-auto--reset)
@@ -270,6 +296,12 @@ recorded the same way."
   (add-hook 'agent-session-id-functions #'agent-auto--on-id)
   (add-hook 'agent-delivery-functions #'agent-auto--record-delivery)
   (add-hook 'agent-recorded-session-functions #'agent-auto--recorded-session)
+  (add-hook 'agent-session-state-change-functions #'agent-auto--schedule-marks)
+  (add-hook 'agent-session-id-functions #'agent-auto--schedule-marks)
+  (add-hook 'kill-buffer-hook #'agent-auto--session-killed)
+  (add-hook 'org-mode-hook #'agent-auto--schedule-marks)
+  (add-hook 'org-agenda-finalize-hook #'agent-auto--mark-agenda)
+  (agent-auto--schedule-marks)
   (setq agent-auto--timer
         (run-with-timer agent-auto-interval agent-auto-interval
                         #'agent-auto--tick)))
@@ -282,12 +314,20 @@ recorded the same way."
   (remove-hook 'agent-session-id-functions #'agent-auto--on-id)
   (remove-hook 'agent-delivery-functions #'agent-auto--record-delivery)
   (remove-hook 'agent-recorded-session-functions
-               #'agent-auto--recorded-session))
+               #'agent-auto--recorded-session)
+  (remove-hook 'agent-session-state-change-functions
+               #'agent-auto--schedule-marks)
+  (remove-hook 'agent-session-id-functions #'agent-auto--schedule-marks)
+  (remove-hook 'kill-buffer-hook #'agent-auto--session-killed)
+  (remove-hook 'org-mode-hook #'agent-auto--schedule-marks)
+  (remove-hook 'org-agenda-finalize-hook #'agent-auto--mark-agenda)
+  (agent-auto--remove-marks))
 
 (defun agent-auto--reset ()
   "Cancel the timers and subprocesses and forget the steps waiting.
 Results not yet written are kept."
-  (dolist (timer (list agent-auto--timer agent-auto--queue-timer))
+  (dolist (timer (list agent-auto--timer agent-auto--queue-timer
+                       agent-auto--marks-timer))
     (when (timerp timer)
       (cancel-timer timer)))
   (dolist (process agent-auto--processes)
@@ -298,6 +338,7 @@ Results not yet written are kept."
       (kill-buffer (process-buffer process))))
   (setq agent-auto--timer nil
         agent-auto--queue-timer nil
+        agent-auto--marks-timer nil
         agent-auto--queue nil
         agent-auto--processes nil
         agent-auto--starting nil))
@@ -317,6 +358,7 @@ Results not yet written are kept."
     (mapc #'agent-auto--check-dialog (agent-auto--linked-buffers))
     (agent-auto--check-silence)
     (agent-auto--flush-pending))
+  (agent-auto--schedule-marks)
   (agent-auto--guard "searching for tasks"
     (agent-auto--scan)))
 
@@ -645,7 +687,8 @@ Nothing is asked, and the windows are left as they are."
     (setq agent-auto--link link
           agent-auto--last-event (float-time)
           agent-auto--settled nil
-          agent-auto--exiting nil)))
+          agent-auto--exiting nil))
+  (agent-auto--schedule-marks))
 
 ;;;; Where sessions run
 
@@ -1033,6 +1076,175 @@ A start that never got a session leaves a placeholder, and a session
 whose id the backend never reported leaves its buffer's name."
   (not (or (string-prefix-p "starting-" recorded)
            (string-prefix-p "*" recorded))))
+
+;;;; Marks
+
+(defun agent-auto--schedule-marks (&rest _)
+  "Arrange for the marks of open sessions to be brought up to date.
+The work is done once, from a timer, however often it is asked for
+before then.  The arguments a hook passes are ignored."
+  (unless (timerp agent-auto--marks-timer)
+    (setq agent-auto--marks-timer
+          (run-with-timer 0 nil #'agent-auto--run-marks))))
+
+(defun agent-auto--run-marks ()
+  "Bring the marks up to date, from the timer `agent-auto--schedule-marks' set."
+  (setq agent-auto--marks-timer nil)
+  (agent-auto--guard "marking tasks with an open session"
+    (agent-auto--refresh-marks)))
+
+(defun agent-auto--session-killed ()
+  "Bring the marks up to date once the current buffer, a session, is killed.
+For `kill-buffer-hook'."
+  (when agent--session
+    (agent-auto--schedule-marks)))
+
+(defun agent-auto--mark-agenda ()
+  "Mark the lines of the agenda just built whose tasks have an open session.
+For `org-agenda-finalize-hook'."
+  (agent-auto--guard "marking an agenda"
+    (agent-auto--refresh-marks)))
+
+(defun agent-auto--refresh-marks ()
+  "Show a mark on every task whose session is open, and on no other.
+The marks are overlays on the headings of the live Org buffers and on
+the lines of the live agenda buffers: no file is visited, no agenda is
+rebuilt, and no text is changed.  An Org buffer is searched only when a
+session is open."
+  (let ((open (agent-auto--open-sessions))
+        (tasks (make-hash-table :test #'equal))
+        agendas)
+    (dolist (buffer (buffer-list))
+      (with-current-buffer buffer
+        (cond ((derived-mode-p 'org-mode)
+               (agent-auto--mark-org-buffer open tasks))
+              ((derived-mode-p 'org-agenda-mode)
+               (push buffer agendas)))))
+    (dolist (buffer agendas)
+      (with-current-buffer buffer
+        (agent-auto--mark-agenda-buffer tasks)))))
+
+(defun agent-auto--open-sessions ()
+  "Return a hash table from what a task can record to its open session's buffer.
+A session is open while its buffer is live.  The keys are the values of
+`agent-auto--session-values' and the value its task is known to record."
+  (let ((open (make-hash-table :test #'equal)))
+    (dolist (buffer (agent-session-buffers))
+      (dolist (value (agent-auto--session-values buffer))
+        (puthash value buffer open))
+      (when-let* ((link (buffer-local-value 'agent-auto--link buffer)))
+        (puthash (agent-auto-link-recorded link) buffer open)))
+    open))
+
+(defun agent-auto--mark-org-buffer (open tasks)
+  "Mark the headings of the current Org buffer whose sessions are in OPEN.
+OPEN is the table of `agent-auto--open-sessions'.  Record each such
+heading in the hash table TASKS, under a cons of the buffer holding its
+text and its position, with the mark it shows.  The headings are found
+by searching for `agent-auto-session-property'."
+  (org-with-wide-buffer
+   (remove-overlays (point-min) (point-max) 'agent-auto-mark t)
+   (unless (hash-table-empty-p open)
+     (goto-char (point-min))
+     (let ((regexp (format "^[ \t]*:%s:[ \t]+\\(.*?\\)[ \t]*$"
+                           agent-auto-session-property))
+           (base (or (buffer-base-buffer) (current-buffer)))
+           (case-fold-search nil))
+       (while (re-search-forward regexp nil t)
+         (when-let* ((session (gethash (match-string-no-properties 1) open))
+                     (mark (agent-auto--mark session))
+                     ((save-match-data (ignore-errors (org-back-to-heading t)))))
+           (puthash (cons base (point)) mark tasks)
+           (agent-auto--mark-heading mark)
+           (outline-next-heading)))))))
+
+(defun agent-auto--mark (session)
+  "Return the mark of the open session in buffer SESSION, or nil for none.
+It is `agent-auto-waiting-mark' for a session waiting for input and
+`agent-auto-working-mark' for any other, in the face of its state, with
+a `help-echo' naming the session and the state."
+  (let* ((state (agent-session-display-state session))
+         (waiting (memq state '(waiting background-waiting)))
+         (mark (if waiting agent-auto-waiting-mark agent-auto-working-mark)))
+    (unless (member mark '(nil ""))
+      (propertize
+       mark
+       'face (agent--session-state-face state)
+       'help-echo (format "Session %s: %s" (buffer-name session)
+                          (pcase state
+                            ('waiting "waiting for input")
+                            ('background-waiting
+                             "waiting for input, with background work")
+                            ('busy "working")
+                            (_ "state not known yet")))))))
+
+(defun agent-auto--mark-heading (mark)
+  "Show MARK on the heading at point: after its TODO keyword, or before its text."
+  (let ((case-fold-search nil))
+    (when (looking-at org-complex-heading-regexp)
+      (if (match-beginning 2)
+          (agent-auto--put-mark (match-beginning 2) (match-end 2)
+                                'after-string (concat " " mark))
+        (let ((start (min (1+ (match-end 1)) (line-end-position))))
+          (agent-auto--put-mark start (min (1+ start) (line-end-position))
+                                'before-string (concat mark " ")))))))
+
+(defun agent-auto--put-mark (start end property string)
+  "Show STRING at the text from START to END, as the overlay PROPERTY.
+PROPERTY is `before-string' or `after-string'.  The overlay goes when
+its text does."
+  (let ((overlay (make-overlay start end nil t)))
+    (overlay-put overlay 'agent-auto-mark t)
+    (overlay-put overlay property string)
+    (overlay-put overlay 'evaporate t)))
+
+(defun agent-auto--mark-agenda-buffer (tasks)
+  "Mark the lines of the current agenda buffer whose tasks are in TASKS.
+TASKS is the table `agent-auto--mark-org-buffer' fills.  The mark goes
+just before the task's title."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (remove-overlays (point-min) (point-max) 'agent-auto-mark t)
+      (unless (hash-table-empty-p tasks)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (when-let* ((marker (get-text-property (point) 'org-hd-marker))
+                      (buffer (marker-buffer marker))
+                      (mark (gethash (cons buffer (marker-position marker))
+                                     tasks))
+                      (start (agent-auto--agenda-title-start))
+                      ((< start (line-end-position))))
+            (agent-auto--put-mark start (1+ start)
+                                  'before-string (concat mark " ")))
+          (forward-line 1))))))
+
+(defun agent-auto--agenda-title-start ()
+  "Return where the title of the task on the current agenda line starts.
+That is after the line's prefix, the task's TODO keyword and its
+priority cookie.  The agenda marks where the heading's text starts with
+the text property `org-heading'."
+  (save-excursion
+    (let ((end (line-end-position))
+          (keyword (get-text-property (point) 'todo-state))
+          (case-fold-search nil))
+      (goto-char (or (text-property-any (point) end 'org-heading t)
+                     (progn (back-to-indentation) (point))))
+      (when (and keyword
+                 (looking-at (concat "\\.*" (regexp-quote keyword) "[ \t]+")))
+        (goto-char (match-end 0)))
+      (when (looking-at "\\[#[A-Z0-9]+\\][ \t]+")
+        (goto-char (match-end 0)))
+      (min (point) end))))
+
+(defun agent-auto--remove-marks ()
+  "Remove every mark, from the Org buffers and the agenda buffers."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (derived-mode-p '(org-mode org-agenda-mode))
+        (save-restriction
+          (widen)
+          (remove-overlays (point-min) (point-max) 'agent-auto-mark t))))))
 
 ;;;; Results
 

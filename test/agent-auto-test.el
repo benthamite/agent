@@ -11,7 +11,9 @@
                            (file-name-directory
                             (or load-file-name buffer-file-name))))
 (require 'cl-lib)
+(require 'benchmark)
 (require 'org)
+(require 'org-agenda)
 (require 'agent-auto)
 (require 'agent-org-linear)
 
@@ -87,6 +89,11 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-delivery-functions (list #'agent-auto--record-delivery))
            (agent-recorded-session-functions
             (list #'agent-auto--recorded-session))
+           (agent-session-state-change-functions
+            (list #'agent-auto--schedule-marks))
+           (agent-auto--marks-timer nil)
+           (agent-auto-working-mark "▶")
+           (agent-auto-waiting-mark "⏸")
            (agent-session-inherited-variables '(agent-auto--link)))
        (agent-register-backend
         'stub
@@ -1193,6 +1200,233 @@ fraction of a second however many files there are."
       (should-not (find-buffer-visiting (expand-file-name "plain-0.org" root)))
       (should-not (find-buffer-visiting (expand-file-name "plain-199.org" root))))))
 
+;;;; Marks
+
+(defun agent-auto-test--marks-due ()
+  "Run the update of the marks a hook asked for, unless it has run already.
+Nothing else brings the marks up to date, so a test that sees them
+change after this has seen the hook ask for it."
+  (when (timerp agent-auto--marks-timer)
+    (cancel-timer agent-auto--marks-timer)
+    (agent-auto--run-marks)))
+
+(defun agent-auto-test--close (buffer)
+  "Kill session BUFFER with the mode's function on `kill-buffer-hook'.
+The hook's global value is changed, since the buffer a test is in can
+have a value of its own, which is the one `let' would bind."
+  (let ((kill-buffer-query-functions nil))
+    (add-hook 'kill-buffer-hook #'agent-auto--session-killed)
+    (unwind-protect (kill-buffer buffer)
+      (remove-hook 'kill-buffer-hook #'agent-auto--session-killed))))
+
+(defun agent-auto-test--mark-strings ()
+  "Return the marks of the current buffer, in order, as (STRING . POSITION)."
+  (save-restriction
+    (widen)
+    (sort (mapcar (lambda (overlay)
+                    (cons (substring-no-properties
+                           (or (overlay-get overlay 'before-string)
+                               (overlay-get overlay 'after-string)))
+                          (overlay-start overlay)))
+                  (seq-filter (lambda (overlay)
+                                (overlay-get overlay 'agent-auto-mark))
+                              (overlays-in (point-min) (point-max))))
+          (lambda (a b) (< (cdr a) (cdr b))))))
+
+(defun agent-auto-test--heading-mark (file heading)
+  "Return the mark shown on HEADING in the buffer visiting FILE, or nil.
+Fail unless it stands right after the heading's TODO keyword."
+  (with-current-buffer (find-buffer-visiting file)
+    (let ((marks (seq-filter
+                  (lambda (mark)
+                    (save-excursion
+                      (goto-char (cdr mark))
+                      (string-match-p (regexp-quote heading)
+                                      (buffer-substring (pos-bol) (pos-eol)))))
+                  (agent-auto-test--mark-strings))))
+      (should (<= (length marks) 1))
+      (when marks
+        (save-excursion
+          (goto-char (cdar marks))
+          (should (looking-at "TODO "))
+          (should (= (pos-bol) (- (point) 2))))
+        (caar marks)))))
+
+(defmacro agent-auto-test--in-agenda (file &rest body)
+  "Evaluate BODY in a TODO agenda built from FILE with the marks' hook on."
+  (declare (indent 1) (debug (form body)))
+  `(let ((org-agenda-finalize-hook (list #'agent-auto--mark-agenda)))
+     (with-current-buffer (find-buffer-visiting ,file)
+       (agent-test-helper-in-agenda "Fix it" ,@body))))
+
+(defun agent-auto-test--agenda-marks ()
+  "Return the marks of the current agenda as (STRING . TEXT-AT-THE-MARK).
+The text runs to the end of the line, with each run of blanks as one."
+  (mapcar (lambda (mark)
+            (cons (car mark)
+                  (replace-regexp-in-string
+                   "[ \t]+" " "
+                   (buffer-substring-no-properties
+                    (cdr mark) (save-excursion (goto-char (cdr mark))
+                                               (pos-eol))))))
+          (agent-auto-test--mark-strings)))
+
+(ert-deftest agent-auto-test-mark-follows-the-session ()
+  "Mark a task's heading from the start of its session until it is closed.
+The mark changes when the session goes from working to waiting and
+back, and nothing of the buffer's text changes."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (agent-auto-test--marks-due)
+      (should (equal (agent-auto-test--heading-mark file "Fix it") " ▶"))
+      (let ((text (with-current-buffer (find-buffer-visiting file)
+                    (buffer-string))))
+        (agent-session-event buffer 'submit)
+        (agent-auto-test--marks-due)
+        (should (equal (agent-auto-test--heading-mark file "Fix it") " ▶"))
+        (agent-session-event buffer 'stop)
+        (agent-auto-test--marks-due)
+        (should (equal (agent-auto-test--heading-mark file "Fix it") " ⏸"))
+        (agent-session-event buffer 'submit)
+        (agent-auto-test--marks-due)
+        (should (equal (agent-auto-test--heading-mark file "Fix it") " ▶"))
+        (with-current-buffer (find-buffer-visiting file)
+          (should (equal (buffer-string) text))
+          (should-not (buffer-modified-p))))
+      (agent-auto-test--close buffer)
+      (agent-auto-test--marks-due)
+      (should-not (agent-auto-test--heading-mark file "Fix it")))))
+
+(ert-deftest agent-auto-test-mark-names-the-session-and-its-state ()
+  "Give the mark a help-echo naming the session and what it is doing."
+  (agent-auto-test--with root
+    (pcase-let ((`(,_file . ,buffer) (agent-auto-test--started-task root)))
+      (agent-session-event buffer 'submit)
+      (should (equal (get-text-property 0 'help-echo (agent-auto--mark buffer))
+                     (format "Session %s: working" (buffer-name buffer))))
+      (should (eq (get-text-property 0 'face (agent-auto--mark buffer))
+                  'agent-busy))
+      (agent-session-event buffer 'stop)
+      (should (equal (get-text-property 0 'help-echo (agent-auto--mark buffer))
+                     (format "Session %s: waiting for input"
+                             (buffer-name buffer)))))))
+
+(ert-deftest agent-auto-test-mark-shows-in-the-agenda ()
+  "Mark a task's agenda line before its title, and keep the mark current.
+The line's text and markers stay as the agenda made them, a redo keeps
+the mark, and closing the session removes it without a rebuild."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (agent-session-event buffer 'submit)
+      (agent-auto-test--in-agenda file
+        (let ((line (buffer-substring (pos-bol) (pos-eol)))
+              (marker (get-text-property (pos-bol) 'org-hd-marker)))
+          (should (equal (agent-auto-test--agenda-marks)
+                         '(("▶ " . "Fix it :agent:"))))
+          (agent-session-event buffer 'stop)
+          (agent-auto-test--marks-due)
+          (should (equal (mapcar #'car (agent-auto-test--agenda-marks))
+                         '("⏸ ")))
+          (should (equal-including-properties
+                   (buffer-substring (pos-bol) (pos-eol)) line))
+          (should (eq (get-text-property (pos-bol) 'org-hd-marker) marker))
+          (org-agenda-redo)
+          (should (equal (agent-auto-test--agenda-marks)
+                         '(("⏸ " . "Fix it :agent:"))))
+          (agent-auto-test--close buffer)
+          (agent-auto-test--marks-due)
+          (should-not (agent-auto-test--agenda-marks))
+          (org-agenda-redo)
+          (should-not (agent-auto-test--agenda-marks)))))))
+
+(ert-deftest agent-auto-test-agenda-mark-follows-the-priority ()
+  "Put the agenda mark after the TODO keyword and the priority cookie."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file
+                 root (agent-auto-test--task root "[#A] Fix it"))))
+      (agent-auto-test--run)
+      (agent-auto-test--in-agenda file
+        (should (equal (agent-auto-test--agenda-marks)
+                       '(("▶ " . "Fix it :agent:"))))))))
+
+(ert-deftest agent-auto-test-closed-session-leaves-no-mark ()
+  "Show no mark on a task whose recorded session is closed."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--closed-task root "sid-00001"))
+          (other (agent-auto-test--file
+                  root (agent-auto-test--task root "Open one") "other.org")))
+      (agent-auto-test--run)
+      (should (= (length agent-auto-test--started) 2))
+      (agent-auto--refresh-marks)
+      (should (equal (agent-auto-test--heading-mark other "Open one") " ▶"))
+      (should-not (agent-auto-test--heading-mark file "Fix it"))
+      (agent-auto-test--in-agenda file
+        (should-not (agent-auto-test--agenda-marks))))))
+
+(ert-deftest agent-auto-test-unrecorded-task-gets-no-mark ()
+  "Leave a task without a recorded session alone, next to a marked one."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file
+                 root (concat (agent-auto-test--task root)
+                              "* TODO Leave it\nA body.\n"))))
+      (agent-auto-test--run)
+      (should (= (length agent-auto-test--started) 1))
+      (agent-auto-test--marks-due)
+      (should (equal (agent-auto-test--heading-mark file "Fix it") " ▶"))
+      (should-not (agent-auto-test--heading-mark file "Leave it"))
+      (with-current-buffer (find-buffer-visiting file)
+        (should (= (length (agent-auto-test--mark-strings)) 1)))
+      (agent-auto-test--in-agenda file
+        (should (equal (agent-auto-test--agenda-marks)
+                       '(("▶ " . "Fix it :agent:"))))))))
+
+(ert-deftest agent-auto-test-nil-mark-shows-nothing ()
+  "Show no mark for a state whose option is nil."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (let ((agent-auto-waiting-mark nil))
+        (agent-session-event buffer 'stop)
+        (agent-auto-test--marks-due)
+        (should-not (agent-auto-test--heading-mark file "Fix it"))
+        (agent-session-event buffer 'submit)
+        (agent-auto-test--marks-due)
+        (should (equal (agent-auto-test--heading-mark file "Fix it") " ▶")))
+      (let ((agent-auto-working-mark nil))
+        (agent-auto--refresh-marks)
+        (should-not (agent-auto-test--heading-mark file "Fix it"))))))
+
+(ert-deftest agent-auto-test-marks-open-no-file ()
+  "Mark only buffers that already visit a file, and remove marks with the mode."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,_buffer) (agent-auto-test--started-task root)))
+      (with-current-buffer (find-buffer-visiting file)
+        (set-buffer-modified-p nil)
+        (kill-buffer))
+      (agent-auto--refresh-marks)
+      (should-not (find-buffer-visiting file))
+      (find-file-noselect file)
+      (agent-auto--refresh-marks)
+      (should (equal (agent-auto-test--heading-mark file "Fix it") " ▶"))
+      (agent-auto--remove-marks)
+      (should-not (agent-auto-test--heading-mark file "Fix it")))))
+
+(ert-deftest agent-auto-test-marks-are-quick ()
+  "Bring the marks of a few hundred tasks and agenda lines up to date at once."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file
+                 root (concat (agent-auto-test--task root)
+                              (mapconcat (lambda (n)
+                                           (format "* TODO Other %d\n:PROPERTIES:\n:AGENT_SESSION: old-%d\n:END:\nBody.\n"
+                                                   n n))
+                                         (number-sequence 1 400))))))
+      (agent-auto-test--run)
+      (agent-auto-test--in-agenda file
+        (should (> (count-lines (point-min) (point-max)) 400))
+        (let ((elapsed (benchmark-elapse (agent-auto--refresh-marks))))
+          (should (< elapsed 0.2)))
+        (should (equal (agent-auto-test--agenda-marks)
+                       '(("▶ " . "Fix it :agent:"))))))))
+
 ;;;; The mode
 
 (ert-deftest agent-auto-test-mode-installs-and-removes-itself ()
@@ -1202,6 +1436,11 @@ fraction of a second however many files there are."
         (agent-delivery-functions nil)
         (agent-recorded-session-functions nil)
         (agent-session-inherited-variables nil)
+        (agent-session-state-change-functions nil)
+        (kill-buffer-hook nil)
+        (org-mode-hook nil)
+        (org-agenda-finalize-hook nil)
+        (agent-auto--marks-timer nil)
         (agent-auto--timer nil)
         (agent-auto--queue-timer nil)
         (agent-auto--queue nil)
@@ -1221,6 +1460,14 @@ fraction of a second however many files there are."
           (should (memq #'agent-auto--recorded-session
                         agent-recorded-session-functions))
           (should (memq 'agent-auto--link agent-session-inherited-variables))
+          (should (memq #'agent-auto--schedule-marks
+                        agent-session-state-change-functions))
+          (should (memq #'agent-auto--schedule-marks
+                        agent-session-id-functions))
+          (should (memq #'agent-auto--session-killed kill-buffer-hook))
+          (should (memq #'agent-auto--schedule-marks org-mode-hook))
+          (should (memq #'agent-auto--mark-agenda org-agenda-finalize-hook))
+          (should (timerp agent-auto--marks-timer))
           (let ((timer agent-auto--timer))
             (agent-auto-mode -1)
             (should-not (memq timer timer-list)))
@@ -1230,6 +1477,11 @@ fraction of a second however many files there are."
           (should-not agent-delivery-functions)
           (should-not agent-recorded-session-functions)
           (should-not agent-session-inherited-variables)
+          (should-not agent-session-state-change-functions)
+          (should-not kill-buffer-hook)
+          (should-not org-mode-hook)
+          (should-not org-agenda-finalize-hook)
+          (should-not agent-auto--marks-timer)
           (should-error (agent-auto-run-now) :type 'user-error))
       (agent-auto-mode -1))))
 
