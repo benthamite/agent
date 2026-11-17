@@ -60,6 +60,7 @@ User options
 * Shared session behavior::
 * Project sources::
 * Org TODO workflows::
+* Unattended sessions on tagged tasks::
 * Claude Code backend::
 * Codex backend::
 * Chief-of-staff loop::
@@ -73,6 +74,7 @@ Commands
 * Reporting bugs and ideas::
 * Branch navigation::
 * Org TODO commands::
+* Unattended task commands::
 * Chief-of-staff commands::
 * Claude Code commands::
 * Codex commands::
@@ -125,6 +127,8 @@ The package is split into a small backend-agnostic core and focused modules:
 @tab Yasnippet TAB expansion and snippet insertion in eat-based session buffers
 @item @samp{agent-todo.el}
 @tab Org TODO workflow that works with any backend: routing the entry at point to a session
+@item @samp{agent-auto.el}
+@tab Unattended sessions on Org tasks tagged for an agent: a timer starts a session on each ready task@comma{} the task records its session@comma{} and the tag that marked it ready is replaced by one saying how the session ended
 @item @samp{agent-util.el}
 @tab File helpers shared by the backends@comma{} such as reading a transcript's first line whatever its length; depends on no other module
 @item @samp{agent-claude.el}
@@ -257,6 +261,7 @@ The global minor modes @code{agent-claude-mode} and @code{agent-codex-mode} own 
 * Shared session behavior::
 * Project sources::
 * Org TODO workflows::
+* Unattended sessions on tagged tasks::
 * Claude Code backend::
 * Codex backend::
 * Chief-of-staff loop::
@@ -356,6 +361,79 @@ Acting on that TODO starts a session in @samp{~/repos/website} and submits its h
 @vindex agent-todo-submit-property
 @code{agent-todo-submit-property} names an Org property that marks a TODO whose text is a prompt ready to be sent. It defaults to @code{nil}. A plain TODO is submitted in any case@comma{} so the option matters only for a TODO of a kind that is otherwise typed into the prompt and left there to be edited@comma{} which is a Linear issue mirrored by @samp{org-linear} (@ref{Shared commands, , Shared commands}). When the issue's own heading has the property@comma{} with any value but @samp{nil}@comma{} its text is submitted as a plain TODO's is. The property is read from the TODO's own heading and is never inherited@comma{} since being a finished brief is a fact about one task@comma{} not about everything filed beside it. With both options set@comma{} a task whose heading carries the mark and sits under a heading naming a directory is routed the same way before and after @samp{org-linear} has given it a @samp{LINEAR_URL}: into that directory@comma{} submitted. The one difference is that the issue's URL then follows its text.
 
+@node Unattended sessions on tagged tasks
+@section Unattended sessions on tagged tasks
+
+The @samp{agent-auto} module starts a session by itself on every Org task that is marked as ready for an agent. It is off until @code{agent-auto-mode} is turned on (@ref{Unattended task commands, , Unattended task commands})@comma{} and it needs ripgrep (@samp{rg}) and a value for @code{agent-todo-directory-property} (@ref{Org TODO workflows, , Org TODO workflows})@comma{} since a task without a directory is never started. Whoever creates a task decides whether an agent can finish it: a person@comma{} a program that files tasks@comma{} or a session that files one for later.
+
+@vindex agent-auto-ready-tag
+@code{agent-auto-ready-tag} is the Org tag that marks a task as ready@comma{} @samp{agent} by default. A task is started when all of these hold: it is an open TODO; it carries the tag on its own heading (a tag inherited from a heading above does not count); @code{agent-todo-directory-property} names a directory for it@comma{} on its own heading or inherited@comma{} and the directory exists; it records no session; and no function in @code{agent-auto-eligible-functions} vetoes it. Removing the tag before the next search prevents the start. There is no limit on how many sessions run.
+
+@lisp
+(setopt agent-todo-directory-property "DIRECTORY")
+(agent-auto-mode 1)
+@end lisp
+
+@example
+* Website
+:PROPERTIES:
+:DIRECTORY: ~/repos/website
+:END:
+** TODO Find why the footer links return 404 :agent:
+The links to the archive in the footer return 404.  Find out why and fix them.
+@end example
+
+@vindex agent-auto-instructions
+@vindex agent-auto-backend
+The session starts in the task's directory@comma{} on the account any session started there gets (@code{agent-account-directory-rules}@comma{} else the persisted selection; @ref{Account model, , Account model})@comma{} named after the task's heading. Its brief is the heading and the body@comma{} followed by the paragraph in @code{agent-auto-instructions}@comma{} and it is always submitted@comma{} also for a Linear issue that @code{agent-send-todo-at-point} would leave in the prompt to be edited. The default instructions tell the session that nobody is watching@comma{} that it may do what the project's own instructions allow an agent and nothing beyond them@comma{} that it must never send a message to a person@comma{} and that its reply must end with a status line@comma{} with the result in one line after @samp{Status: done:}. @code{agent-auto-backend} names the backend@comma{} such as @code{claude-code}; nil@comma{} the default@comma{} means the only registered backend@comma{} and with several registered no session is started until the option names one. The task's TODO keyword is left alone@comma{} and nothing is asked and no window is changed by the start.
+
+When another tracked session@comma{} one linked to a task@comma{} already runs in the directory's Git checkout@comma{} the new session gets a worktree instead: @samp{REPO/NAME} under @code{agent-branch-worktree-directory}@comma{} on the branch @samp{agent-auto/NAME}@comma{} where @samp{NAME} is made from the task's heading. Two tasks in one repository therefore never share a working tree. The account is still the one the task's own directory gets.
+
+@vindex agent-auto-session-property
+@vindex agent-auto-started-property
+@vindex agent-auto-result-property
+The task is the record; there is no database. Before the session starts@comma{} the task gets two properties: @samp{AGENT_SESSION}@comma{} the session's id (the name of its buffer until the backend reports the id)@comma{} and @samp{AGENT_STARTED}@comma{} the time. A task that has @samp{AGENT_SESSION} is never started@comma{} so a task is started once; to run one again@comma{} delete the property and tag the task again. A task sent to a session by hand@comma{} with @code{agent-act-on-thing-at-point} or @code{agent-send-todo-at-point} while the mode is on@comma{} is recorded the same way@comma{} whatever its tags@comma{} so the timer starts no second session on it. A handoff moves the task to the session it starts@comma{} a restart keeps it@comma{} and a session resumed later@comma{} as after Emacs restarts@comma{} is linked again to the task that records its id.
+
+@vindex agent-auto-review-tag
+@vindex agent-auto-blocked-tag
+@vindex agent-auto-stuck-tag
+When the session's turn ends@comma{} its status line (@ref{Reading and messaging sessions, , Reading and messaging sessions}) decides what happens to the task@comma{} and a one-line result is written in its @samp{AGENT_RESULT} property:
+
+@multitable {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+@headitem The turn ended with
+@tab Tag
+@tab @samp{AGENT_RESULT}
+@item @samp{Status: done}
+@tab @code{agent-auto-review-tag} (@samp{review})
+@tab What follows @samp{done}@comma{} else the paragraph above the status line
+@item @samp{Status: done@comma{} pending verification}
+@tab @code{agent-auto-review-tag}
+@tab @samp{pending verification:} and what is still to be proved
+@item @samp{Status: waiting on you}@comma{} a permission or input prompt@comma{} or an interrupted turn
+@tab @code{agent-auto-blocked-tag} (@samp{blocked})
+@tab The question
+@item @samp{Status: in progress}
+@tab unchanged
+@tab unchanged; the session is still followed
+@item no status line@comma{} a session that could not start@comma{} silence@comma{} or no session
+@tab @code{agent-auto-stuck-tag} (@samp{stuck})
+@tab The reason
+@end multitable
+
+The new tag replaces whichever of the four tags the task carries@comma{} so a session that asked a question and was answered moves its task from blocked to review when it finishes@comma{} and a session given up on as silent still delivers its result. A task that carries none of the four is left alone: a result tag the user removed is never added back. So is a task that has been closed. Nothing is ever retried: a stuck task stays stuck until someone looks.
+
+@vindex agent-auto-silence-timeout
+@code{agent-auto-silence-timeout} is the number of minutes without a sign of life after which a task still marked ready becomes stuck@comma{} 30 by default. A sign of life is an event of the session@comma{} activity recorded in its transcript@comma{} or a status its agent published@comma{} so a long turn that keeps working is not silent. A ready task whose recorded session is not running for that long is stuck too; the delay leaves time for the session to be resumed after Emacs restarts.
+
+@vindex agent-auto-eligible-functions
+@code{agent-auto-eligible-functions} is an abnormal hook that decides whether a ready task may be started. Each function is called with no arguments@comma{} with point on the task's heading in the buffer visiting its file@comma{} and the task is started only when every function returns non-nil; a function that signals an error vetoes it too. This is where a rule the tag alone cannot express goes@comma{} such as refusing a task made from a stranger's message. The hook runs on every search while the task is ready and unstarted@comma{} so its functions must be quick and leave the buffer as it is.
+
+@vindex agent-auto-files
+@vindex agent-auto-interval
+@code{agent-auto-files} says where to look: nil@comma{} the default@comma{} for the files of @code{org-agenda-files}@comma{} or a list of Org files and of directories whose Org files are searched@comma{} or a function returning such a list. @code{agent-auto-interval} is the number of seconds between two searches@comma{} 30 by default; a change takes effect when the mode is next turned on. The search is cheap: ripgrep looks for the tag in the files on disk@comma{} without Emacs waiting for it@comma{} and only a file that has it is visited. The work is then done in short steps@comma{} one file or one start each@comma{} so Emacs stays responsive however many tasks are ready.
+
+Org files are edited only in the buffer visiting them@comma{} which is saved after each edit. A buffer with unsaved edits is left alone until it is saved: its tasks are not started@comma{} and a result meant for one of them is kept and written afterwards. A buffer whose file changed on disk is reverted first. Point@comma{} narrowing and windows are never touched. The one exception is a task sent by hand: the user is at the task@comma{} so its properties are written at once@comma{} and a buffer that had unsaved edits is left unsaved.
+
 @node Claude Code backend
 @section Claude Code backend
 
@@ -446,6 +524,7 @@ In stateless mode@comma{} backend output may include echoed CLI transcript text 
 * Reporting bugs and ideas::
 * Branch navigation::
 * Org TODO commands::
+* Unattended task commands::
 * Chief-of-staff commands::
 * Claude Code commands::
 * Codex commands::
@@ -1042,6 +1121,15 @@ The @samp{agent-todo} module turns an Org TODO entry into work for an AI session
 
 @code{agent-send-todo-at-point} formats the heading and body of the TODO at point@comma{} or of the TODO the agenda line at point shows@comma{} as a prompt and submits it to a session started for it; it is not a menu entry of its own@comma{} since the menu reaches the same routing through @code{agent-act-on-thing-at-point}. With a prefix argument it submits the prompt to a running session chosen by completion. Like a Slack message@comma{} a TODO names no directory@comma{} so the project is read from the account's sources and ranked by the TODO's own text (@ref{Project sources, , Project sources})@comma{} unless @code{agent-todo-directory-property} is set and the TODO@comma{} or a heading above it@comma{} names its directory in that property: the session then starts there with nothing to choose (@ref{Org TODO workflows, , Org TODO workflows}). It no longer looks for the session belonging to the current file's project: an Org file of tasks rarely sits in the repository those tasks are about. When @code{agent-todo-in-progress-keyword} is set@comma{} the heading moves to that keyword once the prompt has been delivered. The heading is remembered as a marker@comma{} so the move lands on the heading the prompt came from however far point has travelled while the project was being chosen@comma{} and an agenda the command was called from is rebuilt so that its line shows the new keyword. A heading deleted in the meantime is left alone: the state change happens after the session exists but before it is shown@comma{} so an error there would leave a running session unshown.
 
+@node Unattended task commands
+@section Unattended task commands
+
+@findex agent-auto-mode
+@code{agent-auto-mode} is a global minor mode@comma{} off by default. While it is on@comma{} a timer looks every @code{agent-auto-interval} seconds for Org tasks tagged as ready for an agent and starts a session on each@comma{} and the sessions of tasks are followed until their turns end (@ref{Unattended sessions on tagged tasks, , Unattended sessions on tagged tasks}). It refuses to turn on without ripgrep. Turning it off stops the timer and the following; sessions already started keep running@comma{} and their tasks are picked up again when it is turned back on.
+
+@findex agent-auto-run-now
+@code{agent-auto-run-now} looks for ready tasks at once instead of waiting for the timer. It needs the mode to be on.
+
 @node Chief-of-staff commands
 @section Chief-of-staff commands
 
@@ -1154,6 +1242,10 @@ These functions let a program outside a session@comma{} such as an orchestrator@
 Every program that sends a message to a session goes through one guard@comma{} @code{agent-send-refusal}@comma{} so that none of them types into an input box holding someone's unsent text or into an open dialog. It returns nil when a message can be sent now@comma{} or a short string naming why not: @samp{no live session}; @samp{a dialog is open}@comma{} when a dialog or picker shows in place of the input box@comma{} which would take the text as keystrokes; @samp{the input box is not showing}; @samp{input box holds unsent text}@comma{} which the message would join; or @samp{the input box cannot be read}. A prompt that Claude Code suggests faint in an empty box is not unsent text. A busy session is not refused@comma{} since it queues what it is sent. Each backend reports its input box through the hook @code{agent-session-input-state-functions}: called with a session buffer@comma{} its function returns nil for another backend's buffer and otherwise a plist of @code{:box}@comma{} non-nil when the input box shows; @code{:input}@comma{} the text in it not yet submitted; and @code{:dialog}@comma{} non-nil when a dialog or picker has replaced it. Claude reads them from the screen@comma{} with @code{:screen-state}. Codex reads its app-server composer@comma{} and an app-server session asks for approvals in the minibuffer@comma{} where no message sent to it goes; in a Codex terminal session the box is taken to show and approval dialogs are not recognized. A session no function answers for is refused. The phone page@comma{} @samp{bin/agent-send} and @code{agent-deliver} all use this guard.
 
 @code{agent-deliver} is how a program sends a message nobody in the session asked for@comma{} such as an orchestrator's answer or a monitor's wake-up. Called with a session buffer and the text@comma{} it submits the text and returns nil@comma{} or returns the reason it did not@comma{} from @code{agent-deliver-refusal}@comma{} without sending anything; an empty text is refused as @samp{nothing to send}@comma{} and an error while submitting is signaled. Beyond the reasons of @code{agent-send-refusal}@comma{} @code{agent-deliver-refusal} refuses a session running its before-exit chain (@samp{session is exiting}); a session that does not read waiting (@samp{session is busy} or @samp{session state is unknown})@comma{} unless its transcript has not changed for @code{agent-deliver-silence-time} seconds@comma{} 600 by default@comma{} which makes it most likely stalled@comma{} as when its stop event was lost (nil turns this off); and a session whose state changed less than @code{agent-deliver-quiet-time} seconds ago@comma{} 15 by default (@samp{session changed state 3 s ago})@comma{} since a state just reached may not have settled and the user may be about to answer the turn that just ended. These refusals are mostly transient@comma{} so a caller tries again later.
+
+@vindex agent-delivery-functions
+@vindex agent-session-inherited-variables
+Two variables let a module follow a session from the thing it was started for. @code{agent-delivery-functions} is an abnormal hook run when @code{agent-act-on-thing-at-point}@comma{} or one of the commands built on it@comma{} has delivered the thing at point to a session@comma{} whether one started for it or a running one. Each function is called with the context plist the thing's extractor gave and the session buffer@comma{} in the buffer the command was invoked from; the context of an Org TODO carries @code{:todo}@comma{} a marker at its heading. @code{agent-session-inherited-variables} is a list of buffer-local variables that a session passes on to the session replacing it: @code{agent-handoff} and the restart commands kill a session's buffer and start another@comma{} and each listed variable that is buffer-local in the buffer killed gets the same value in the new one. @samp{agent-auto} uses both@comma{} to record a hand-started session on its task and to keep a task linked to its session across a handoff.
 
 @node Modeline and status helpers
 @section Modeline and status helpers

@@ -144,9 +144,10 @@ line at point shows in an agenda.  It is both the text a project is
 chosen from and the request itself, so it is submitted rather than left
 for review.  A TODO that `agent-todo-directory-property' names a
 directory for carries that directory, and no project is then chosen.
-The heading is remembered as a marker because choosing that project can
-take a model request and a prompt, by which time point has moved, or
-the agenda has been rebuilt."
+The context's `:todo' is a marker at the heading, for
+`agent-delivery-functions'.  The heading is remembered as a marker
+because choosing that project can take a model request and a prompt, by
+which time point has moved, or the agenda has been rebuilt."
   (let ((marker (or (agent--org-entry-marker)
                     (user-error "Must be called on an org heading or agenda entry"))))
     (unless (agent--at-org-entry #'org-get-todo-state)
@@ -158,6 +159,7 @@ the agenda has been rebuilt."
                        (list :text prompt
                              :payload prompt
                              :submit t
+                             :todo marker
                              :after (lambda ()
                                       (agent-todo--mark-in-progress
                                        marker))))))))

@@ -680,6 +680,22 @@ Each function receives the session buffer and the event symbol, before
 `agent-session-event' applies the event, including an event that will
 leave the state unchanged.")
 
+(defvar agent-session-inherited-variables nil
+  "Buffer-local variables a session passes on to the session replacing it.
+`agent-handoff' and the restart commands kill a session's buffer and
+start another in its place.  Each variable in this list that has a
+buffer-local value in the buffer killed gets the same value in the new
+buffer, so a module that keeps what it knows about a session in a
+buffer-local variable keeps knowing it across the replacement.")
+
+(defvar agent-delivery-functions nil
+  "Abnormal hook run when the thing at point has been delivered to a session.
+Each function is called with the context plist the thing's extractor
+gave and the session buffer, in the buffer the command was invoked from
+and before the context's `:after' thunk.  It is run for a session
+started for the thing and for a running session it was sent to; see
+`agent-at-point-things' for the context.")
+
 (defvar agent-session-status-token-functions nil
   "Hook returning a backend's publisher process token for a session buffer.")
 
@@ -3903,12 +3919,15 @@ passed as the initial prompt."
                (not (agent--confirm-no-captured-prompts
                      backend source "Handoff")))
       (user-error "Handoff aborted"))
-    (let ((named (and source (buffer-local-value 'agent--named source))))
-      (agent--kill-handoff-source backend source source-directory)
-      (agent--mark-named
-       (agent-start-session session :initial-prompt
-                            (plist-get handoff :prompt))
-       named))))
+    (let ((named (and source (buffer-local-value 'agent--named source)))
+          (inherited (agent--kill-handoff-source
+                      backend source source-directory)))
+      (agent--inherit-session-variables
+       (agent--mark-named
+        (agent-start-session session :initial-prompt
+                             (plist-get handoff :prompt))
+        named)
+       inherited))))
 
 (defun agent--handoff-source-buffer (buffer-name)
   "Return the session buffer named BUFFER-NAME, or the current buffer.
@@ -3998,10 +4017,34 @@ over.  DIRECTORY replaces SESSION's directory when non-nil."
   "Kill SOURCE, or the single existing BACKEND buffer in DIR.
 The fallback handles emacsclient invocations that reach Emacs
 without the requesting buffer name; leaving that buffer alive
-would trigger an instance-name prompt and break unattended loops."
+would trigger an instance-name prompt and break unattended loops.
+Return what the buffer killed passes on to its successor, as
+`agent--session-inheritance' does."
   (when-let* ((target (or source
                           (agent--single-session-buffer-for-dir backend dir))))
-    (agent--force-kill-buffer target)))
+    (prog1 (agent--session-inheritance target)
+      (agent--force-kill-buffer target))))
+
+(defun agent--session-inheritance (buffer)
+  "Return what session BUFFER passes on to the session replacing it.
+The result is an alist of each variable in
+`agent-session-inherited-variables' that is buffer-local in BUFFER and
+its value there."
+  (delq nil (mapcar (lambda (variable)
+                      (when (local-variable-p variable buffer)
+                        (cons variable
+                              (buffer-local-value variable buffer))))
+                    agent-session-inherited-variables)))
+
+(defun agent--inherit-session-variables (buffer inheritance)
+  "Set in session BUFFER the variables INHERITANCE records; return BUFFER.
+INHERITANCE is as `agent--session-inheritance' returns it for the
+session BUFFER replaces."
+  (when inheritance
+    (with-current-buffer buffer
+      (pcase-dolist (`(,variable . ,value) inheritance)
+        (set (make-local-variable variable) value))))
+  buffer)
 
 (defun agent--single-session-buffer-for-dir (backend dir)
   "Return the only BACKEND session buffer for DIR, or signal on ambiguity."
@@ -4365,8 +4408,9 @@ when the thing carries a working directory, as an absolute path,
 `:suggested-directory' when it worked one out and the user should still
 be asked, `:text' when it carries only text for a project to be chosen
 from, `:payload' for what to send, `:submit' for whether to submit it,
-and an optional `:after' thunk run once the payload is delivered, in the
-buffer the command was invoked from.  A context that names an existing
+an optional `:after' thunk run once the payload is delivered, in the
+buffer the command was invoked from, and `:todo', a marker at the org
+entry the thing is, when it is one.  A context that names an existing
 session instead carries `:resume-id', `:backend' and `:directory', and
 that session is shown or resumed with no payload.  The continuation is
 called rather than returned to because extraction can require network
@@ -4528,13 +4572,16 @@ ORIGIN is the buffer the command was invoked from."
 
 (defun agent--finish-delivery (context buffer origin)
   "Run CONTEXT's `:after' thunk, display session BUFFER and return it.
+`agent-delivery-functions' run first, with CONTEXT and BUFFER.
 The thunk acts on the thing at point, so it runs in ORIGIN, the buffer
 the command was invoked from: starting a session pops to BUFFER and
 makes it current, and an origin that died meanwhile has nothing left to
 act on."
-  (when-let* ((after (plist-get context :after))
-              ((buffer-live-p origin)))
-    (with-current-buffer origin (funcall after)))
+  (when (buffer-live-p origin)
+    (with-current-buffer origin
+      (run-hook-with-args 'agent-delivery-functions context buffer)
+      (when-let* ((after (plist-get context :after)))
+        (funcall after))))
   (display-buffer buffer)
   buffer)
 
@@ -4844,7 +4891,8 @@ ACCOUNT-FN is called with no arguments once BUFFER is known to be
 restartable, and returns the account to resume under.  INSTANCE, when
 non-nil, is the instance name the resumed session takes instead of
 BUFFER's.  The session's captured prompts follow it to its new account
-and instance name."
+and instance name, and the new buffer gets the variables in
+`agent-session-inherited-variables'."
   (let* ((session (agent-session buffer))
          (backend (agent-session-backend session))
          (struct (agent-backend backend))
@@ -4855,14 +4903,15 @@ and instance name."
           (when-let* ((fn (and struct (agent-backend-restart-options struct))))
             (funcall fn buffer)))
          (account (funcall account-fn))
-         (state (agent--session-user-state buffer)))
+         (state (agent--session-user-state buffer))
+         (inherited (agent--session-inheritance buffer)))
     (agent-check-session-start backend account)
     (agent--change-session-identity buffer account instance)
     (agent--force-kill-buffer buffer)
     (let ((new (apply #'agent-start-session session
                       :resume-id session-id extra-options)))
       (agent--restore-session-user-states (list (cons new state)))
-      new)))
+      (agent--inherit-session-variables new inherited))))
 
 (defun agent--change-session-identity (buffer account &optional instance)
   "Record ACCOUNT, and INSTANCE when non-nil, on session BUFFER.

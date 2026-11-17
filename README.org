@@ -42,6 +42,7 @@ The package is split into a small backend-agnostic core and focused modules:
 | =agent-org-linear.el= | Linear-issue-to-project routing: routes an issue =org-linear= mirrors as the org TODO it is, ranking projects by its Linear project and adding its URL to the prompt                                                       |
 | =agent-snippet.el=   | Yasnippet TAB expansion and snippet insertion in eat-based session buffers                                                                                                                                                  |
 | =agent-todo.el=      | Org TODO workflow that works with any backend: routing the entry at point to a session                                                                                             |
+| =agent-auto.el=      | Unattended sessions on Org tasks tagged for an agent: a timer starts a session on each ready task, the task records its session, and the tag that marked it ready is replaced by one saying how the session ended |
 | =agent-util.el=      | File helpers shared by the backends, such as reading a transcript's first line whatever its length; depends on no other module                                                                                         |
 | =agent-claude.el=    | Claude Code backend: integrates =claude-code.el= with status and usage polling, hook setup, and ~agent-claude-mode~                                                                                                          |
 | =agent-claude-cli.el= | Quarantined undocumented Claude CLI conventions: Keychain credential naming, the usage API endpoint, the =~/.claude/projects/= directory encoding, transcript JSONL parsing, and the =.claude.json= merge engine            |
@@ -268,6 +269,68 @@ Acting on that TODO starts a session in =~/repos/website= and submits its headin
 
 #+vindex: agent-todo-submit-property
 ~agent-todo-submit-property~ names an Org property that marks a TODO whose text is a prompt ready to be sent. It defaults to ~nil~. A plain TODO is submitted in any case, so the option matters only for a TODO of a kind that is otherwise typed into the prompt and left there to be edited, which is a Linear issue mirrored by =org-linear= ([[#h:shared-commands][Shared commands]]). When the issue's own heading has the property, with any value but =nil=, its text is submitted as a plain TODO's is. The property is read from the TODO's own heading and is never inherited, since being a finished brief is a fact about one task, not about everything filed beside it. With both options set, a task whose heading carries the mark and sits under a heading naming a directory is routed the same way before and after =org-linear= has given it a =LINEAR_URL=: into that directory, submitted. The one difference is that the issue's URL then follows its text.
+
+** Unattended sessions on tagged tasks
+:PROPERTIES:
+:CUSTOM_ID: h:auto-options
+:END:
+
+The =agent-auto= module starts a session by itself on every Org task that is marked as ready for an agent. It is off until ~agent-auto-mode~ is turned on ([[#h:auto-commands][Unattended task commands]]), and it needs ripgrep (=rg=) and a value for ~agent-todo-directory-property~ ([[#h:todo-options][Org TODO workflows]]), since a task without a directory is never started. Whoever creates a task decides whether an agent can finish it: a person, a program that files tasks, or a session that files one for later.
+
+#+vindex: agent-auto-ready-tag
+~agent-auto-ready-tag~ is the Org tag that marks a task as ready, =agent= by default. A task is started when all of these hold: it is an open TODO; it carries the tag on its own heading (a tag inherited from a heading above does not count); ~agent-todo-directory-property~ names a directory for it, on its own heading or inherited, and the directory exists; it records no session; and no function in ~agent-auto-eligible-functions~ vetoes it. Removing the tag before the next search prevents the start. There is no limit on how many sessions run.
+
+#+begin_src emacs-lisp
+(setopt agent-todo-directory-property "DIRECTORY")
+(agent-auto-mode 1)
+#+end_src
+
+#+begin_src org
+,* Website
+:PROPERTIES:
+:DIRECTORY: ~/repos/website
+:END:
+,** TODO Find why the footer links return 404 :agent:
+The links to the archive in the footer return 404.  Find out why and fix them.
+#+end_src
+
+#+vindex: agent-auto-instructions
+#+vindex: agent-auto-backend
+The session starts in the task's directory, on the account any session started there gets (~agent-account-directory-rules~, else the persisted selection; [[#h:account-model][Account model]]), named after the task's heading. Its brief is the heading and the body, followed by the paragraph in ~agent-auto-instructions~, and it is always submitted, also for a Linear issue that ~agent-send-todo-at-point~ would leave in the prompt to be edited. The default instructions tell the session that nobody is watching, that it may do what the project's own instructions allow an agent and nothing beyond them, that it must never send a message to a person, and that its reply must end with a status line, with the result in one line after =Status: done:=. ~agent-auto-backend~ names the backend, such as ~claude-code~; nil, the default, means the only registered backend, and with several registered no session is started until the option names one. The task's TODO keyword is left alone, and nothing is asked and no window is changed by the start.
+
+When another tracked session, one linked to a task, already runs in the directory's Git checkout, the new session gets a worktree instead: =REPO/NAME= under ~agent-branch-worktree-directory~, on the branch =agent-auto/NAME=, where =NAME= is made from the task's heading. Two tasks in one repository therefore never share a working tree. The account is still the one the task's own directory gets.
+
+#+vindex: agent-auto-session-property
+#+vindex: agent-auto-started-property
+#+vindex: agent-auto-result-property
+The task is the record; there is no database. Before the session starts, the task gets two properties: =AGENT_SESSION=, the session's id (the name of its buffer until the backend reports the id), and =AGENT_STARTED=, the time. A task that has =AGENT_SESSION= is never started, so a task is started once; to run one again, delete the property and tag the task again. A task sent to a session by hand, with ~agent-act-on-thing-at-point~ or ~agent-send-todo-at-point~ while the mode is on, is recorded the same way, whatever its tags, so the timer starts no second session on it. A handoff moves the task to the session it starts, a restart keeps it, and a session resumed later, as after Emacs restarts, is linked again to the task that records its id.
+
+#+vindex: agent-auto-review-tag
+#+vindex: agent-auto-blocked-tag
+#+vindex: agent-auto-stuck-tag
+When the session's turn ends, its status line ([[#h:session-api][Reading and messaging sessions]]) decides what happens to the task, and a one-line result is written in its =AGENT_RESULT= property:
+
+| The turn ended with                                                   | Tag                                   | =AGENT_RESULT=                                                                 |
+|-----------------------------------------------------------------------+---------------------------------------+--------------------------------------------------------------------------------|
+| =Status: done=                                                        | ~agent-auto-review-tag~ (=review=)    | What follows =done=, else the paragraph above the status line                  |
+| =Status: done, pending verification=                                  | ~agent-auto-review-tag~               | =pending verification:= and what is still to be proved                         |
+| =Status: waiting on you=, a permission or input prompt, or an interrupted turn | ~agent-auto-blocked-tag~ (=blocked=)  | The question                                                                   |
+| =Status: in progress=                                                 | unchanged                             | unchanged; the session is still followed                                       |
+| no status line, a session that could not start, silence, or no session | ~agent-auto-stuck-tag~ (=stuck=)      | The reason                                                                     |
+
+The new tag replaces whichever of the four tags the task carries, so a session that asked a question and was answered moves its task from blocked to review when it finishes, and a session given up on as silent still delivers its result. A task that carries none of the four is left alone: a result tag the user removed is never added back. So is a task that has been closed. Nothing is ever retried: a stuck task stays stuck until someone looks.
+
+#+vindex: agent-auto-silence-timeout
+~agent-auto-silence-timeout~ is the number of minutes without a sign of life after which a task still marked ready becomes stuck, 30 by default. A sign of life is an event of the session, activity recorded in its transcript, or a status its agent published, so a long turn that keeps working is not silent. A ready task whose recorded session is not running for that long is stuck too; the delay leaves time for the session to be resumed after Emacs restarts.
+
+#+vindex: agent-auto-eligible-functions
+~agent-auto-eligible-functions~ is an abnormal hook that decides whether a ready task may be started. Each function is called with no arguments, with point on the task's heading in the buffer visiting its file, and the task is started only when every function returns non-nil; a function that signals an error vetoes it too. This is where a rule the tag alone cannot express goes, such as refusing a task made from a stranger's message. The hook runs on every search while the task is ready and unstarted, so its functions must be quick and leave the buffer as it is.
+
+#+vindex: agent-auto-files
+#+vindex: agent-auto-interval
+~agent-auto-files~ says where to look: nil, the default, for the files of ~org-agenda-files~, or a list of Org files and of directories whose Org files are searched, or a function returning such a list. ~agent-auto-interval~ is the number of seconds between two searches, 30 by default; a change takes effect when the mode is next turned on. The search is cheap: ripgrep looks for the tag in the files on disk, without Emacs waiting for it, and only a file that has it is visited. The work is then done in short steps, one file or one start each, so Emacs stays responsive however many tasks are ready.
+
+Org files are edited only in the buffer visiting them, which is saved after each edit. A buffer with unsaved edits is left alone until it is saved: its tasks are not started, and a result meant for one of them is kept and written afterwards. A buffer whose file changed on disk is reverted first. Point, narrowing and windows are never touched. The one exception is a task sent by hand: the user is at the task, so its properties are written at once, and a buffer that had unsaved edits is left unsaved.
 
 ** Claude Code backend
 :PROPERTIES:
@@ -955,6 +1018,17 @@ The =agent-todo= module turns an Org TODO entry into work for an AI session, wit
 
 ~agent-send-todo-at-point~ formats the heading and body of the TODO at point, or of the TODO the agenda line at point shows, as a prompt and submits it to a session started for it; it is not a menu entry of its own, since the menu reaches the same routing through ~agent-act-on-thing-at-point~. With a prefix argument it submits the prompt to a running session chosen by completion. Like a Slack message, a TODO names no directory, so the project is read from the account's sources and ranked by the TODO's own text ([[#h:project-options][Project sources]]), unless ~agent-todo-directory-property~ is set and the TODO, or a heading above it, names its directory in that property: the session then starts there with nothing to choose ([[#h:todo-options][Org TODO workflows]]). It no longer looks for the session belonging to the current file's project: an Org file of tasks rarely sits in the repository those tasks are about. When ~agent-todo-in-progress-keyword~ is set, the heading moves to that keyword once the prompt has been delivered. The heading is remembered as a marker, so the move lands on the heading the prompt came from however far point has travelled while the project was being chosen, and an agenda the command was called from is rebuilt so that its line shows the new keyword. A heading deleted in the meantime is left alone: the state change happens after the session exists but before it is shown, so an error there would leave a running session unshown.
 
+** Unattended task commands
+:PROPERTIES:
+:CUSTOM_ID: h:auto-commands
+:END:
+
+#+findex: agent-auto-mode
+~agent-auto-mode~ is a global minor mode, off by default. While it is on, a timer looks every ~agent-auto-interval~ seconds for Org tasks tagged as ready for an agent and starts a session on each, and the sessions of tasks are followed until their turns end ([[#h:auto-options][Unattended sessions on tagged tasks]]). It refuses to turn on without ripgrep. Turning it off stops the timer and the following; sessions already started keep running, and their tasks are picked up again when it is turned back on.
+
+#+findex: agent-auto-run-now
+~agent-auto-run-now~ looks for ready tasks at once instead of waiting for the timer. It needs the mode to be on.
+
 ** Chief-of-staff commands
 :PROPERTIES:
 :CUSTOM_ID: h:chief-commands
@@ -1073,6 +1147,10 @@ These functions let a program outside a session, such as an orchestrator, read w
 Every program that sends a message to a session goes through one guard, ~agent-send-refusal~, so that none of them types into an input box holding someone's unsent text or into an open dialog. It returns nil when a message can be sent now, or a short string naming why not: =no live session=; =a dialog is open=, when a dialog or picker shows in place of the input box, which would take the text as keystrokes; =the input box is not showing=; =input box holds unsent text=, which the message would join; or =the input box cannot be read=. A prompt that Claude Code suggests faint in an empty box is not unsent text. A busy session is not refused, since it queues what it is sent. Each backend reports its input box through the hook ~agent-session-input-state-functions~: called with a session buffer, its function returns nil for another backend's buffer and otherwise a plist of ~:box~, non-nil when the input box shows; ~:input~, the text in it not yet submitted; and ~:dialog~, non-nil when a dialog or picker has replaced it. Claude reads them from the screen, with ~:screen-state~. Codex reads its app-server composer, and an app-server session asks for approvals in the minibuffer, where no message sent to it goes; in a Codex terminal session the box is taken to show and approval dialogs are not recognized. A session no function answers for is refused. The phone page, =bin/agent-send= and ~agent-deliver~ all use this guard.
 
 ~agent-deliver~ is how a program sends a message nobody in the session asked for, such as an orchestrator's answer or a monitor's wake-up. Called with a session buffer and the text, it submits the text and returns nil, or returns the reason it did not, from ~agent-deliver-refusal~, without sending anything; an empty text is refused as =nothing to send=, and an error while submitting is signaled. Beyond the reasons of ~agent-send-refusal~, ~agent-deliver-refusal~ refuses a session running its before-exit chain (=session is exiting=); a session that does not read waiting (=session is busy= or =session state is unknown=), unless its transcript has not changed for ~agent-deliver-silence-time~ seconds, 600 by default, which makes it most likely stalled, as when its stop event was lost (nil turns this off); and a session whose state changed less than ~agent-deliver-quiet-time~ seconds ago, 15 by default (=session changed state 3 s ago=), since a state just reached may not have settled and the user may be about to answer the turn that just ended. These refusals are mostly transient, so a caller tries again later.
+
+#+vindex: agent-delivery-functions
+#+vindex: agent-session-inherited-variables
+Two variables let a module follow a session from the thing it was started for. ~agent-delivery-functions~ is an abnormal hook run when ~agent-act-on-thing-at-point~, or one of the commands built on it, has delivered the thing at point to a session, whether one started for it or a running one. Each function is called with the context plist the thing's extractor gave and the session buffer, in the buffer the command was invoked from; the context of an Org TODO carries ~:todo~, a marker at its heading. ~agent-session-inherited-variables~ is a list of buffer-local variables that a session passes on to the session replacing it: ~agent-handoff~ and the restart commands kill a session's buffer and start another, and each listed variable that is buffer-local in the buffer killed gets the same value in the new one. =agent-auto= uses both, to record a hand-started session on its task and to keep a task linked to its session across a handoff.
 
 ** Modeline and status helpers
 :PROPERTIES:
