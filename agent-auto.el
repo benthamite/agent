@@ -1038,9 +1038,11 @@ has a session shows that session instead of starting another.  The
 context names the session's buffer when it is live, and otherwise the
 session to resume, by its id, with the backend that ran it, where it
 ran, on the account the task's directory gets, under the name a session
-started on the task gets, which is made from its heading.  A task that records a
-session by no id, since it never got one, records nothing that can be
-resumed: that is said, and nil returned, so a new session is started."
+started on the task gets, which is made from its heading.  A task that
+records a session by no id, since it never got one, records nothing that
+can be resumed: the context says so with `:lost', and the user is asked
+before a new session is started.  Nothing is asked or said here, so the
+hook can be run to learn what a task records."
   (when-let* ((marker (agent--org-entry-marker))
               (task (agent--at-org-entry #'agent-auto--recorded-at-point)))
     (let ((recorded (plist-get task :session))
@@ -1057,9 +1059,7 @@ resumed: that is said, and nil returned, so a new session is started."
                           (or (plist-get task :directory) directory)))
               :instance (plist-get task :instance)
               :todo marker))
-       (t (message "The session this task records (%s) cannot be resumed; starting a new one"
-                   recorded)
-          nil)))))
+       (t (list :lost recorded :todo marker))))))
 
 (defun agent-auto--recorded-at-point ()
   "Return what the task at point records of its session, or nil.

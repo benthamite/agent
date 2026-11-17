@@ -705,11 +705,18 @@ its value is a context plist naming a session, which is shown, and
 nothing is sent.  A context with `:buffer' names a live session buffer.
 One with `:resume-id', `:backend' and `:directory', and optionally
 `:account' and `:instance', names a past session, which is resumed,
-under the instance name `:instance' gives when it gives one; when
-resuming it signals an error, the error is reported and the thing is
-routed as if no function had answered.  `agent-delivery-functions' then run with the
-context and the session buffer, so the context can carry what they need,
-such as `:todo'.  The hook is not run with a prefix argument.")
+under the instance name `:instance' gives when it gives one.  One with
+`:lost' names a session that can be neither shown nor resumed, the value
+saying which.  For such a session, and for one that signals an error
+when resumed, the user is asked whether to start a new session, since
+that session is given the thing again: the thing is then routed as if no
+function had answered, and the command is refused when the user
+declines or `agent-inhibit-prompts' forbids asking.
+`agent-delivery-functions' then run with the context and the session
+buffer, so the context can carry what they need, such as `:todo'.  A
+function only looks the session up and asks nothing, so the hook can be
+run to learn what a thing records.  The hook is not run with a prefix
+argument.")
 
 (defvar agent-session-status-token-functions nil
   "Hook returning a backend's publisher process token for a session buffer.")
@@ -4545,8 +4552,8 @@ no backend or account is resolved for it and nothing is prompted for."
 (defun agent--show-recorded-session ()
   "Show the session the thing at point already has; return its buffer, or nil.
 The session is the one `agent-recorded-session-functions' name.  Nil
-when they name none, and when the one they name cannot be resumed, which
-is reported."
+when they name none, and when the one they name cannot be resumed and
+the user agreed to a new one; see `agent--confirm-new-session'."
   (when-let* ((origin (current-buffer))
               (context (run-hook-with-args-until-success
                         'agent-recorded-session-functions))
@@ -4558,18 +4565,39 @@ is reported."
 
 (defun agent--recorded-session-buffer (context)
   "Show the session CONTEXT names and return its buffer, or nil.
-CONTEXT is as `agent-recorded-session-functions' return it.  A session
-that cannot be resumed is reported, and nil returned."
-  (if-let* ((buffer (plist-get context :buffer)))
-      (pop-to-buffer buffer '((display-buffer-reuse-window
-                              display-buffer-same-window)))
-    (condition-case err
-        (let ((agent-inhibit-prompts t))
-          (agent--resume-context-session context))
-      (error
-       (message "Could not resume session %s (%s); starting a new one"
-                (plist-get context :resume-id) (error-message-string err))
-       nil))))
+CONTEXT is as `agent-recorded-session-functions' return it.  Nil is
+returned for a session that can be neither shown nor resumed, once the
+user has agreed to a new one; see `agent--confirm-new-session'."
+  (cond
+   ((plist-get context :buffer)
+    (pop-to-buffer (plist-get context :buffer)
+                   '((display-buffer-reuse-window
+                      display-buffer-same-window))))
+   ((plist-get context :lost)
+    (agent--confirm-new-session context))
+   (t (condition-case err
+          (let ((agent-inhibit-prompts t))
+            (agent--resume-context-session context))
+        (error
+         (agent--confirm-new-session context (error-message-string err)))))))
+
+(defun agent--confirm-new-session (context &optional detail)
+  "Ask whether a new session may replace the one CONTEXT names; return nil.
+That session can be neither shown nor resumed, and DETAIL, when non-nil,
+says why.  A new session is given the thing again, as a task's brief,
+so it is not started unasked.  Return nil when the user agrees, so that
+the thing is routed as if it had no session.  Signal a `user-error'
+when the user declines, and without asking when `agent-inhibit-prompts'
+is non-nil."
+  (let ((reason (format "%s cannot be resumed%s"
+                        (if (plist-get context :todo)
+                            "This task's session"
+                          "The recorded session")
+                        (if detail (format " (%s)" detail) ""))))
+    (when (or agent-inhibit-prompts
+              (not (y-or-n-p (format "%s. Start a new one? " reason))))
+      (user-error "%s; no session started" reason))
+    nil))
 
 (defun agent--extractor-origin (extractor)
   "Return the origin of the thing EXTRACTOR reads at point, or nil.

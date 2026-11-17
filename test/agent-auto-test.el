@@ -1228,10 +1228,31 @@ The account is still the one the task's own directory gets."
             (should (equal (agent-session-directory session) worktree))
             (should (equal (agent-session-account session) "work"))))))))
 
-(ert-deftest agent-auto-test-acting-starts-anew-without-an-id ()
-  "Say so and start a new session when the recorded one has no id.
+;; A session that could not be resumed was replaced without a word but a
+;; line in the echo area, and the new one was given the brief again.
+(defmacro agent-auto-test--answering (answer asked &rest body)
+  "Evaluate BODY with `y-or-n-p' answering ANSWER.
+ASKED is a symbol, bound to the prompts it was given, the latest first."
+  (declare (indent 2) (debug (form symbolp body)))
+  `(let (,asked)
+     (cl-letf (((symbol-function 'y-or-n-p)
+                (lambda (prompt) (push prompt ,asked) ,answer)))
+       ,@body)))
+
+(defun agent-auto-test--refused (file)
+  "Act on the first task of FILE where nothing may be asked.
+Return the message of the `user-error' that refuses it."
+  (let ((agent-inhibit-prompts t))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (ert-fail "Asked with `y-or-n-p'"))))
+      (cadr (should-error (agent-auto-test--act file) :type 'user-error)))))
+
+(ert-deftest agent-auto-test-acting-asks-before-starting-anew-without-an-id ()
+  "Ask before a new session replaces a recorded one that has no id.
 A placeholder and a buffer's name name no conversation to resume.  The
-task is linked to the new session."
+question is asked once.  Declined, or where nothing may be asked, no
+session is started and the reason is given; accepted, the task is
+linked to the new session.  Looking the session up asks nothing."
   (dolist (recorded '(nil "starting-20261117T120000-0a1b"))
     (agent-auto-test--with root
       (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root))
@@ -1242,10 +1263,27 @@ task is linked to the new session."
            file "Fix it" (lambda () (org-entry-put nil "AGENT_SESSION" recorded)))
           (with-current-buffer (find-buffer-visiting file)
             (save-buffer)))
-        (agent-test-helper-with-messages messages
+        (agent-auto-test--answering nil asked
+          (should (string-match-p
+                   "This task's session cannot be resumed"
+                   (cadr (should-error (agent-auto-test--act file)
+                                       :type 'user-error))))
+          (should (equal asked '("This task's session cannot be resumed. Start a new one? "))))
+        (agent-auto-test--answering (ert-fail "Asked with `y-or-n-p'") asked
+          (let ((context (agent-auto-test--at
+                          file "Fix it"
+                          (lambda ()
+                            (run-hook-with-args-until-success
+                             'agent-recorded-session-functions)))))
+            (should context)
+            (should-not (plist-get context :buffer))
+            (should-not (plist-get context :resume-id))))
+        (should (string-match-p "This task's session cannot be resumed"
+                                (agent-auto-test--refused file)))
+        (should (= (length agent-auto-test--started) 1))
+        (agent-auto-test--answering t asked
           (agent-auto-test--act file)
-          (should (string-match-p "cannot be resumed; starting a new one"
-                                  messages)))
+          (should (= (length asked) 1)))
         (should (= (length agent-auto-test--started) 2))
         (let ((new (car agent-auto-test--buffers)))
           (should (equal (plist-get (cdar agent-auto-test--started)
@@ -1256,16 +1294,24 @@ task is linked to the new session."
           (agent-auto-test--end-turn new "Status: done: fixed anew")
           (should (equal (agent-auto-test--tags file "Fix it") '("review"))))))))
 
-(ert-deftest agent-auto-test-acting-starts-anew-when-resuming-fails ()
-  "Report a failed resume and start a new session, linked to the task."
+(ert-deftest agent-auto-test-acting-asks-before-starting-anew-when-resuming-fails ()
+  "Ask before a new session replaces a recorded one that fails to resume.
+The question says why resuming failed.  Declined, or where nothing may
+be asked, no session is started; accepted, the task is linked to the new
+session."
   (agent-auto-test--with root
     (let ((file (agent-auto-test--closed-task root "sid-00001"))
           (agent-auto-test--resume-error "no such conversation"))
-      (agent-test-helper-with-messages messages
+      (agent-auto-test--answering nil asked
+        (should-error (agent-auto-test--act file) :type 'user-error)
+        (should (equal asked '("This task's session cannot be resumed (no such conversation). Start a new one? "))))
+      (should (string-match-p
+               "This task's session cannot be resumed (no such conversation)"
+               (agent-auto-test--refused file)))
+      (should (= (length agent-auto-test--started) 1))
+      (agent-auto-test--answering t asked
         (agent-auto-test--act file)
-        (should (string-match-p
-                 "Could not resume session sid-00001 (no such conversation); starting a new one"
-                 messages)))
+        (should (= (length asked) 1)))
       (should (= (length agent-auto-test--started) 2))
       (let ((new (car agent-auto-test--buffers)))
         (should (equal (plist-get (cdar agent-auto-test--started) :initial-prompt)
