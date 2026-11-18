@@ -483,6 +483,7 @@ is no longer closed for him."
     (agent-session-state-change-functions . agent-auto--schedule-marks)
     (agent-session-id-functions . agent-auto--schedule-marks)
     (agent-before-exit-step-functions . agent-auto--handover-step)
+    (agent-before-exit-stopped-functions . agent-auto--exit-stopped)
     (after-save-hook . agent-auto--after-save)
     (kill-buffer-hook . agent-auto--session-killed)
     (org-mode-hook . agent-auto--schedule-marks)
@@ -1195,6 +1196,16 @@ left open and is the user's from then on; see `agent-auto--attend'."
        (message "agent-auto: %s could not be closed: %s"
                 (buffer-name buffer) (error-message-string err))
        (agent-auto--attend buffer)))))
+
+(defun agent-auto--exit-stopped (buffer _reason)
+  "Leave session BUFFER to the user, its exit chain having stopped.
+For `agent-before-exit-stopped-functions': a skill of the chain held the
+exit for the user, or failed, and said why.  The session stays open and
+needs him at its terminal, so one that was unattended leaves its snooze
+and is his from then on; see `agent-auto--attend'.  It is not closed for
+him a second time, whatever it reports."
+  (agent-auto--guard "leaving a session open"
+    (agent-auto--attend buffer)))
 
 (defun agent-auto--closes-itself-p (buffer)
   "Return non-nil when session BUFFER, whose turn gave a result, is to close.

@@ -133,6 +133,15 @@ only while the backend still shows the session working, or reports
 background work the turn left running, as for a skill that has not
 written its receipt.  A function that signals an error gives no step.")
 
+(defvar agent-before-exit-stopped-functions nil
+  "Abnormal hook run when a before-exit chain stops short of the exit.
+Each function is called with the session buffer and a string saying why,
+when a skill of the chain held the exit for the user, or its receipt was
+missing, invalid or a failure.  The chain has been reset by then and the
+session stays open, so a module that had a session exited for the user
+learns here that it was not.  The hook is not run for a chain the user
+cancels by submitting a prompt.")
+
 (defcustom agent-before-exit-timeout 600
   "Seconds between checks on an unfinished before-exit skill.
 The watchdog restarts whenever the chain advances to another skill.
@@ -3715,13 +3724,14 @@ Show the receipt's message as a notice rather than a warning, reset
 the chain so that a later exit request starts it afresh, and mark
 BUFFER as awaiting input.  The completion event that delivered the
 receipt is left unconsumed, so the usual ready alert still fires.
-Return nil."
+`agent-before-exit-stopped-functions' are then run.  Return nil."
   (let* ((skill (agent--before-exit-current-skill-name))
          (detail (or (plist-get result :message) "no message given")))
     (agent--before-exit-reset)
     (message "agent: %s needs your input before exit: %s" skill detail)
     (when (buffer-live-p buffer)
       (agent--session-set-state buffer 'awaiting-input))
+    (run-hook-with-args 'agent-before-exit-stopped-functions buffer detail)
     nil))
 
 (defun agent--before-exit-current-skill-name ()
@@ -3731,7 +3741,9 @@ Return nil."
         "before-exit skill")))
 
 (defun agent--before-exit-fail (buffer result)
-  "Stop BUFFER's closeout chain because of receipt RESULT."
+  "Stop BUFFER's closeout chain because of receipt RESULT.
+The chain is reset, a warning says why, and
+`agent-before-exit-stopped-functions' are run.  Return nil."
   (let* ((skill (agent--before-exit-current-skill-name))
          (detail (or (plist-get result :message)
                      (format "status `%s'" (plist-get result :status))))
@@ -3742,6 +3754,7 @@ Return nil."
     (message "%s" message-text)
     (when (buffer-live-p buffer)
       (agent--session-set-state buffer 'awaiting-input))
+    (run-hook-with-args 'agent-before-exit-stopped-functions buffer detail)
     nil))
 
 (defun agent--before-exit-duplicate-completion-p (completion)

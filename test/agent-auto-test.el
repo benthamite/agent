@@ -95,6 +95,8 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-auto-wait-over-functions nil)
            (agent-auto--returning nil)
            (agent-before-exit-step-functions (list #'agent-auto--handover-step))
+           (agent-before-exit-stopped-functions
+            (list #'agent-auto--exit-stopped))
            (after-save-hook (list #'agent-auto--after-save))
            (org-log-into-drawer t)
            (agent-auto--missing (make-hash-table :test #'equal))
@@ -2939,6 +2941,50 @@ and the session closes."
           (agent-auto-test--exit-due))
         (should-not (buffer-live-p buffer))))))
 
+(ert-deftest agent-auto-test-exit-chain-that-stops-leaves-the-session-to-the-user ()
+  "Leave open, out of its snooze, a session whose own exit chain stops.
+A skill of the chain holds the exit for the user, with its message, or
+ends without the receipt it owes.  The session stays open and is his
+from then on: it is not closed for him again when it next reports."
+  (dolist (receipt '("{\"status\":\"held\",\"message\":\"3 proposals await approval\"}"
+                     nil))
+    (agent-auto-test--with root
+      (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root))
+                  (agent-before-exit-skill-names '(("update-log" :receipt t))))
+        (agent-auto-test--closing
+          (agent-auto-test--end-turn buffer "Status: done: fixed")
+          (agent-auto-test--answer
+           buffer '(:state "finished" :summary "Fixed it"))
+          (should (string-prefix-p "/update-log --receipt-file "
+                                   (caar agent-auto-test--submitted)))
+          (should (agent-session-snoozed-p buffer))
+          (when receipt
+            (write-region receipt nil
+                          (plist-get (buffer-local-value 'agent--before-exit
+                                                         buffer)
+                                     :receipt-file)
+                          nil 'silent))
+          (agent-test-helper-with-messages messages
+            (cl-letf (((symbol-function 'display-warning) #'ignore))
+              (agent-session-event buffer 'stop))
+            (should (string-match-p
+                     (if receipt
+                         "update-log needs your input before exit: 3 proposals await approval"
+                       "update-log closeout stopped: no receipt file was written")
+                     messages)))
+          (agent-auto-test--exit-due)
+          (should (buffer-live-p buffer))
+          (should-not (buffer-local-value 'agent--before-exit buffer))
+          (should-not (agent-session-snoozed-p buffer))
+          (should-not (buffer-local-value 'agent-auto--unattended buffer))
+          (let ((submitted (length agent-auto-test--submitted)))
+            (agent-session-event buffer 'submit)
+            (agent-session-event buffer 'stop)
+            (agent-auto-test--end-turn buffer "Status: done: fixed again")
+            (should (= (length agent-auto-test--submitted) submitted))
+            (should (buffer-live-p buffer))))
+        (should (equal (agent-auto-test--tags file "Fix it") '("review")))))))
+
 (ert-deftest agent-auto-test-session-the-user-writes-in-is-not-closed ()
   "Close no session the user has written in, whenever he wrote.
 After its turn ended and before the close has begun, and during the
@@ -4384,6 +4430,7 @@ command that changed nothing."
     (agent-session-state-change-functions . agent-auto--schedule-marks)
     (agent-session-id-functions . agent-auto--schedule-marks)
     (agent-before-exit-step-functions . agent-auto--handover-step)
+    (agent-before-exit-stopped-functions . agent-auto--exit-stopped)
     (after-save-hook . agent-auto--after-save)
     (kill-buffer-hook . agent-auto--session-killed)
     (org-mode-hook . agent-auto--schedule-marks)
@@ -4405,6 +4452,7 @@ and it is turned off afterwards."
          (agent-session-inherited-variables nil)
          (agent-session-state-change-functions nil)
          (agent-before-exit-step-functions nil)
+         (agent-before-exit-stopped-functions nil)
          (after-save-hook nil)
          (agent-auto--handovers nil)
          (agent-auto--flush-timer nil)
@@ -4465,6 +4513,7 @@ and it is turned off afterwards."
     (should-not agent-session-inherited-variables)
     (should-not agent-session-state-change-functions)
     (should-not agent-before-exit-step-functions)
+    (should-not agent-before-exit-stopped-functions)
     (should-not after-save-hook)
     (should-not kill-buffer-hook)
     (should-not org-mode-hook)

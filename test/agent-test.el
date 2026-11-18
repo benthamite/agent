@@ -3349,6 +3349,68 @@ answers \"Two\"."
                                   (car events)))
           (should (plist-get agent--before-exit :receipt-file)))))))
 
+(ert-deftest agent-test-before-exit-stopped-functions-hear-of-a-chain-that-stops ()
+  "Tell `agent-before-exit-stopped-functions' of a chain that stops short.
+The functions get the session buffer and the reason when a skill holds
+the exit and when its receipt is missing, once the chain is reset.  A
+chain that runs to the exit tells them nothing, and neither does one the
+user cancels by submitting a prompt."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names '(("update-log" :receipt t)))
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-skill-directories nil)
+        (agent-before-exit-step-functions nil)
+        stopped
+        exited)
+    (with-temp-buffer
+      (let* ((buf (current-buffer))
+             (agent-before-exit-stopped-functions
+              (list (lambda (buffer reason)
+                      (push (list buffer reason
+                                  (buffer-local-value 'agent--before-exit
+                                                      buffer))
+                            stopped))))
+             (receipt (lambda (text)
+                        (with-temp-file (plist-get agent--before-exit
+                                                   :receipt-file)
+                          (insert text)))))
+        (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buf))
+                :skill-command-prefix "/"
+                :submit #'ignore))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   #'ignore)
+                  ((symbol-function 'agent--exit-session)
+                   (lambda (_buffer) (setq exited t)))
+                  ((symbol-function 'run-at-time)
+                   (lambda (_time _repeat function &rest args)
+                     (apply function args)))
+                  ((symbol-function 'display-warning) #'ignore)
+                  ((symbol-function 'message) #'ignore))
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (funcall receipt "{\"status\":\"held\",\"message\":\"3 proposals await approval\"}")
+          (agent-session-event buf 'stop)
+          (should (equal stopped
+                         (list (list buf "3 proposals await approval" nil))))
+          (setq stopped nil)
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (agent-session-event buf 'stop)
+          (should (equal stopped
+                         (list (list buf "no receipt file was written" nil))))
+          (setq stopped nil)
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (funcall receipt "{\"status\":\"success\"}")
+          (agent-session-event buf 'stop)
+          (should exited)
+          (should-not stopped)
+          (setq agent--before-exit nil)
+          (should-not (agent-run-skill-before-exit 'one buf))
+          (agent-session-event buf 'user-submit)
+          (should-not agent--before-exit)
+          (should-not stopped))))))
+
 (ert-deftest agent-test-before-exit-missing-receipt-stops-chain ()
   "Keep the session open when a gated entry writes no receipt."
   (let ((agent-backends nil)

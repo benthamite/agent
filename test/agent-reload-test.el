@@ -78,6 +78,7 @@
     (agent-session-state-change-functions agent-auto--schedule-marks)
     (agent-session-id-functions agent-auto--schedule-marks)
     (agent-before-exit-step-functions agent-auto--handover-step)
+    (agent-before-exit-stopped-functions agent-auto--exit-stopped)
     (after-save-hook agent-auto--after-save)
     (kill-buffer-hook agent-auto--session-killed)
     (org-mode-hook agent-auto--schedule-marks)
