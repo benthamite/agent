@@ -254,7 +254,7 @@ The global minor modes @code{agent-claude-mode} and @code{agent-codex-mode} own 
   (agent-codex-mode 1))
 @end lisp
 
-Loading @samp{agent-claude.el} again while @code{agent-claude-mode} is on@comma{} as happens when the package is updated in a running Emacs@comma{} installs the hooks@comma{} the advice and the timer of the version just loaded@comma{} each of them once@comma{} so the mode does not have to be turned off and on to pick up what an update added. What the mode does once when it is turned on is not done again by loading the file: no stale status or session settings file is deleted@comma{} the notification function kept for restoring stays the one that was in place before the mode was turned on@comma{} and the sessions that are running are left as they are.
+Loading @samp{agent-claude.el} or @samp{agent-codex.el} again while its mode is on@comma{} as happens when the package is updated in a running Emacs@comma{} installs the hooks and the advice of the version just loaded@comma{} and the timer of the Claude mode@comma{} each of them once@comma{} so the mode does not have to be turned off and on to pick up what an update added. What a mode does once when it is turned on is not done again by loading its file: no stale status or session settings file is deleted@comma{} the notification function kept for restoring stays the one that was in place before the mode was turned on@comma{} and the sessions that are running are left as they are.
 
 @node User options
 @chapter User options

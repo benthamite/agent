@@ -165,7 +165,7 @@ The global minor modes ~agent-claude-mode~ and ~agent-codex-mode~ own every hook
   (agent-codex-mode 1))
 #+end_src
 
-Loading =agent-claude.el= again while ~agent-claude-mode~ is on, as happens when the package is updated in a running Emacs, installs the hooks, the advice and the timer of the version just loaded, each of them once, so the mode does not have to be turned off and on to pick up what an update added. What the mode does once when it is turned on is not done again by loading the file: no stale status or session settings file is deleted, the notification function kept for restoring stays the one that was in place before the mode was turned on, and the sessions that are running are left as they are.
+Loading =agent-claude.el= or =agent-codex.el= again while its mode is on, as happens when the package is updated in a running Emacs, installs the hooks and the advice of the version just loaded, and the timer of the Claude mode, each of them once, so the mode does not have to be turned off and on to pick up what an update added. What a mode does once when it is turned on is not done again by loading its file: no stale status or session settings file is deleted, the notification function kept for restoring stays the one that was in place before the mode was turned on, and the sessions that are running are left as they are.
 
 * User options
 :PROPERTIES:

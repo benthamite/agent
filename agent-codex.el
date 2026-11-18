@@ -1650,7 +1650,9 @@ backend renders branch trees."
 (define-minor-mode agent-codex-mode
   "Global minor mode wiring `codex' sessions into agent.
 Owns every hook, advice, and notification handler the Codex
-backend installs; nothing is installed at load time.  Disabling
+backend installs; nothing is installed when the file is loaded
+while the mode is off.  Loading it again while the mode is on
+installs the hooks and the advice again, each once.  Disabling
 removes them symmetrically and restores
 `codex-notification-function'."
   :global t
@@ -1660,33 +1662,63 @@ removes them symmetrically and restores
     (agent-codex--mode-disable)))
 
 (defun agent-codex--mode-enable ()
-  "Install Codex backend hooks and advice."
+  "Turn the Codex backend on.
+Do what must happen once each time the mode is turned on: save
+`codex-notification-function' before replacing it, turn
+`agent-scroll-keys-global-mode' on and bring the sessions already
+running under the mode.  Everything that can be installed any number of
+times is left to `agent-codex--install'."
   (setq agent-codex--saved-notification-function codex-notification-function)
   (setq codex-notification-function #'codex-default-notification)
-  (add-hook 'codex-event-hook #'agent-codex--handle-notification)
-  (add-hook 'codex-app-server-turn-completed-hook
-            #'agent-codex--handle-app-server-turn-completed)
-  (add-hook 'codex-app-server-notification-functions
-            #'agent-codex--follow-notification)
-  (add-hook 'agent-session-derived-status-functions
-            #'agent-codex--derived-status)
-  (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
-  (dolist (fn agent-codex--start-hook-functions)
-    (add-hook 'codex-start-hook fn))
-  (add-hook 'doom-modeline-mode-hook #'agent-codex--reapply-modelines)
+  (agent-codex--install)
   (agent-scroll-keys-global-mode 1)
   (agent-setup-scroll-keys-in-existing-buffers)
-  (agent-setup-session-keys-in-existing-buffers)
-  (add-hook 'codex-process-environment-functions
-            #'agent-codex-account-env)
-  (add-hook 'codex-process-environment-functions
-            #'agent-codex--sync-theme-before-start)
-  (add-hook 'codex-command-submitted-hook #'agent-codex--note-submission)
-  (advice-add 'codex--do-send-command :around #'agent-codex--intercept-exit)
-  (advice-add 'codex--dispatch-hook-message :filter-args
-              #'agent-codex--route-hook-to-current-name)
-  (advice-add 'codex--send-command-to-buffer :around
-              #'agent-codex--intercept-exit-to-buffer))
+  (agent-setup-session-keys-in-existing-buffers))
+
+(defconst agent-codex--hooks
+  (append
+   '((codex-event-hook agent-codex--handle-notification)
+     (codex-app-server-turn-completed-hook
+      agent-codex--handle-app-server-turn-completed)
+     (codex-app-server-notification-functions agent-codex--follow-notification)
+     (agent-session-derived-status-functions agent-codex--derived-status))
+   (mapcar (lambda (function) (list 'codex-start-hook function))
+           agent-codex--start-hook-functions)
+   '((doom-modeline-mode-hook agent-codex--reapply-modelines)
+     (codex-process-environment-functions agent-codex-account-env)
+     (codex-process-environment-functions agent-codex--sync-theme-before-start)
+     (codex-command-submitted-hook agent-codex--note-submission)))
+  "The hooks of `agent-codex-mode', each a list (HOOK FUNCTION).
+These are the arguments of `add-hook', so the functions go on the global
+value of each hook, in this order.")
+
+(defconst agent-codex--shared-hooks
+  '((kill-buffer-query-functions agent-protect-buffer))
+  "The hooks `agent-codex-mode' shares with `agent-claude-mode'.
+Each is a list as in `agent-codex--hooks'.  Turning the mode off
+removes them only while that mode is off too.")
+
+(defconst agent-codex--advice
+  '((codex--do-send-command :around agent-codex--intercept-exit)
+    (codex--dispatch-hook-message
+     :filter-args agent-codex--route-hook-to-current-name)
+    (codex--send-command-to-buffer
+     :around agent-codex--intercept-exit-to-buffer))
+  "The advice of `agent-codex-mode', each a list of arguments.
+The arguments are those of `advice-add'.")
+
+(defun agent-codex--install ()
+  "Install everything the mode needs while it is on, each thing once.
+That is its hooks and its advice.  Calling this again changes nothing,
+so the end of this file calls it when the file is loaded while the mode
+is on: an Emacs that turned the mode on with an older version of the
+file then has what this version installs, without the mode being
+toggled.  What must happen once each time the mode is turned on is in
+`agent-codex--mode-enable' and is never done by loading the file."
+  (dolist (arguments (append agent-codex--hooks agent-codex--shared-hooks))
+    (apply #'add-hook arguments))
+  (dolist (arguments agent-codex--advice)
+    (apply #'advice-add arguments)))
 
 (defun agent-codex--route-hook-to-current-name (args)
   "Return hook ARGS naming the session buffer by its current name.
@@ -1701,29 +1733,22 @@ since then answers to its new name."
 (defun agent-codex--mode-disable ()
   "Remove Codex backend hooks and advice."
   (setq codex-notification-function agent-codex--saved-notification-function)
-  (remove-hook 'codex-event-hook #'agent-codex--handle-notification)
-  (remove-hook 'codex-app-server-turn-completed-hook
-               #'agent-codex--handle-app-server-turn-completed)
-  (remove-hook 'codex-app-server-notification-functions
-               #'agent-codex--follow-notification)
-  (remove-hook 'agent-session-derived-status-functions
-               #'agent-codex--derived-status)
+  (pcase-dolist (`(,hook ,function . ,_) agent-codex--hooks)
+    (remove-hook hook function))
   (unless (bound-and-true-p agent-claude-mode)
-    (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer)
+    (pcase-dolist (`(,hook ,function . ,_) agent-codex--shared-hooks)
+      (remove-hook hook function))
     (agent-scroll-keys-global-mode -1))
-  (dolist (fn agent-codex--start-hook-functions)
-    (remove-hook 'codex-start-hook fn))
-  (remove-hook 'doom-modeline-mode-hook #'agent-codex--reapply-modelines)
-  (remove-hook 'codex-process-environment-functions
-               #'agent-codex-account-env)
-  (remove-hook 'codex-process-environment-functions
-               #'agent-codex--sync-theme-before-start)
-  (remove-hook 'codex-command-submitted-hook #'agent-codex--note-submission)
-  (advice-remove 'codex--do-send-command #'agent-codex--intercept-exit)
-  (advice-remove 'codex--dispatch-hook-message
-                 #'agent-codex--route-hook-to-current-name)
-  (advice-remove 'codex--send-command-to-buffer
-                 #'agent-codex--intercept-exit-to-buffer))
+  (pcase-dolist (`(,symbol ,_how ,function) agent-codex--advice)
+    (advice-remove symbol function)))
+
+;;;; Loading again
+
+;; The mode's own function runs only when the mode is toggled.  Loading
+;; this file again while the mode is on, as when the package is updated
+;; in a running Emacs, therefore installs what this version needs.
+(when agent-codex-mode
+  (agent-codex--install))
 
 ;;;; Provide
 
