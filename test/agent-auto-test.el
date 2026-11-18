@@ -1330,7 +1330,7 @@ skills."
             (should-not (file-exists-p answer))
             (should (file-directory-p (file-name-directory answer)))
             (dolist (word '("the task \"Fix it\"" "`state`" "`finished`"
-                            "`needs-pablo`" "`waiting-on-someone`"
+                            "`needs-user`" "`waiting-on-someone`"
                             "`interrupted`" "`summary`" "`next`" "`question`"
                             "`who`" "`what`" "`wait`" "never quote"))
               (should (string-search word prompt)))
@@ -1460,7 +1460,7 @@ that closed interrupted removes it."
       (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
       (setq buffer (agent-auto-test--resume root))
       (agent-auto-test--hand-over
-       buffer '(:state "needs-pablo" :summary "Compared the two accounts"
+       buffer '(:state "needs-user" :summary "Compared the two accounts"
                 :next "pay it" :question "Which account pays?"))
       (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
@@ -1555,7 +1555,7 @@ session and what was in memory are gone."
         (goto-char (point-max))
         (insert "Typing.\n"))
       (agent-auto-test--hand-over
-       buffer '(:state "needs-pablo" :summary "Found two ways" :next "pick one"
+       buffer '(:state "needs-user" :summary "Found two ways" :next "pick one"
                 :question "Which way?"))
       (should (= (length (agent-auto-test--receipt-files)) 1))
       (let ((kill-buffer-query-functions nil))
@@ -1676,7 +1676,7 @@ is deleted and not written again."
         (goto-char (point-max))
         (insert "Typing.\n"))
       (agent-auto-test--hand-over
-       buffer '(:state "needs-pablo" :summary "First" :question "Which?"))
+       buffer '(:state "needs-user" :summary "First" :question "Which?"))
       (setq buffer (agent-auto-test--resume root))
       (agent-auto-test--hand-over buffer '(:state "finished" :summary "Second"))
       (should (= (length (agent-auto-test--receipt-files)) 2))
@@ -1717,7 +1717,7 @@ the task had."
         (goto-char (point-max))
         (insert "Typing.\n"))
       (agent-auto-test--hand-over
-       buffer '(:state "needs-pablo" :summary "Stopped" :question "Go on?"))
+       buffer '(:state "needs-user" :summary "Stopped" :question "Go on?"))
       (setq buffer (agent-auto-test--resume root))
       (run-hook-with-args 'agent-session-event-functions buffer 'user-submit)
       (agent-auto-test--end-turn buffer "Status: done: shipped it")
@@ -1737,7 +1737,7 @@ the task had."
         (goto-char (point-max))
         (insert "Typing.\n"))
       (agent-auto-test--hand-over
-       buffer '(:state "needs-pablo" :summary "Stopped" :question "Go on?"))
+       buffer '(:state "needs-user" :summary "Stopped" :question "Go on?"))
       (agent-auto-test--at file "Fix it" (lambda () (org-todo "DONE")))
       (with-current-buffer org
         (save-buffer))

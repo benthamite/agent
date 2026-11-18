@@ -479,13 +479,13 @@ The prompt is @code{agent-auto-handover-prompt}. It names the task by its headin
 @headitem Field
 @tab Holds
 @item @samp{state}
-@tab @samp{finished}@comma{} @samp{needs-pablo}@comma{} @samp{waiting-on-someone} or @samp{interrupted}
+@tab @samp{finished}@comma{} @samp{needs-user}@comma{} @samp{waiting-on-someone} or @samp{interrupted}
 @item @samp{summary}
 @tab What was done@comma{} in a sentence or two
 @item @samp{next}
 @tab The next step
 @item @samp{question}
-@tab For @samp{needs-pablo}: the question to answer
+@tab For @samp{needs-user}: the question to answer
 @item @samp{who}@comma{} @samp{what}
 @tab For @samp{waiting-on-someone}: the person waited for@comma{} and what is awaited from them
 @item @samp{wait}
@@ -503,7 +503,7 @@ A dated note is added to the task's log@comma{} in Org's own note format: a list
 @item
 @samp{AGENT_RESULT} is replaced by one line: how the session closed@comma{} the question if there is one@comma{} the summary and the next step.
 @item
-The tag: @samp{finished} gives @code{agent-auto-review-tag} and @samp{needs-pablo} gives @code{agent-auto-blocked-tag}; @samp{waiting-on-someone} and @samp{interrupted} give none. Whichever of the ready tag and the three result tags the task carried is removed.
+The tag: @samp{finished} gives @code{agent-auto-review-tag} and @samp{needs-user} gives @code{agent-auto-blocked-tag}; @samp{waiting-on-someone} and @samp{interrupted} give none. Whichever of the ready tag and the three result tags the task carried is removed.
 @item
 The TODO keyword is left alone@comma{} except for @samp{waiting-on-someone}@comma{} described below.
 @end itemize

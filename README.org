@@ -375,10 +375,10 @@ The prompt is ~agent-auto-handover-prompt~. It names the task by its heading, wh
 
 | Field         | Holds                                                                                    |
 |---------------+------------------------------------------------------------------------------------------|
-| =state=       | =finished=, =needs-pablo=, =waiting-on-someone= or =interrupted=                         |
+| =state=       | =finished=, =needs-user=, =waiting-on-someone= or =interrupted=                         |
 | =summary=     | What was done, in a sentence or two                                                      |
 | =next=        | The next step                                                                            |
-| =question=    | For =needs-pablo=: the question to answer                                                |
+| =question=    | For =needs-user=: the question to answer                                                |
 | =who=, =what= | For =waiting-on-someone=: the person waited for, and what is awaited from them           |
 | =wait=        | For =waiting-on-someone=: the id of the wait the session registered, or an empty string |
 
@@ -389,7 +389,7 @@ When the turn ends, the handover is written on the task with the machinery that 
 
 - A dated note is added to the task's log, in Org's own note format: a list item headed =Note taken on [DATE]=, as ~org-log-note-headings~ gives it, in the drawer ~org-log-into-drawer~ names for the task, which is created if need be, or where Org puts a task's notes when it names none. Its lines are =Session closed: STATE.=, =Done:= with the summary, =Next:= with the next step, and =Question:=, =Waiting on:= and =Waiting for:= with the other fields, each in full. Whatever reads a task's notes reads this one; =org-linear=, for instance, posts a note in the log drawer to Linear as a comment.
 - =AGENT_RESULT= is replaced by one line: how the session closed, the question if there is one, the summary and the next step.
-- The tag: =finished= gives ~agent-auto-review-tag~ and =needs-pablo= gives ~agent-auto-blocked-tag~; =waiting-on-someone= and =interrupted= give none. Whichever of the ready tag and the three result tags the task carried is removed.
+- The tag: =finished= gives ~agent-auto-review-tag~ and =needs-user= gives ~agent-auto-blocked-tag~; =waiting-on-someone= and =interrupted= give none. Whichever of the ready tag and the three result tags the task carried is removed.
 - The TODO keyword is left alone, except for =waiting-on-someone=, described below.
 
 The results of the session's turns are still written during the session, as before. The handover is what is written at the close, and it replaces the result; the turns of the exit chain that follow it write nothing.

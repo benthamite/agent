@@ -160,11 +160,11 @@ the two options names one of them, such as `claude-code'."
   "This session is being closed, and it is linked to the task \"%t\".  \
 Before it closes, write a handover receipt for that task: one JSON object, \
 written to the file %f and nowhere else.  Its fields, every value a string: \
-`state`, which is `finished` when the task's work is done, `needs-pablo` when \
+`state`, which is `finished` when the task's work is done, `needs-user` when \
 it cannot go on without a decision or input from the user, \
 `waiting-on-someone` when it waits for another person's reply or action, and \
 `interrupted` when the work stopped part-way for any other reason; `summary`, \
-what was done, in a sentence or two; `next`, the next step; for `needs-pablo` \
+what was done, in a sentence or two; `next`, the next step; for `needs-user` \
 also `question`, the question to answer; and for `waiting-on-someone` also \
 `who`, the person waited for, `what`, what is awaited from them, and `wait`, \
 the id of the wait you registered for their reply, exactly as the tool \
@@ -180,7 +180,7 @@ task, and do not send a message to anyone."
 a session linked to an open task.  %f is replaced by the name of the
 file the session is to write, %t by the task's heading, and %% by a
 percent sign.  The file must hold one JSON object with the field
-`state', one of `finished', `needs-pablo', `waiting-on-someone' and
+`state', one of `finished', `needs-user', `waiting-on-someone' and
 `interrupted', and may hold `summary', `next', `question', `who', `what'
 and `wait'; the prompt has to say so, since nothing else tells the
 session.  `agent-auto-wait-instructions', when not empty, follows it on
@@ -1996,7 +1996,7 @@ ONLY-READY non-nil the task must carry the ready tag."
 ;;;; Handover
 
 (defconst agent-auto--handover-states
-  '("finished" "needs-pablo" "waiting-on-someone" "interrupted")
+  '("finished" "needs-user" "waiting-on-someone" "interrupted")
   "The states a session can name in its handover.")
 
 (defun agent-auto--handover-step (buffer)
@@ -2409,7 +2409,7 @@ closed waiting on someone also sets the task waiting; see
          (new (append (seq-difference tags lifecycle)
                       (pcase (plist-get receipt :state)
                         ("finished" (list agent-auto-review-tag))
-                        ("needs-pablo" (list agent-auto-blocked-tag))))))
+                        ("needs-user" (list agent-auto-blocked-tag))))))
     (unless (equal new tags)
       (org-set-tags new))
     (org-entry-put nil agent-auto-result-property
@@ -2421,7 +2421,7 @@ closed waiting on someone also sets the task waiting; see
   "Return in a few words how the session of RECEIPT closed."
   (pcase (plist-get receipt :state)
     ("finished" "finished")
-    ("needs-pablo" "needs a decision")
+    ("needs-user" "needs a decision")
     ("waiting-on-someone"
      (format "waiting on %s" (or (plist-get receipt :who) "someone")))
     (_ "interrupted")))
