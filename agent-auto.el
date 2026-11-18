@@ -65,6 +65,7 @@
 (require 'org)
 (require 'agent)
 (require 'agent-todo)
+(require 'agent-decision)
 
 ;;;; Customization
 
@@ -203,6 +204,35 @@ and `wait'; the prompt has to say so, since nothing else tells the
 session.  `agent-auto-wait-instructions', when not empty, follows it on
 the same line."
   :type 'string
+  :group 'agent-auto)
+
+(defcustom agent-auto-decision-instructions
+  "When you stop because you need a decision or input from the user, that \
+is when your reply ends with `Status: waiting on you` or your handover's state \
+is `needs-user`, first write what you need from him as a decision: one JSON \
+object, written to the file %f and nowhere else, of the form {\"items\": \
+[{\"question\": \"...\", \"options\": [{\"label\": \"...\", \"effect\": \
+{\"kind\": \"session\", \"instruction\": \"...\"}}], \"recommended\": 0, \
+\"why\": \"...\"}]}.  Make one item of each question you wait on, with the \
+actions you propose as its options, each with the instruction you are to be \
+given if the user chooses it; `recommended` is the index of the option you \
+recommend, or null when you recommend none, and `why` your reason.  An option \
+that sends a message you drafted has the effect {\"kind\": \"send\", \"to\": \
+\"...\", \"to_label\": \"...\", \"instruction\": \"...\", \"text\": \"...\"}: \
+`to` says where it goes, in a form you can act on, `to_label` names the person \
+and the channel, and `text` is the exact text, which the user may revise \
+before he answers.  Write the questions and the reasons in your own words: \
+never quote or paste a message, an email or any other private material."
+  "How a session that needs the user writes the decision he is to answer.
+It is added to the brief of every unattended session, after
+`agent-auto-instructions', to the handover prompt, after
+`agent-auto-wait-instructions', and to the answer a session is given
+when the user answers its decision.  %f is replaced by the name of the
+file the session is to write, and %% by a percent sign.  The file holds
+the items of a decision, as `agent-decision-property' describes them;
+the session's decision is written on its task, where `agent-decide'
+answers it.  Nil or an empty string asks for no decision."
+  :type '(choice (const :tag "None" nil) string)
   :group 'agent-auto)
 
 (defcustom agent-auto-wait-instructions ""
@@ -354,6 +384,10 @@ the user's starts in the session.")
 A task that waits on someone goes back to its keyword when a turn starts
 in its session; the task is looked at for the first such turn only.")
 
+(defvar-local agent-auto--decision-file nil
+  "The file this session was asked to write its decision to, or nil.
+See `agent-auto-decision-instructions'.")
+
 (defvar-local agent-auto--checked nil
   "The values of this session already searched for among the tasks.")
 
@@ -495,6 +529,7 @@ in it, it is his own and is no longer closed for him."
     (agent-before-exit-step-functions . agent-auto--handover-step)
     (agent-before-exit-stopped-functions . agent-auto--exit-stopped)
     (after-save-hook . agent-auto--after-save)
+    (before-save-hook . agent-auto--before-save)
     (kill-buffer-hook . agent-auto--session-killed)
     (org-mode-hook . agent-auto--schedule-marks)
     (org-agenda-finalize-hook . agent-auto--mark-agenda)
@@ -642,7 +677,7 @@ DIRECTORY is the home directory."
 ;;;; Searching
 
 (defun agent-auto--scan ()
-  "Search the files for ready tasks, recorded sessions and recorded waits.
+  "Search the files for ready tasks, recorded sessions, waits and decisions.
 Waits are searched for only while `agent-auto-wait-over-functions' has a
 function to ask.  Each file ripgrep finds is then visited in a step of
 its own.  Nothing is searched while the steps of the search before are
@@ -655,7 +690,8 @@ still running."
                  "--no-messages")
                (mapcan (lambda (pattern) (list "-e" pattern))
                        (append
-                        (list (format ":%s:" agent-auto-ready-tag))
+                        (list (format ":%s:" agent-auto-ready-tag)
+                              (format ":%s:" agent-decision-property))
                         (and agent-auto-wait-over-functions
                              (list (format ":%s:" agent-auto-wait-property)))
                         (agent-auto--unchecked-values)))
@@ -697,14 +733,18 @@ once.  The values returned are marked as searched."
 
 (defun agent-auto--visit-file (file)
   "Link the sessions FILE records and queue its ready tasks.
-The tasks whose wait is over leave the waiting keyword.  A file whose
-buffer has unsaved edits is left for a later search."
+The tasks whose wait is over leave the waiting keyword, and the
+decisions whose record changed are shown again; see
+`agent-auto--render-decisions'.  A file whose buffer has unsaved edits
+is left for a later search."
   (when-let* ((buffer (agent-auto--org-buffer file)))
     (with-current-buffer buffer
       (agent-auto--attach-recorded file))
     (when (eq (agent-auto--editable-buffer file) buffer)
       (with-current-buffer buffer
-        (agent-auto--check-waits))
+        (agent-auto--check-waits)
+        (agent-auto--render-decisions)
+        (agent-todo--save))
       (dolist (marker (with-current-buffer buffer
                         (agent-auto--ready-headings)))
         (agent-auto--enqueue
@@ -795,22 +835,28 @@ A session being started counts."
 
 ;;;; Starting
 
-(defun agent-auto--start (file directory &optional unsaved)
+(defun agent-auto--start (file directory &optional unsaved answer)
   "Start a session in DIRECTORY on the task at point, which is in FILE.
 The task records the start before anything else happens, so that it is
 never started twice, and its buffer is then saved.  With UNSAVED non-nil
-the buffer is left unsaved: the user has edits of his own in it.  Return
-the link of the task to its session."
+the buffer is left unsaved: the user has edits of his own in it.  ANSWER,
+when non-nil, is the user's answer to the task's decision, which ends
+the brief.  Return the link of the task to its session."
   (let* ((backend (agent-auto--backend))
          (entry (agent-todo--collect-at-point))
          (link (agent-auto-link-create :file file
-                                       :recorded (agent-auto--placeholder))))
+                                       :recorded (agent-auto--placeholder)))
+         (decision-file (agent-auto--new-decision-file)))
     (agent-auto--record (agent-auto-link-recorded link) backend)
     (unless unsaved
       (agent-todo--save))
     (agent-auto--launch link backend directory
                         (agent-todo--slug (plist-get entry :title))
-                        (agent-auto--brief entry))
+                        (agent-auto--join
+                         (agent-auto--brief entry)
+                         (agent-auto--decision-instructions decision-file)
+                         answer)
+                        decision-file)
     link))
 
 (defun agent-auto--backend ()
@@ -851,11 +897,18 @@ It is the task's heading and body, then `agent-auto-instructions'."
         task
       (concat task "\n\n" agent-auto-instructions))))
 
-(defun agent-auto--launch (link backend directory slug brief)
+(defun agent-auto--join (&rest texts)
+  "Return the TEXTS that are not nil or empty, as paragraphs."
+  (string-join (seq-remove (lambda (text) (member text '(nil ""))) texts)
+               "\n\n"))
+
+(defun agent-auto--launch (link backend directory slug brief
+                                &optional decision-file)
   "Start a BACKEND session named after SLUG on LINK's task, with BRIEF.
 It runs in DIRECTORY, or in a worktree of DIRECTORY's checkout when
 another tracked session holds that checkout.  A failure marks the task
-stuck."
+stuck.  DECISION-FILE is the file the brief asks the session to write
+its decision to."
   (let* ((checkout (agent-auto--checkout directory))
          (start (cons link checkout)))
     (push start agent-auto--starting)
@@ -870,18 +923,21 @@ stuck."
                  (agent-auto--spawn
                   start backend
                   (agent-auto--worktree-directory directory checkout worktree)
-                  directory slug brief))))
-          (agent-auto--spawn start backend directory directory slug brief))
+                  directory slug brief decision-file))))
+          (agent-auto--spawn start backend directory directory slug brief
+                             decision-file))
       (error (agent-auto--start-failed start (error-message-string err))))))
 
-(defun agent-auto--spawn (start backend directory account-directory slug brief)
+(defun agent-auto--spawn (start backend directory account-directory slug brief
+                               &optional decision-file)
   "Start the BACKEND session of START in DIRECTORY with BRIEF.
 START is an entry of `agent-auto--starting'.  The session is named
 after SLUG and runs under the account ACCOUNT-DIRECTORY gets, which is
 the task's own directory even when DIRECTORY is a worktree made for it.
 Nothing is asked, and the windows are left as they are.  The session
 starts snoozed, since nobody is watching it: it is listed with the
-sessions set aside and fires no ready alert."
+sessions set aside and fires no ready alert.  It is to write its
+decision to DECISION-FILE."
   (condition-case err
       (let* ((directory (file-name-as-directory (expand-file-name directory)))
              (buffer
@@ -898,6 +954,8 @@ sessions set aside and fires no ready alert."
                      :initial-prompt brief))))))
         (setq agent-auto--starting (delq start agent-auto--starting))
         (agent-auto--attach buffer (car start) t)
+        (with-current-buffer buffer
+          (setq agent-auto--decision-file decision-file))
         (agent--set-snoozed buffer t)
         (agent-auto--sync-session buffer)
         (run-with-timer agent-auto--start-check-delay nil
@@ -910,7 +968,8 @@ sessions set aside and fires no ready alert."
   "Mark the task of START stuck because its session did not start for REASON."
   (setq agent-auto--starting (delq start agent-auto--starting))
   (message "agent-auto: could not start a session: %s" reason)
-  (agent-auto--conclude (car start) 'stuck (concat "start failed: " reason) t))
+  (agent-auto--conclude (car start) 'stuck (concat "start failed: " reason) t)
+  (agent-auto--decision-not-started (car start) reason))
 
 (defun agent-auto--attach (buffer link &optional unattended)
   "Record that session BUFFER works on the task of LINK.
@@ -1051,11 +1110,13 @@ For `agent-session-event-functions'."
           ('user-submit (setq agent-auto--exiting nil
                               agent-auto--settled nil)
                         (agent-auto--attend buffer)
-                        (agent-auto--turn-started buffer))
+                        (agent-auto--turn-started buffer)
+                        (agent-auto--decision-worked-on buffer))
           ((or 'submit 'activity)
            (setq agent-auto--settled nil)
            (unless (agent-auto--chain-turn-p buffer)
-             (agent-auto--turn-started buffer))))))))
+             (agent-auto--turn-started buffer)
+             (agent-auto--decision-worked-on buffer))))))))
 
 (defun agent-auto--turn-started (buffer)
   "Note that a turn of the user's started in session BUFFER.
@@ -1157,9 +1218,16 @@ done pending verification are a review, waiting is blocked, and in
 progress changes nothing.  With STRICT non-nil, a reply without a status
 line is stuck; otherwise it changes nothing either.  A reply that
 reports a result closes an unattended session; see `agent-auto--report'.
-One that leaves its task stuck takes the session out of its snooze."
+One that leaves its task stuck takes the session out of its snooze.
+
+A decision the turn was carrying out ends with the turn, and a session
+that waits on the user has the decision it wrote put on its task; see
+`agent-auto--decision-turn-ended' and `agent-auto--take-decision'."
   (let* ((status (and text (agent--reply-text-status text)))
          (detail (agent-auto--one-line (plist-get status :detail))))
+    (agent-auto--decision-turn-ended buffer (plist-get status :status) detail)
+    (when (eq (plist-get status :status) 'waiting)
+      (agent-auto--take-decision buffer))
     (pcase (plist-get status :status)
       ('done
        (agent-auto--report
@@ -2215,6 +2283,668 @@ on each of the others."
                         (string-join refusals "; "))
               ""))))
 
+;;;; Decisions
+
+;;;###autoload
+(defun agent-decide ()
+  "Answer the decision proposed on the Org task at point.
+The task is the heading at point, the one the agenda line at point
+shows, or the one a function of `agent-decision-task-functions' finds.
+Its decision, which `agent-decision-property' records and a block at
+the top of its body shows, is read item by item in the minibuffer; see
+`agent-decision-read-answer'.  \\`RET' takes every recommendation, a
+digit another option, \\`c' comments, \\`x' drops the decision and
+\\`C-g' answers nothing.  Nothing is carried out before the last item is
+answered.
+
+The answer is then recorded on the task and carried out, once: a
+command effect runs its command, which must be on
+`agent-decision-commands', with point on the task; session and send
+effects go, in one message, to the session the task records, resumed
+if need be, or to a new session, unattended and snoozed, as
+`agent-delegate-tasks' starts one, and asked of
+`agent-auto-eligible-functions' with `agent-auto-by-hand' non-nil.  The
+text a send was approved with is the draft as the block showed it when
+the answer was given.
+
+The command refuses a decision that is not open, as one answered
+already or being carried out, one that is stale, as a function of
+`agent-decision-stale-functions' or a later turn of the session that
+proposed it says, and one that names a command not on
+`agent-decision-commands'.  It acts only when called from the keyboard:
+see `agent-decision-from-keyboard-p'.
+
+With lines marked in an agenda, the options common to the decisions of
+every marked task are offered, and the one chosen answers all of them."
+  (interactive)
+  (unless (agent-decision-from-keyboard-p 'agent-decide)
+    (user-error "A decision is answered only from the keyboard"))
+  (if (and (derived-mode-p 'org-agenda-mode) org-agenda-bulk-marked-entries)
+      (agent-auto--decide-marked)
+    (let ((marker (agent-auto--decision-task)))
+      (unwind-protect (agent-auto--decide-at marker)
+        (set-marker marker nil)))))
+
+(defun agent-auto--decision-task ()
+  "Return a marker at the task of the thing at point, or signal a `user-error'.
+See `agent-decision-task-functions'."
+  (or (run-hook-with-args-until-success 'agent-decision-task-functions)
+      (agent--org-entry-marker)
+      (user-error "Call this on an Org task or on an agenda line")))
+
+(defun agent-auto--decide-at (marker)
+  "Read the user's answer to the decision of the task at MARKER, and act on it."
+  (let* ((record (agent-auto--at-task-saving marker #'agent-auto--open-decision))
+         (drafts (agent-auto--at-task
+                  marker (lambda ()
+                           (agent-decision-drafts
+                            record (agent-decision-block-drafts)))))
+         (comments (agent-auto--at-task
+                    marker (lambda () (agent-auto--comments-p record))))
+         (reply (agent-decision-read-answer record drafts comments)))
+    (agent-auto--still-open marker record)
+    (pcase reply
+      (`(answer . ,choices)
+       (agent-auto--carry-out marker (agent-decision-answer record choices
+                                                            drafts)))
+      (`(comment . ,text)
+       (agent-auto--carry-out marker (agent-decision-comment record text)))
+      (`(drop)
+       (agent-auto--at-task-saving marker #'agent-decision-drop)
+       (message "Dropped the decision")))))
+
+(defun agent-auto--open-decision ()
+  "Return the decision of the task at point, which can be answered now.
+Signal a `user-error' that says why it cannot: there is none, it cannot
+be read, it is not open, it names a command not on
+`agent-decision-commands', or it is stale.  The block is brought up to
+date first, so that the drafts read from it are those the user sees."
+  (agent-decision-render)
+  (let ((record (or (agent-decision-read)
+                    (user-error "This task has no decision"))))
+    (when-let* ((problem (agent-decision-problem record)))
+      (user-error "This decision cannot be answered: %s" problem))
+    (unless (equal (agent-decision-state record) "open")
+      (user-error "This decision was answered already (%s)"
+                  (agent-decision-state record)))
+    (when-let* ((refused (agent-decision-refused-commands record)))
+      (user-error "This decision names a command not on `agent-decision-commands': %s"
+                  (string-join refused ", ")))
+    (when-let* ((stale (or (agent-decision-get record 'stale)
+                           (save-excursion
+                             (run-hook-with-args-until-success
+                              'agent-decision-stale-functions record)))))
+      (user-error "This decision is stale: %s" stale))
+    record))
+
+(defun agent-auto--still-open (marker record)
+  "Signal a `user-error' unless RECORD is still the open decision at MARKER.
+Timers run while the prompt waits, and one can answer, replace or mark
+stale the decision being answered."
+  (let ((now (agent-auto--at-task marker #'agent-decision-read)))
+    (unless (and now
+                 (equal (agent-decision-get now 'id)
+                        (agent-decision-get record 'id))
+                 (equal (agent-decision-state now) "open")
+                 (not (agent-decision-get now 'stale)))
+      (user-error "The decision changed while you answered; nothing was done"))))
+
+(defun agent-auto--comments-p (record)
+  "Return non-nil when the user may comment on RECORD, a decision.
+A session's decision takes comments, which go to the session; another
+takes them only when `agent-decision-comment-function' says it does.
+Point is on the task's heading."
+  (if (equal (agent-decision-get record 'proposer) "session")
+      t
+    (and agent-decision-comment-function
+         (save-excursion (funcall agent-decision-comment-function record nil)))))
+
+(defun agent-auto--at-task-saving (marker function)
+  "Call FUNCTION at the task at MARKER, saving its buffer if it was clean.
+Return what FUNCTION returns."
+  (agent-auto--at-task
+   marker
+   (lambda ()
+     (let ((clean (not (buffer-modified-p))))
+       (prog1 (funcall function)
+         (when clean
+           (agent-todo--save)))))))
+
+;;;;; Carrying an answer out
+
+(defun agent-auto--carry-out (marker record)
+  "Record RECORD, an answered decision, on the task at MARKER, and carry it out.
+The commands it chose run first, then what goes to a session, which
+leaves the decision being carried out until the session's turn ends.  A
+decision with nothing for a session is done once its commands have run.
+An answer that cannot be carried out puts the decision back as open,
+saying why, and so does a command that signals an error."
+  (let* ((id (agent-decision-get record 'id))
+         (chosen (agent-decision-chosen record))
+         (comment (agent-decision-get record 'comment))
+         (commands (seq-filter (lambda (choice)
+                                 (equal (agent-auto--choice-kind choice)
+                                        "command"))
+                               chosen))
+         (for-session (or (and comment
+                               (equal (agent-decision-get record 'proposer)
+                                      "session"))
+                          (seq-some (lambda (choice)
+                                      (member (agent-auto--choice-kind choice)
+                                              '("session" "send")))
+                                    chosen))))
+    (agent-auto--at-task-saving marker (lambda () (agent-decision-write record)))
+    (agent-auto--decision-at
+     marker id (lambda (now) (agent-decision-put now 'state "carrying-out")))
+    (if-let* ((reason (agent-auto--carry-effects
+                       marker record commands for-session comment)))
+        (progn
+          (agent-auto--decision-at
+           marker id (lambda (now) (agent-decision-reopen now reason)))
+          (user-error "The answer could not be carried out: %s; the decision is open again"
+                      reason))
+      (unless for-session
+        (agent-auto--decision-at
+         marker id (lambda (now) (agent-decision-put now 'state "done"))))
+      (message "%s" (if for-session
+                        "Answered; a session carries the answer out"
+                      "Answered")))))
+
+(defun agent-auto--carry-effects (marker record commands for-session comment)
+  "Carry out the answer RECORD holds on the task at MARKER; return nil, or why not.
+COMMANDS are the chosen options whose effect is a command, which run
+first.  FOR-SESSION is non-nil when the answer goes to a session, and
+COMMENT is the user's comment, when he commented instead of choosing;
+a comment that goes to no session goes to
+`agent-decision-comment-function'."
+  (condition-case err
+      (progn
+        (dolist (choice commands)
+          (agent-auto--run-decision-command marker choice))
+        (cond
+         (for-session
+          (agent-auto--carry-to-session
+           marker (agent-auto--answer-message record marker)))
+         (comment
+          (ignore (agent-auto--at-task
+                   marker (lambda ()
+                            (funcall agent-decision-comment-function
+                                     record comment)))))))
+    (error (error-message-string err))))
+
+(defun agent-auto--choice-kind (choice)
+  "Return the kind of the effect of CHOICE, as `agent-decision-chosen' gives it."
+  (agent-decision-kind (agent-decision-effect (nth 1 choice))))
+
+(defun agent-auto--run-decision-command (marker choice)
+  "Run the command CHOICE names, interactively, with point on the task at MARKER.
+The command must be on `agent-decision-commands'."
+  (let* ((name (agent-decision-get (agent-decision-effect (nth 1 choice))
+                                   'command))
+         (command (intern-soft name)))
+    (unless (and command (memq command agent-decision-commands)
+                 (commandp command))
+      (error "`%s' is not on `agent-decision-commands'" name))
+    (agent-auto--at-task marker (lambda () (call-interactively command)))))
+
+(defun agent-auto--decision-at (marker id function)
+  "Replace the decision with ID of the task at MARKER by what FUNCTION returns.
+FUNCTION is called with the decision.  A task that is gone, or whose
+decision is no longer the one with ID, is left as it is."
+  (when (and (marker-buffer marker)
+             (agent-auto--at-task
+              marker (lambda ()
+                       (equal (agent-decision-get (agent-decision-read) 'id)
+                              id))))
+    (agent-auto--at-task-saving
+     marker (lambda () (agent-decision-update function)))))
+
+(defun agent-auto--answer-message (record marker)
+  "Return the message that gives a session the answer RECORD holds.
+MARKER is at the task.  The message says what the user chose, or his
+comment, and authorizes exactly the chosen effects; the text approved
+for a send is given verbatim, with the conversation it goes to."
+  (let ((title (agent-auto--at-task
+                marker (lambda () (substring-no-properties
+                                   (org-get-heading t t t t)))))
+        (comment (agent-decision-get record 'comment)))
+    (if comment
+        (format "The user did not choose an option of the decision proposed on the task \"%s\"; he commented on it instead, in Emacs:\n\n%s\n\nTake his comment into account, do nothing it does not ask for, and when you need him again, propose a new decision."
+                title comment)
+      (agent-auto--join
+       (format "The user answered, in Emacs, the decision proposed on the task \"%s\".  His answer authorizes exactly the effects below, once, and nothing else: every other instruction you were given still holds."
+               title)
+       (mapconcat #'agent-auto--choice-message (agent-decision-chosen record)
+                  "\n\n")
+       "When you are done, end your reply with a status line, as before."))))
+
+(defun agent-auto--choice-message (choice)
+  "Return what the answer message says of CHOICE.
+CHOICE is (ITEM OPTION TEXT), as `agent-decision-chosen' gives it."
+  (pcase-let* ((`(,item ,option ,text) choice)
+               (effect (agent-decision-effect option)))
+    (concat
+     (format "Question: %s\nThe user chose: %s"
+             (agent-decision-get item 'question)
+             (agent-decision-get option 'label))
+     (pcase (agent-decision-kind effect)
+       ("command" "\nThat was done in Emacs; there is nothing for you to do about it.")
+       ("session" (format "\nInstruction: %s"
+                          (agent-decision-get effect 'instruction)))
+       ("send"
+        (format "\nInstruction: %s\nThe user approved sending exactly the text between the two lines below to %s (%s).  Send it once, without changing it, and send nothing else.  If you cannot establish whether it was sent, do not send it again: end your reply with `Status: waiting on you: uncertain whether the message was sent', and propose as a decision whether to check and send it again.\n-----\n%s\n-----"
+                (agent-decision-get effect 'instruction)
+                (or (agent-decision-get effect 'to_label)
+                    (agent-decision-get effect 'to))
+                (agent-decision-get effect 'to)
+                (or text "")))))))
+
+(defun agent-auto--carry-to-session (marker message &optional resume-only)
+  "Give MESSAGE to a session on the task at MARKER; return nil, or why not.
+The session is the one the task records, when it is running; else that
+session resumed, unattended and snoozed; else, unless RESUME-ONLY is
+non-nil, a new session, started as `agent-delegate-tasks' starts one,
+whose brief MESSAGE ends.  Each is told where to write a decision; see
+`agent-auto-decision-instructions'.  The task must pass
+`agent-auto-eligible-functions', asked with `agent-auto-by-hand'
+non-nil.  MESSAGE reaches a running session as a program's prompt,
+never as one the user typed, so that an unattended session stays so."
+  (agent-auto--at-task
+   marker
+   (lambda ()
+     (let* ((title (substring-no-properties (org-get-heading t t t t)))
+            (task (agent-auto--recorded-at-point))
+            (recorded (plist-get task :session))
+            (buffer (and recorded (agent-auto--session-buffer recorded))))
+       (or (agent-auto--veto title)
+           (cond
+            (buffer (agent-auto--answer-running buffer message))
+            ((and recorded (plist-get task :backend)
+                  (or (plist-get task :ran-in) (plist-get task :directory))
+                  (agent-auto--session-id-p recorded))
+             (agent-auto--answer-resumed task message))
+            (resume-only "the task records no session that can be resumed")
+            (t (agent-auto--answer-new title message))))))))
+
+(defun agent-auto--answer-running (buffer message)
+  "Submit MESSAGE to the running session BUFFER; return nil, or why not.
+It is submitted as a program submits text, which is not the user's own
+submission: see `agent-auto--attend'."
+  (or (agent-send-refusal buffer)
+      (let ((file (agent-auto--new-decision-file)))
+        (agent-auto--forget-decision-file buffer)
+        (with-current-buffer buffer
+          (setq agent-auto--decision-file file))
+        (agent-submit (agent-auto--join
+                       message (agent-auto--decision-instructions file))
+                      buffer)
+        nil)))
+
+(defun agent-auto--answer-resumed (task message)
+  "Resume the session TASK records with MESSAGE; return nil, or why not.
+TASK is as `agent-auto--recorded-at-point' returns it, with point on the
+task.  The session is resumed unattended and snoozed, with MESSAGE as
+its first prompt, without showing it or asking anything."
+  (condition-case err
+      (let* ((backend (plist-get task :backend))
+             (own (plist-get task :directory))
+             (directory (file-name-as-directory
+                         (expand-file-name (or (plist-get task :ran-in) own))))
+             (file (agent-auto--new-decision-file))
+             (link (agent-auto-link-create :file (buffer-file-name)
+                                           :recorded (plist-get task :session)))
+             (buffer
+              (save-window-excursion
+                (save-current-buffer
+                  (let ((agent-inhibit-prompts t))
+                    (agent--start-named-session
+                     (agent-session-create
+                      :backend backend
+                      :account (agent-account-resolve backend nil
+                                                      (or own directory))
+                      :directory directory)
+                     (plist-get task :instance)
+                     :resume-id (plist-get task :session)
+                     :initial-prompt (agent-auto--join
+                                      message
+                                      (agent-auto--decision-instructions
+                                       file))))))))
+        (agent-auto--tag-ready)
+        (agent-auto--attach buffer link t)
+        (with-current-buffer buffer
+          (setq agent-auto--decision-file file))
+        (agent--set-snoozed buffer t)
+        (agent-auto--log "resumed %s to carry out an answer" (buffer-name buffer))
+        nil)
+    (error (error-message-string err))))
+
+(defun agent-auto--answer-new (title message)
+  "Start a session on the task at point, headed TITLE, with MESSAGE.
+Return nil, or why it could not be started.  The session is started as
+`agent-delegate-tasks' starts one, and its brief ends with MESSAGE."
+  (let ((directory (agent-auto--task-directory))
+        (clean (not (buffer-modified-p))))
+    (cond
+     ((not (buffer-file-name))
+      (format "\"%s\" is in a buffer that visits no file" title))
+     ((not directory) (format "\"%s\" names no directory" title))
+     ((not (file-directory-p directory))
+      (format "\"%s\" names a directory that does not exist" title))
+     (t (or (condition-case err
+                (ignore (agent-auto--backend))
+              (error (error-message-string err)))
+            (progn
+              (agent-auto--tag-ready)
+              (unless (agent-auto--session-live-p
+                       (agent-auto-link-recorded
+                        (agent-auto--start (buffer-file-name) directory
+                                           (not clean) message)))
+                "its session could not be started")))))))
+
+;;;;; Asking a session for its decision
+
+;;;###autoload
+(defun agent-request-decision ()
+  "Ask the session of the Org task at point for the decision it waits on.
+This is for a task whose session closed needing the user before it was
+asked to write a decision.  The session the task records is resumed,
+unattended and snoozed, or given the request if it is running, with only
+the request to write its decision file; it then closes, through its
+handover, as an unattended session does, and its decision is written on
+the task, where `agent-decide' answers it."
+  (interactive)
+  (unless agent-auto-mode
+    (user-error "Turn `agent-auto-mode' on first"))
+  (let ((marker (agent-auto--decision-task)))
+    (unwind-protect
+        (let ((title (agent-auto--at-task
+                      marker (lambda ()
+                               (substring-no-properties
+                                (org-get-heading t t t t))))))
+          (when-let* ((reason (agent-auto--carry-to-session
+                               marker
+                               (format "The user asks for the decision you are waiting on, on the task \"%s\".  In this turn, do nothing else: do not go on with the task, and do not send a message to anyone.  Write the decision as the instructions below say, then end your reply with `Status: waiting on you: ' and the question."
+                                       title)
+                               t)))
+            (user-error "No decision was asked for: %s" reason))
+          (message "Asked the session of “%s” for its decision" title))
+      (set-marker marker nil))))
+
+;;;;; Marked tasks
+
+(defun agent-auto--decide-marked ()
+  "Answer the decisions of the tasks marked in the current agenda, at once.
+Every marked task must have an open decision of one item that can be
+answered.  The options offered are those all of them have, the same
+label with the same effect, and the one chosen answers each.  The marks
+are then cleared."
+  (let ((markers (agent-auto--marked-tasks)))
+    (unwind-protect
+        (let* ((records (mapcar #'agent-auto--marked-decision markers))
+               (common (agent-auto--common-options records))
+               (choice (agent-auto--read-common records common)))
+          (cl-mapc (lambda (marker record)
+                     (agent-auto--carry-out
+                      marker
+                      (agent-decision-answer
+                       record (list (cons 0 (agent-auto--option-index
+                                             record choice)))
+                       nil)))
+                   markers records)
+          (let ((inhibit-message t))
+            (org-agenda-bulk-unmark-all))
+          (message "Answered %d decisions: %s" (length records)
+                   (agent-decision-get choice 'label)))
+      (dolist (marker markers)
+        (when marker
+          (set-marker marker nil))))))
+
+(defun agent-auto--marked-decision (marker)
+  "Return the open decision of the marked task at MARKER.
+Signal a `user-error' when there is none that can be answered, or when
+it has more than one item."
+  (unless (and marker (marker-buffer marker))
+    (user-error "A marked task is no longer in its file"))
+  (let ((record (agent-auto--at-task-saving marker #'agent-auto--open-decision)))
+    (unless (= (length (agent-decision-items record)) 1)
+      (user-error "“%s” has a decision of several questions: answer it on its own"
+                  (agent-auto--at-task marker (lambda ()
+                                                (org-get-heading t t t t)))))
+    record))
+
+(defun agent-auto--common-options (records)
+  "Return the options the one item of each of RECORDS has, in the first's order.
+Two options are the same when their labels and effects are.  Signal a
+`user-error' when the decisions have no option in common."
+  (or (seq-filter
+       (lambda (option)
+         (seq-every-p (lambda (record)
+                        (agent-auto--option-index record option))
+                      records))
+       (agent-decision-options (car (agent-decision-items (car records)))))
+      (user-error "The marked tasks' decisions have no option in common")))
+
+(defun agent-auto--option-index (record option)
+  "Return the index of OPTION in the one item of RECORD, or nil."
+  (seq-position (agent-decision-options (car (agent-decision-items record)))
+                option
+                (lambda (one other)
+                  (and (equal (agent-decision-get one 'label)
+                              (agent-decision-get other 'label))
+                       (equal (agent-decision-effect one)
+                              (agent-decision-effect other))))))
+
+(defun agent-auto--read-common (records common)
+  "Read which of the options COMMON answers the decisions RECORDS.
+The option is recommended when every decision recommends it.  Return
+the option."
+  (let* ((recommended
+          (seq-position common nil
+                        (lambda (option _)
+                          (seq-every-p
+                           (lambda (record)
+                             (eql (agent-auto--option-index record option)
+                                  (agent-decision-recommended
+                                   (car (agent-decision-items record)))))
+                           records))))
+         (questions (seq-uniq (mapcar (lambda (record)
+                                        (agent-decision-get
+                                         (car (agent-decision-items record))
+                                         'question))
+                                      records)))
+         (item `((question . ,(if (cdr questions)
+                                  (format "the decisions of %d marked tasks"
+                                          (length records))
+                                (car questions)))
+                 (options . ,(vconcat common))
+                 (recommended . ,(or recommended :null))))
+         (reply (agent-decision-read-answer `((id . "marked")
+                                              (items . ,(vector item)))
+                                            nil)))
+    (pcase reply
+      (`(answer (0 . ,index)) (nth index common))
+      (_ (user-error "Drop the decisions of marked tasks one at a time")))))
+
+;;;;; A session's decision
+
+(defun agent-auto--decision-instructions (file)
+  "Return `agent-auto-decision-instructions' naming FILE, or nil."
+  (unless (or (null file) (member agent-auto-decision-instructions '(nil "")))
+    (format-spec agent-auto-decision-instructions `((?f . ,file)) 'ignore)))
+
+(defun agent-auto--new-decision-file ()
+  "Return a new file for a session to write its decision to.
+It is in a private directory of its own, where temporary files go, as
+the handover's file is; see `agent-auto--answer-file'."
+  (let ((directory (make-temp-file "agent-decision-" t)))
+    (set-file-modes directory #o700)
+    (expand-file-name "decision.json" directory)))
+
+(defun agent-auto--forget-decision-file (buffer)
+  "Delete the file session BUFFER was asked to write its decision to."
+  (when-let* ((file (buffer-local-value 'agent-auto--decision-file buffer))
+              (directory (file-name-directory file)))
+    (when (and (file-directory-p directory)
+               (string-prefix-p "agent-decision-"
+                                (file-name-nondirectory
+                                 (directory-file-name directory))))
+      (delete-directory directory t))
+    (with-current-buffer buffer
+      (setq agent-auto--decision-file nil))))
+
+(defun agent-auto--take-decision (buffer)
+  "Write on its task the decision session BUFFER wrote to its file, if any.
+The decision is the session's: its proposer is \"session\", its source
+the session's id and its basis the turn that wrote it.  It replaces the
+task's decision.  One that cannot be read, or that names a command not on
+`agent-decision-commands', is not written, and the echo area says why.
+The task's buffer is edited also when it has unsaved edits, since the
+file is deleted once read."
+  (when-let* ((file (buffer-local-value 'agent-auto--decision-file buffer))
+              ((file-exists-p file))
+              (link (buffer-local-value 'agent-auto--link buffer)))
+    (let ((record (agent-auto--session-decision buffer file)))
+      (agent-auto--forget-decision-file buffer)
+      (if (stringp record)
+          (message "agent-auto: the decision %s wrote was not put on its task: %s"
+                   (buffer-name buffer) record)
+        (agent-auto--edit-task link (lambda () (agent-decision-write record)) t)
+        (agent-auto--log "%s proposed a decision" (buffer-name buffer))))))
+
+(defun agent-auto--session-decision (buffer file)
+  "Return the decision session BUFFER wrote to FILE, or why it cannot be taken."
+  (let* ((data (condition-case nil
+                   (with-temp-buffer
+                     (let ((coding-system-for-read 'utf-8))
+                       (insert-file-contents file))
+                     (agent-decision-parse (buffer-string)))
+                 (error nil)))
+         (session (car (agent-auto--session-values buffer)))
+         (record (and data
+                      `((id . ,(format "session-%s-%04x"
+                                       (format-time-string "%Y%m%dT%H%M%S%6N")
+                                       (random #x10000)))
+                        (proposer . "session")
+                        (source . ,session)
+                        (basis . ,(format "%s@%s" session
+                                          (or (plist-get
+                                               (agent-session-last-reply buffer)
+                                               :timestamp)
+                                              (agent-decision-time))))
+                        (items . ,(or (agent-decision-get data 'items) []))
+                        (state . "open")))))
+    (cond
+     ((null record) "it is not a JSON object")
+     ((agent-decision-problem record))
+     ((when-let* ((refused (agent-decision-refused-commands record)))
+        (format "it names a command not on `agent-decision-commands': %s"
+                (string-join refused ", "))))
+     (t record))))
+
+(defun agent-auto--decision-worked-on (buffer)
+  "Mark stale the open decision session BUFFER proposed on its task.
+This is for a turn of the session that is neither of its exit nor the
+delivery of an answer: the decision rested on where the session stood
+before it.  A decision being answered or carried out is no longer open,
+so the turn that carries it out changes nothing."
+  (when-let* ((link (buffer-local-value 'agent-auto--link buffer))
+              (values (agent-auto--session-values buffer)))
+    (agent-auto--edit-task
+     link
+     (lambda ()
+       (when-let* ((record (agent-decision-read))
+                   ((equal (agent-decision-state record) "open"))
+                   ((equal (agent-decision-get record 'proposer) "session"))
+                   ((member (agent-decision-get record 'source) values))
+                   ((not (agent-decision-get record 'stale))))
+         (agent-decision-write
+          (agent-decision-put record 'stale
+                              (format "the session worked on after proposing it, at %s"
+                                      (format-time-string "%F %R"))))))
+     t)))
+
+(defun agent-auto--decision-turn-ended (buffer status detail)
+  "End the decision session BUFFER was carrying out, its turn having ended.
+STATUS is the status of the reply, as `agent--reply-text-status' gives
+it, and DETAIL its one-line detail.  A reply that says the work is done
+makes the decision done; one that waits on the user saying it is
+uncertain whether a message was sent makes it uncertain, and nothing
+resends it; one that waits on the user otherwise makes it done, the
+answer having been taken.  A turn in progress, or without a status,
+leaves the decision being carried out until the session closes; see
+`agent-auto--decision-closed'."
+  (when-let* ((link (buffer-local-value 'agent-auto--link buffer))
+              (state (pcase status
+                       ((or 'done 'pending-verification) "done")
+                       ('waiting (if (and detail
+                                          (string-match-p "\\`uncertain\\b"
+                                                          detail))
+                                     "uncertain"
+                                   "done")))))
+    (agent-auto--end-decision link state detail)))
+
+(defun agent-auto--decision-closed (buffer handover)
+  "End the decision session BUFFER was carrying out, the session closing.
+HANDOVER is the state of its handover, or \"none\".  A finished session,
+or one that needs the user, took the answer; any other close fails it."
+  (when-let* ((link (buffer-local-value 'agent-auto--link buffer)))
+    (if (member handover '("finished" "needs-user"))
+        (agent-auto--end-decision link "done" nil)
+      (agent-auto--end-decision link "failed"
+                                (format "the session closed (%s)" handover)))))
+
+(defun agent-auto--end-decision (link state outcome)
+  "Give the decision being carried out on LINK's task STATE and OUTCOME.
+Only a decision being carried out is changed."
+  (agent-auto--edit-task
+   link
+   (lambda ()
+     (when-let* ((record (agent-decision-read))
+                 ((equal (agent-decision-state record) "carrying-out")))
+       (agent-decision-write
+        (let ((new (agent-decision-put record 'state state)))
+          (if outcome (agent-decision-put new 'outcome outcome) new)))))
+   t))
+
+(defun agent-auto--decision-not-started (link reason)
+  "Put back as open the decision of LINK's task, its session not started.
+REASON says why.  Only a decision being carried out is put back."
+  (agent-auto--edit-task
+   link
+   (lambda ()
+     (when-let* ((record (agent-decision-read))
+                 ((equal (agent-decision-state record) "carrying-out")))
+       (agent-decision-write
+        (agent-decision-reopen record (concat "start failed: " reason)))
+       (message "agent-auto: the answer was not carried out (%s); the decision is open again"
+                reason)))
+   t))
+
+;;;;; Showing decisions
+
+(defun agent-auto--render-decisions ()
+  "Show again the decisions of the current Org buffer whose record changed.
+See `agent-decision-render'.  A task whose block cannot be written is
+reported in *Messages* and left as it is."
+  (when (derived-mode-p 'org-mode)
+    (org-with-wide-buffer
+     (goto-char (point-min))
+     (let ((regexp (format "^[ \t]*:\\(?:%s\\|%s\\):"
+                           (regexp-quote agent-decision-property)
+                           (regexp-quote agent-decision-shown-property)))
+           (case-fold-search t))
+       (while (re-search-forward regexp nil t)
+         (save-excursion
+           (agent-auto--guard "showing a decision"
+             (org-back-to-heading t)
+             (agent-decision-render))))))))
+
+(defun agent-auto--before-save ()
+  "Show again the decisions of the buffer being saved whose record changed.
+For `before-save-hook': a program that writes a decision on a task saves
+the task's buffer, and the block shows the decision from then on."
+  (agent-auto--render-decisions))
+
 ;;;; The keys of a list of tasks
 
 (defvar-keymap agent-task-keys-mode-map
@@ -2229,6 +2959,7 @@ on their sessions: on the task at point, or on the marked tasks.")
 (keymap-set agent-task-keys-mode-map "s" #'agent-act-on-tasks)
 (keymap-set agent-task-keys-mode-map "S" #'agent-link-session)
 (keymap-set agent-task-keys-mode-map "D" #'agent-delegate-tasks)
+(keymap-set agent-task-keys-mode-map "Y" #'agent-decide)
 
 ;;;###autoload
 (define-minor-mode agent-task-keys-mode
@@ -2265,7 +2996,8 @@ of a session that closes without a handover says so in its result; see
 `agent-auto--close-without-handover'."
   (when agent--session
     (agent-auto--guard "noting a session's close"
-      (agent-auto--close-without-handover (current-buffer)))
+      (agent-auto--close-without-handover (current-buffer))
+      (agent-auto--forget-decision-file (current-buffer)))
     (agent-auto--schedule-marks)))
 
 (defun agent-auto--mark-agenda ()
@@ -2555,24 +3287,33 @@ closed or gone, is not asked."
     (agent-auto--sync-session buffer)
     (when-let* ((link (buffer-local-value 'agent-auto--link buffer))
                 (task (agent-auto--task-at-close link)))
-      (let ((file (agent-auto--answer-file buffer)))
+      (let ((file (agent-auto--answer-file buffer))
+            (decision-file (agent-auto--new-decision-file)))
+        (agent-auto--forget-decision-file buffer)
+        (with-current-buffer buffer
+          (setq agent-auto--decision-file decision-file))
         (list :name "handover"
               :prompt (agent-auto--handover-prompt file
-                                                   (plist-get task :title))
+                                                   (plist-get task :title)
+                                                   decision-file)
               :done-p (lambda (_buffer) (file-exists-p file))
               :finish #'agent-auto--handover-finish)))))
 
-(defun agent-auto--handover-prompt (file title)
+(defun agent-auto--handover-prompt (file title &optional decision-file)
   "Return the prompt asking a session to write its handover to FILE.
 TITLE is the heading of the session's task.  The prompt is
-`agent-auto-handover-prompt', then `agent-auto-wait-instructions', on
-one line when neither has a line break: a prompt of one line is the one
-a terminal takes most reliably."
+`agent-auto-handover-prompt', then `agent-auto-wait-instructions', then
+`agent-auto-decision-instructions' naming DECISION-FILE, when it is
+given, on one line when none has a line break: a prompt of one line is
+the one a terminal takes most reliably."
   (concat (format-spec agent-auto-handover-prompt
                        `((?f . ,file) (?t . ,title))
                        'ignore)
           (unless (member agent-auto-wait-instructions '(nil ""))
-            (concat "  " agent-auto-wait-instructions))))
+            (concat "  " agent-auto-wait-instructions))
+          (when-let* ((instructions (agent-auto--decision-instructions
+                                     decision-file)))
+            (concat "  " instructions))))
 
 (defun agent-auto--answer-file (buffer)
   "Return a new file for session BUFFER to write its handover to.
@@ -2606,7 +3347,10 @@ no handover, or whose handover has been kept, leaves nothing."
   (when-let* ((file (buffer-local-value 'agent-auto--handover-answer buffer)))
     (let ((answer (agent-auto--read-answer file)))
       (agent-auto--forget-answer buffer)
-      (agent-auto--record-handover buffer answer))))
+      (agent-auto--record-handover buffer answer)
+      (if (equal (plist-get answer :state) "needs-user")
+          (agent-auto--take-decision buffer)
+        (agent-auto--forget-decision-file buffer)))))
 
 (defun agent-auto--close-without-handover (buffer)
   "Leave a receipt for session BUFFER, which is being killed, if it has none.
@@ -2690,6 +3434,7 @@ the receipt is; see `agent-auto--waiting-result'."
   (with-current-buffer buffer
     (setq agent-auto--handed-over (plist-get answer :state)
           agent-auto--back nil))
+  (agent-auto--decision-closed buffer (plist-get answer :state))
   (when-let* ((link (buffer-local-value 'agent-auto--link buffer))
               (task (agent-auto--task-at-close link)))
     (let ((receipt (append (list :id (agent-auto--handover-id)

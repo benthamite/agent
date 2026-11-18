@@ -84,6 +84,13 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-auto-backend nil)
            (agent-todo-backend nil)
            (agent-auto-instructions "Standing.")
+           (agent-auto-decision-instructions nil)
+           (agent-decision-commands nil)
+           (agent-decision-functions nil)
+           (agent-decision-stale-functions nil)
+           (agent-decision-task-functions nil)
+           (agent-decision-comment-function nil)
+           (before-save-hook (list #'agent-auto--before-save))
            (agent-auto-silence-timeout 30)
            (agent-auto--pending nil)
            (agent-auto--handovers nil)
@@ -5002,6 +5009,466 @@ is loaded.  Loading it while the mode is off installs nothing."
       (should-error (agent-auto-mode 1) :type 'user-error))
     (should-not agent-auto-mode)
     (should-not agent-auto--timer)))
+
+;;;; Decisions
+
+(defvar agent-auto-test--commanded nil
+  "The headings `agent-auto-test--nothing-needed' was called on, the latest first.")
+
+(defun agent-auto-test--nothing-needed ()
+  "Record the heading point is on, as a decision's command would act on it."
+  (interactive)
+  (push (substring-no-properties (org-get-heading t t t t))
+        agent-auto-test--commanded))
+
+(defun agent-auto-test--option (label kind &rest fields)
+  "Return the JSON of an option LABEL whose effect has KIND and FIELDS.
+FIELDS is a plist of the effect's other keys and their values."
+  (json-serialize
+   `((label . ,label)
+     (effect . ((kind . ,kind)
+                ,@(let (pairs)
+                    (while fields
+                      (push (cons (intern (substring (symbol-name (car fields)) 1))
+                                  (cadr fields))
+                            pairs)
+                      (setq fields (cddr fields)))
+                    (nreverse pairs)))))))
+
+(defun agent-auto-test--decision-json (proposer source options
+                                                &optional recommended id)
+  "Return the JSON of a decision of one item whose OPTIONS are JSON texts.
+PROPOSER and SOURCE are as a record names them, RECOMMENDED the index of
+the recommended option or nil, and ID the decision's, d1 by default."
+  (format "{\"id\":\"%s\",\"proposer\":\"%s\",\"source\":\"%s\",\"basis\":\"b\",\"items\":[{\"question\":\"Send this reply?\",\"recommended\":%s,\"why\":\"It answers her.\",\"options\":[%s]}]}"
+          (or id "d1") proposer source
+          (if recommended (number-to-string recommended) "null")
+          (string-join options ",")))
+
+(defconst agent-auto-test--send-option
+  (agent-auto-test--option "Send it" "send" :to "chat:145"
+                           :to_label "Ann, chat"
+                           :instruction "Send it with the chat tool."
+                           :text "Hello Ann.")
+  "An option that sends a draft to Ann.")
+
+(defconst agent-auto-test--command-option
+  (agent-auto-test--option "Nothing needed" "command"
+                           :command "agent-auto-test--nothing-needed")
+  "An option that runs a command.")
+
+(defconst agent-auto-test--session-option
+  (agent-auto-test--option "Work on it" "session"
+                           :instruction "Rework the draft.")
+  "An option that a session carries out.")
+
+(defun agent-auto-test--put-decision (file heading json)
+  "Make JSON the decision of HEADING in FILE, written and saved by a program."
+  (agent-auto-test--at file heading
+                       (lambda ()
+                         (org-entry-put nil agent-decision-property json)
+                         (save-buffer))))
+
+(defun agent-auto-test--decision (file &optional heading)
+  "Return the decision HEADING, by default Fix it, of FILE records."
+  (agent-auto-test--at file (or heading "Fix it") #'agent-decision-read))
+
+(defun agent-auto-test--decision-state (file &optional heading)
+  "Return the state of the decision of HEADING, by default Fix it, in FILE."
+  (agent-decision-state (agent-auto-test--decision file heading)))
+
+(defun agent-auto-test--decide (file keys &optional heading)
+  "Call `agent-decide' from the keyboard on HEADING of FILE, typing KEYS.
+HEADING defaults to Fix it.  Return what the command said last."
+  (agent-test-helper-with-messages messages
+    (agent-auto-test--at file (or heading "Fix it")
+                         (lambda ()
+                           (let ((this-command 'agent-decide)
+                                 (last-input-event ?Y)
+                                 (unread-command-events keys))
+                             (call-interactively #'agent-decide))))
+    (car (last (split-string messages "\n" t)))))
+
+(defmacro agent-auto-test--with-box (&rest body)
+  "Evaluate BODY with every stub session showing an empty input box."
+  (declare (indent 0) (debug (body)))
+  `(let ((agent-session-input-state-functions
+          (list (lambda (_buffer) (list :box t)))))
+     ,@body))
+
+(ert-deftest agent-auto-test-decide-runs-an-allowed-command ()
+  "Run the command of the recommended option, at the task, once.
+RET takes the recommendation.  The decision is then done, and a second
+press of the key is refused."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file root (agent-auto-test--task root nil "")))
+          (agent-auto-test--commanded nil)
+          (agent-decision-commands '(agent-auto-test--nothing-needed)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "engine" "chat:145" (list agent-auto-test--command-option
+                                  agent-auto-test--session-option)
+        0))
+      (should (equal (agent-auto-test--decide file (list 13)) "Answered"))
+      (should (equal agent-auto-test--commanded '("Fix it")))
+      (should (equal (agent-auto-test--decision-state file) "done"))
+      (should (string-search "Answered "
+                             (agent-auto-test--disk file)))
+      (should (string-match-p
+               "answered already"
+               (cadr (should-error (agent-auto-test--decide file (list 13))
+                                   :type 'user-error))))
+      (should (equal agent-auto-test--commanded '("Fix it")))
+      (should-not agent-auto-test--started))))
+
+(ert-deftest agent-auto-test-decide-refuses-a-command-not-allowed ()
+  "Refuse a decision that names a command not on `agent-decision-commands'.
+None of its options can be chosen, and nothing is run."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file root (agent-auto-test--task root nil "")))
+          (agent-auto-test--commanded nil))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "engine" "chat:145" (list agent-auto-test--session-option
+                                  agent-auto-test--command-option)
+        0))
+      (should (string-match-p
+               "agent-decision-commands.*agent-auto-test--nothing-needed"
+               (cadr (should-error (agent-auto-test--decide file (list 13))
+                                   :type 'user-error))))
+      (should-not agent-auto-test--commanded)
+      (should-not agent-auto-test--started)
+      (should (equal (agent-auto-test--decision-state file) "open")))))
+
+(ert-deftest agent-auto-test-decide-only-from-the-keyboard ()
+  "Refuse `agent-decide' called by a program, as through `emacsclient'.
+A call made with another command as `this-command', or with quitting
+inhibited, as in a process filter, answers nothing."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file root (agent-auto-test--task root nil "")))
+          (agent-auto-test--commanded nil)
+          (agent-decision-commands '(agent-auto-test--nothing-needed)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "engine" "chat:145" (list agent-auto-test--command-option) 0))
+      (agent-auto-test--at
+       file "Fix it"
+       (lambda ()
+         (let ((unread-command-events (list 13)))
+           (let ((this-command 'eval-expression))
+             (should-error (call-interactively #'agent-decide)
+                           :type 'user-error))
+           (let ((this-command 'agent-decide)
+                 (last-input-event ?Y)
+                 (inhibit-quit t))
+             (should-error (call-interactively #'agent-decide)
+                           :type 'user-error)))))
+      (should-not agent-auto-test--commanded)
+      (should (equal (agent-auto-test--decision-state file) "open")))))
+
+(ert-deftest agent-auto-test-decide-sends-the-draft-as-it-stands ()
+  "Give the session the draft as the block shows it when the user answers.
+The answer is a program's prompt, never the user's own, and the record
+keeps the approved text, which a later edit of the block leaves alone.
+A second press, while the answer is carried out, is refused, and the
+end of the session's turn makes the decision done."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "engine" "chat:145" (list agent-auto-test--send-option
+                                  agent-auto-test--session-option)
+        0))
+      (should (string-search "#+begin_example\nHello Ann.\n#+end_example"
+                             (agent-auto-test--disk file)))
+      (with-current-buffer (find-buffer-visiting file)
+        (goto-char (point-min))
+        (search-forward "#+begin_example\n")
+        (insert "Hi Ann, I can come on Monday.\n")
+        (save-buffer))
+      (agent-auto-test--with-box
+        (agent-auto-test--decide file (list 13)))
+      (let ((sent (caar agent-auto-test--submitted)))
+        (should (eq (cdar agent-auto-test--submitted) buffer))
+        (should (string-search "to Ann, chat (chat:145)" sent))
+        (should (string-search
+                 "-----\nHi Ann, I can come on Monday.\nHello Ann.\n-----" sent))
+        (should (string-search "Instruction: Send it with the chat tool." sent)))
+      (should (equal (agent-auto-test--decision-state file) "carrying-out"))
+      (should (equal (nth 2 (car (agent-decision-chosen
+                                  (agent-auto-test--decision file))))
+                     "Hi Ann, I can come on Monday.\nHello Ann."))
+      (with-current-buffer (find-buffer-visiting file)
+        (goto-char (point-min))
+        (search-forward "#+begin_example\n")
+        (insert "Changed after.\n")
+        (save-buffer))
+      (should (equal (nth 2 (car (agent-decision-chosen
+                                  (agent-auto-test--decision file))))
+                     "Hi Ann, I can come on Monday.\nHello Ann."))
+      (should-error (agent-auto-test--decide file (list 13)) :type 'user-error)
+      (should (= (length agent-auto-test--submitted) 1))
+      (agent-auto-test--end-turn buffer "Sent.\n\nStatus: done: sent the reply")
+      (should (equal (agent-auto-test--decision-state file) "done")))))
+
+(ert-deftest agent-auto-test-uncertain-send-is-not-resent ()
+  "Leave uncertain a send whose outcome the session cannot establish.
+The decision cannot be answered again, so nothing sends the text twice."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "engine" "chat:145" (list agent-auto-test--send-option) 0))
+      (agent-auto-test--with-box
+        (agent-auto-test--decide file (list 13)))
+      (agent-auto-test--end-turn
+       buffer "Status: waiting on you: uncertain whether the message was sent")
+      (should (equal (agent-auto-test--decision-state file) "uncertain"))
+      (should-error (agent-auto-test--decide file (list 13)) :type 'user-error)
+      (should (= (length agent-auto-test--submitted) 1)))))
+
+(ert-deftest agent-auto-test-answer-leaves-an-unattended-session-unattended ()
+  "Deliver an answer to an unattended session as a program's prompt.
+The session stays unattended and snoozed, the delivery does not make its
+decision stale, and the end of its turn closes it through the handover,
+as any unattended session that reports a result."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "session" "sid-1" (list agent-auto-test--session-option) 0))
+      (agent-auto-test--with-box
+        (agent-auto-test--decide file (list 13)))
+      (should (string-search "Instruction: Rework the draft."
+                             (caar agent-auto-test--submitted)))
+      (should (buffer-local-value 'agent-auto--unattended buffer))
+      (should (agent-session-snoozed-p buffer))
+      (should (equal (agent-auto-test--decision-state file) "carrying-out"))
+      (should-not (agent-decision-get (agent-auto-test--decision file) 'stale))
+      (agent-auto-test--closing
+        (agent-session-event buffer 'stop)
+        (agent-auto-test--end-turn buffer "Status: done: reworked it")
+        (should (equal (agent-auto-test--decision-state file) "done"))
+        (should (agent-auto-test--handover-asked-p buffer))))))
+
+(ert-deftest agent-auto-test-session-decision-goes-stale ()
+  "Make a session's decision stale when the session works on after it.
+A turn the user starts makes it stale; a turn of the session's exit does
+not.  A stale decision cannot be answered."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "session" "sid-1" (list agent-auto-test--session-option) 0))
+      (with-current-buffer buffer
+        (setq agent-auto--exiting t))
+      (agent-session-event buffer 'submit)
+      (should-not (agent-decision-get (agent-auto-test--decision file) 'stale))
+      (with-current-buffer buffer
+        (setq agent-auto--exiting nil))
+      (agent-session-event buffer 'stop)
+      (agent-session-event buffer 'user-submit)
+      (should (agent-decision-get (agent-auto-test--decision file) 'stale))
+      (should (string-search "Stale: the session worked on"
+                             (agent-auto-test--disk file)))
+      (should (string-match-p
+               "stale"
+               (cadr (should-error
+                      (agent-auto-test--with-box
+                        (agent-auto-test--decide file (list 13)))
+                      :type 'user-error))))
+      (should-not agent-auto-test--submitted))))
+
+(ert-deftest agent-auto-test-session-writes-its-decision-before-closing ()
+  "Put on its task the decision an unattended session wrote, then close it.
+The brief names the decision file.  The decision is the session's, and
+is on the task with its block before the exit chain asks for the
+handover, whose prompt asks for a decision too."
+  (agent-auto-test--with root
+    (let ((agent-auto-decision-instructions "Decide in %f."))
+      (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root)))
+        (let ((decision-file (buffer-local-value 'agent-auto--decision-file
+                                                 buffer)))
+          (should (string-search (format "Decide in %s." decision-file)
+                                 (plist-get (cdar agent-auto-test--started)
+                                            :initial-prompt)))
+          (write-region
+           (format "{\"items\":[{\"question\":\"Which calendar?\",\"recommended\":0,\"why\":\"It is the one shared.\",\"options\":[%s,%s]}]}"
+                   (agent-auto-test--option "Work" "session"
+                                            :instruction "Use the work calendar.")
+                   (agent-auto-test--option "Home" "session"
+                                            :instruction "Use the home calendar."))
+           nil decision-file nil 'silent)
+          (agent-auto-test--closing
+            (agent-auto-test--end-turn buffer "Status: waiting on you: which calendar?")
+            (should (agent-auto-test--handover-asked-p buffer))
+            (should (string-match-p "Decide in .*decision\\.json\\."
+                                    (caar agent-auto-test--submitted)))
+            (let ((record (agent-auto-test--decision file)))
+              (should (equal (agent-decision-get record 'proposer) "session"))
+              (should (equal (agent-decision-get record 'source) "sid-1"))
+              (should (equal (agent-decision-state record) "open")))
+            (should (string-search "#+begin_decision\nWhich calendar?\n1. Work (recommended)\n2. Home\n"
+                                   (agent-auto-test--disk file)))
+            (should-not (file-exists-p decision-file))
+            (agent-auto-test--answer
+             buffer '(:state "needs-user" :summary "Compared the calendars"))
+            (should (equal (agent-auto-test--decision-state file) "open"))))))))
+
+(ert-deftest agent-auto-test-session-decision-with-a-refused-command ()
+  "Put on no task a session's decision that names a command not allowed."
+  (agent-auto-test--with root
+    (let ((agent-auto-decision-instructions "Decide in %f."))
+      (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root)))
+        (write-region
+         (format "{\"items\":[{\"question\":\"Delete it?\",\"recommended\":0,\"options\":[%s]}]}"
+                 (agent-auto-test--option "Delete" "command"
+                                          :command "delete-file"))
+         nil (buffer-local-value 'agent-auto--decision-file buffer) nil 'silent)
+        (agent-auto-test--exiting
+          (agent-test-helper-with-messages messages
+            (agent-auto-test--end-turn buffer "Status: waiting on you: delete?")
+            (should (string-search "not on `agent-decision-commands'" messages))))
+        (should-not (agent-auto-test--decision file))))))
+
+(ert-deftest agent-auto-test-answer-resumes-the-closed-session ()
+  "Resume the session a task records to give it the answer, unattended.
+The session is resumed with the answer as its first prompt, snoozed,
+and is told where to write a decision."
+  (agent-auto-test--with root
+    (let* ((agent-auto-decision-instructions "Decide in %f.")
+           (file (agent-auto-test--closed-task root "sid-1")))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "session" "sid-1" (list agent-auto-test--session-option
+                                agent-auto-test--send-option)
+        nil))
+      (agent-auto-test--decide file (list 13 ?1))
+      (let ((options (cdar agent-auto-test--started))
+            (buffer (car agent-auto-test--buffers)))
+        (should (equal (plist-get options :resume-id) "sid-1"))
+        (should (string-search "The user chose: Work on it"
+                               (plist-get options :initial-prompt)))
+        (should (string-search "Decide in "
+                               (plist-get options :initial-prompt)))
+        (should (buffer-local-value 'agent-auto--unattended buffer))
+        (should (agent-session-snoozed-p buffer))
+        (should (buffer-local-value 'agent-auto--decision-file buffer)))
+      (should (equal (agent-auto-test--decision-state file) "carrying-out")))))
+
+(ert-deftest agent-auto-test-failed-start-leaves-the-decision-open ()
+  "Put the decision back as open, saying why, when no session can take it."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--closed-task root "sid-1"))
+          (agent-auto-test--resume-error "no such conversation"))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "session" "sid-1" (list agent-auto-test--session-option) 0))
+      (should (string-match-p
+               "no such conversation"
+               (cadr (should-error (agent-auto-test--decide file (list 13))
+                                   :type 'user-error))))
+      (let ((record (agent-auto-test--decision file)))
+        (should (equal (agent-decision-state record) "open"))
+        (should (string-search "no such conversation"
+                               (agent-decision-get record 'failure))))
+      (should (string-search "The last answer could not be carried out"
+                             (agent-auto-test--disk file))))))
+
+(ert-deftest agent-auto-test-answer-starts-a-session-on-a-task-without-one ()
+  "Start a session, unattended, on a task that records none, with the answer."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file root (agent-auto-test--task root nil ""))))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "engine" "chat:145" (list agent-auto-test--session-option) 0))
+      (agent-auto-test--decide file (list 13))
+      (let ((brief (plist-get (cdar agent-auto-test--started) :initial-prompt)))
+        (should (string-prefix-p "Fix it\n\n" brief))
+        (should (string-search "Instruction: Rework the draft." brief)))
+      (should (buffer-local-value 'agent-auto--unattended
+                                  (car agent-auto-test--buffers)))
+      (should (agent-auto-test--property file "Fix it" "AGENT_SESSION"))
+      (should (member "agent" (agent-auto-test--tags file "Fix it")))
+      (should (equal (agent-auto-test--decision-state file) "carrying-out")))))
+
+(ert-deftest agent-auto-test-answer-asks-the-eligibility-functions ()
+  "Refuse to start a session on a task the eligibility functions veto."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file root (agent-auto-test--task root nil "")))
+          (asked nil))
+      (setq agent-auto-eligible-functions
+            (list (lambda () (setq asked agent-auto-by-hand) nil)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "engine" "chat:145" (list agent-auto-test--session-option) 0))
+      (should-error (agent-auto-test--decide file (list 13)) :type 'user-error)
+      (should asked)
+      (should-not agent-auto-test--started)
+      (should (equal (agent-auto-test--decision-state file) "open")))))
+
+(ert-deftest agent-auto-test-request-decision-resumes-the-session ()
+  "Ask a closed session for its decision, resuming it with only that request."
+  (agent-auto-test--with root
+    (let* ((agent-auto-decision-instructions "Decide in %f.")
+           (file (agent-auto-test--closed-task root "sid-1")))
+      (agent-auto-test--at file "Fix it"
+                           (lambda () (call-interactively #'agent-request-decision)))
+      (let ((prompt (plist-get (cdar agent-auto-test--started) :initial-prompt))
+            (buffer (car agent-auto-test--buffers)))
+        (should (equal (plist-get (cdar agent-auto-test--started) :resume-id)
+                       "sid-1"))
+        (should (string-search "asks for the decision you are waiting on" prompt))
+        (should (string-search (buffer-local-value 'agent-auto--decision-file
+                                                   buffer)
+                               prompt))
+        (should (buffer-local-value 'agent-auto--unattended buffer))))))
+
+(ert-deftest agent-auto-test-decide-on-marked-lines ()
+  "Offer the options common to the marked tasks' decisions, and answer all.
+The decisions recommend different sends, so the common option is not
+recommended and needs a digit."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks root "Answer Ann" "Answer Ben"))
+          (agent-auto-test--commanded nil)
+          (agent-decision-commands '(agent-auto-test--nothing-needed)))
+      (agent-auto-test--put-decision
+       file "Answer Ann"
+       (agent-auto-test--decision-json
+        "engine" "chat:1" (list agent-auto-test--send-option
+                                agent-auto-test--command-option)
+        0 "a"))
+      (agent-auto-test--put-decision
+       file "Answer Ben"
+       (agent-auto-test--decision-json
+        "engine" "chat:2" (list (agent-auto-test--option
+                                 "Send it" "send" :to "chat:2"
+                                 :instruction "Send it.")
+                                agent-auto-test--command-option)
+        0 "b"))
+      (with-current-buffer (find-file-noselect file)
+        (agent-test-helper-in-agenda "Answer Ann"
+          (agent-auto-test--mark-lines "Answer Ann" "Answer Ben")
+          (let ((this-command 'agent-decide)
+                (last-input-event ?Y)
+                (unread-command-events (list 13 ?1)))
+            (call-interactively #'agent-decide))
+          (should-not org-agenda-bulk-marked-entries)))
+      (should (equal (sort (copy-sequence agent-auto-test--commanded) #'string<)
+                     '("Answer Ann" "Answer Ben")))
+      (should (equal (agent-auto-test--decision-state file "Answer Ann") "done"))
+      (should (equal (agent-auto-test--decision-state file "Answer Ben") "done")))))
 
 (provide 'agent-auto-test)
 ;;; agent-auto-test.el ends here
