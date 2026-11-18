@@ -4174,6 +4174,56 @@ while the mode is off, the command is refused too."
                        (format-message "Turn `agent-auto-mode' on first"))))
       (should-not agent-auto-test--started))))
 
+(ert-deftest agent-auto-test-delegate-tells-the-eligibility-functions ()
+  "Ask the eligibility functions of a delegated task with `agent-auto-by-hand'.
+The variable is non-nil while they run for a task the user delegates and
+nil while they run for the timer, and nil again afterwards.  So a
+function can let through for him what it refuses the timer: a tagged
+task it vetoes is not started by a search, and is by the command."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (concat (agent-auto-test--task root "Tagged")
+                               (agent-auto-test--task root "Refused" ""))))
+           (seen nil)
+           (agent-auto-eligible-functions
+            (list (lambda ()
+                    (push (cons (org-get-heading t t t t) agent-auto-by-hand)
+                          seen)
+                    (and agent-auto-by-hand
+                         (not (equal (org-get-heading t t t t) "Refused")))))))
+      (agent-auto-test--run)
+      (should (equal seen '(("Tagged" . nil))))
+      (should-not agent-auto-test--started)
+      (setq seen nil)
+      (agent-auto-test--delegate-refused file "Refused")
+      (should (equal seen '(("Refused" . t))))
+      (should-not agent-auto-by-hand)
+      (should (equal (agent-auto-test--delegate file "Tagged")
+                     "Started 1 unattended session"))
+      (should (equal (car seen) '("Tagged" . t)))
+      (should-not agent-auto-by-hand)
+      (should (equal (agent-auto-test--started-instances) '("tagged")))
+      (should (equal (agent-auto-test--tags file "Tagged") '("agent"))))))
+
+(ert-deftest agent-auto-test-delegate-shows-the-reason-a-function-signals ()
+  "Show the message of the `user-error' an eligibility function signals.
+It is the reason the task is refused, as it stands, after the task's
+title.  The task is vetoed: it gets no tag and no session, and its
+buffer and its file are as they were."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--listed-tasks root "Answer Ann"))
+           (agent-auto-eligible-functions
+            (list (lambda ()
+                    (when agent-auto-by-hand
+                      (user-error "Its sender is unknown: start it with s"))
+                    nil))))
+      (should (equal (agent-auto-test--delegate-refused file "Answer Ann")
+                     "\"Answer Ann\": Its sender is unknown: start it with s"))
+      (should (equal (agent-auto-test--tags file "Answer Ann") '("listed")))
+      (should-not (agent-auto-test--property file "Answer Ann"
+                                             "AGENT_SESSION"))
+      (should-not agent-auto-by-hand))))
+
 (ert-deftest agent-auto-test-delegate-leaves-unsaved-edits-unsaved ()
   "Record a delegated task at once in a buffer that has unsaved edits.
 The user is at the task: it gets its tag and its session, and the

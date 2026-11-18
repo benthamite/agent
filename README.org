@@ -356,6 +356,18 @@ The mode never answers the trust question itself, and for the sessions it gives 
 #+vindex: agent-auto-eligible-functions
 ~agent-auto-eligible-functions~ is an abnormal hook that decides whether a ready task may be started. Each function is called with no arguments, with point on the task's heading in the buffer visiting its file, and the task is started only when every function returns non-nil; a function that signals an error vetoes it too. This is where a rule the tag alone cannot express goes, such as refusing a task made from a stranger's message. The hook runs on every search while the task is ready and unstarted, so its functions must be quick and leave the buffer as it is.
 
+#+vindex: agent-auto-by-hand
+~agent-delegate-tasks~ asks the same functions about a task you delegate ([[#h:auto-commands][Unattended task commands]]), and binds the variable ~agent-auto-by-hand~ to a non-nil value while they run; for the timer it is nil. Your own command stands for whatever mark a function wants before the timer may start a task, so a function can let through, while the variable is non-nil, what it would refuse the timer, and keep the checks that hold whoever starts the task. A function that still refuses can say why by signaling a ~user-error~: the command shows its message as the reason. A function that returns nil, or signals any other error, vetoes as it does for the timer.
+
+#+begin_src emacs-lisp
+(defun my-agent-task-eligible-p ()
+  "Let a task marked FROZEN start only when I delegate it myself."
+  (or (not (org-entry-get nil "FROZEN"))
+      (bound-and-true-p agent-auto-by-hand)))
+
+(add-hook 'agent-auto-eligible-functions #'my-agent-task-eligible-p)
+#+end_src
+
 #+vindex: agent-auto-files
 #+vindex: agent-auto-interval
 ~agent-auto-files~ says where to look: nil, the default, for the files of ~org-agenda-files~, or a list of Org files and of directories whose Org files are searched, or a function returning such a list. ~agent-auto-interval~ is the number of seconds between two searches, 30 by default; a change takes effect when the mode is next turned on. The search is cheap: ripgrep looks for the tag in the files on disk, without Emacs waiting for it, and only a file that has it is visited. The work is then done in short steps, one file or one start each, so Emacs stays responsive however many tasks are ready.
@@ -1168,7 +1180,7 @@ With lines marked in an agenda, as =m= (~org-agenda-bulk-mark~) marks them, ~age
 #+findex: agent-delegate-tasks
 ~agent-delegate-tasks~ hands the Org task at point to an agent, for a task you judge one can finish without you. The task is the one the line at point shows in an agenda, or the heading at point in an Org buffer. It gets ~agent-auto-ready-tag~, in place of a result tag left by an earlier session, and its session is started at once, exactly as the timer starts one and without waiting for it ([[#h:auto-options][Unattended sessions on tagged tasks]]): in the task's directory, or in a worktree when another tracked session holds the checkout, briefed with the task and ~agent-auto-instructions~, snoozed and shown in no window. Everything after the start is the same too: the session is unattended, its result is written on the task, and it closes itself ([[#h:auto-closing][Unattended sessions close themselves]]). The task's keyword is left alone. A message says =Started 1 unattended session=, and an agenda is built again so that the line shows the tag. The user is at the task, so its buffer is written at once: one that had no unsaved edits is saved, and one that had is left unsaved. The command needs ~agent-auto-mode~ to be on.
 
-No session is started, and the task is left exactly as it was, untagged, when it cannot be delegated. The command then signals why, naming the task: =is closed=; =is not a TODO=; =names no directory=, or =names a directory that does not exist= (~agent-todo-directory-property~); =already records a session; go back to it with s=, the key being the one ~agent-act-on-tasks~ has in ~agent-task-keys-mode-map~; the reason no backend can be chosen (~agent-auto-backend~); or =may not run unattended=, when a function of ~agent-auto-eligible-functions~ vetoes it. A session that could not be started leaves the task stuck with the reason, as for the timer, and the command says =its session could not be started=.
+No session is started, and the task is left exactly as it was, untagged, when it cannot be delegated. The command then signals why, naming the task: =is closed=; =is not a TODO=; =names no directory=, or =names a directory that does not exist= (~agent-todo-directory-property~); =already records a session; go back to it with s=, the key being the one ~agent-act-on-tasks~ has in ~agent-task-keys-mode-map~; the reason no backend can be chosen (~agent-auto-backend~); or =may not run unattended=, when a function of ~agent-auto-eligible-functions~ vetoes it. Those functions are asked with ~agent-auto-by-hand~ non-nil, and one that signals a ~user-error~ gives the reason itself: its message is shown as it stands, after the task's title ([[#h:auto-options][Unattended sessions on tagged tasks]]). A session that could not be started leaves the task stuck with the reason, as for the timer, and the command says =its session could not be started=.
 
 #+findex: agent-task-keys-mode
 #+vindex: agent-task-keys-mode-map

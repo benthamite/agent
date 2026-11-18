@@ -140,7 +140,12 @@ heading in the buffer visiting its file, widened.  The task is started
 only when every function returns non-nil, so any function can veto it,
 and a function that signals an error vetoes it too.  The hook runs on
 every search for as long as the task is ready and unstarted, so its
-functions must be quick and must not change the buffer."
+functions must be quick and must not change the buffer.
+
+`agent-delegate-tasks' asks the same functions, with `agent-auto-by-hand'
+non-nil, for a task the user delegates.  A function that refuses such a
+task can say why by signaling a `user-error', whose message the command
+shows."
   :type 'hook
   :group 'agent-auto)
 
@@ -2019,6 +2024,15 @@ already, and the reason no session was started on each of the others."
 
 ;;;; Delegating a task
 
+(defvar agent-auto-by-hand nil
+  "Non-nil while the eligibility functions run for a task the user delegated.
+`agent-delegate-tasks' binds it to t around
+`agent-auto-eligible-functions' for each task it is asked to start, and
+the timer leaves it nil.  The user's own command stands for the mark the
+timer needs, so a function can let through, while this is non-nil, what
+it would refuse the timer.  A function that still refuses can say why by
+signaling a `user-error', whose message the command shows as its reason.")
+
 ;;;###autoload
 (defun agent-delegate-tasks ()
   "Start an unattended session on the Org task at point, at once.
@@ -2034,7 +2048,9 @@ No session is started, and the task is left as it was, when it is closed
 or is no TODO, names no directory that exists, already records a
 session, which `agent-act-on-tasks' goes back to, or may not run
 unattended, a function of `agent-auto-eligible-functions' having vetoed
-it.  The command then says why."
+it.  The command then says why.  Those functions are asked with
+`agent-auto-by-hand' non-nil: your command stands for the mark they
+would want before the timer may start the task."
   (interactive)
   (unless agent-auto-mode
     (user-error "Turn `agent-auto-mode' on first"))
@@ -2113,16 +2129,21 @@ it may not run unattended, as `agent-auto--veto' tells."
 
 (defun agent-auto--veto (title)
   "Return why the task at point, headed TITLE, may not run unattended, or nil.
-`agent-auto-eligible-functions' are asked as the timer asks them: a
-function that returns nil vetoes the task, and so does one that signals
-an error, whose message is part of the reason."
-  (condition-case err
-      (unless (save-excursion
-                (run-hook-with-args-until-failure
-                 'agent-auto-eligible-functions))
-        (format "\"%s\" may not run unattended" title))
-    (error (format "\"%s\" may not run unattended: %s"
-                   title (error-message-string err)))))
+`agent-auto-eligible-functions' are asked as the timer asks them, but
+with `agent-auto-by-hand' non-nil, the user having delegated the task.
+A function that returns nil vetoes the task, and so does one that
+signals an error.  The message of a `user-error' is the reason the
+function gives, and is returned as it stands after the title; that of
+any other error is added to a reason of this function's own."
+  (let ((agent-auto-by-hand t))
+    (condition-case err
+        (unless (save-excursion
+                  (run-hook-with-args-until-failure
+                   'agent-auto-eligible-functions))
+          (format "\"%s\" may not run unattended" title))
+      (user-error (format "\"%s\": %s" title (error-message-string err)))
+      (error (format "\"%s\" may not run unattended: %s"
+                     title (error-message-string err))))))
 
 (defun agent-auto--tag-ready ()
   "Give the task at point the ready tag, in place of any result tag it carries."
