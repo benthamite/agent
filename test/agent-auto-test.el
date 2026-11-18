@@ -2829,9 +2829,10 @@ its tag, and its result says what it had reported."
   "Leave open, and snoozed, an unattended session that has more to do.
 That is one that reports itself in progress; one whose turn ended with
 background work still running, whatever its status line says and
-whichever report of its backend tells of the work; and one in which a
-turn has started since.  The result is written all the same, and the
-session closes once a turn ends with nothing left to do."
+whichever report of its backend tells of the work; one in which a turn
+has started since; and one its backend reads as busy though its turn has
+ended, whose exit is not even armed.  The result is written all the
+same, and the session closes once a turn ends with nothing left to do."
   (agent-auto-test--with root
     (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root))
                 (backend (agent-backend 'stub))
@@ -2852,11 +2853,15 @@ session closes once a turn ends with nothing left to do."
         (setq work nil)
         (agent-session-event buffer 'activity)
         (agent-auto-test--end-turn buffer "Status: done: built")
+        (agent-session-event buffer 'stop)
+        (setf (agent-backend-busy-p backend) (lambda (_buffer) t))
+        (agent-auto--turn-end buffer)
         (should-not agent-auto-test--submitted)
+        (should-not (buffer-local-value 'agent--before-exit buffer))
         (should (buffer-live-p buffer))
         (should (agent-session-snoozed-p buffer))
         (should (buffer-local-value 'agent-auto--unattended buffer))
-        (agent-session-event buffer 'stop)
+        (setf (agent-backend-busy-p backend) #'ignore)
         (agent-auto--turn-end buffer)
         (should (agent-auto-test--handover-asked-p buffer))))))
 

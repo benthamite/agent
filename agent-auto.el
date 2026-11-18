@@ -1224,15 +1224,18 @@ him a second time, whatever it reports."
 (defun agent-auto--closes-itself-p (buffer)
   "Return non-nil when session BUFFER, whose turn gave a result, is to close.
 It is when the session is unattended, see `agent-auto--unattended', and
-nothing shows that it has more to do: no exit of it is under way; no
-turn has started in it since the one that ended, whose own end will tell;
-and its backend reports no background work, which closing would kill
-before it reported back; see `agent-auto--background-work-p'."
+nothing shows that it has more to do: no exit of it is under way; it
+does not read busy, as it does once a turn has started in it since the
+one that ended, whose own end will tell; and its backend reports no
+background work, which closing would kill before it reported back; see
+`agent-auto--background-work-p'.  The exit of a session that reads busy
+would only be armed, to start at the end of a turn that may well leave
+the session more to do."
   (and (buffer-live-p buffer)
        (buffer-local-value 'agent-auto--unattended buffer)
        (not (buffer-local-value 'agent--before-exit buffer))
        (not (agent-auto--chain-turn-p buffer))
-       (not (eq (buffer-local-value 'agent--session-state buffer) 'busy))
+       (not (eq (agent-session-display-state buffer) 'busy))
        (not (agent-auto--background-work-p buffer))))
 
 (defun agent-auto--background-work-p (buffer)
