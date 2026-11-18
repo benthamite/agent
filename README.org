@@ -594,7 +594,7 @@ In EAT-backed Claude and Codex session buffers, ~agent-setup-scroll-keys~ makes 
 #+vindex: agent-scroll-keys-mode-map
 #+vindex: agent-usage-mode-map
 #+vindex: agent-report-mode-map
-After an update there is no need to restart Emacs for the package's own keys. Each time its files are loaded, the package sets the keys of its keymaps again, in the keymaps that are already there, and leaves the keys you bound in them yourself: ~agent-scroll-keys-mode-map~ (PageUp and PageDown in sessions), ~agent-usage-mode-map~ (the usage buffer), ~agent-report-mode-map~ (the report buffer) and the keymap that binds =TAB= to snippet expansion in sessions. Session buffers hold ~agent-scroll-keys-mode-map~ itself, so a key a new version binds in it reaches the sessions that are already open. A key the package binds is given the package's command at every load, so one you bound to a command of your own in these keymaps has to be bound again after an update. ~agent-session-keys-mode-map~ is yours alone and is never touched.
+After an update there is no need to restart Emacs for the package's own keys. Each time its files are loaded, the package sets the keys of its keymaps again, in the keymaps that are already there, and leaves the keys you bound in them yourself: ~agent-scroll-keys-mode-map~ (PageUp and PageDown in sessions), ~agent-usage-mode-map~ (the usage buffer), ~agent-report-mode-map~ (the report buffer), ~agent-task-keys-mode-map~ (the keys for a task's session in a list of tasks) and the keymap that binds =TAB= to snippet expansion in sessions. Session buffers hold ~agent-scroll-keys-mode-map~ itself, so a key a new version binds in it reaches the sessions that are already open. A key the package binds is given the package's command at every load, so one you bound to a command of your own in these keymaps has to be bound again after an update. ~agent-session-keys-mode-map~ is yours alone and is never touched.
 
 The command ~agent-select-session~ opens the session switcher, which contains only existing session entries. If no sessions are active, it reports that there are none; use ~agent-start-new-session~ (=n=) to start one. Sessions receive stable home-row keys where possible and display backend icons next to their labels.
 
@@ -1129,6 +1129,16 @@ The =agent-todo= module turns an Org TODO entry into work for an AI session, wit
 
 #+findex: agent-link-session
 ~agent-link-session~ links a running session and an Org task that already exists, whoever made the task, and sends the session nothing. It is for a session started by hand whose task turns out to exist already. On an Org heading, or on a line of an agenda, it asks for a running session by completion, those that run in the task's directory first. In a session's buffer it asks for a task among the open TODOs of ~agent-auto-files~, those whose directory is the session's first. The task then records the session exactly as a task a session was started from does, and needs nothing else on it: its heading shows the session's mark, acting on it goes to the session, the session's results and its handover are written on it, and the timer starts no session on it ([[#h:auto-options][Unattended sessions on tagged tasks]], [[#h:auto-handover][Handover of a closing session]]). A link that would replace another, because the task records another session or the session is linked to another task, is asked about first, as when a task is sent to a running session, and declining changes nothing. With a prefix argument the task's text is also sent to the session, as ~agent-send-todo-at-point~ with a prefix argument sends it. The command needs ~agent-auto-mode~ to be on, and refuses a heading that is no TODO or is closed.
+
+#+findex: agent-task-keys-mode
+#+vindex: agent-task-keys-mode-map
+~agent-task-keys-mode~ is a buffer-local minor mode that gives a list of tasks the package's own keys for the session of the task at point. In its keymap, ~agent-task-keys-mode-map~, =S= runs ~agent-link-session~ on the task of the line at point. The mode is off until you turn it on in the lists it should work in, from their hooks, and its keys then take precedence over those of the list's major mode, so in an Org agenda =S= no longer runs the agenda's own command for that key. For every agenda:
+
+#+begin_src emacs-lisp
+(add-hook 'org-agenda-mode-hook #'agent-task-keys-mode)
+#+end_src
+
+Like the package's other keymaps, this one keeps the keys you bind in it, and the package's own keys are set in it again each time its files are loaded ([[#h:shared-commands][Shared commands]]).
 
 ** Chief-of-staff commands
 :PROPERTIES:

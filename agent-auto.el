@@ -1688,6 +1688,28 @@ is read in its own buffer; otherwise point is on the task already."
              (lambda (context)
                (agent--deliver-to context buffer origin)))))
 
+(defvar-keymap agent-task-keys-mode-map
+  :doc "Keymap of `agent-task-keys-mode'.
+It holds the keys that act on the session of the task at point in a
+buffer that lists tasks.")
+
+;; The keys are set outside the `defvar-keymap', whose value form runs
+;; only the first time: loading the package again in a running Emacs, as
+;; an update does, would otherwise leave the keymap with the keys of the
+;; old code.  Keys the user bound in the keymap stay.
+(keymap-set agent-task-keys-mode-map "S" #'agent-link-session)
+
+;;;###autoload
+(define-minor-mode agent-task-keys-mode
+  "Minor mode with keys for the session of the task at point.
+It is for buffers that list tasks, such as an Org agenda, and is turned
+on in the lists it should work in from their hooks, as
+`org-agenda-mode-hook'.  Its keys take precedence over those of the
+buffer's major mode.
+
+\\{agent-task-keys-mode-map}"
+  :keymap agent-task-keys-mode-map)
+
 ;;;; Marks
 
 (defun agent-auto--schedule-marks (&rest _)

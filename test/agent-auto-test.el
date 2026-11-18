@@ -2725,6 +2725,39 @@ sent task moves to."
                         :type 'user-error)))
       (should-not (string-match-p "AGENT_SESSION" (agent-auto-test--disk file))))))
 
+(ert-deftest agent-auto-test-task-keys-mode-links-from-an-agenda ()
+  "Link a session to the task of an agenda line with S typed in the agenda.
+The key is the mode's own: it runs the command only while the mode is on
+in the agenda, where it takes precedence over the agenda's key.  It goes
+through the command loop, links the session to the task of the line at
+point, and sends nothing."
+  (agent-auto-test--with root
+    (let ((made (car (agent-auto-test--existing-tasks root)))
+          (buffer (agent-auto-test--open-session root "open" "sid-1"))
+          (pre-command-hook nil)
+          (post-command-hook nil))
+      (should (eq (keymap-lookup agent-task-keys-mode-map "S")
+                  #'agent-link-session))
+      (agent-auto-test--acting _shown
+        (agent-auto-test--completing "." offered
+          (with-current-buffer (find-file-noselect made)
+            (agent-test-helper-in-agenda "Made elsewhere"
+              (should-not (eq (key-binding (kbd "S")) #'agent-link-session))
+              (agent-task-keys-mode 1)
+              (should (eq (key-binding (kbd "S")) #'agent-link-session))
+              (set-window-buffer (selected-window) (current-buffer))
+              (set-window-point (selected-window) (point))
+              (execute-kbd-macro (kbd "S"))
+              (agent-task-keys-mode -1)
+              (should-not (eq (key-binding (kbd "S")) #'agent-link-session))))
+          (should (= (length offered) 1))))
+      (should (equal (agent-auto-test--property made "Made elsewhere"
+                                                "AGENT_SESSION")
+                     "sid-1"))
+      (should (string-match-p ":AGENT_SESSION: +sid-1"
+                              (agent-auto-test--disk made)))
+      (should (buffer-local-value 'agent-auto--link buffer)))))
+
 ;;;; Where to look
 
 (ert-deftest agent-auto-test-looks-in-the-agenda-files-by-default ()

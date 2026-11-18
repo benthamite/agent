@@ -128,6 +128,7 @@ handover receipt of the scenario does.")
   '((agent-report-mode-map "C-c C-c" agent-report-send)
     (agent-report-mode-map "C-c C-k" agent-report-cancel)
     (agent-usage-mode-map "g" agent-usage-refresh)
+    (agent-task-keys-mode-map "S" agent-link-session)
     (agent-snippet--keys-mode-map "TAB" agent-snippet-tab)
     (agent-snippet--keys-mode-map "<tab>" agent-snippet-tab)
     (agent-scroll-keys-mode-map "<prior>" agent-scroll-page-up)
@@ -143,7 +144,8 @@ MAP is the variable that holds the keymap.")
 
 (defconst agent-reload-test--maps
   '(agent-report-mode-map agent-usage-mode-map agent-snippet--keys-mode-map
-    agent-scroll-keys-mode-map agent-session-keys-mode-map)
+    agent-scroll-keys-mode-map agent-task-keys-mode-map
+    agent-session-keys-mode-map)
   "The keymaps of the package, in each of which the user binds a key.
 The last is the user's own, in which the package binds nothing.")
 
