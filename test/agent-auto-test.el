@@ -61,8 +61,8 @@ Each element is a cons of the text and the session's buffer.")
 
 (defmacro agent-auto-test--with (root &rest body)
   "Evaluate BODY with a stub backend and ROOT bound to a new directory.
-The hooks `agent-auto-mode' installs are in place, without its timer:
-a test runs a search with `agent-auto-test--run'.  Tasks name their
+The hooks `agent-auto-mode' installs are in place and the mode reads as
+on, without its timer: a test runs a search with `agent-auto-test--run'.  Tasks name their
 directory in the property DIR, and worktrees go under ROOT."
   (declare (indent 1) (debug (symbolp body)))
   `(agent-test-helper-with-directory ,root
@@ -110,6 +110,7 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-before-delivery-functions
             (list #'agent-auto--confirm-delivery))
            (agent-auto--approved nil)
+           (agent-auto-mode t)
            (agent-recorded-session-functions
             (list #'agent-auto--recorded-session))
            (agent-session-state-change-functions
@@ -2476,6 +2477,253 @@ start a new one on it."
         (should-not (buffer-local-value 'agent-auto--unattended buffer))
         (agent-auto-test--run)
         (should (= (length agent-auto-test--started) 1))))))
+
+;;;; Linking by hand
+
+(defmacro agent-auto-test--completing (pick offered &rest body)
+  "Evaluate BODY with `completing-read' choosing the candidate PICK matches.
+PICK is a regexp.  OFFERED is a symbol, bound to the lists of candidates
+that were offered, each in the order it was offered in, the latest
+first."
+  (declare (indent 2) (debug (form symbolp body)))
+  `(let (,offered)
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_prompt table &rest _)
+                  (let ((all (all-completions "" table)))
+                    (should (eq (completion-metadata-get
+                                 (completion-metadata "" table nil)
+                                 'display-sort-function)
+                                #'identity))
+                    (push all ,offered)
+                    (or (seq-find (lambda (candidate)
+                                    (string-match-p ,pick candidate))
+                                  all)
+                        (ert-fail (format "No candidate matches %s in %S"
+                                          ,pick all)))))))
+       ,@body)))
+
+(defun agent-auto-test--open-session (root name id)
+  "Start a session named NAME in ROOT by hand, on no task; return its buffer.
+It has the id ID and takes text."
+  (let ((buffer (agent-start-session
+                 (agent-session-create :backend 'stub :directory root
+                                       :instance name))))
+    (agent--note-session-id buffer id)
+    (agent-auto-test--take-text)
+    buffer))
+
+(defun agent-auto-test--existing-tasks (root)
+  "Write two files of tasks under ROOT and return them, as (MADE . PLAIN).
+The first holds a task some other program made, which names ROOT as its
+directory and carries a property of that program's.  The second holds a
+plain TODO with no property at all, and is searched first."
+  (let ((plain (agent-auto-test--file root "* TODO Plain one\nIts body.\n"
+                                      "plain.org"))
+        (made (agent-auto-test--file
+               root (format "* TODO Made elsewhere\n:PROPERTIES:\n:DIR: %s\n:OTHER_ID: p-1\n:END:\nIts body.\n"
+                            root))))
+    (cons made plain)))
+
+(ert-deftest agent-auto-test-link-session-from-the-task ()
+  "Link a running session to the task at point, and send it nothing.
+The sessions in the task's directory are offered first.  The task then
+records the session as one started from it does, on disk; its heading
+shows the session's mark; acting on it goes to the session; and closing
+the session writes its handover on the task."
+  (agent-auto-test--with root
+    (let* ((elsewhere (file-name-as-directory (expand-file-name "else" root)))
+           (made (car (agent-auto-test--existing-tasks root)))
+           (buffer (agent-auto-test--open-session root "open" "sid-1"))
+           (other (progn (make-directory elsewhere)
+                         (agent-auto-test--open-session elsewhere "far"
+                                                        "sid-2"))))
+      (should (equal (agent-session-buffers) (list other buffer)))
+      (agent-auto-test--acting shown
+        (agent-auto-test--completing "agent-test[^/]*\\'" offered
+          (with-current-buffer (find-file-noselect made)
+            (goto-char (point-min))
+            (search-forward "Its body")
+            (agent-link-session))
+          (should (equal (car offered)
+                         (list (agent--session-candidate-label buffer)
+                               (agent--session-candidate-label other)))))
+        (should-not shown)
+        (should (equal (agent-auto-test--property made "Made elsewhere"
+                                                  "AGENT_SESSION")
+                       "sid-1"))
+        (should (equal (agent-auto-test--property made "Made elsewhere"
+                                                  "AGENT_BACKEND")
+                       "stub"))
+        (should (agent-auto-test--property made "Made elsewhere" "AGENT_STARTED"))
+        (should (equal (agent-auto-test--property made "Made elsewhere" "OTHER_ID")
+                       "p-1"))
+        (should (string-match-p ":AGENT_SESSION: +sid-1"
+                                (agent-auto-test--disk made)))
+        (should (buffer-local-value 'agent-auto--link buffer))
+        (should-not (buffer-local-value 'agent-auto--link other))
+        (agent-auto-test--marks-due)
+        (should (equal (agent-auto-test--heading-mark made "Made elsewhere")
+                       " ▶"))
+        (agent-auto-test--act made)
+        (should (equal shown (list buffer))))
+      (agent-auto-test--run)
+      (should (= (length agent-auto-test--started) 2))
+      (agent-auto-test--hand-over
+       buffer '(:state "interrupted" :summary "Half of it" :next "the rest"))
+      (should (equal (agent-auto-test--notes made "Made elsewhere")
+                     '("Session closed: interrupted.\nDone: Half of it\nNext: the rest"))))))
+
+(ert-deftest agent-auto-test-link-session-from-the-session ()
+  "Link the session of the current buffer to a task chosen by completion.
+The open TODOs of the files searched are offered, those whose directory
+is the session's first, and a closed one is not.  A plain TODO in
+another file, with no property of its own, is linked as any task: it
+records the session and where it runs, shows its mark, goes to the
+session when acted on, and gets the handover.  Nothing is sent."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,_made . ,plain) (agent-auto-test--existing-tasks root))
+                 (_done (agent-auto-test--file
+                         root "* DONE Closed one\n" "done.org"))
+                 (buffer (agent-auto-test--open-session root "open" "sid-1")))
+      (agent-auto-test--acting shown
+        (agent-auto-test--completing "Plain one" offered
+          (with-current-buffer buffer
+            (agent-link-session))
+          (should (equal (car offered)
+                         '("Made elsewhere  (tasks.org)"
+                           "Plain one  (plain.org)"))))
+        (should-not shown)
+        (should (equal (agent-auto-test--property plain "Plain one"
+                                                  "AGENT_SESSION")
+                       "sid-1"))
+        (should (file-equal-p (agent-auto-test--property plain "Plain one"
+                                                         "AGENT_DIRECTORY")
+                              root))
+        (should (string-match-p ":AGENT_SESSION: +sid-1"
+                                (agent-auto-test--disk plain)))
+        (agent-auto-test--marks-due)
+        (should (equal (agent-auto-test--heading-mark plain "Plain one") " ▶"))
+        (agent-auto-test--act plain)
+        (should (equal shown (list buffer))))
+      (agent-auto-test--hand-over
+       buffer '(:state "finished" :summary "All of it"))
+      (should (equal (agent-auto-test--tags plain "Plain one") '("review")))
+      (should (equal (agent-auto-test--notes plain "Plain one")
+                     '("Session closed: finished.\nDone: All of it"))))))
+
+(ert-deftest agent-auto-test-link-session-from-an-agenda-line ()
+  "Link a running session to the task of the agenda line at point."
+  (agent-auto-test--with root
+    (let ((made (car (agent-auto-test--existing-tasks root)))
+          (buffer (agent-auto-test--open-session root "open" "sid-1")))
+      (agent-auto-test--acting _shown
+        (agent-auto-test--completing "." _offered
+          (with-current-buffer (find-file-noselect made)
+            (agent-test-helper-in-agenda "Made elsewhere"
+              (agent-link-session)))))
+      (should (equal (agent-auto-test--property made "Made elsewhere"
+                                                "AGENT_SESSION")
+                     "sid-1"))
+      (should (buffer-local-value 'agent-auto--link buffer)))))
+
+(ert-deftest agent-auto-test-link-session-asks-before-replacing ()
+  "Ask before a link made by hand replaces another, from either side.
+A task that records another session, and a session linked to another
+task: declined, nothing changes; accepted, the link is replaced and the
+log of the task that lost its session names it.  Nothing is sent."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,made . ,plain) (agent-auto-test--existing-tasks root))
+                 (first (agent-auto-test--open-session root "first" "sid-1"))
+                 (second (agent-auto-test--open-session root "second" "sid-2")))
+      (agent-auto-test--acting _shown
+        (agent-auto-test--completing "Made elsewhere" _offered
+          (with-current-buffer first
+            (agent-link-session)))
+        (let ((before (agent-auto-test--disk made)))
+          (agent-auto-test--completing "second" _offered
+            (agent-auto-test--answering nil asked
+              (agent-auto-test--act made nil #'agent-link-session
+                                    "Made elsewhere")
+              (should (= (length asked) 1))
+              (should (string-match-p "records another session (sid-1)"
+                                      (car asked)))))
+          (should (equal (agent-auto-test--disk made) before))
+          (should-not (buffer-local-value 'agent-auto--link second)))
+        (agent-auto-test--completing "Plain one" _offered
+          (agent-auto-test--answering nil asked
+            (with-current-buffer first
+              (agent-link-session))
+            (should (= (length asked) 1))
+            (should (string-match-p "is linked to the task “Made elsewhere”"
+                                    (car asked))))
+          (should-not (agent-auto-test--property plain "Plain one"
+                                                 "AGENT_SESSION"))
+          (agent-auto-test--answering t _asked
+            (with-current-buffer first
+              (agent-link-session))))
+        (should (equal (agent-auto-test--property plain "Plain one"
+                                                  "AGENT_SESSION")
+                       "sid-1"))
+        (should-not (agent-auto-test--property made "Made elsewhere"
+                                               "AGENT_SESSION"))
+        (should (equal (agent-auto-test--notes made "Made elsewhere")
+                       '("Session sid-1 (stub) is no longer linked to this task: it was linked to another.")))
+        (agent-auto-test--completing "second" _offered
+          (agent-auto-test--answering t _asked
+            (agent-auto-test--act plain nil #'agent-link-session "Plain one")))
+        (should (equal (agent-auto-test--property plain "Plain one"
+                                                  "AGENT_SESSION")
+                       "sid-2"))
+        (should (string-match-p
+                 "\\`Session sid-1 (stub, .*) is no longer linked to this task: another took its place\\.\\'"
+                 (car (agent-auto-test--notes plain "Plain one"))))
+        (should-not (buffer-local-value 'agent-auto--link first))
+        (should (buffer-local-value 'agent-auto--link second))))))
+
+(ert-deftest agent-auto-test-link-session-with-a-prefix-sends-the-task ()
+  "Send the task's text to the session as well, with a prefix argument.
+From the task and from the session, the text is the one sending the
+task to a running session submits, and the task moves to the keyword a
+sent task moves to."
+  (dolist (from '(task session))
+    (agent-auto-test--with root
+      (let* ((agent-todo-in-progress-keyword "DOING")
+             (file (agent-auto-test--file
+                    root (concat "#+TODO: TODO DOING | DONE\n"
+                                 (agent-auto-test--task root nil ""))))
+             (buffer (agent-auto-test--open-session root "open" "sid-1")))
+        (if (eq from 'task)
+            (agent-auto-test--completing "." _offered
+              (agent-auto-test--act file '(4) #'agent-link-session "Fix it"))
+          (agent-auto-test--completing "Fix it" _offered
+            (with-current-buffer buffer
+              (agent-link-session '(4)))))
+        (should (equal agent-auto-test--submitted
+                       (list (cons "Fix it\n\nThe body." buffer))))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                       "sid-1"))
+        (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
+        (should (buffer-local-value 'agent-auto--link buffer))))))
+
+(ert-deftest agent-auto-test-link-session-refuses-what-cannot-be-linked ()
+  "Refuse to link where there is no open task, no session, or no mode."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file
+                 root "Before the first heading.\n* Not a task\n* DONE Closed\n* TODO Open\n")))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (ert-fail "Asked for a choice"))))
+        (dolist (place '("Before the first" "Not a task" "Closed"))
+          (should-error (agent-auto-test--act file nil #'agent-link-session
+                                              place)
+                        :type 'user-error))
+        (should-error (agent-auto-test--act file nil #'agent-link-session "Open")
+                      :type 'user-error)
+        (let ((agent-auto-mode nil))
+          (agent-auto-test--open-session root "open" "sid-1")
+          (should-error (agent-auto-test--act file nil #'agent-link-session
+                                              "Open")
+                        :type 'user-error)))
+      (should-not (string-match-p "AGENT_SESSION" (agent-auto-test--disk file))))))
 
 ;;;; Where to look
 

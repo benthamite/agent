@@ -1127,6 +1127,9 @@ The =agent-todo= module turns an Org TODO entry into work for an AI session, wit
 #+findex: agent-auto-run-now
 ~agent-auto-run-now~ looks for ready tasks at once instead of waiting for the timer. It needs the mode to be on.
 
+#+findex: agent-link-session
+~agent-link-session~ links a running session and an Org task that already exists, whoever made the task, and sends the session nothing. It is for a session started by hand whose task turns out to exist already. On an Org heading, or on a line of an agenda, it asks for a running session by completion, those that run in the task's directory first. In a session's buffer it asks for a task among the open TODOs of ~agent-auto-files~, those whose directory is the session's first. The task then records the session exactly as a task a session was started from does, and needs nothing else on it: its heading shows the session's mark, acting on it goes to the session, the session's results and its handover are written on it, and the timer starts no session on it ([[#h:auto-options][Unattended sessions on tagged tasks]], [[#h:auto-handover][Handover of a closing session]]). A link that would replace another, because the task records another session or the session is linked to another task, is asked about first, as when a task is sent to a running session, and declining changes nothing. With a prefix argument the task's text is also sent to the session, as ~agent-send-todo-at-point~ with a prefix argument sends it. The command needs ~agent-auto-mode~ to be on, and refuses a heading that is no TODO or is closed.
+
 ** Chief-of-staff commands
 :PROPERTIES:
 :CUSTOM_ID: h:chief-commands

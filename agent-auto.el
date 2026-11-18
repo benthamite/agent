@@ -1488,6 +1488,206 @@ the session takes."
         (format "%s (%s)" recorded (string-join details ", "))
       recorded)))
 
+;;;; Linking by hand
+
+;;;###autoload
+(defun agent-link-session (&optional send)
+  "Link a running session and an Org task, sending the session nothing.
+On an Org heading or on a line of an agenda, choose a running session
+by completion, those in the task's directory first.  In a session's
+buffer, choose a task by completion among the open TODOs of
+`agent-auto-files', those whose directory is the session's first.
+
+The task then records the session exactly as a task a session was
+started from does: its heading shows the session's mark, acting on it
+goes to the session, the session's results and its handover are written
+on it, and the timer starts no session on it.  One session works on one
+task, so a link that would replace another is asked about first, and
+declining changes nothing; see `agent-auto--confirm-link'.
+
+With prefix argument SEND, also send the session the task's text, as
+`agent-send-todo-at-point' with a prefix argument does."
+  (interactive "P")
+  (unless agent-auto-mode
+    (user-error "Turn `agent-auto-mode' on first"))
+  (let* ((from-session (and (agent-session) (current-buffer)))
+         (marker (if from-session
+                     (agent-auto--read-task from-session)
+                   (agent-auto--task-at-point)))
+         (buffer (or from-session (agent-auto--read-session marker))))
+    (cond
+     (send (agent-auto--send-task marker buffer (and from-session t)))
+     ((agent-auto--confirm-link marker buffer)
+      (agent-auto--link-task marker buffer)
+      (message "Linked %s to the task “%s”"
+               (agent-display-name buffer)
+               (agent-auto--at-task
+                marker (lambda () (org-get-heading t t t t)))))
+     (t (message "Nothing was linked")))))
+
+(defun agent-auto--task-at-point ()
+  "Return a marker at the open Org task at point, or signal a `user-error'.
+The task is the heading at point in an Org buffer, or the one the line
+at point shows in an agenda.  It must be a TODO that is not closed, in a
+buffer that visits a file."
+  (let ((marker (or (agent--org-entry-marker)
+                    (user-error "Call this on an Org task, on an agenda line or in a session"))))
+    (unless (agent--at-org-entry #'org-get-todo-state)
+      (user-error "Point is not on a TODO heading"))
+    (when (agent--at-org-entry #'org-entry-is-done-p)
+      (user-error "This task is closed"))
+    (unless (agent-auto--task-file marker)
+      (user-error "This task's buffer visits no file"))
+    marker))
+
+(defun agent-auto--read-session (marker)
+  "Read a running session to link to the task at MARKER; return its buffer.
+The sessions that run in the task's directory come first."
+  (let* ((buffers (or (agent-session-buffers)
+                      (user-error "No session is running")))
+         (directory (agent-auto--at-task marker #'agent-auto--task-directory))
+         (same-p (agent-auto--same-directory-p directory))
+         (candidates
+          (agent-auto--label
+           (agent-auto--first
+            (lambda (buffer)
+              (when-let* ((session (agent-session buffer)))
+                (funcall same-p (agent-session-directory session))))
+            buffers)
+           #'agent--session-candidate-label)))
+    (agent-auto--choose "Link the session: " candidates)))
+
+(defun agent-auto--read-task (buffer)
+  "Read an open task to link session BUFFER to; return a marker at it.
+The tasks are the open TODOs of `agent-auto-files', those whose
+directory is the session's first."
+  (let* ((same-p (agent-auto--same-directory-p
+                  (agent-session-directory (agent-session buffer))))
+         (tasks (or (agent-auto--open-tasks)
+                    (user-error "No open task in `agent-auto-files'")))
+         (candidates
+          (agent-auto--label
+           (agent-auto--first
+            (lambda (task) (funcall same-p (plist-get task :directory)))
+            tasks)
+           (lambda (task)
+             (format "%s  (%s)" (plist-get task :title)
+                     (file-name-nondirectory (plist-get task :file))))))
+         (task (agent-auto--choose
+                (format "Link %s to the task: " (agent-display-name buffer))
+                candidates)))
+    (with-current-buffer (plist-get task :buffer)
+      (copy-marker (plist-get task :position)))))
+
+(defun agent-auto--open-tasks ()
+  "Return the open TODOs of `agent-auto-files', in the order of the files.
+Each is a plist of `:title', `:file', `:buffer', the buffer visiting the
+file, `:position', where the heading starts, and `:directory', the
+directory `agent-todo-directory-property' names for the task, or nil."
+  (mapcan
+   (lambda (file)
+     (when-let* ((org (agent-auto--org-buffer file)))
+       (with-current-buffer org
+         (org-with-wide-buffer
+          (goto-char (point-min))
+          (let ((case-fold-search nil)
+                tasks)
+            (while (re-search-forward org-not-done-heading-regexp nil t)
+              (save-excursion
+                (goto-char (match-beginning 0))
+                (push (list :title (substring-no-properties
+                                    (org-get-heading t t t t))
+                            :file file
+                            :buffer org
+                            :position (point)
+                            :directory (agent-auto--task-directory))
+                      tasks)))
+            (nreverse tasks))))))
+   (agent-auto--files)))
+
+(defun agent-auto--task-directory ()
+  "Return the directory the task at point names, or nil when it names none.
+The directory is the one `agent-todo-directory-property' names, on the
+task's own heading or inherited.  Nothing is said of a directory that
+does not exist, since this is asked of many tasks to put them in order."
+  (when-let* ((agent-todo-directory-property)
+              (name (org-entry-get nil agent-todo-directory-property t))
+              ((not (member name '("" "nil")))))
+    (file-name-as-directory (expand-file-name name))))
+
+(defun agent-auto--same-directory-p (directory)
+  "Return a function telling whether a directory is DIRECTORY.
+The function takes a directory's name, or nil, and compares the true
+names, each of which it works out once, so that it can be asked of many
+tasks.  With DIRECTORY nil it always answers nil."
+  (let ((seen (make-hash-table :test #'equal))
+        (true (and directory
+                   (file-truename (file-name-as-directory
+                                   (expand-file-name directory))))))
+    (lambda (other)
+      (and true other
+           (equal true
+                  (or (gethash other seen)
+                      (puthash other
+                               (file-truename (file-name-as-directory
+                                               (expand-file-name other)))
+                               seen)))))))
+
+(defun agent-auto--first (predicate items)
+  "Return ITEMS with those PREDICATE holds for first, each group in its order."
+  (append (seq-filter predicate items) (seq-remove predicate items)))
+
+(defun agent-auto--label (items function)
+  "Return an alist from a label to each of ITEMS, in their order.
+FUNCTION, called with an item, returns its label.  A label that two
+items share gets a number, so that each can be chosen."
+  (let ((seen (make-hash-table :test #'equal)))
+    (mapcar (lambda (item)
+              (let* ((label (funcall function item))
+                     (count (puthash label (1+ (gethash label seen 0)) seen)))
+                (cons (if (= count 1) label (format "%s <%d>" label count))
+                      item)))
+            items)))
+
+(defun agent-auto--choose (prompt candidates)
+  "Read one of CANDIDATES with PROMPT, and return what it stands for.
+CANDIDATES is an alist from a label to an item.  They are offered in
+their order, which a completion interface would otherwise sort away, and
+the first is the default."
+  (let* ((labels (mapcar #'car candidates))
+         (table (lambda (string predicate action)
+                  (if (eq action 'metadata)
+                      '(metadata (display-sort-function . identity)
+                                 (cycle-sort-function . identity))
+                    (complete-with-action action labels string predicate))))
+         (choice (completing-read prompt table nil t nil nil (car labels))))
+    (cdr (assoc choice candidates))))
+
+(defun agent-auto--send-task (marker buffer from-session)
+  "Send the task at MARKER to session BUFFER, as sending it by hand does.
+The task is read by the extractor of the thing it is, so a Linear issue
+is sent as one, and the link is asked about and recorded as for any task
+sent to a running session; see `agent-auto--confirm-delivery'.  With
+FROM-SESSION non-nil the command was called in the session and the task
+is read in its own buffer; otherwise point is on the task already."
+  (if from-session
+      (with-current-buffer (marker-buffer marker)
+        (save-excursion
+          (save-restriction
+            (widen)
+            (goto-char marker)
+            (agent-auto--send-thing-at-point buffer))))
+    (agent-auto--send-thing-at-point buffer)))
+
+(defun agent-auto--send-thing-at-point (buffer)
+  "Send the thing at point to the running session BUFFER."
+  (let ((origin (current-buffer))
+        (agent--context-wants-directory nil))
+    (funcall (or (agent--extractor-at-point)
+                 (user-error "Nothing to send at point"))
+             (lambda (context)
+               (agent--deliver-to context buffer origin)))))
+
 ;;;; Marks
 
 (defun agent-auto--schedule-marks (&rest _)
