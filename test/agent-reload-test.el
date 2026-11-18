@@ -76,6 +76,8 @@
     (agent-recorded-session-functions agent-auto--recorded-session)
     (agent-session-state-change-functions agent-auto--schedule-marks)
     (agent-session-id-functions agent-auto--schedule-marks)
+    (agent-before-exit-step-functions agent-auto--handover-step)
+    (after-save-hook agent-auto--after-save)
     (kill-buffer-hook agent-auto--session-killed)
     (org-mode-hook agent-auto--schedule-marks)
     (org-agenda-finalize-hook agent-auto--mark-agenda))
@@ -112,8 +114,10 @@ FUNCTION advises the function of SYMBOL.")
 
 (defconst agent-reload-test--mode-timers
   '(agent-claude--monet-gc-orphaned-servers agent--tab-bar-refresh
-    agent-auto--tick)
-  "The functions of the timers the modes run.")
+    agent-auto--tick agent-auto--run-flush)
+  "The functions of the timers the modes run.
+The last runs once, when something waits to be written on a task, as the
+handover receipt of the scenario does.")
 
 (defconst agent-reload-test--load-timers
   '(agent--refresh-derived-statuses agent--refresh-session-switcher)
@@ -184,8 +188,10 @@ Return a plist.  `:first' and `:second' are what
 found once the modes were turned off again.  `:swept' is non-nil when
 turning the modes on deleted the stale files that were there, and
 `:files-kept' when the loads left every file of the scenario as it was:
-the stale ones written after the modes were turned on, and the status
-files of a session.  `:server-kept' is non-nil when the remote-control
+the stale ones written after the modes were turned on, the status files
+of a session, and a handover receipt with the Org file of its task.
+`:handovers' lists how many receipts `agent-auto' held after the second
+load and after the first.  `:server-kept' is non-nil when the remote-control
 server is the process it was, and `:server-functions' lists its filter,
 its sentinel and its log function, each the symbol it is or
 `not-a-symbol'.  `:saved' lists the notification functions the two
@@ -211,6 +217,7 @@ them, and `:events' lists the session events and state changes seen."
                        (not (seq-some #'file-exists-p stale))))
          (files (progn (agent-reload-test--plant-stale-files)
                        (agent-reload-test--plant-session-files)
+                       (agent-reload-test--plant-handover directory)
                        (agent-reload-test--files directory)))
          (server agent-remote--server)
          (maps (mapcar #'symbol-value agent-reload-test--maps))
@@ -218,10 +225,13 @@ them, and `:events' lists the session events and state changes seen."
          (sessions (agent-reload-test--make-sessions))
          (states (agent-reload-test--session-states sessions))
          (first (agent-reload-test--load-after #'agent-reload-test--make-older))
+         (handovers (list (length agent-auto--handovers)))
          (second (agent-reload-test--load-after
                   #'agent-reload-test--add-second-timers))
+         (handovers (cons (length agent-auto--handovers) handovers))
          (report
           (list :swept swept :first first :second second
+                :handovers handovers
                 :files-kept (equal files (agent-reload-test--files directory))
                 :server-kept (and (eq server agent-remote--server)
                                   (process-live-p server)
@@ -293,6 +303,7 @@ an init file would have left them."
         codex-notification-function #'agent-reload-test-codex-notification
         agent-tab-bar-refresh-interval 3600
         agent-auto-interval 3600
+        agent-auto-handover-directory (expand-file-name "handovers/" directory)
         agent-remote-host "127.0.0.1"
         agent-remote-listen-address "127.0.0.1"
         agent-remote-allowed-networks '("127.0.0.0/8")
@@ -331,6 +342,26 @@ ago."
                   (expand-file-name (concat "0123-abcd." extension)
                                     agent-claude-status-directory)
                   nil 'silent)))
+
+(defun agent-reload-test--plant-handover (directory)
+  "Write under DIRECTORY a handover receipt that waits for its task's buffer.
+The task is in an Org file whose buffer is left with an unsaved edit, so
+the receipt cannot be written on it and nothing of the scenario's files
+changes while it waits."
+  (let ((tasks (expand-file-name "tasks.org" directory))
+        (receipt (expand-file-name "20261118T083000000000-0a1b.json"
+                                   agent-auto-handover-directory)))
+    (write-region "* TODO Task\n:PROPERTIES:\n:AGENT_SESSION: sid-0\n:END:\n"
+                  nil tasks nil 'silent)
+    (with-current-buffer (find-file-noselect tasks)
+      (goto-char (point-max))
+      (insert "Unsaved.\n"))
+    (make-directory agent-auto-handover-directory t)
+    (write-region
+     (json-serialize (list :id "20261118T083000000000-0a1b" :file tasks
+                           :session "sid-0" :state "interrupted"
+                           :summary "Half done"))
+     nil receipt nil 'silent)))
 
 (defun agent-reload-test--turn-modes-on ()
   "Turn every global mode of the package on, and the capture mode in a buffer.
@@ -567,6 +598,14 @@ Each keymap is the one it was, since session buffers and
      (plist-get (plist-get (agent-reload-test--report) load) :user-keys)))
   (agent-reload-test--should-all-be
    t (plist-get (agent-reload-test--report) :maps-kept)))
+
+(ert-deftest agent-reload-test-handover-receipts-are-read-once ()
+  "Hold a receipt left on disk once after each load, and leave its file.
+Loading `agent-auto.el' again reads the receipts again, as turning the
+mode on does, and a receipt read twice must not be held twice."
+  (let ((report (agent-reload-test--report)))
+    (should (equal (plist-get report :handovers) '(1 1)))
+    (should (plist-get report :files-kept))))
 
 (ert-deftest agent-reload-test-what-is-done-once-is-not-done-again ()
   "Leave alone what a mode does once when it is turned on.

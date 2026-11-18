@@ -61,6 +61,7 @@ User options
 * Project sources::
 * Org TODO workflows::
 * Unattended sessions on tagged tasks::
+* Handover of a closing session::
 * Claude Code backend::
 * Codex backend::
 * Chief-of-staff loop::
@@ -100,7 +101,7 @@ Indices
 
 The package is split into a small backend-agnostic core and focused modules:
 
-@multitable {aaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+@multitable {aaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Module
 @tab Role
 @item @samp{agent.el}
@@ -128,7 +129,7 @@ The package is split into a small backend-agnostic core and focused modules:
 @item @samp{agent-todo.el}
 @tab Org TODO workflow that works with any backend: routing the entry at point to a session
 @item @samp{agent-auto.el}
-@tab Unattended sessions on Org tasks tagged for an agent: a timer starts a session on each ready task@comma{} the task records its session@comma{} and the tag that marked it ready is replaced by one saying how the session ended
+@tab Unattended sessions on Org tasks tagged for an agent: a timer starts a session on each ready task@comma{} the task records its session@comma{} and the tag that marked it ready is replaced by one saying how the session ended; a session closed before its task is finished leaves a handover on the task
 @item @samp{agent-util.el}
 @tab File helpers shared by the backends@comma{} such as reading a transcript's first line whatever its length; depends on no other module
 @item @samp{agent-claude.el}
@@ -264,6 +265,7 @@ Loading @samp{agent-claude.el} or @samp{agent-codex.el} again while its mode is 
 * Project sources::
 * Org TODO workflows::
 * Unattended sessions on tagged tasks::
+* Handover of a closing session::
 * Claude Code backend::
 * Codex backend::
 * Chief-of-staff loop::
@@ -460,7 +462,58 @@ The mode never answers the trust question itself@comma{} and for the sessions it
 @vindex agent-auto-interval
 @code{agent-auto-files} says where to look: nil@comma{} the default@comma{} for the files of @code{org-agenda-files}@comma{} or a list of Org files and of directories whose Org files are searched@comma{} or a function returning such a list. @code{agent-auto-interval} is the number of seconds between two searches@comma{} 30 by default; a change takes effect when the mode is next turned on. The search is cheap: ripgrep looks for the tag in the files on disk@comma{} without Emacs waiting for it@comma{} and only a file that has it is visited. The work is then done in short steps@comma{} one file or one start each@comma{} so Emacs stays responsive however many tasks are ready.
 
-Org files are edited only in the buffer visiting them@comma{} which is saved after each edit. A buffer with unsaved edits is left alone until it is saved: its tasks are not started@comma{} and a result meant for one of them is kept and written afterwards. A buffer whose file changed on disk is reverted first. Point@comma{} narrowing and windows are never touched. There are two exceptions. One is a task sent by hand: the user is at the task@comma{} so its properties are written at once@comma{} and a buffer that had unsaved edits is left unsaved. One that had none is saved@comma{} after the session is recorded and again after the task is moved to @code{agent-todo-in-progress-keyword}@comma{} so the session's result is written without the file having to be saved by hand first. The other is a session's own record: the id the backend reports replaces the buffer's name the task recorded until then@comma{} also in a buffer with unsaved edits@comma{} which is left unsaved@comma{} so a session closed before the file is saved can still be resumed from its task.
+Org files are edited only in the buffer visiting them@comma{} which is saved after each edit. A buffer with unsaved edits is left alone until it is saved: its tasks are not started@comma{} and a result meant for one of them is kept and written afterwards@comma{} by the save itself. A buffer whose file changed on disk is reverted first. Point@comma{} narrowing and windows are never touched. There are two exceptions. One is a task sent by hand: the user is at the task@comma{} so its properties are written at once@comma{} and a buffer that had unsaved edits is left unsaved. One that had none is saved@comma{} after the session is recorded and again after the task is moved to @code{agent-todo-in-progress-keyword}@comma{} so the session's result is written without the file having to be saved by hand first. The other is a session's own record: the id the backend reports replaces the buffer's name the task recorded until then@comma{} also in a buffer with unsaved edits@comma{} which is left unsaved@comma{} so a session closed before the file is saved can still be resumed from its task.
+
+@node Handover of a closing session
+@section Handover of a closing session
+
+A session that is closed before its task is finished leaves the task saying where things stand. While @code{agent-auto-mode} is on@comma{} @code{agent-exit} on a session linked to an open task (@ref{Unattended sessions on tagged tasks, , Unattended sessions on tagged tasks}) first asks the session for a handover@comma{} as the first step of its before-exit chain@comma{} ahead of the configured skills (@ref{Shared commands, , Shared commands}). A session linked to no task@comma{} or to one that is closed@comma{} is not asked. The step costs one more turn at each such close.
+
+@vindex agent-auto-handover-prompt
+@vindex agent-auto-wait-instructions
+The prompt is @code{agent-auto-handover-prompt}. It asks the session to write one JSON object to a file whose name replaces @samp{%f} in it (@samp{%%} gives a percent sign)@comma{} with these fields@comma{} every value a string:
+
+@multitable {aaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+@headitem Field
+@tab Holds
+@item @samp{state}
+@tab @samp{finished}@comma{} @samp{needs-pablo}@comma{} @samp{waiting-on-someone} or @samp{interrupted}
+@item @samp{summary}
+@tab What was done@comma{} in a sentence or two
+@item @samp{next}
+@tab The next step
+@item @samp{question}
+@tab For @samp{needs-pablo}: the question to answer
+@item @samp{who}@comma{} @samp{what}
+@tab For @samp{waiting-on-someone}: the person waited for@comma{} and what is awaited from them
+@item @samp{wait}
+@tab For @samp{waiting-on-someone}: the id of the wait the session registered@comma{} or an empty string
+@end multitable
+
+The default prompt also forbids quoting or pasting a message@comma{} an email or any other private material: the session says what happened in its own words@comma{} since the note can travel beyond the Org file. It tells the session to do nothing else in that turn. A prompt of your own has to name the fields@comma{} since nothing else tells the session about them. @code{agent-auto-wait-instructions}@comma{} a string that is empty by default@comma{} is added to the prompt as its last paragraph; it is where you say how a session registers a wait for someone's reply@comma{} so that it can name the wait in @samp{wait}.
+
+@vindex agent-auto-handover-property
+When the turn ends@comma{} the handover is written on the task with the machinery that writes results: in the buffer visiting the file@comma{} never through a window or point.
+
+@itemize
+@item
+A dated note is added to the task's log@comma{} in Org's own note format: a list item headed @samp{Note taken on [DATE]}@comma{} as @code{org-log-note-headings} gives it@comma{} in the drawer @code{org-log-into-drawer} names for the task@comma{} which is created if need be@comma{} or where Org puts a task's notes when it names none. Its lines are @samp{Session closed: STATE.}@comma{} @samp{Done:} with the summary@comma{} @samp{Next:} with the next step@comma{} and @samp{Question:}@comma{} @samp{Waiting on:} and @samp{Waiting for:} with the other fields@comma{} each in full. Whatever reads a task's notes reads this one; @samp{org-linear}@comma{} for instance@comma{} posts a note in the log drawer to Linear as a comment.
+@item
+@samp{AGENT_RESULT} is replaced by one line: how the session closed@comma{} the question if there is one@comma{} the summary and the next step.
+@item
+The tag: @samp{finished} gives @code{agent-auto-review-tag} and @samp{needs-pablo} gives @code{agent-auto-blocked-tag}; @samp{waiting-on-someone} and @samp{interrupted} give none. Whichever of the ready tag and the three result tags the task carried is removed.
+@item
+The TODO keyword is left alone.
+@end itemize
+
+The results of the session's turns are still written during the session@comma{} as before. The handover is what is written at the close@comma{} and it replaces the result; the turns of the exit chain that follow it write nothing.
+
+@vindex agent-auto-handover-directory
+Each close has a receipt of its own: a JSON file in @code{agent-auto-handover-directory} (@samp{agent/handovers/} in @code{user-emacs-directory} by default)@comma{} named after an id made from the time@comma{} which holds the handover and names the task by its file@comma{} the session it recorded at the close and its Org ID when it has one. The receipt is written on the task at once when the task's buffer has no unsaved edits. Otherwise it waits: it is written when the buffer is saved@comma{} or@comma{} if Emacs quits first@comma{} when the mode is next turned on@comma{} as at the next start. Two closes before a save are two receipts@comma{} written in order. A receipt is deleted only once it has been written and the buffer saved@comma{} and the task records the id of the last one written@comma{} in @samp{AGENT_HANDOVER}@comma{} so a receipt whose file outlived the writing@comma{} as when Emacs was killed in between@comma{} is not written twice. A task is found by its Org ID when the receipt names one@comma{} and otherwise by the session it records; a receipt whose task cannot be found is kept@comma{} and reported once in the echo area.
+
+A receipt written late does not undo what happened since. The dated note is history and is always added. The result and the tag are written only if the task is still open@comma{} still records the session it recorded at the close@comma{} has had no later handover@comma{} written or waiting@comma{} and still has the result it had at the close@comma{} so a result that a later turn of the session left wins.
+
+Closing always works. A skill of the chain whose receipt is missing stops the chain; the handover is the exception. If the session ends its handover turn without having written the file@comma{} or wrote something that is not a JSON object naming one of the four states@comma{} the task gets the note @samp{Session closed without a handover:} followed by the reason (@samp{it wrote no receipt}@comma{} @samp{its receipt is not valid JSON} or @samp{its receipt names no known state})@comma{} nothing else on the task changes@comma{} nothing of what the file held is repeated@comma{} and the chain goes on. The same note@comma{} with @samp{its buffer was killed}@comma{} is written when the buffer of a linked session is killed without a handover: by @code{agent-exit-without-skills}@comma{} which runs no step of the chain@comma{} by @code{agent-kill-session-buffer}@comma{} or because its process ended. A session that left a handover gets no second note when its buffer is then killed@comma{} and a session killed for a handoff or a restart gets none@comma{} since it goes on in a new buffer. When Emacs itself quits or crashes nothing is written: the task keeps its last result.
 
 @node Claude Code backend
 @section Claude Code backend
@@ -1028,7 +1081,7 @@ duration. @code{agent-exit-without-skills} is the only exit command that bypasse
 the skill hook; it still runs other before-exit functions.
 
 @vindex agent-before-exit-step-functions
-A module can put steps of its own at the head of the chain with @code{agent-before-exit-step-functions}@comma{} an abnormal hook. Each function is called with the session buffer when the chain starts and returns nil@comma{} or a step: a plist of @code{:name}@comma{} a string naming the step in messages; @code{:prompt}@comma{} the text submitted to the session as it stands; @code{:done-p}@comma{} optionally@comma{} a function of the session buffer that returns non-nil once the step has left what it was asked for@comma{} such as a file; and @code{:finish}@comma{} optionally@comma{} a function of the session buffer called once when the turn the prompt started has ended. The steps run first@comma{} in the order of the hook@comma{} each as a turn of its own@comma{} and the configured skills follow; a session no skill applies to still runs its steps. A step never stops the chain: when its turn ends@comma{} @code{:finish} is called and the chain goes on@comma{} whatever the turn did and whatever @code{:finish} returns or signals. A turn that ended without @code{:done-p} holding is waited for only while the backend still shows the session working or reports background work the turn left running@comma{} as for a skill that has not written its receipt. A function that signals an error gives no step@comma{} and a step is skipped on a backend that text cannot be sent to. Like the skills@comma{} the steps do not run with @code{agent-exit-without-skills}.
+A module can put steps of its own at the head of the chain with @code{agent-before-exit-step-functions}@comma{} an abnormal hook; @samp{agent-auto} puts the handover of a session linked to a task there (@ref{Handover of a closing session, , Handover of a closing session}). Each function is called with the session buffer when the chain starts and returns nil@comma{} or a step: a plist of @code{:name}@comma{} a string naming the step in messages; @code{:prompt}@comma{} the text submitted to the session as it stands; @code{:done-p}@comma{} optionally@comma{} a function of the session buffer that returns non-nil once the step has left what it was asked for@comma{} such as a file; and @code{:finish}@comma{} optionally@comma{} a function of the session buffer called once when the turn the prompt started has ended. The steps run first@comma{} in the order of the hook@comma{} each as a turn of its own@comma{} and the configured skills follow; a session no skill applies to still runs its steps. A step never stops the chain: when its turn ends@comma{} @code{:finish} is called and the chain goes on@comma{} whatever the turn did and whatever @code{:finish} returns or signals. A turn that ended without @code{:done-p} holding is waited for only while the backend still shows the session working or reports background work the turn left running@comma{} as for a skill that has not written its receipt. A function that signals an error gives no step@comma{} and a step is skipped on a backend that text cannot be sent to. Like the skills@comma{} the steps do not run with @code{agent-exit-without-skills}.
 
 A session with no native id on which no session event has ever arrived has not
 started a conversation. That is what a CLI started with a bare @samp{--resume} looks

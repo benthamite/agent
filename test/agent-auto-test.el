@@ -86,6 +86,14 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-auto-instructions "Standing.")
            (agent-auto-silence-timeout 30)
            (agent-auto--pending nil)
+           (agent-auto--handovers nil)
+           (agent-auto--last-handover-id nil)
+           (agent-auto--flush-timer nil)
+           (agent-auto-handover-directory (expand-file-name "handovers/" ,root))
+           (agent-auto-wait-instructions "")
+           (agent-before-exit-step-functions (list #'agent-auto--handover-step))
+           (after-save-hook (list #'agent-auto--after-save))
+           (org-log-into-drawer t)
            (agent-auto--missing (make-hash-table :test #'equal))
            (agent-auto--starting nil)
            (agent-auto--queue nil)
@@ -769,7 +777,8 @@ It is given the silence timeout to come back, as after Emacs restarts."
       (should-not (agent-auto-test--property file "Fix it" "AGENT_RESULT")))))
 
 (ert-deftest agent-auto-test-result-waits-for-a-saved-buffer ()
-  "Write a result only once the task's buffer has no unsaved edits."
+  "Write a result only once the task's buffer has no unsaved edits.
+The save itself then has it written, without waiting for a search."
   (agent-auto-test--with root
     (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
       (let ((org (find-buffer-visiting file)))
@@ -782,7 +791,7 @@ It is given the silence timeout to come back, as after Emacs restarts."
           (should (equal (with-current-buffer org (buffer-string)) text)))
         (with-current-buffer org
           (save-buffer))
-        (agent-auto-test--run)
+        (agent-auto-test--flush-due)
         (should (equal (agent-auto-test--tags file "Fix it") '("review")))
         (should (string-match-p "Typing" (agent-auto-test--disk file)))
         (should-not agent-auto--pending)))))
@@ -1151,7 +1160,8 @@ is read as any other.  The turns the chain then submits are its own."
                 (looked nil))
       (agent-auto-test--take-text)
       (agent--note-session-id buffer "sid-1")
-      (let ((agent-before-exit-skill-names '("update-log" "retro")))
+      (let ((agent-before-exit-skill-names '("update-log" "retro"))
+            (agent-before-exit-step-functions nil))
         (cl-letf (((symbol-function 'run-with-timer)
                    (lambda (seconds repeat function &rest arguments)
                      (if (eq function #'agent-auto--turn-end)
@@ -1170,6 +1180,585 @@ is read as any other.  The turns the chain then submits are its own."
             (should (equal (caar agent-auto-test--submitted) "/retro"))
             (agent-session-event buffer 'stop)
             (should-not looked)))))))
+
+;;;; Handover
+
+(defconst agent-auto-test--note-regexp
+  "^[ \t]*- \\(Note taken on\\|State \"\\([^\"]+\\)\"\\)[^\n]*\\\\\\\\[ \t]*$"
+  "The first line of a log item that carries text, as `org-linear' reads it.
+This is its `org-linear--note-regexp', copied: a note it does not match
+never reaches Linear as a comment.")
+
+(defun agent-auto-test--notes (file heading)
+  "Return the notes in the log drawer of HEADING in FILE, the first first.
+They are read as `org-linear' reads them: from the drawer that
+`org-log-into-drawer' names, each the lines indented under an item that
+`agent-auto-test--note-regexp' matches, joined by newlines."
+  (agent-auto-test--at
+   file heading
+   (lambda ()
+     (let ((limit (save-excursion (outline-next-heading) (point)))
+           (name (or (org-log-into-drawer) "LOGBOOK"))
+           notes)
+       (when (re-search-forward (format "^[ \t]*:%s:[ \t]*$" (regexp-quote name))
+                                limit t)
+         (let ((beg (1+ (line-end-position)))
+               (end (and (re-search-forward "^[ \t]*:END:[ \t]*$" limit t)
+                         (line-beginning-position))))
+           (goto-char beg)
+           (while (re-search-forward agent-auto-test--note-regexp end t)
+             (let ((indent (current-indentation))
+                   (start (progn (forward-line 1) (point))))
+               (while (and (< (point) end)
+                           (> (current-indentation) indent))
+                 (forward-line 1))
+               (push (string-trim
+                      (replace-regexp-in-string
+                       "^[ \t]+" "" (buffer-substring-no-properties
+                                     start (point))))
+                     notes)))))
+       (nreverse notes)))))
+
+(defun agent-auto-test--keyword (file heading)
+  "Return the TODO keyword of HEADING in FILE."
+  (agent-auto-test--at file heading
+                       (lambda ()
+                         (substring-no-properties (org-get-todo-state)))))
+
+(defun agent-auto-test--receipt-files ()
+  "Return the names of the handover receipts on disk."
+  (and (file-directory-p agent-auto-handover-directory)
+       (directory-files agent-auto-handover-directory nil "\\.json\\'")))
+
+(defun agent-auto-test--flush-due ()
+  "Write on the tasks what a hook asked to be written, unless it is written.
+Nothing else writes it before the next search, so a test that sees it
+written after this has seen the hook ask for it."
+  (when (timerp agent-auto--flush-timer)
+    (cancel-timer agent-auto--flush-timer)
+    (agent-auto--run-flush)))
+
+(defun agent-auto-test--working-task (root &optional properties)
+  "Start a session by hand on the one task of a new file under ROOT.
+The file declares the keywords TODO, DOING, WAITING and DONE, and the
+task is left in DOING, as in the middle of the work.  PROPERTIES is text
+added to its property drawer.  The session has the id sid-1 and takes
+text; see `agent-auto-test--take-text'.  Return (FILE . BUFFER)."
+  (let ((file (agent-auto-test--file
+               root (format "#+TODO: TODO DOING WAITING | DONE\n* TODO Fix it\n:PROPERTIES:\n:DIR: %s\n%s:END:\nThe body.\n"
+                            root (or properties "")))))
+    (with-current-buffer (find-file-noselect file)
+      (goto-char (point-min))
+      (search-forward "Fix it")
+      (let ((agent-todo-in-progress-keyword "DOING"))
+        (agent-act-on-thing-at-point)))
+    (let ((buffer (car agent-auto-test--buffers)))
+      (agent--note-session-id buffer "sid-1")
+      (agent-auto-test--take-text)
+      (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
+      (should-not (buffer-modified-p (find-buffer-visiting file)))
+      (cons file buffer))))
+
+(defun agent-auto-test--ask-exit (buffer)
+  "Ask for session BUFFER to be exited, as `agent-exit' does.
+Return the text its exit chain submitted to it first, or nil when it
+submitted none."
+  (let ((before (length agent-auto-test--submitted)))
+    (with-current-buffer buffer
+      (let ((inhibit-message t))
+        (agent-exit)))
+    (and (> (length agent-auto-test--submitted) before)
+         (caar agent-auto-test--submitted))))
+
+(defun agent-auto-test--answer (buffer answer)
+  "End the handover turn of session BUFFER, which wrote ANSWER.
+ANSWER is a plist, written as JSON, a string, written as it is, or nil
+for a session that wrote nothing.  What the end of the turn asks to be
+written on the task is written."
+  (when answer
+    (write-region (if (stringp answer) answer (json-serialize answer)) nil
+                  (buffer-local-value 'agent-auto--handover-answer buffer)
+                  nil 'silent))
+  (agent-session-event buffer 'stop)
+  (agent-auto-test--flush-due))
+
+(defun agent-auto-test--hand-over (buffer answer)
+  "Exit session BUFFER with `agent-exit', the session writing ANSWER.
+ANSWER is as for `agent-auto-test--answer'.  Return the handover prompt."
+  (agent-auto-test--exiting
+    (prog1 (agent-auto-test--ask-exit buffer)
+      (agent-auto-test--answer buffer answer))))
+
+(defun agent-auto-test--resume (root)
+  "Kill the stub session and resume it in a new buffer, linked to its task.
+The session is the one of the task under ROOT, whose id is sid-1.
+Return the new buffer."
+  (agent-auto-test--close (car agent-auto-test--buffers))
+  (let ((resumed (agent-start-session
+                  (agent-session-create :backend 'stub :directory root
+                                        :instance "resumed")
+                  :resume-id "sid-1")))
+    (agent--note-session-id resumed "sid-1")
+    (agent-auto-test--run)
+    (should (buffer-local-value 'agent-auto--link resumed))
+    resumed))
+
+(ert-deftest agent-auto-test-handover-is-the-first-step-of-an-exit ()
+  "Ask a session linked to an open task for its handover before its skills.
+The prompt names the file to write and every field, and ends with the
+wait instructions when there are any.  The file is new for each exit,
+and is gone once the turn has ended, when the chain goes on to the
+skills."
+  (agent-auto-test--with root
+    (pcase-let ((`(,_file . ,buffer) (agent-auto-test--working-task root)))
+      (let ((agent-before-exit-skill-names '("update-log"))
+            (agent-auto-wait-instructions "Register the wait with waits add."))
+        (agent-auto-test--exiting
+          (let ((prompt (agent-auto-test--ask-exit buffer))
+                (answer (buffer-local-value 'agent-auto--handover-answer
+                                            buffer)))
+            (should (= (length agent-auto-test--submitted) 1))
+            (should (string-search answer prompt))
+            (should-not (file-exists-p answer))
+            (should (file-directory-p (file-name-directory answer)))
+            (dolist (word '("`state'" "`finished'" "`needs-pablo'"
+                            "`waiting-on-someone'" "`interrupted'" "`summary'"
+                            "`next'" "`question'" "`who'" "`what'" "`wait'"
+                            "never quote"))
+              (should (string-search word prompt)))
+            (should (string-suffix-p "\n\nRegister the wait with waits add."
+                                     prompt))
+            (agent-auto-test--answer buffer '(:state "interrupted"))
+            (should (equal (caar agent-auto-test--submitted) "/update-log"))
+            (should-not (file-exists-p (file-name-directory answer)))))))))
+
+(ert-deftest agent-auto-test-handover-prompt-takes-the-file-name ()
+  "Put the file's name where the prompt has %f, and keep a doubled percent."
+  (let ((agent-auto-handover-prompt "Write to %f, 100%% of it.")
+        (agent-auto-wait-instructions ""))
+    (should (equal (agent-auto--handover-prompt "/tmp/x/handover.json")
+                   "Write to /tmp/x/handover.json, 100% of it."))))
+
+(ert-deftest agent-auto-test-handover-is-asked-only-for-an-open-task ()
+  "Ask no session for a handover that has no task, or whose task is closed.
+Its exit chain runs its skills alone, and nothing is written."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+      (let ((agent-before-exit-skill-names '("update-log"))
+            (other (agent-start-session
+                    (agent-session-create :backend 'stub :directory root
+                                          :instance "other"))))
+        (agent--note-session-id other "sid-2")
+        (agent-auto-test--at file "Fix it" (lambda () (org-todo "DONE")))
+        (with-current-buffer (find-buffer-visiting file)
+          (save-buffer))
+        (let ((disk (agent-auto-test--disk file)))
+          (agent-auto-test--exiting
+            (should (equal (agent-auto-test--ask-exit buffer) "/update-log"))
+            (should (equal (agent-auto-test--ask-exit other) "/update-log"))
+            (agent-session-event buffer 'stop)
+            (agent-session-event other 'stop))
+          (agent-auto-test--close buffer)
+          (agent-auto-test--close other)
+          (agent-auto-test--flush-due)
+          (should (equal (agent-auto-test--disk file) disk))
+          (should-not (agent-auto-test--receipt-files)))))))
+
+(ert-deftest agent-auto-test-handover-interrupted-keeps-the-keyword ()
+  "Leave a note and a one-line result on a task whose session closed mid-work.
+The keyword stays, no tag is added, and the note is one Org and
+`org-linear' read: an item of the task's log drawer, headed as Org heads
+a note and dated, with the state, what was done and the next step on
+lines of their own.  The receipt is deleted once it is written."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+      (agent-auto-test--hand-over
+       buffer '(:state "interrupted"
+                :summary "Read the parser and found\nthe bug"
+                :next "write the fix"))
+      (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
+      (should-not (agent-auto-test--tags file "Fix it"))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Interrupted: Read the parser and found the bug. Next: write the fix"))
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed: interrupted.\nDone: Read the parser and found the bug\nNext: write the fix")))
+      (should (string-match-p
+               (concat ":LOGBOOK:\n"
+                       "- Note taken on \\[[0-9]\\{4\\}-[0-9][0-9]-[0-9][0-9] [[:alpha:]]+ [0-9][0-9]:[0-9][0-9]\\] \\\\\\\\\n"
+                       "  Session closed: interrupted\\.\n"
+                       "  Done: Read the parser and found the bug\n"
+                       "  Next: write the fix\n"
+                       ":END:\n")
+               (agent-auto-test--disk file)))
+      (should (agent-auto-test--property file "Fix it" "AGENT_HANDOVER"))
+      (should-not (buffer-modified-p (find-buffer-visiting file)))
+      (should-not agent-auto--handovers)
+      (should-not (agent-auto-test--receipt-files)))))
+
+(defun agent-auto-test--org-note (lines time)
+  "Add a note of LINES, taken at TIME, to the task at point as Org does.
+The note is stored by the function that stores one written in the note
+buffer of `org-add-note'."
+  (move-marker org-log-note-marker (point))
+  (move-marker org-log-note-return-to (point))
+  (let ((org-log-note-purpose 'note)
+        (org-log-note-effective-time time)
+        (org-log-note-window-configuration (current-window-configuration))
+        (org-note-abort nil)
+        (org-log-post-message nil)
+        (inhibit-message t))
+    (with-current-buffer (generate-new-buffer "*Org Note*")
+      (insert (string-join lines "\n"))
+      (org-store-log-note))))
+
+(ert-deftest agent-auto-test-note-is-written-as-org-writes-one ()
+  "Write a note exactly as Org's own note command does.
+Into a new log drawer and into one that has a note, in a task with a
+body and in one at the end of the file, and where notes go when Org puts
+them in no drawer."
+  (dolist (org-log-into-drawer '(t "NOTES" nil))
+    (dolist (text '("* TODO One\n:PROPERTIES:\n:DIR: /tmp/\n:END:\nThe body.\n* TODO Two\n"
+                    "* TODO One\n:LOGBOOK:\n- Note taken on [2026-11-17 Tue 10:00] \\\\\n  An earlier note.\n:END:\n"
+                    "* TODO One"))
+      (let ((time (encode-time '(0 30 8 18 11 2026 nil -1 nil)))
+            (lines '("Session closed: interrupted." "Done: it"))
+            ours theirs)
+        (agent-test-helper-with-org-file text
+          (goto-char (point-min))
+          (agent-auto--add-note lines time)
+          (setq ours (buffer-string)))
+        (agent-test-helper-with-org-file text
+          (goto-char (point-min))
+          (agent-auto-test--org-note lines time)
+          (setq theirs (buffer-string)))
+        (should (string-search "Done: it" ours))
+        (should (equal ours theirs))))))
+
+(ert-deftest agent-auto-test-handover-finished-and-needs-the-user ()
+  "Tag a task for review when its session closed finished, and blocked with
+the question when it closed needing the user.
+The tag replaces whichever result tag the task carried, and a session
+that closed interrupted removes it."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+      (agent-auto-test--hand-over
+       buffer '(:state "finished" :summary "Fixed the parser."
+                :next "review the diff"))
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Finished: Fixed the parser. Next: review the diff"))
+      (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
+      (setq buffer (agent-auto-test--resume root))
+      (agent-auto-test--hand-over
+       buffer '(:state "needs-pablo" :summary "Compared the two accounts"
+                :next "pay it" :question "Which account pays?"))
+      (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Needs a decision: Which account pays? Compared the two accounts. Next: pay it"))
+      (should (equal (car (agent-auto-test--notes file "Fix it"))
+                     "Session closed: needs a decision.\nDone: Compared the two accounts\nNext: pay it\nQuestion: Which account pays?"))
+      (setq buffer (agent-auto-test--resume root))
+      (agent-auto-test--hand-over
+       buffer '(:state "interrupted" :summary "Paid half" :next "pay the rest"))
+      (should-not (agent-auto-test--tags file "Fix it"))
+      (should (= (length (agent-auto-test--notes file "Fix it")) 3)))))
+
+(ert-deftest agent-auto-test-handover-replaces-the-result ()
+  "Write the result of each turn as before, and the handover over it.
+The ready tag of a task the timer started goes with the result tags."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (agent--note-session-id buffer "sid-1")
+      (agent-auto-test--take-text)
+      (agent-auto-test--end-turn buffer "Status: waiting on you: which one?")
+      (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "which one?"))
+      (agent-auto-test--hand-over
+       buffer '(:state "interrupted" :summary "Asked which one" :next "wait"))
+      (should-not (agent-auto-test--tags file "Fix it"))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Interrupted: Asked which one. Next: wait")))))
+
+(ert-deftest agent-auto-test-handover-waits-for-a-saved-buffer ()
+  "Write nothing of a handover while the task's buffer has unsaved edits.
+The receipt is kept on disk, and everything is written once the buffer
+is saved, by the save itself."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                 (org (find-buffer-visiting file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (let ((text (with-current-buffer org (buffer-string))))
+        (agent-auto-test--hand-over
+         buffer '(:state "finished" :summary "Fixed it" :next "review it"))
+        (agent-auto-test--run)
+        (should (equal (with-current-buffer org (buffer-string)) text))
+        (should (buffer-modified-p org)))
+      (should (= (length agent-auto--handovers) 1))
+      (should (= (length (agent-auto-test--receipt-files)) 1))
+      (with-current-buffer org
+        (save-buffer))
+      (agent-auto-test--flush-due)
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed: finished.\nDone: Fixed it\nNext: review it")))
+      (should (string-match-p "Typing" (agent-auto-test--disk file)))
+      (should (string-match-p "AGENT_HANDOVER" (agent-auto-test--disk file)))
+      (should-not (buffer-modified-p org))
+      (should-not agent-auto--handovers)
+      (should-not (agent-auto-test--receipt-files)))))
+
+(ert-deftest agent-auto-test-handover-survives-a-restart ()
+  "Write at the next start a handover that Emacs quit before writing.
+The receipt on disk is all that is left of it: the unsaved edits, the
+session and what was in memory are gone."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                 (org (find-buffer-visiting file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (agent-auto-test--hand-over
+       buffer '(:state "needs-pablo" :summary "Found two ways" :next "pick one"
+                :question "Which way?"))
+      (should (= (length (agent-auto-test--receipt-files)) 1))
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer buffer)
+        (with-current-buffer org
+          (set-buffer-modified-p nil)
+          (kill-buffer)))
+      (setq agent-auto--handovers nil
+            agent-auto--pending nil)
+      (agent-auto--load-handovers)
+      (should (= (length agent-auto--handovers) 1))
+      (agent-auto--flush)
+      (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed: needs a decision.\nDone: Found two ways\nNext: pick one\nQuestion: Which way?")))
+      (should-not (string-match-p "Typing" (agent-auto-test--disk file)))
+      (should (string-match-p "AGENT_HANDOVER" (agent-auto-test--disk file)))
+      (should-not (agent-auto-test--receipt-files)))))
+
+(ert-deftest agent-auto-test-killed-session-leaves-a-note ()
+  "Say in the task's log that a session killed without `agent-exit' left no handover.
+Nothing else on the task changes.  A session that closed with a handover
+gets no second note when its buffer is killed, and neither does one
+killed for a handoff or a restart, which goes on in a new buffer."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+      (agent-auto-test--close buffer)
+      (agent-auto-test--flush-due)
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed without a handover: its buffer was killed.")))
+      (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
+      (should-not (agent-auto-test--tags file "Fix it"))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_RESULT"))
+      (should-not (agent-auto-test--receipt-files))
+      (setq buffer (agent-auto-test--resume root))
+      (agent-auto-test--hand-over buffer '(:state "interrupted" :summary "It"))
+      (should (= (length (agent-auto-test--notes file "Fix it")) 2))
+      (agent-auto-test--close buffer)
+      (agent-auto-test--flush-due)
+      (should (= (length (agent-auto-test--notes file "Fix it")) 2))
+      (should (equal (car (agent-auto-test--notes file "Fix it"))
+                     "Session closed: interrupted.\nDone: It"))))
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+      (let* ((handoff (expand-file-name "handoff.md" root))
+             (agent-handoff-files `((stub . ,handoff))))
+        (write-region "Continue the fix." nil handoff nil 'silent)
+        (add-hook 'kill-buffer-hook #'agent-auto--session-killed)
+        (unwind-protect
+            (cl-letf (((symbol-function 'agent--confirm-no-captured-prompts)
+                       (lambda (&rest _) t))
+                      ((symbol-function 'agent-restart--account) #'ignore))
+              (with-current-buffer buffer
+                (agent-handoff))
+              (agent--note-session-id (car agent-auto-test--buffers) "sid-2")
+              (with-current-buffer (car agent-auto-test--buffers)
+                (agent-restart)))
+          (remove-hook 'kill-buffer-hook #'agent-auto--session-killed)))
+      (agent-auto-test--flush-due)
+      (should (= (length agent-auto-test--started) 3))
+      (should-not (agent-auto-test--notes file "Fix it"))
+      (should-not (agent-auto-test--receipt-files)))))
+
+(ert-deftest agent-auto-test-missing-and-malformed-receipts ()
+  "Go on with the exit, and say so on the task, when no handover can be read.
+A session that wrote nothing, text that is no JSON, and JSON that names
+no known state each leave a note saying which, and the next skill of the
+chain is submitted all the same.  Nothing of a receipt that cannot be
+read is repeated."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                (agent-before-exit-skill-names '("update-log")))
+      (dolist (case '((nil . "it wrote no receipt")
+                      ("{\"state\": \"finished\", the secret" . "its receipt is not valid JSON")
+                      ("{\"state\": \"done\", \"summary\": \"the secret\"}"
+                       . "its receipt names no known state")
+                      ("[\"finished\"]" . "its receipt names no known state")))
+        (agent-auto-test--hand-over buffer (car case))
+        (should (equal (caar agent-auto-test--submitted) "/update-log"))
+        (should (equal (car (agent-auto-test--notes file "Fix it"))
+                       (format "Session closed without a handover: %s."
+                               (cdr case))))
+        (should-not (string-match-p "secret" (agent-auto-test--disk file)))
+        (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
+        (should-not (agent-auto-test--property file "Fix it" "AGENT_RESULT"))
+        (should-not (agent-auto-test--receipt-files))
+        (setq buffer (agent-auto-test--resume root))))))
+
+(ert-deftest agent-auto-test-note-shows-every-field ()
+  "Show in the note each field a handover gave, whatever its summary says.
+A summary that names neither the question nor who is waited for leaves
+them in the note all the same, each in full and on a line of its own."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                (long (mapconcat #'identity (make-list 80 "word") " ")))
+      (agent-auto-test--hand-over
+       buffer (list :state "waiting-on-someone" :summary "Sent it." :next "wait"
+                    :who "the accountant" :what long :question "Why?"))
+      (should (equal (car (agent-auto-test--notes file "Fix it"))
+                     (concat "Session closed: waiting on someone.\nDone: Sent it.\n"
+                             "Next: wait\nQuestion: Why?\n"
+                             "Waiting on: the accountant\nWaiting for: " long)))
+      (should (string-prefix-p
+               "Waiting on the accountant: Why? Sent it. Next: wait"
+               (agent-auto-test--property file "Fix it" "AGENT_RESULT"))))))
+
+(ert-deftest agent-auto-test-two-closes-before-a-save ()
+  "Write the handovers of two closes in order once the buffer is saved.
+Both notes are added, the later above the earlier as Org orders a log,
+and the task shows the result of the later.  A receipt that is still on
+disk after it was written, as when Emacs was killed before deleting it,
+is deleted and not written again."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                 (org (find-buffer-visiting file))
+                 (kept (expand-file-name "kept/" root)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (agent-auto-test--hand-over
+       buffer '(:state "needs-pablo" :summary "First" :question "Which?"))
+      (setq buffer (agent-auto-test--resume root))
+      (agent-auto-test--hand-over buffer '(:state "finished" :summary "Second"))
+      (should (= (length (agent-auto-test--receipt-files)) 2))
+      (copy-directory agent-auto-handover-directory kept nil t t)
+      (with-current-buffer org
+        (save-buffer))
+      (agent-auto-test--flush-due)
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed: finished.\nDone: Second"
+                       "Session closed: needs a decision.\nDone: First\nQuestion: Which?")))
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Finished: Second."))
+      (should-not (agent-auto-test--receipt-files))
+      (let ((last (agent-auto-test--property file "Fix it" "AGENT_HANDOVER")))
+        (should (equal (concat last ".json")
+                       (car (last (directory-files kept nil "\\.json\\'")))))
+        (copy-file (expand-file-name (concat last ".json") kept)
+                   (expand-file-name (concat last ".json")
+                                     agent-auto-handover-directory))
+        (agent-auto--load-handovers)
+        (should (= (length agent-auto--handovers) 1))
+        (agent-auto--flush)
+        (should (= (length (agent-auto-test--notes file "Fix it")) 2))
+        (should-not (agent-auto-test--receipt-files))
+        (should-not agent-auto--handovers)))))
+
+(ert-deftest agent-auto-test-late-receipt-undoes-nothing ()
+  "Add the note of a receipt written late, and leave what happened since.
+After the session was resumed and its next turn left a result, after the
+task was closed, and after the task was given another session: the note
+is there each time, and the result, the tag and the keyword are those
+the task had."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                 (org (find-buffer-visiting file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (agent-auto-test--hand-over
+       buffer '(:state "needs-pablo" :summary "Stopped" :question "Go on?"))
+      (setq buffer (agent-auto-test--resume root))
+      (run-hook-with-args 'agent-session-event-functions buffer 'user-submit)
+      (agent-auto-test--end-turn buffer "Status: done: shipped it")
+      (with-current-buffer org
+        (save-buffer))
+      (agent-auto-test--flush-due)
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed: needs a decision.\nDone: Stopped\nQuestion: Go on?")))
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "shipped it"))
+      (should-not (agent-auto-test--receipt-files))))
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                 (org (find-buffer-visiting file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (agent-auto-test--hand-over
+       buffer '(:state "needs-pablo" :summary "Stopped" :question "Go on?"))
+      (agent-auto-test--at file "Fix it" (lambda () (org-todo "DONE")))
+      (with-current-buffer org
+        (save-buffer))
+      (agent-auto-test--flush-due)
+      (should (= (length (agent-auto-test--notes file "Fix it")) 1))
+      (should (equal (agent-auto-test--keyword file "Fix it") "DONE"))
+      (should-not (agent-auto-test--tags file "Fix it"))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_RESULT"))
+      (should-not (agent-auto-test--receipt-files))))
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,buffer)
+                  (agent-auto-test--working-task root ":ID: task-1\n"))
+                 (org (find-buffer-visiting file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (agent-auto-test--hand-over
+       buffer '(:state "finished" :summary "Stopped"))
+      (agent-auto-test--at
+       file "Fix it" (lambda () (org-entry-put nil "AGENT_SESSION" "sid-9")))
+      (with-current-buffer org
+        (save-buffer))
+      (agent-auto-test--flush-due)
+      (should (= (length (agent-auto-test--notes file "Fix it")) 1))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                     "sid-9"))
+      (should-not (agent-auto-test--tags file "Fix it"))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_RESULT"))
+      (should-not (agent-auto-test--receipt-files)))))
+
+(ert-deftest agent-auto-test-lost-task-keeps-the-receipt ()
+  "Keep the receipt of a task that cannot be found, and say so once.
+Such a task has no Org ID and no longer records the session."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                 (org (find-buffer-visiting file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (agent-auto-test--hand-over buffer '(:state "finished" :summary "It"))
+      (agent-auto-test--at
+       file "Fix it" (lambda () (org-entry-put nil "AGENT_SESSION" "sid-9")))
+      (with-current-buffer org
+        (save-buffer))
+      (agent-test-helper-with-messages messages
+        (agent-auto-test--flush-due)
+        (should (string-match-p "no task for a handover" messages)))
+      (should (= (length (agent-auto-test--receipt-files)) 1))
+      (agent-test-helper-with-messages messages
+        (agent-auto--flush)
+        (agent-auto--load-handovers)
+        (agent-auto--flush)
+        (should-not (string-match-p "no task for a handover" messages)))
+      (should (= (length (agent-auto-test--receipt-files)) 1))
+      (should-not (agent-auto-test--notes file "Fix it")))))
 
 ;;;; Acting on a task that records a session
 
@@ -1904,6 +2493,8 @@ command that changed nothing."
     (agent-recorded-session-functions . agent-auto--recorded-session)
     (agent-session-state-change-functions . agent-auto--schedule-marks)
     (agent-session-id-functions . agent-auto--schedule-marks)
+    (agent-before-exit-step-functions . agent-auto--handover-step)
+    (after-save-hook . agent-auto--after-save)
     (kill-buffer-hook . agent-auto--session-killed)
     (org-mode-hook . agent-auto--schedule-marks)
     (org-agenda-finalize-hook . agent-auto--mark-agenda)
@@ -1922,6 +2513,13 @@ and it is turned off afterwards."
          (agent-recorded-session-functions nil)
          (agent-session-inherited-variables nil)
          (agent-session-state-change-functions nil)
+         (agent-before-exit-step-functions nil)
+         (after-save-hook nil)
+         (agent-auto--handovers nil)
+         (agent-auto--flush-timer nil)
+         (agent-auto-handover-directory
+          (expand-file-name "agent-auto-test-no-handovers/"
+                            temporary-file-directory))
          (kill-buffer-hook nil)
          (org-mode-hook nil)
          (org-agenda-finalize-hook nil)
@@ -1974,6 +2572,8 @@ and it is turned off afterwards."
     (should-not agent-recorded-session-functions)
     (should-not agent-session-inherited-variables)
     (should-not agent-session-state-change-functions)
+    (should-not agent-before-exit-step-functions)
+    (should-not after-save-hook)
     (should-not kill-buffer-hook)
     (should-not org-mode-hook)
     (should-not org-agenda-finalize-hook)

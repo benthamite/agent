@@ -711,6 +711,12 @@ buffer-local value in the buffer killed gets the same value in the new
 buffer, so a module that keeps what it knows about a session in a
 buffer-local variable keeps knowing it across the replacement.")
 
+(defvar agent-session-being-replaced nil
+  "Non-nil while a session's buffer is killed for another to take its place.
+`agent-handoff' and the restart commands bind it around the kill, so a
+function on `kill-buffer-hook' can tell a session that goes on in a new
+buffer from one that is closed.")
+
 (defvar agent-delivery-functions nil
   "Abnormal hook run when the thing at point has been delivered to a session.
 Each function is called with the context plist the thing's extractor
@@ -4224,7 +4230,8 @@ Return what the buffer killed passes on to its successor, as
   (when-let* ((target (or source
                           (agent--single-session-buffer-for-dir backend dir))))
     (prog1 (agent--session-inheritance target)
-      (agent--force-kill-buffer target))))
+      (let ((agent-session-being-replaced t))
+        (agent--force-kill-buffer target)))))
 
 (defun agent--session-inheritance (buffer)
   "Return what session BUFFER passes on to the session replacing it.
@@ -5300,7 +5307,8 @@ and instance name, and the new buffer gets the variables in
          (inherited (agent--session-inheritance buffer)))
     (agent-check-session-start backend account)
     (agent--change-session-identity buffer account instance)
-    (agent--force-kill-buffer buffer)
+    (let ((agent-session-being-replaced t))
+      (agent--force-kill-buffer buffer))
     (let ((new (apply #'agent-start-session session
                       :resume-id session-id extra-options)))
       (agent--restore-session-user-states (list (cons new state)))
