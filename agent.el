@@ -3451,9 +3451,10 @@ been captured without it."
     t))
 
 (defun agent-run-skill-before-exit (backend buffer)
-  "Submit the before-exit skills for BUFFER before BACKEND exits it.
+  "Submit the before-exit steps and skills for BUFFER before BACKEND exits it.
 Member of `agent-before-exit-functions'.  Return nil to delay the
-exit while the chain runs, and t when there is nothing to run."
+exit while the chain runs, and t when there is nothing to run.  The
+steps are those `agent-before-exit-step-functions' give."
   (with-current-buffer buffer
     (setq agent--backend backend))
   (not (agent--before-exit-transition buffer 'start)))
@@ -5153,7 +5154,8 @@ session, since the Codex CLI has no `/exit'."
 
 ;;;###autoload
 (defun agent-exit-without-skills ()
-  "Exit the current AI session without running before-exit skills."
+  "Exit the current AI session without running before-exit skills.
+The steps of `agent-before-exit-step-functions' do not run either."
   (interactive)
   (let ((agent-before-exit-functions
          (remove #'agent-run-skill-before-exit agent-before-exit-functions)))
