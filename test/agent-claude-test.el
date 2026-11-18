@@ -3014,7 +3014,11 @@ Claude Code still reports idle at the instant a prompt is sent."
       (agent-claude--schedule-agents-query "/cfg/")
       (agent-claude--schedule-agents-query "/cfg/")
       (should-not started)
-      (sleep-for 0.4)
+      ;; In short waits, not one: once a repeating timer has run during a
+      ;; wait, Emacs runs no later timer until the wait ends, and the
+      ;; package keeps two repeating timers running.
+      (dotimes (_ 20)
+        (sleep-for 0.02))
       (should (equal started '("/cfg/")))
       (should-not (gethash "/cfg/" agent-claude--agents-timers)))))
 
