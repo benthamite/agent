@@ -4224,6 +4224,92 @@ buffer and its file are as they were."
                                              "AGENT_SESSION"))
       (should-not agent-auto-by-hand))))
 
+(defun agent-auto-test--delegate-marked ()
+  "Call `agent-delegate-tasks' in the current agenda; return its report.
+The report is what the command said last."
+  (agent-test-helper-with-messages messages
+    (call-interactively #'agent-delegate-tasks)
+    (car (last (split-string messages "\n" t)))))
+
+(ert-deftest agent-auto-test-delegate-starts-a-session-on-each-marked-task ()
+  "With lines marked in an agenda, delegate each marked task.
+The unattended sessions start in the order the lines were marked,
+whatever line point is on, each on its own task, which gets the tag and
+records it.  None is shown and the selected window stays selected.  A
+marked task that names no directory is reported and not started, and so
+is one that records a session, and one whose buffer was killed.  The
+marks are cleared, and the lines show the tags the tasks got."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root
+                  (concat
+                   (mapconcat
+                    (lambda (heading)
+                      (format "* TODO %s :listed:\n:PROPERTIES:\n:DIR: %s\n:END:\nBody of %s.\n"
+                              heading root heading))
+                    '("Answer Ann" "Answer Ben" "Answer Cleo" "Answer Dora") "")
+                   "* TODO Answer Eve :listed:\n"
+                   (format "* TODO Answer Finn :listed:\n:PROPERTIES:\n:DIR: %s\n:AGENT_SESSION: abc\n:END:\n"
+                           root))))
+           (second (agent-auto-test--file
+                    root (agent-auto-test--task root "Answer Gus" ":listed:")
+                    "second.org"))
+           (start (symbol-function 'agent-auto-test--start-session)))
+      (find-file-noselect second)
+      (cl-letf (((symbol-function 'display-buffer)
+                 agent-auto-test--display-buffer)
+                ((symbol-function 'agent-auto-test--start-session)
+                 (lambda (&rest arguments)
+                   (pop-to-buffer (apply start arguments)))))
+        (with-current-buffer (find-file-noselect file)
+          (agent-test-helper--call-in-agenda
+           "Answer Ann"
+           (lambda ()
+             (let ((agenda (current-buffer))
+                   (window (selected-window)))
+               (agent-auto-test--mark-lines "Answer Cleo" "Answer Eve"
+                                            "Answer Ann" "Answer Finn"
+                                            "Answer Gus" "Answer Ben")
+               (with-current-buffer (find-buffer-visiting second)
+                 (kill-buffer))
+               (goto-char (point-min))
+               (search-forward "Answer Dora")
+               (set-window-point window (point))
+               (should (equal (agent-auto-test--delegate-marked)
+                              (concat "Started 3 unattended sessions; "
+                                      "3 not started: "
+                                      "\"Answer Eve\" names no directory; "
+                                      "\"Answer Finn\" already records a session; go back to it with s; "
+                                      "a marked task is no longer in its file")))
+               (should (eq (selected-window) window))
+               (should (eq (window-buffer window) agenda))
+               (should (eq (current-buffer) agenda))
+               (should (string-match-p "Answer Dora"
+                                       (buffer-substring (pos-bol) (pos-eol))))
+               (dolist (buffer agent-auto-test--buffers)
+                 (should-not (get-buffer-window buffer t))
+                 (should (agent-session-snoozed-p buffer))
+                 (should (buffer-local-value 'agent-auto--unattended buffer)))
+               (should-not org-agenda-bulk-marked-entries)
+               (should (zerop (agent-auto-test--marked-lines)))
+               (goto-char (point-min))
+               (search-forward "Answer Cleo")
+               (should (string-match-p ":listed:agent:"
+                                       (buffer-substring (pos-bol) (pos-eol))))))
+           (lambda ()
+             (let ((org-agenda-files (list file second)))
+               (org-todo-list))))))
+      (should (equal (agent-auto-test--started-instances)
+                     '("answer-cleo" "answer-ann" "answer-ben")))
+      (dolist (heading '("Answer Ann" "Answer Ben" "Answer Cleo"))
+        (should (agent-auto-test--records-its-session-p file heading))
+        (should (equal (agent-auto-test--tags file heading)
+                       '("listed" "agent"))))
+      (dolist (heading '("Answer Dora" "Answer Eve" "Answer Finn"))
+        (should (equal (agent-auto-test--tags file heading) '("listed"))))
+      (should-not (agent-auto-test--property file "Answer Eve" "AGENT_SESSION"))
+      (should-not (find-buffer-visiting second)))))
+
 (ert-deftest agent-auto-test-delegate-leaves-unsaved-edits-unsaved ()
   "Record a delegated task at once in a buffer that has unsaved edits.
 The user is at the task: it gets its tag and its session, and the

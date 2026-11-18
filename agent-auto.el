@@ -2044,6 +2044,12 @@ task and `agent-auto-instructions', snoozed and unshown, and closed for
 you when its turn ends with a result.  This is for a task an agent can
 finish without you: you hear of it again through the task.
 
+With lines marked in the agenda, as `org-agenda-bulk-mark' marks them,
+one session is started for each marked task instead, in the order the
+lines were marked.  The marks are then cleared, and a message says how
+many sessions were started and why none was started on each of the
+other tasks.
+
 No session is started, and the task is left as it was, when it is closed
 or is no TODO, names no directory that exists, already records a
 session, which `agent-act-on-tasks' goes back to, or may not run
@@ -2054,7 +2060,27 @@ would want before the timer may start the task."
   (interactive)
   (unless agent-auto-mode
     (user-error "Turn `agent-auto-mode' on first"))
-  (agent-auto--delegate-at-point))
+  (if (and (derived-mode-p 'org-agenda-mode) org-agenda-bulk-marked-entries)
+      (agent-auto--delegate-marked)
+    (agent-auto--delegate-at-point)))
+
+(defun agent-auto--delegate-marked ()
+  "Start an unattended session on each task marked in the current agenda.
+The markers of the marked tasks are taken before the first session is
+started, as for `agent-auto--start-marked': a start can have the agenda
+built again, which forgets the marks.  The marks are then cleared, the
+agenda shows the tasks as they now are, and what came of it is said in
+the echo area; see `agent-auto--delegated-report'."
+  (let* ((markers (agent-auto--marked-tasks))
+         (outcomes (unwind-protect
+                       (mapcar #'agent-auto--delegate-task markers)
+                     (dolist (marker markers)
+                       (when marker
+                         (set-marker marker nil))))))
+    (let ((inhibit-message t))
+      (org-agenda-bulk-unmark-all)
+      (agent-auto--show-delegated outcomes))
+    (message "%s" (agent-auto--delegated-report outcomes))))
 
 (defun agent-auto--delegate-at-point ()
   "Start an unattended session on the Org task at point, and say so.
@@ -2071,12 +2097,16 @@ Signal a `user-error' that says why when no session was started; see
 
 (defun agent-auto--delegate-task (marker)
   "Start an unattended session on the task at MARKER; return what came of it.
-Return `started', or a string that says why no session was started:
-`agent-auto--delegate-refusal' refused the task, or starting it signaled
-an error."
-  (condition-case err
-      (agent-auto--at-task marker #'agent-auto--delegate-task-at-point)
-    (error (error-message-string err))))
+MARKER is nil for a marked line whose marker pointed nowhere; see
+`agent-auto--marked-tasks'.  Return `started', or a string that says why
+no session was started: the task is no longer in its file,
+`agent-auto--delegate-refusal' refused it, or starting it signaled an
+error."
+  (if (and marker (marker-buffer marker))
+      (condition-case err
+          (agent-auto--at-task marker #'agent-auto--delegate-task-at-point)
+        (error (error-message-string err)))
+    "a marked task is no longer in its file"))
 
 (defun agent-auto--delegate-task-at-point ()
   "Start an unattended session on the task at point, which the user delegated.
