@@ -81,6 +81,11 @@
   "What the global modes put on hooks, each a list (HOOK FUNCTION).
 The functions are on the global value of each hook.")
 
+(defconst agent-reload-test--local-hooks
+  '((after-change-functions agent-capture--after-change))
+  "What `agent-prompt-capture-mode' puts on hooks, as (HOOK FUNCTION).
+The functions are on the value each hook has in a buffer of the mode.")
+
 (defconst agent-reload-test--advice
   '((claude-code--start agent-claude--start-with-session-settings)
     (claude-code-handle-hook agent-claude--route-hook-to-current-name)
@@ -124,6 +129,9 @@ FUNCTION advises the function of SYMBOL.")
 
 (defconst agent-reload-test--file (or load-file-name buffer-file-name)
   "This file, which the batch Emacs loads to run the scenario.")
+
+(defconst agent-reload-test--capture-buffer " *agent-reload-test-capture*"
+  "Name of the buffer in which the scenario turns the capture mode on.")
 
 (defvar agent-reload-test--events nil
   "The session events and state changes the scenario saw, newest first.")
@@ -282,7 +290,7 @@ ago."
     files))
 
 (defun agent-reload-test--turn-modes-on ()
-  "Turn every global mode of the package on.
+  "Turn every global mode of the package on, and the capture mode in a buffer.
 `agent-auto-mode' is given the ripgrep it refuses to start without."
   (agent-claude-mode 1)
   (agent-codex-mode 1)
@@ -290,10 +298,14 @@ ago."
   (agent-remote-mode 1)
   (cl-letf (((symbol-function 'executable-find)
              (lambda (command &rest _) command)))
-    (agent-auto-mode 1)))
+    (agent-auto-mode 1))
+  (with-current-buffer (get-buffer-create agent-reload-test--capture-buffer)
+    (agent-prompt-capture-mode 1)))
 
 (defun agent-reload-test--turn-modes-off ()
-  "Turn every global mode of the package off."
+  "Turn every mode `agent-reload-test--turn-modes-on' turned on off."
+  (with-current-buffer agent-reload-test--capture-buffer
+    (agent-prompt-capture-mode -1))
   (agent-auto-mode -1)
   (agent-remote-mode -1)
   (agent-tab-bar-mode -1)
@@ -359,6 +371,9 @@ That version turned the modes on and installed none of what the lists
 at the top of this file name."
   (dolist (entry agent-reload-test--hooks)
     (remove-hook (car entry) (cadr entry)))
+  (with-current-buffer agent-reload-test--capture-buffer
+    (dolist (entry agent-reload-test--local-hooks)
+      (remove-hook (car entry) (cadr entry) t)))
   (dolist (entry agent-reload-test--advice)
     (advice-remove (car entry) (cadr entry)))
   (setq agent-session-inherited-variables
@@ -376,7 +391,8 @@ at the top of this file name."
   "Return how often each thing the package installs is installed now.
 The value is a plist of alists, each from an entry of the list of the
 same name at the top of this file to a count: `:hooks' how often the
-function is on its hook, `:advice' how often it advises the function of
+function is on its hook, `:local-hooks' how often it is on the hook in
+the capture buffer, `:advice' how often it advises the function of
 the symbol, `:inherited' how often the variable is in
 `agent-session-inherited-variables', `:mode-timers' and `:load-timers'
 how many timers run the function.  `:user-keys' is an alist from each
@@ -388,6 +404,14 @@ keymap to the command `agent-reload-test--user-key' runs in it."
                                (and (default-boundp (car entry))
                                     (default-value (car entry))))))
                 agent-reload-test--hooks)
+        :local-hooks
+        (mapcar (lambda (entry)
+                  (cons entry (agent-reload-test--count
+                               (cadr entry)
+                               (buffer-local-value
+                                (car entry)
+                                (get-buffer agent-reload-test--capture-buffer)))))
+                agent-reload-test--local-hooks)
         :advice
         (mapcar (lambda (entry)
                   (cons entry (agent-reload-test--advice-count
@@ -450,6 +474,7 @@ after the first load, and none is there twice after the second."
   (dolist (load '(:first :second))
     (let ((installed (plist-get (agent-reload-test--report) load)))
       (agent-reload-test--should-all-be 1 (plist-get installed :hooks))
+      (agent-reload-test--should-all-be 1 (plist-get installed :local-hooks))
       (agent-reload-test--should-all-be 1 (plist-get installed :inherited)))))
 
 (ert-deftest agent-reload-test-advice-is-installed-once ()
@@ -513,6 +538,7 @@ the package runs whenever it is loaded stay."
   (let* ((report (agent-reload-test--report))
          (installed (plist-get report :off)))
     (agent-reload-test--should-all-be 0 (plist-get installed :hooks))
+    (agent-reload-test--should-all-be 0 (plist-get installed :local-hooks))
     (agent-reload-test--should-all-be 0 (plist-get installed :advice))
     (agent-reload-test--should-all-be 0 (plist-get installed :inherited))
     (agent-reload-test--should-all-be 0 (plist-get installed :mode-timers))

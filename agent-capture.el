@@ -330,15 +330,30 @@ Re-running the major mode would kill buffer-local state such as
   (insert ":END:\n\n")
   (point))
 
+(defconst agent-capture--hooks
+  '((after-change-functions agent-capture--after-change nil t))
+  "The hooks of `agent-prompt-capture-mode', each a list of arguments.
+The arguments are those of `add-hook', so the functions go on the
+buffer-local value of each hook.")
+
 (define-minor-mode agent-prompt-capture-mode
   "Automatically save persisted Agent prompt capture buffers."
   :lighter " AgentCapture"
   (if agent-prompt-capture-mode
-      (add-hook 'after-change-functions
-                #'agent-capture--after-change nil t)
-    (remove-hook 'after-change-functions
-                 #'agent-capture--after-change t)
+      (agent-capture--install)
+    (pcase-dolist (`(,hook ,function . ,_) agent-capture--hooks)
+      (remove-hook hook function t))
     (agent-capture--cancel-save)))
+
+(defun agent-capture--install ()
+  "Install the hooks of `agent-prompt-capture-mode' in the current buffer.
+Each goes in once.  Calling this again changes nothing, so the end of
+this file calls it in every buffer that has the mode on when the file is
+loaded: a buffer that turned the mode on with an older version of the
+file then has what this version installs, without the mode being
+toggled."
+  (dolist (arguments agent-capture--hooks)
+    (apply #'add-hook arguments)))
 
 (defun agent-capture--after-change (&rest _)
   "Schedule an automatic save for the current prompt capture buffer."
@@ -488,6 +503,17 @@ PROMPTS is the list of prompt plists offered as candidates."
                 (plist-get prompt :created))
          (equal (plist-get candidate :text)
                 (plist-get prompt :text)))))
+
+;;;; Loading again
+
+;; The mode's own function runs only when the mode is toggled.  Loading
+;; this file again, as when the package is updated in a running Emacs,
+;; therefore installs what this version needs in each buffer that has
+;; the mode on.
+(dolist (buffer (buffer-list))
+  (when (buffer-local-value 'agent-prompt-capture-mode buffer)
+    (with-current-buffer buffer
+      (agent-capture--install))))
 
 ;;;; Provide
 
