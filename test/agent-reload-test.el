@@ -94,7 +94,9 @@ The functions are on the global value of each hook.")
     (monet--display-diff-buffer agent-claude--display-diff-buffer)
     (codex--do-send-command agent-codex--intercept-exit)
     (codex--dispatch-hook-message agent-codex--route-hook-to-current-name)
-    (codex--send-command-to-buffer agent-codex--intercept-exit-to-buffer))
+    (codex--send-command-to-buffer agent-codex--intercept-exit-to-buffer)
+    (scroll-down-command agent--scroll-down-command)
+    (scroll-up-command agent--scroll-up-command))
   "The advice of the global modes, each a list (SYMBOL FUNCTION).
 FUNCTION advises the function of SYMBOL.")
 

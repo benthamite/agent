@@ -608,6 +608,7 @@ The executable @samp{bin/agent-send} submits a message@comma{} read from standar
 @findex agent-history
 @findex agent-setup-kill-on-exit
 @findex agent-setup-scroll-keys
+@findex agent-scroll-keys-global-mode
 @findex agent-snippet-tab
 The command @code{agent-menu} opens the unified transient menu. Every entry in it works with either backend: session switching@comma{} waiting-session jumps@comma{} resuming a past session@comma{} creating a branch of the current session@comma{} handoff@comma{} restart@comma{} exit@comma{} history browsing@comma{} skill execution@comma{} one dispatcher that acts on the thing at point@comma{} and a Prompts section beneath Tools in the same column for prompt capture and inserting captured prompts@comma{} one at a time or all at once.
 
@@ -631,7 +632,7 @@ followed by ready alerts@comma{} theme synchronization and hiding snoozed sessio
 @findex agent-history
 The command @code{agent-history}@comma{} labeled “open log” and bound to @samp{l} in the Sessions column@comma{} opens the Agent Log menu for browsing@comma{} opening@comma{} searching@comma{} and resuming historical sessions across backends. Agent Log is an optional package: loading @samp{agent} never requires it@comma{} @code{agent-history} loads it on demand@comma{} and invoking the command without Agent Log installed signals a clear error. Neither @code{agent-menu} nor the session switcher reads any historical catalog while opening; catalog work (which for Codex can start an app-server process and take seconds) happens only after an explicit Agent Log action.
 
-In EAT-backed Claude and Codex session buffers@comma{} @code{agent-setup-scroll-keys} makes PageUp and PageDown send terminal mouse-wheel events@comma{} matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window. Terminal helpers require buffer-local EAT state@comma{} so native app-server sessions cannot inherit a stale terminal from a killed buffer.
+In EAT-backed Claude and Codex session buffers@comma{} @code{agent-setup-scroll-keys} makes PageUp and PageDown send terminal mouse-wheel events@comma{} matching the TUI scroll path used by the mouse. PageUp and PageDown in other selected buffers retain their normal bindings and never target a visible AI terminal in another window. In a selected AI terminal @code{scroll-up-command} and @code{scroll-down-command} are redirected the same way@comma{} by advice of the global minor mode @code{agent-scroll-keys-global-mode}@comma{} which each backend mode turns on. Loading @samp{agent.el} again while that mode is on@comma{} as happens when the package is updated in a running Emacs@comma{} installs the advice of the version just loaded@comma{} each of them once. Terminal helpers require buffer-local EAT state@comma{} so native app-server sessions cannot inherit a stale terminal from a killed buffer.
 
 @findex agent-effort-increase
 @findex agent-effort-decrease

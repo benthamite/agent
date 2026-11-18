@@ -2792,21 +2792,27 @@ actionable."
          (and (agent--eat-terminal-p)
               (agent--detect-backend (current-buffer))))))
 
+(defconst agent--scroll-command-advice
+  '((scroll-down-command :around agent--scroll-down-command)
+    (scroll-up-command :around agent--scroll-up-command))
+  "The advice of `agent-scroll-keys-global-mode', each a list of arguments.
+The arguments are those of `advice-add'.")
+
 (defun agent--scroll-command-advice-add ()
-  "Install scroll-command advice for agent terminal buffers."
-  (unless (advice-member-p #'agent--scroll-down-command
-                           'scroll-down-command)
-    (advice-add 'scroll-down-command
-                :around #'agent--scroll-down-command))
-  (unless (advice-member-p #'agent--scroll-up-command
-                           'scroll-up-command)
-    (advice-add 'scroll-up-command
-                :around #'agent--scroll-up-command)))
+  "Install scroll-command advice for agent terminal buffers, each once.
+An advice already in place stays where it is.  Calling this again
+changes nothing, so the end of this file calls it when the file is
+loaded while `agent-scroll-keys-global-mode' is on: an Emacs that turned
+the mode on with an older version of the file then has what this version
+installs, without the mode being toggled."
+  (pcase-dolist (`(,symbol ,how ,function) agent--scroll-command-advice)
+    (unless (advice-member-p function symbol)
+      (advice-add symbol how function))))
 
 (defun agent--scroll-command-advice-remove ()
   "Remove scroll-command advice for agent terminal buffers."
-  (advice-remove 'scroll-down-command #'agent--scroll-down-command)
-  (advice-remove 'scroll-up-command #'agent--scroll-up-command))
+  (pcase-dolist (`(,symbol ,_how ,function) agent--scroll-command-advice)
+    (advice-remove symbol function)))
 
 (defun agent--scroll-down-command (original &rest args)
   "Send PageUp-like `scroll-down-command' calls to AI terminals.
@@ -6247,6 +6253,8 @@ the section's commands have nothing to work with."
 ;; a running Emacs, therefore installs what this version needs of it.
 (when agent-tab-bar-mode
   (agent--tab-bar-install))
+(when agent-scroll-keys-global-mode
+  (agent--scroll-command-advice-add))
 
 ;;;; Provide
 
