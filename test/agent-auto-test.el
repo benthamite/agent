@@ -4034,6 +4034,188 @@ command loop."
       (dolist (heading '("Answer Ann" "Answer Ben" "Answer Cleo"))
         (should (agent-auto-test--records-its-session-p file heading))))))
 
+;;;; Delegating tasks
+
+(defun agent-auto-test--delegate (file heading)
+  "Call `agent-delegate-tasks' on HEADING of FILE; return what it said last."
+  (agent-test-helper-with-messages messages
+    (agent-auto-test--act
+     file nil (lambda (_prefix) (call-interactively #'agent-delegate-tasks))
+     heading)
+    (car (last (split-string messages "\n" t)))))
+
+(defun agent-auto-test--delegate-refused (file heading)
+  "Call `agent-delegate-tasks' on HEADING of FILE; return why it refused.
+Fail unless it signaled a `user-error', started no session and left the
+file's buffer and the file itself as they were."
+  (let ((started (length agent-auto-test--started))
+        (text (with-current-buffer (find-file-noselect file) (buffer-string)))
+        (disk (agent-auto-test--disk file)))
+    (prog1 (cadr (should-error (agent-auto-test--delegate file heading)
+                               :type 'user-error))
+      (should (= (length agent-auto-test--started) started))
+      (should (equal (with-current-buffer (find-buffer-visiting file)
+                       (buffer-string))
+                     text))
+      (should-not (buffer-modified-p (find-buffer-visiting file)))
+      (should (equal (agent-auto-test--disk file) disk)))))
+
+(ert-deftest agent-auto-test-delegate-starts-an-unattended-session-at-once ()
+  "Start an unattended session on the task at point without waiting for the timer.
+The task is a plain TODO with a directory.  It gets the ready tag beside
+its own, on disk, and records the session, which starts at once, in the
+task's directory, briefed with the task and the standing instructions,
+snoozed and shown in no window.  From then on it is what a session the
+timer started is: it closes itself when its turn reports the task done.
+A second task is delegated from its line in an agenda."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks root "Fix it" "Ship it"))
+          (start (symbol-function 'agent-auto-test--start-session))
+          (window (selected-window))
+          (shown (window-buffer)))
+      (cl-letf (((symbol-function 'display-buffer)
+                 agent-auto-test--display-buffer)
+                ((symbol-function 'agent-auto-test--start-session)
+                 (lambda (&rest arguments)
+                   (pop-to-buffer (apply start arguments)))))
+        (should (equal (agent-auto-test--delegate file "Fix it")
+                       "Started 1 unattended session")))
+      (should (= (length agent-auto-test--started) 1))
+      (pcase-let ((`(,session . ,options) (car agent-auto-test--started))
+                  (buffer (car agent-auto-test--buffers)))
+        (should (equal (agent-session-directory session) root))
+        (should (equal (agent-session-instance session) "fix-it"))
+        (should (equal (plist-get options :initial-prompt)
+                       "Fix it\n\nBody of Fix it.\n\nStanding."))
+        (should (agent-session-snoozed-p buffer))
+        (should (buffer-local-value 'agent-auto--unattended buffer))
+        (should-not (get-buffer-window buffer t))
+        (should (eq (selected-window) window))
+        (should (eq (window-buffer window) shown))
+        (should (equal (agent-auto-test--tags file "Fix it")
+                       '("listed" "agent")))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                       (buffer-name buffer)))
+        (should (string-match-p "^\\* TODO Fix it +:listed:agent:$"
+                                (agent-auto-test--disk file)))
+        (should (string-search (buffer-name buffer)
+                               (agent-auto-test--disk file)))
+        (should (equal (agent-auto-test--keyword file "Fix it") "TODO"))
+        (agent-auto-test--run)
+        (should (= (length agent-auto-test--started) 1))
+        (agent--note-session-id buffer "sid-1")
+        (agent-auto-test--take-text)
+        (agent-auto-test--closing
+          (agent-auto-test--end-turn buffer "Status: done: fixed")
+          (should (agent-auto-test--handover-asked-p buffer))))
+      (with-current-buffer (find-file-noselect file)
+        (agent-test-helper-in-agenda "Ship it"
+          (agent-test-helper-with-messages messages
+            (call-interactively #'agent-delegate-tasks)
+            (should (string-match-p "Started 1 unattended session" messages)))
+          (should (string-match-p ":listed:agent:"
+                                  (buffer-substring (pos-bol) (pos-eol))))
+          (should (string-match-p "Ship it"
+                                  (buffer-substring (pos-bol) (pos-eol))))))
+      (should (equal (agent-auto-test--started-instances)
+                     '("fix-it" "ship-it")))
+      (should (agent-auto-test--records-its-session-p file "Ship it")))))
+
+(ert-deftest agent-auto-test-delegate-says-why-a-task-is-not-started ()
+  "Refuse a task that cannot be delegated, with the reason, and change nothing.
+A task that is closed, a heading that is no TODO, a task that names no
+directory or one that does not exist, a task that records a session,
+with the key that goes back to it, and a task an eligibility function
+vetoes, by returning nil or by signaling an error.  No session is
+started, and the task gets no tag.  Where point is on no Org entry, and
+while the mode is off, the command is refused too."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root
+                  (concat
+                   "#+TODO: TODO DOING | DONE\n"
+                   (format "* DONE Closed\n:PROPERTIES:\n:DIR: %s\n:END:\n" root)
+                   (format "* Not a task\n:PROPERTIES:\n:DIR: %s\n:END:\n" root)
+                   "* TODO No directory\n"
+                   (format "* TODO Directory gone\n:PROPERTIES:\n:DIR: %s\n:END:\n"
+                           (expand-file-name "gone" root))
+                   (format "* TODO Recorded\n:PROPERTIES:\n:DIR: %s\n:AGENT_SESSION: abc\n:END:\n"
+                           root)
+                   (agent-auto-test--task root "Vetoed" "")
+                   (agent-auto-test--task root "Broken" ""))))
+           (agent-auto-eligible-functions
+            (list (lambda ()
+                    (let ((heading (org-get-heading t t t t)))
+                      (when (equal heading "Broken")
+                        (error "Cannot tell"))
+                      (not (equal heading "Vetoed")))))))
+      (pcase-dolist (`(,heading . ,reason)
+                     '(("Closed" . "\"Closed\" is closed")
+                       ("Not a task" . "\"Not a task\" is not a TODO")
+                       ("No directory" . "\"No directory\" names no directory")
+                       ("Directory gone"
+                        . "\"Directory gone\" names a directory that does not exist")
+                       ("Recorded"
+                        . "\"Recorded\" already records a session; go back to it with s")
+                       ("Vetoed" . "\"Vetoed\" may not run unattended")
+                       ("Broken"
+                        . "\"Broken\" may not run unattended: Cannot tell")))
+        (should (equal (agent-auto-test--delegate-refused file heading) reason)))
+      (with-temp-buffer
+        (org-mode)
+        (insert "Not a task.\n")
+        (should (equal (cadr (should-error (agent-delegate-tasks)
+                                           :type 'user-error))
+                       "Call this on an Org task or on an agenda line")))
+      (let ((agent-auto-mode nil))
+        (should (equal (cadr (should-error
+                              (agent-auto-test--delegate file "Vetoed")
+                              :type 'user-error))
+                       (format-message "Turn `agent-auto-mode' on first"))))
+      (should-not agent-auto-test--started))))
+
+(ert-deftest agent-auto-test-delegate-leaves-unsaved-edits-unsaved ()
+  "Record a delegated task at once in a buffer that has unsaved edits.
+The user is at the task: it gets its tag and its session, and the
+buffer is left for him to save.  A result tag the task carried from an
+earlier session gives way to the ready tag."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (agent-auto-test--task root "Fix it" ":listed:review:")))
+           (org (find-file-noselect file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (should (equal (agent-auto-test--delegate file "Fix it")
+                     "Started 1 unattended session"))
+      (should (= (length agent-auto-test--started) 1))
+      (should (buffer-modified-p org))
+      (should (equal (agent-auto-test--tags file "Fix it") '("listed" "agent")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                     (buffer-name (car agent-auto-test--buffers))))
+      (should (string-match-p ":listed:review:" (agent-auto-test--disk file)))
+      (should-not (string-search "Typing" (agent-auto-test--disk file))))))
+
+(ert-deftest agent-auto-test-delegate-reports-a-session-that-could-not-start ()
+  "Say that the session of a delegated task could not be started.
+The task is then stuck, with the reason, as one the timer could not
+start is, and is not started again."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks root "Fix it")))
+      (setq agent-auto-test--start-error "No such program")
+      (should (equal (let ((inhibit-message t))
+                       (agent-auto-test--delegate-error file "Fix it"))
+                     "\"Fix it\": its session could not be started"))
+      (should (equal (agent-auto-test--tags file "Fix it") '("listed" "stuck")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "start failed: No such program"))
+      (should-not agent-auto-test--started))))
+
+(defun agent-auto-test--delegate-error (file heading)
+  "Call `agent-delegate-tasks' on HEADING of FILE; return its `user-error'."
+  (cadr (should-error (agent-auto-test--delegate file heading)
+                      :type 'user-error)))
+
 ;;;; Where to look
 
 (ert-deftest agent-auto-test-looks-in-the-agenda-files-by-default ()

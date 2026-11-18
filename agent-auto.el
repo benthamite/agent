@@ -45,8 +45,11 @@
 ;; A session that closes without a handover leaves no note: its task's
 ;; result says so, in one line.
 ;;
-;; A session the timer starts is unattended: nobody is watching it.  It
-;; starts snoozed and unshown, and it is closed for the user, through the
+;; `agent-delegate-tasks' starts such a session at once on the task at
+;; point, which it tags, for a task its user judges an agent can finish.
+;;
+;; A session started in either way is unattended: nobody is watching it.
+;; It starts snoozed and unshown, and it is closed for the user, through the
 ;; exit chain and so with a handover, when its turn ends with a result,
 ;; unless background work of its is still running.  It is the user's
 ;; own, and is no longer closed for him, once he submits a prompt in it.
@@ -311,7 +314,8 @@ It holds the `wait' field of the session's handover; see
 
 (defvar-local agent-auto--unattended nil
   "Non-nil in a session started unattended, which nobody is watching.
-The timer starts such a session, on a tagged task.  It was told to end
+The timer starts such a session, on a tagged task, and so does
+`agent-delegate-tasks', on a task the user delegates.  It was told to end
 its replies with a status line, so a reply without one leaves its task
 stuck.  It is the user's own once he submits a prompt in it, and this is
 nil from then on; see `agent-auto--attend'.  A session started by hand
@@ -452,12 +456,13 @@ A session that `agent-exit' closes while its task is open is first asked
 for a handover, with `agent-auto-handover-prompt', which becomes a dated
 note in the task's log, its result and its tag.
 
-A session the timer starts is unattended.  It starts snoozed and
-unshown, and is closed in the same way, by itself, when its turn ends
-with \"Status: done\", \"Status: done, pending verification\" or
-\"Status: waiting on you\", unless its backend reports background work
-still running.  Once the user submits a prompt in it, it is his own and
-is no longer closed for him."
+`agent-delegate-tasks' starts such a session at once on the task at
+point, which it tags.  A session started in either way is unattended.
+It starts snoozed and unshown, and is closed, by itself and through the
+same handover, when its turn ends with \"Status: done\", \"Status: done,
+pending verification\" or \"Status: waiting on you\", unless its backend
+reports background work still running.  Once the user submits a prompt
+in it, it is his own and is no longer closed for him."
   :global t
   :group 'agent-auto
   (agent-auto--reset)
@@ -785,19 +790,23 @@ A session being started counts."
 
 ;;;; Starting
 
-(defun agent-auto--start (file directory)
+(defun agent-auto--start (file directory &optional unsaved)
   "Start a session in DIRECTORY on the task at point, which is in FILE.
 The task records the start before anything else happens, so that it is
-never started twice."
+never started twice, and its buffer is then saved.  With UNSAVED non-nil
+the buffer is left unsaved: the user has edits of his own in it.  Return
+the link of the task to its session."
   (let* ((backend (agent-auto--backend))
          (entry (agent-todo--collect-at-point))
          (link (agent-auto-link-create :file file
                                        :recorded (agent-auto--placeholder))))
     (agent-auto--record (agent-auto-link-recorded link) backend)
-    (agent-todo--save)
+    (unless unsaved
+      (agent-todo--save))
     (agent-auto--launch link backend directory
                         (agent-todo--slug (plist-get entry :title))
-                        (agent-auto--brief entry))))
+                        (agent-auto--brief entry))
+    link))
 
 (defun agent-auto--backend ()
   "Return the backend to start sessions with, or signal an error.
@@ -900,8 +909,8 @@ sessions set aside and fires no ready alert."
 
 (defun agent-auto--attach (buffer link &optional unattended)
   "Record that session BUFFER works on the task of LINK.
-UNATTENDED is non-nil for a session the timer started; see
-`agent-auto--unattended'."
+UNATTENDED is non-nil for a session started unattended, by the timer or
+by `agent-delegate-tasks'; see `agent-auto--unattended'."
   (with-current-buffer buffer
     (setq agent-auto--link link
           agent-auto--unattended unattended
@@ -2006,6 +2015,150 @@ already, and the reason no session was started on each of the others."
             (if failures
                 (format ", %d failed: %s" (length failures)
                         (string-join failures "; "))
+              ""))))
+
+;;;; Delegating a task
+
+;;;###autoload
+(defun agent-delegate-tasks ()
+  "Start an unattended session on the Org task at point, at once.
+The task at point is the one the line at point shows in an agenda, or
+the heading at point in an Org buffer.  It gets `agent-auto-ready-tag',
+and its session is started as the timer of `agent-auto-mode' starts one,
+without waiting for the timer: in the task's directory, briefed with the
+task and `agent-auto-instructions', snoozed and unshown, and closed for
+you when its turn ends with a result.  This is for a task an agent can
+finish without you: you hear of it again through the task.
+
+No session is started, and the task is left as it was, when it is closed
+or is no TODO, names no directory that exists, already records a
+session, which `agent-act-on-tasks' goes back to, or may not run
+unattended, a function of `agent-auto-eligible-functions' having vetoed
+it.  The command then says why."
+  (interactive)
+  (unless agent-auto-mode
+    (user-error "Turn `agent-auto-mode' on first"))
+  (agent-auto--delegate-at-point))
+
+(defun agent-auto--delegate-at-point ()
+  "Start an unattended session on the Org task at point, and say so.
+Signal a `user-error' that says why when no session was started; see
+`agent-auto--delegate-task'."
+  (let* ((marker (or (agent--org-entry-marker)
+                     (user-error "Call this on an Org task or on an agenda line")))
+         (outcome (unwind-protect (agent-auto--delegate-task marker)
+                    (set-marker marker nil))))
+    (unless (eq outcome 'started)
+      (user-error "%s" outcome))
+    (agent-auto--show-delegated (list outcome))
+    (message "%s" (agent-auto--delegated-report (list outcome)))))
+
+(defun agent-auto--delegate-task (marker)
+  "Start an unattended session on the task at MARKER; return what came of it.
+Return `started', or a string that says why no session was started:
+`agent-auto--delegate-refusal' refused the task, or starting it signaled
+an error."
+  (condition-case err
+      (agent-auto--at-task marker #'agent-auto--delegate-task-at-point)
+    (error (error-message-string err))))
+
+(defun agent-auto--delegate-task-at-point ()
+  "Start an unattended session on the task at point, which the user delegated.
+Point is on the task's heading in the buffer that visits its file,
+widened.  The task gets the ready tag and its session is started as the
+timer starts one; see `agent-auto--start'.  A buffer that had no unsaved
+edits is saved, and one that had is left unsaved, since the user is at
+the task.  Return as `agent-auto--delegate-task' does; a task that is
+refused is left as it was."
+  (let ((title (substring-no-properties (org-get-heading t t t t)))
+        (clean (not (buffer-modified-p))))
+    (or (agent-auto--delegate-refusal title)
+        (let ((directory (agent-auto--task-directory)))
+          (agent-auto--tag-ready)
+          (if (agent-auto--session-live-p
+               (agent-auto-link-recorded
+                (agent-auto--start (buffer-file-name) directory (not clean))))
+              'started
+            (format "\"%s\": its session could not be started" title))))))
+
+(defun agent-auto--delegate-refusal (title)
+  "Return why the task at point, headed TITLE, cannot be delegated, or nil.
+The reasons, in the order they are looked for: it is no TODO; it is
+closed; its buffer visits no file; it already records a session, which
+the key of `agent-act-on-tasks' goes back to; it names no directory, or
+one that does not exist; no backend can be chosen for its session; and
+it may not run unattended, as `agent-auto--veto' tells."
+  (let ((directory (agent-auto--task-directory)))
+    (cond
+     ((not (org-get-todo-state))
+      (format "\"%s\" is not a TODO" title))
+     ((org-entry-is-done-p)
+      (format "\"%s\" is closed" title))
+     ((not (buffer-file-name))
+      (format "\"%s\" is in a buffer that visits no file" title))
+     ((org-entry-get nil agent-auto-session-property)
+      (format "\"%s\" already records a session; go back to it with %s"
+              title
+              (substring-no-properties
+               (substitute-command-keys
+                "\\<agent-task-keys-mode-map>\\[agent-act-on-tasks]"))))
+     ((not directory)
+      (format "\"%s\" names no directory" title))
+     ((not (file-directory-p directory))
+      (format "\"%s\" names a directory that does not exist" title))
+     (t (or (condition-case err
+                (ignore (agent-auto--backend))
+              (error (format "\"%s\": %s" title (error-message-string err))))
+            (agent-auto--veto title))))))
+
+(defun agent-auto--veto (title)
+  "Return why the task at point, headed TITLE, may not run unattended, or nil.
+`agent-auto-eligible-functions' are asked as the timer asks them: a
+function that returns nil vetoes the task, and so does one that signals
+an error, whose message is part of the reason."
+  (condition-case err
+      (unless (save-excursion
+                (run-hook-with-args-until-failure
+                 'agent-auto-eligible-functions))
+        (format "\"%s\" may not run unattended" title))
+    (error (format "\"%s\" may not run unattended: %s"
+                   title (error-message-string err)))))
+
+(defun agent-auto--tag-ready ()
+  "Give the task at point the ready tag, in place of any result tag it carries."
+  (let* ((tags (org-get-tags nil t))
+         (new (append (seq-difference tags (agent-auto--lifecycle-tags))
+                      (list agent-auto-ready-tag)))
+         (inhibit-message t))
+    (unless (equal new tags)
+      (org-set-tags new))))
+
+(defun agent-auto--lifecycle-tags ()
+  "Return the ready tag and the three result tags."
+  (list agent-auto-ready-tag agent-auto-review-tag agent-auto-blocked-tag
+        agent-auto-stuck-tag))
+
+(defun agent-auto--show-delegated (outcomes)
+  "Build the current agenda again when OUTCOMES tell of a session started.
+OUTCOMES are as for `agent-auto--delegated-report'.  A delegated task
+gets its tag at its own heading, which leaves the line that shows it as
+it was; see `agent-todo--redo-agenda'."
+  (when (and (memq 'started outcomes) (derived-mode-p 'org-agenda-mode))
+    (let ((inhibit-message t))
+      (agent-todo--redo-agenda))))
+
+(defun agent-auto--delegated-report (outcomes)
+  "Return what to say of the tasks the user delegated.
+OUTCOMES are what `agent-auto--delegate-task' returned for them: how
+many unattended sessions were started, and the reason none was started
+on each of the others."
+  (let ((started (seq-count (lambda (outcome) (eq outcome 'started)) outcomes))
+        (refusals (seq-filter #'stringp outcomes)))
+    (concat (format "Started %d unattended session%s" started
+                    (if (= started 1) "" "s"))
+            (if refusals
+                (format "; %d not started: %s" (length refusals)
+                        (string-join refusals "; "))
               ""))))
 
 ;;;; The keys of a list of tasks
