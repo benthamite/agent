@@ -1105,6 +1105,36 @@ across a handoff; a session the timer started is stuck as before."
                                  "Here is what I found so far.")
       (should (equal (agent-auto-test--tags file "Fix it") '("stuck"))))))
 
+(ert-deftest agent-auto-test-session-is-the-users-once-he-writes-in-it ()
+  "Make an unattended session the user's own when he submits a prompt in it.
+It leaves the snooze it was started in, and a reply of its without a
+status line no longer leaves its task stuck.  A snooze he gives it
+afterwards is his, and stays.  A prompt a program submits, and a turn
+the session's own background work starts, leave it unattended and
+snoozed, and its task stuck as before."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (agent-session-event buffer 'submit)
+      (agent-session-event buffer 'stop)
+      (agent-session-event buffer 'activity)
+      (should (buffer-local-value 'agent-auto--unattended buffer))
+      (should (agent-session-snoozed-p buffer))
+      (agent-session-event buffer 'user-submit)
+      (should-not (buffer-local-value 'agent-auto--unattended buffer))
+      (should-not (agent-session-snoozed-p buffer))
+      (agent-auto-test--end-turn buffer "Here is what I found so far.")
+      (should (equal (agent-auto-test--tags file "Fix it") '("agent")))
+      (agent--set-snoozed buffer t)
+      (agent-session-event buffer 'user-submit)
+      (should (agent-session-snoozed-p buffer))))
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (agent-session-event buffer 'submit)
+      (agent-session-event buffer 'activity)
+      (should (agent-session-snoozed-p buffer))
+      (agent-auto-test--end-turn buffer "Here is what I found so far.")
+      (should (equal (agent-auto-test--tags file "Fix it") '("stuck"))))))
+
 (ert-deftest agent-auto-test-handoff-carries-the-task ()
   "Move the task's link to the session a handoff starts.
 The task then records the new session, and gets its result."

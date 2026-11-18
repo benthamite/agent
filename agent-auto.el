@@ -92,8 +92,9 @@ other dialog in place of its input box, or has its turn interrupted."
 It replaces `agent-auto-ready-tag' when the session could not be
 started, stopped without a status line, gave no sign of life for
 `agent-auto-silence-timeout', or is no longer running.  Only a session
-the timer started is stuck for stopping without a status line: one
-started by hand, or resumed, is the user's to drive."
+started unattended is stuck for stopping without a status line, and only
+until the user submits a prompt in it: one started by hand, or resumed,
+is the user's to drive."
   :type 'string
   :group 'agent-auto)
 
@@ -303,10 +304,13 @@ It holds the `wait' field of the session's handover; see
   "Float time of this session's last event, or nil before the first.")
 
 (defvar-local agent-auto--unattended nil
-  "Non-nil in a session the timer started, which nobody is watching.
-Such a session was told to end its replies with a status line, so a
-reply without one leaves its task stuck.  A session started by hand or
-resumed is the user's to drive, and its task is never stuck for that.")
+  "Non-nil in a session started unattended, which nobody is watching.
+The timer starts such a session, on a tagged task.  It was told to end
+its replies with a status line, so a reply without one leaves its task
+stuck.  It is the user's own once he submits a prompt in it, and this is
+nil from then on; see `agent-auto--attend'.  A session started by hand
+or resumed is the user's to drive from the start, and its task is never
+stuck for that.")
 
 (defvar-local agent-auto--settled nil
   "Non-nil once this session's turn ended with a result written to its task.
@@ -1009,6 +1013,7 @@ For `agent-session-event-functions'."
           ('exit-request (setq agent-auto--exiting t))
           ('user-submit (setq agent-auto--exiting nil
                               agent-auto--settled nil)
+                        (agent-auto--attend buffer)
                         (agent-auto--turn-started buffer))
           ((or 'submit 'activity)
            (setq agent-auto--settled nil)
@@ -1031,6 +1036,28 @@ written on the task no longer sets it waiting."
       (with-current-buffer buffer
         (setq agent-auto--back t))
       (agent-auto--return link))))
+
+(defun agent-auto--attend (buffer)
+  "Make session BUFFER, started unattended, the user's own from now on.
+The user steps into such a session by submitting a prompt in it, which
+its backend reports as the event `user-submit'.  A prompt a program
+submits, as a notice delivered to the session, and a turn its own
+background work starts are no such thing, and leave it unattended.  The
+session leaves the snooze it was started in, and a reply of its without
+a status line no longer leaves its task stuck."
+  (when (buffer-local-value 'agent-auto--unattended buffer)
+    (agent-auto--unsnooze buffer)
+    (with-current-buffer buffer
+      (setq agent-auto--unattended nil))
+    (agent-auto--log "%s is attended from now on" (buffer-name buffer))))
+
+(defun agent-auto--unsnooze (buffer)
+  "Take session BUFFER, started unattended, out of the snooze it started in.
+A session that is not unattended is left as it is: its snooze is the
+user's own."
+  (when (and (buffer-local-value 'agent-auto--unattended buffer)
+             (agent-session-snoozed-p buffer))
+    (agent--set-snoozed buffer nil)))
 
 (defun agent-auto--chain-turn-p (buffer)
   "Return non-nil when the turn of session BUFFER belongs to its exit.
