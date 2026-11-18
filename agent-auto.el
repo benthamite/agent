@@ -1970,23 +1970,44 @@ it or the user did.  The tag replaces whichever of the ready and result
 tags the task carries, and a task that carries none of them and has no
 result yet, as one sent to a session by hand, gets it too.  A task that
 has a result and none of the tags is left alone, so a tag the user
-removed is never added back, and so is a task that is closed.  With
-ONLY-READY non-nil the task must carry the ready tag."
+removed is never added back, and so is a task that is closed.  A result
+that a close of the session left without a tag is no such case, and the
+task gets the tag; see `agent-auto--untagged-result-p'.  With ONLY-READY
+non-nil the task must carry the ready tag."
   (let ((tags (org-get-tags nil t))
+        (result (org-entry-get nil agent-auto-result-property))
         (lifecycle (list agent-auto-ready-tag agent-auto-review-tag
                          agent-auto-blocked-tag agent-auto-stuck-tag)))
     (when (and (org-entry-is-todo-p)
                (if only-ready
                    (member agent-auto-ready-tag tags)
                  (or (seq-intersection tags lifecycle)
-                     (not (org-entry-get nil agent-auto-result-property)))))
+                     (not result)
+                     (agent-auto--untagged-result-p result))))
       (let ((new (append (seq-difference tags lifecycle)
                          (list (agent-auto--tag kind)))))
         (unless (equal new tags)
           (org-set-tags new)))
-      (unless (equal (org-entry-get nil agent-auto-result-property) text)
+      (unless (equal result text)
         (org-entry-put nil agent-auto-result-property text))
       (agent-auto--log "%s: %s" (agent-auto--tag kind) text))))
+
+(defconst agent-auto--untagged-result-regexp
+  (rx string-start
+      (or (seq "Handover, " (or "interrupted" "waiting on "))
+          "Closed without a handover"))
+  "Regexp matching a result that a close left on a task without a tag.
+Those are the results of `agent-auto--handover-result' for a session
+that closed interrupted or waiting on someone, and of
+`agent-auto--close-result'.")
+
+(defun agent-auto--untagged-result-p (result)
+  "Return non-nil when RESULT is one that a close left without a tag.
+A task that has a result and no result tag is otherwise one whose tag
+the user removed, which is left alone.  After such a close the task has
+no tag because none was given, and it hears from its session again once
+the session is resumed."
+  (string-match-p agent-auto--untagged-result-regexp result))
 
 (defun agent-auto--tag (kind)
   "Return the Org tag of result KIND."
@@ -2517,16 +2538,16 @@ closed waiting on someone also sets the task waiting; see
 
 (defun agent-auto--handover-result (receipt)
   "Return the one-line result RECEIPT gives its task.
-It is how the session closed, the question it asks, what it did and the
-next step."
-  (let* ((title (agent-auto--handover-title receipt))
-         (next (plist-get receipt :next))
+It starts with \"Handover, \" and how the session closed, which tells
+it from the result of a turn; see `agent-auto--untagged-result-p'.  The
+question the session asks, what it did and the next step follow."
+  (let* ((next (plist-get receipt :next))
          (parts (delq nil
                       (list (agent-auto--sentence (plist-get receipt :question))
                             (agent-auto--sentence (plist-get receipt :summary))
                             (and next (concat "Next: " next))))))
     (agent-auto--one-line
-     (concat (upcase (substring title 0 1)) (substring title 1)
+     (concat "Handover, " (agent-auto--handover-title receipt)
              (and parts (concat ": " (string-join parts " ")))))))
 
 (defun agent-auto--sentence (text)

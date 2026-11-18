@@ -1389,7 +1389,7 @@ lines of their own.  The receipt is deleted once it is written."
       (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
       (should-not (agent-auto-test--tags file "Fix it"))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
-                     "Interrupted: Read the parser and found the bug. Next: write the fix"))
+                     "Handover, interrupted: Read the parser and found the bug. Next: write the fix"))
       (should (equal (agent-auto-test--notes file "Fix it")
                      '("Session closed: interrupted.\nDone: Read the parser and found the bug\nNext: write the fix")))
       (should (string-match-p
@@ -1456,7 +1456,7 @@ that closed interrupted removes it."
                 :next "review the diff"))
       (should (equal (agent-auto-test--tags file "Fix it") '("review")))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
-                     "Finished: Fixed the parser. Next: review the diff"))
+                     "Handover, finished: Fixed the parser. Next: review the diff"))
       (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
       (setq buffer (agent-auto-test--resume root))
       (agent-auto-test--hand-over
@@ -1464,7 +1464,7 @@ that closed interrupted removes it."
                 :next "pay it" :question "Which account pays?"))
       (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
-                     "Needs a decision: Which account pays? Compared the two accounts. Next: pay it"))
+                     "Handover, needs a decision: Which account pays? Compared the two accounts. Next: pay it"))
       (should (equal (car (agent-auto-test--notes file "Fix it"))
                      "Session closed: needs a decision.\nDone: Compared the two accounts\nNext: pay it\nQuestion: Which account pays?"))
       (setq buffer (agent-auto-test--resume root))
@@ -1488,7 +1488,7 @@ The ready tag of a task the timer started goes with the result tags."
        buffer '(:state "interrupted" :summary "Asked which one" :next "wait"))
       (should-not (agent-auto-test--tags file "Fix it"))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
-                     "Interrupted: Asked which one. Next: wait")))))
+                     "Handover, interrupted: Asked which one. Next: wait")))))
 
 (ert-deftest agent-auto-test-chain-turns-leave-the-handover-alone ()
   "Write nothing on the task for a turn of the chain that follows the handover.
@@ -1512,7 +1512,45 @@ prompt marks the task blocked."
           (agent-auto-test--run)))
       (should (equal (agent-auto-test--tags file "Fix it") '("review")))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
-                     "Finished: Fixed it.")))))
+                     "Handover, finished: Fixed it.")))))
+
+;; A result with no tag was read as one whose tag the user had removed,
+;; so a task whose session closed interrupted, waiting on someone or
+;; without a handover never heard from that session again.
+(ert-deftest agent-auto-test-task-hears-again-after-an-untagged-close ()
+  "Write a resumed session's result on a task that a close left without a tag.
+After a handover that closed interrupted or waiting on someone, and
+after a close without a handover on a task that had no result, the next
+turn's result and tag are written as usual.  A tag the user removed
+after a handover gave one is still not added back."
+  (dolist (close (list '(:state "interrupted" :summary "Half")
+                       agent-auto-test--waiting
+                       nil))
+    (agent-auto-test--with root
+      (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+        (if close
+            (agent-auto-test--hand-over buffer close)
+          (agent-auto-test--close buffer)
+          (agent-auto-test--flush-due))
+        (should (agent-auto-test--property file "Fix it" "AGENT_RESULT"))
+        (should-not (agent-auto-test--tags file "Fix it"))
+        (setq buffer (agent-auto-test--resume root))
+        (agent-auto-test--end-turn buffer "Status: done: shipped it")
+        (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                       "shipped it")))))
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+      (agent-auto-test--hand-over buffer '(:state "finished" :summary "All"))
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (agent-auto-test--at file "Fix it" (lambda () (org-set-tags nil)))
+      (with-current-buffer (find-buffer-visiting file)
+        (save-buffer))
+      (setq buffer (agent-auto-test--resume root))
+      (agent-auto-test--end-turn buffer "Status: waiting on you: anything else?")
+      (should-not (agent-auto-test--tags file "Fix it"))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Handover, finished: All.")))))
 
 (ert-deftest agent-auto-test-handover-waits-for-a-saved-buffer ()
   "Write nothing of a handover while the task's buffer has unsaved edits.
@@ -1616,7 +1654,7 @@ buffer."
       (should (equal (agent-auto-test--notes file "Fix it")
                      '("Session closed: interrupted.\nDone: It")))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
-                     "Interrupted: It."))
+                     "Handover, interrupted: It."))
       (should-not (agent-auto-test--receipt-files))))
   (agent-auto-test--with root
     (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
@@ -1737,7 +1775,7 @@ handover is the only note either way."
                      '("Session closed: finished.\nDone: First")))
       (should (equal (agent-auto-test--tags file "Fix it") '("review")))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
-                     "Closed without a handover (its buffer was killed); before that: Finished: First."))
+                     "Closed without a handover (its buffer was killed); before that: Handover, finished: First."))
       (should-not (agent-auto-test--receipt-files))))
   (agent-auto-test--with root
     (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
@@ -1756,7 +1794,7 @@ handover is the only note either way."
                      '("Session closed: finished.\nDone: Second")))
       (should (equal (agent-auto-test--tags file "Fix it") '("review")))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
-                     "Finished: Second."))
+                     "Handover, finished: Second."))
       (should-not (agent-auto-test--receipt-files)))))
 
 (ert-deftest agent-auto-test-note-shows-every-field ()
@@ -1774,7 +1812,7 @@ them in the note all the same, each in full and on a line of its own."
                              "Next: wait\nQuestion: Why?\n"
                              "Waiting on: the accountant\nWaiting for: " long)))
       (should (string-prefix-p
-               "Waiting on the accountant: Why? Sent it. Next: wait"
+               "Handover, waiting on the accountant: Why? Sent it. Next: wait"
                (agent-auto-test--property file "Fix it" "AGENT_RESULT"))))))
 
 (ert-deftest agent-auto-test-two-closes-before-a-save ()
@@ -1804,7 +1842,7 @@ is deleted and not written again."
                        "Session closed: needs a decision.\nDone: First\nQuestion: Which?")))
       (should (equal (agent-auto-test--tags file "Fix it") '("review")))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
-                     "Finished: Second."))
+                     "Handover, finished: Second."))
       (should-not (agent-auto-test--receipt-files))
       (let ((last (agent-auto-test--property file "Fix it" "AGENT_HANDOVER")))
         (should (equal (concat last ".json")
@@ -1971,7 +2009,7 @@ keyword, and both properties go."
         (should (equal (agent-auto-test--notes file "Fix it")
                        '("Session closed: waiting on someone.\nDone: Asked for the invoice\nNext: pay it\nWaiting on: the accountant\nWaiting for: the invoice")))
         (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
-                       "Waiting on the accountant: Asked for the invoice. Next: pay it"))
+                       "Handover, waiting on the accountant: Asked for the invoice. Next: pay it"))
         (should (string-match-p "^\\* WAITING Fix it"
                                 (agent-auto-test--disk file)))
         (should-not (string-match-p "State \"" (agent-auto-test--disk file)))
@@ -2117,7 +2155,7 @@ is recorded of a keyword or a wait."
         (should-not (agent-auto-test--property file "Fix it" "AGENT_WAIT"))
         (should (= (length (agent-auto-test--notes file "Fix it")) 1))
         (should (string-prefix-p
-                 "Waiting on the accountant"
+                 "Handover, waiting on the accountant"
                  (agent-auto-test--property file "Fix it" "AGENT_RESULT")))))))
 
 (ert-deftest agent-auto-test-late-receipt-sets-nothing-waiting ()
