@@ -37,6 +37,10 @@ Each is a cons of the `agent-session' and the options it was started with.")
 (defvar-local agent-auto-test--reply nil
   "The last reply of this stub session.")
 
+(defvar agent-auto-test--submitted nil
+  "What was submitted to stub sessions, the latest first.
+Each element is a cons of the text and the session's buffer.")
+
 (defun agent-auto-test--start-session (session &rest options)
   "Start a stub session for SESSION with OPTIONS and return its buffer."
   (when agent-auto-test--start-error
@@ -67,6 +71,10 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-auto-test--buffers nil)
            (agent-auto-test--start-error nil)
            (agent-auto-test--resume-error nil)
+           (agent-auto-test--submitted nil)
+           (agent-before-exit-skill-names nil)
+           (agent-before-exit-skill-name nil)
+           (agent-before-exit-skill-directories nil)
            (agent-todo-directory-property "DIR")
            (agent-todo-in-progress-keyword nil)
            (agent-account-directory-rules nil)
@@ -183,6 +191,23 @@ directory in the property DIR, and worktrees go under ROOT."
     (setq agent-auto-test--reply reply))
   (run-hook-with-args 'agent-session-event-functions buffer 'stop)
   (agent-auto--turn-end buffer))
+
+(defun agent-auto-test--take-text ()
+  "Make the stub backend take text and skills submitted to its sessions.
+What is submitted is recorded in `agent-auto-test--submitted'."
+  (let ((backend (agent-backend 'stub)))
+    (setf (agent-backend-skill-command-prefix backend) "/"
+          (agent-backend-submit backend)
+          (lambda (text &optional buffer)
+            (push (cons text buffer) agent-auto-test--submitted)))))
+
+(defmacro agent-auto-test--exiting (&rest body)
+  "Evaluate BODY with an exit chain that runs no watchdog and exits nothing.
+The session a chain would exit is left open."
+  (declare (indent 0) (debug (body)))
+  `(cl-letf (((symbol-function 'agent--before-exit-start-watchdog) #'ignore)
+             ((symbol-function 'agent--exit-session) #'ignore))
+     ,@body))
 
 (defun agent-auto-test--task (root &optional heading tags)
   "Return the text of a ready TODO named HEADING whose directory is ROOT.
@@ -1112,6 +1137,39 @@ the task.  A session resumed while waiting has its last reply read."
       (run-hook-with-args 'agent-session-event-functions buffer 'exit-request)
       (agent-auto-test--end-turn buffer "Logged the session.")
       (should (equal (agent-auto-test--tags file "Fix it") '("agent"))))))
+
+;; The exit of a session was known to its task only once the chain had
+;; run its last skill, so the turn of every skill before it was read as
+;; the task's result.
+(ert-deftest agent-auto-test-chain-turns-write-no-result ()
+  "Look at the end of the user's last turn, and at no turn of the exit chain.
+The turn running when the exit is asked for is the user's, and its end
+is read as any other.  The turns the chain then submits are its own."
+  (agent-auto-test--with root
+    (pcase-let ((`(,_file . ,buffer) (agent-auto-test--started-task root))
+                (timer-function (symbol-function 'run-with-timer))
+                (looked nil))
+      (agent-auto-test--take-text)
+      (agent--note-session-id buffer "sid-1")
+      (let ((agent-before-exit-skill-names '("update-log" "retro")))
+        (cl-letf (((symbol-function 'run-with-timer)
+                   (lambda (seconds repeat function &rest arguments)
+                     (if (eq function #'agent-auto--turn-end)
+                         (push arguments looked)
+                       (apply timer-function seconds repeat function
+                              arguments)))))
+          (agent-auto-test--exiting
+            (agent-session-event buffer 'submit)
+            (should-not (agent-run-skill-before-exit 'stub buffer))
+            (should-not agent-auto-test--submitted)
+            (agent-session-event buffer 'stop)
+            (should (= (length looked) 1))
+            (should (equal (caar agent-auto-test--submitted) "/update-log"))
+            (setq looked nil)
+            (agent-session-event buffer 'stop)
+            (should (equal (caar agent-auto-test--submitted) "/retro"))
+            (agent-session-event buffer 'stop)
+            (should-not looked)))))))
 
 ;;;; Acting on a task that records a session
 

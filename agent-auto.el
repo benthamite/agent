@@ -835,9 +835,10 @@ For `agent-session-event-functions'."
         (setq agent-auto--last-event (float-time))
         (pcase event
           ((or 'stop 'idle-prompt)
-           (run-with-timer agent-auto--turn-end-delay nil
-                           #'agent-auto--turn-end buffer
-                           agent-auto--turn-end-retries))
+           (unless (agent-auto--chain-turn-p buffer)
+             (run-with-timer agent-auto--turn-end-delay nil
+                             #'agent-auto--turn-end buffer
+                             agent-auto--turn-end-retries)))
           ('blocked
            (agent-auto--settle
             buffer 'blocked
@@ -846,6 +847,16 @@ For `agent-session-event-functions'."
           ('user-submit (setq agent-auto--exiting nil
                               agent-auto--settled nil))
           ((or 'submit 'activity) (setq agent-auto--settled nil)))))))
+
+(defun agent-auto--chain-turn-p (buffer)
+  "Return non-nil when the turn of session BUFFER belongs to its exit.
+That is a turn the before-exit chain submitted, as one of its skills,
+and any turn of a session whose exit has been requested.  The turn that
+was running when `agent-exit' was called is the user's: the chain waits
+for it, and its end is the task's result."
+  (or (buffer-local-value 'agent-auto--exiting buffer)
+      (memq (plist-get (buffer-local-value 'agent--before-exit buffer) :state)
+            '(running closing))))
 
 (defun agent-auto--on-id (buffer)
   "Record the new id of session BUFFER on its task.
@@ -857,11 +868,12 @@ For `agent-session-id-functions'."
 (defun agent-auto--turn-end (buffer &optional retries)
   "Write on its task how the turn of session BUFFER ended.
 A session being exited is left alone: the turns of its exit are not the
-task's result.  With RETRIES, a positive number, a session whose reply
-cannot be read yet is looked at again after `agent-auto--turn-end-delay',
-that many times at most, before it counts as stopped without a status
-line, which leaves the task stuck only when the timer started the
-session; see `agent-auto--unattended'."
+task's result, and those its before-exit chain submits are not even
+looked at; see `agent-auto--chain-turn-p'.  With RETRIES, a positive
+number, a session whose reply cannot be read yet is looked at again
+after `agent-auto--turn-end-delay', that many times at most, before it
+counts as stopped without a status line, which leaves the task stuck
+only when the timer started the session; see `agent-auto--unattended'."
   (when (and (buffer-live-p buffer)
              (buffer-local-value 'agent-auto--link buffer)
              (not (buffer-local-value 'agent-auto--exiting buffer)))
