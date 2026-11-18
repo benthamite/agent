@@ -3424,6 +3424,54 @@ does not outlast the command."
       (should (= (length agent-auto-test--started) 3))
       (should-not agent-reuse-backend-choice))))
 
+;; A marked task is moved to the in-progress keyword at its heading, not
+;; from its line, so its line kept the old keyword, and in an agenda
+;; grouped by keyword its old place, until the agenda was built again.
+(ert-deftest agent-auto-test-act-on-tasks-shows-the-keyword-of-the-marked-tasks ()
+  "Show the in-progress keyword on the lines of the marked tasks started.
+The agenda is built again once, after the last session has started, as
+it is after a session is started on the task of one line, and point
+stays on its line.  It is not built again when no session was started,
+nor when there is no in-progress keyword for a task to move to."
+  (agent-auto-test--with root
+    (let* ((agent-todo-in-progress-keyword "DOING")
+           (file (agent-auto-test--listed-tasks
+                  root "Answer Ann" "Answer Ben" "Answer Cleo"))
+           (rebuilt 0)
+           (keyword (lambda (heading)
+                      (save-excursion
+                        (goto-char (point-min))
+                        (search-forward heading)
+                        (get-text-property (pos-bol) 'todo-state)))))
+      (advice-add 'org-agenda-redo :before
+                  (lambda (&rest _) (setq rebuilt (1+ rebuilt)))
+                  '((name . agent-auto-test)))
+      (unwind-protect
+          (with-current-buffer (find-file-noselect file)
+            (agent-test-helper-in-agenda "Answer Ann"
+              (agent-auto-test--mark-lines "Answer Ann" "Answer Cleo")
+              (goto-char (point-min))
+              (search-forward "Answer Ben")
+              (should (equal (agent-auto-test--act-on-marked)
+                             "Started 2 sessions"))
+              (should (= rebuilt 1))
+              (should (equal (mapcar keyword '("Answer Ann" "Answer Ben"
+                                               "Answer Cleo"))
+                             '("DOING" "TODO" "DOING")))
+              (should (string-match-p "Answer Ben"
+                                      (buffer-substring (pos-bol) (pos-eol))))
+              (should-not org-agenda-bulk-marked-entries)
+              (agent-auto-test--mark-lines "Answer Ann")
+              (should (equal (agent-auto-test--act-on-marked)
+                             "0 started, 1 already running"))
+              (should (= rebuilt 1))
+              (let ((agent-todo-in-progress-keyword nil))
+                (agent-auto-test--mark-lines "Answer Ben")
+                (should (equal (agent-auto-test--act-on-marked)
+                               "Started 1 session"))
+                (should (= rebuilt 1)))))
+        (advice-remove 'org-agenda-redo 'agent-auto-test)))))
+
 ;; Without sticky agendas Org keeps the marks in a global variable, which
 ;; an Org buffer sees too.
 (ert-deftest agent-auto-test-act-on-tasks-acts-on-a-heading-whatever-is-marked ()

@@ -1737,7 +1737,8 @@ one session is started for each marked task instead, in the order the
 lines were marked, and EXISTING is ignored.  None of the sessions is
 shown, the selected window stays selected, and the backend is asked for
 at most once.  A marked task whose recorded session is running is left
-alone.  The marks are then cleared, and a message says how many
+alone.  The marks are then cleared, the agenda is built again if tasks
+moved to `agent-todo-in-progress-keyword', and a message says how many
 sessions were started, how many tasks had a running session already,
 and why no session was started on each of the others.
 
@@ -1762,8 +1763,10 @@ A task that is closed is refused; see `agent-act-on-tasks'."
 
 (defun agent-auto--start-marked ()
   "Start a session on each task marked in the current agenda; clear the marks.
-No session is shown and the selected window stays selected.  What came
-of it is said in the echo area; see `agent-auto--started-report'."
+No session is shown and the selected window stays selected.  The agenda
+then shows the tasks as they now are, and what came of it is said in the
+echo area; see `agent-auto--show-started' and
+`agent-auto--started-report'."
   (let* ((markers (agent-auto--marked-tasks))
          (outcomes
           (unwind-protect
@@ -1778,7 +1781,8 @@ of it is said in the echo area; see `agent-auto--started-report'."
               (when marker
                 (set-marker marker nil))))))
     (let ((inhibit-message t))
-      (org-agenda-bulk-unmark-all))
+      (org-agenda-bulk-unmark-all)
+      (agent-auto--show-started outcomes))
     (message "%s" (agent-auto--started-report outcomes))))
 
 (defun agent-auto--marked-tasks ()
@@ -1828,6 +1832,17 @@ acted on: the context of a running session names its buffer."
    (plist-get (run-hook-with-args-until-success
                'agent-recorded-session-functions)
               :buffer)))
+
+(defun agent-auto--show-started (outcomes)
+  "Build the current agenda again when OUTCOMES tell of a session started.
+OUTCOMES are as for `agent-auto--started-report'.  A marked task moves
+to `agent-todo-in-progress-keyword' at its own heading, which leaves the
+line that shows it on the old keyword, where a task started from its
+line has the agenda built again; see `agent-todo--redo-agenda'.  One
+rebuild serves all the marked tasks.  Without that keyword no task
+moved, and nothing is built again."
+  (when (and agent-todo-in-progress-keyword (memq 'started outcomes))
+    (agent-todo--redo-agenda)))
 
 (defun agent-auto--started-report (outcomes)
   "Return what to say of the sessions started on the marked tasks.
