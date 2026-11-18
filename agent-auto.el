@@ -474,10 +474,9 @@ That is its hooks, the variables its sessions pass on, the handover
 receipts left on disk, which are then written from a timer of their own,
 and its timer, which replaces any timer already running the search.
 Calling this again changes nothing but the timers, so the end of this
-file calls it
-when the file is loaded while the mode is on: an Emacs that turned the
-mode on with an older version of the file then has what this version
-installs, without the mode being toggled."
+file calls it when the file is loaded while the mode is on: an Emacs
+that turned the mode on with an older version of the file then has what
+this version installs, without the mode being toggled."
   (dolist (variable agent-auto--inherited-variables)
     (add-to-list 'agent-session-inherited-variables variable))
   (pcase-dolist (`(,hook . ,function) agent-auto--hooks)
@@ -604,8 +603,8 @@ DIRECTORY is the home directory."
   "Search the files for ready tasks, recorded sessions and recorded waits.
 Waits are searched for only while `agent-auto-wait-over-functions' has a
 function to ask.  Each file ripgrep finds is then visited in a step of
-its own.  Nothing
-is searched while the steps of the search before are still running."
+its own.  Nothing is searched while the steps of the search before are
+still running."
   (unless (or agent-auto--queue agent-auto--processes)
     (when-let* ((files (agent-auto--files)))
       (agent-auto--call
@@ -993,9 +992,10 @@ For `agent-session-event-functions'."
                              #'agent-auto--turn-end buffer
                              agent-auto--turn-end-retries)))
           ('blocked
-           (agent-auto--settle
-            buffer 'blocked
-            "the session waits at a permission or input prompt, or was interrupted"))
+           (unless (agent-auto--chain-turn-p buffer)
+             (agent-auto--settle
+              buffer 'blocked
+              "the session waits at a permission or input prompt, or was interrupted")))
           ('exit-request (setq agent-auto--exiting t))
           ('user-submit (setq agent-auto--exiting nil
                               agent-auto--settled nil)
@@ -1025,9 +1025,11 @@ written on the task no longer sets it waiting."
 (defun agent-auto--chain-turn-p (buffer)
   "Return non-nil when the turn of session BUFFER belongs to its exit.
 That is a turn the before-exit chain submitted, as one of its skills,
-and any turn of a session whose exit has been requested.  The turn that
-was running when `agent-exit' was called is the user's: the chain waits
-for it, and its end is the task's result."
+and any turn of a session whose exit has been requested.  Nothing of
+such a turn is written on the task: not how it ends, and not a prompt
+or a dialog it waits at.  The turn that was running when `agent-exit'
+was called is the user's: the chain waits for it, and its end is the
+task's result."
   (or (buffer-local-value 'agent-auto--exiting buffer)
       (memq (plist-get (buffer-local-value 'agent--before-exit buffer) :state)
             '(running closing))))
@@ -1129,7 +1131,7 @@ lets the turn run, and its end writes the result as usual."
   (when (and (buffer-live-p buffer)
              (buffer-local-value 'agent-auto--link buffer)
              (not (buffer-local-value 'agent-auto--settled buffer))
-             (not (buffer-local-value 'agent-auto--exiting buffer)))
+             (not (agent-auto--chain-turn-p buffer)))
     (agent-auto--guard "looking at a session's screen"
       (when (agent-auto--dialog-p buffer)
         (message "agent-auto: %s waits at a dialog that needs an answer"

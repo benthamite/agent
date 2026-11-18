@@ -1488,6 +1488,30 @@ The ready tag of a task the timer started goes with the result tags."
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
                      "Interrupted: Asked which one. Next: wait")))))
 
+(ert-deftest agent-auto-test-chain-turns-leave-the-handover-alone ()
+  "Write nothing on the task for a turn of the chain that follows the handover.
+A skill that stops at a permission prompt, or shows a dialog, leaves the
+task as the handover left it; before the exit was asked for, the same
+prompt marks the task blocked."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                (agent-before-exit-skill-names '("update-log")))
+      (agent-session-event buffer 'blocked)
+      (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
+      (agent-auto-test--exiting
+        (agent-auto-test--ask-exit buffer)
+        (agent-auto-test--answer
+         buffer '(:state "finished" :summary "Fixed it"))
+        (should (equal (caar agent-auto-test--submitted) "/update-log"))
+        (let ((agent-session-input-state-functions
+               (list (lambda (_session) (list :dialog t)))))
+          (agent-session-event buffer 'blocked)
+          (agent-auto--check-dialog buffer)
+          (agent-auto-test--run)))
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Finished: Fixed it.")))))
+
 (ert-deftest agent-auto-test-handover-waits-for-a-saved-buffer ()
   "Write nothing of a handover while the task's buffer has unsaved edits.
 The receipt is kept on disk, and everything is written once the buffer
