@@ -183,16 +183,18 @@ Return a plist.  `:first' and `:second' are what
 `agent-reload-test--installed' found after each load, and `:off' what it
 found once the modes were turned off again.  `:swept' is non-nil when
 turning the modes on deleted the stale files that were there, and
-`:files-kept' when the loads left every file of the scenario as it was,
-the stale ones planted after that included.  `:server-kept' is non-nil
-when the remote-control server is the process it was.  `:saved' lists
-the notification functions the two backend modes saved, and `:restored'
-the ones in place once the modes were off.  `:tab-bar' lists
-`tab-bar-format' after the loads, before them and before the modes were
-turned on, and `:tab-bar-off' is what it was once they were off again.
-`:maps-kept' is an alist from each of `agent-reload-test--maps' to whether
-it holds the keymap it held before the loads.
-`:sessions' is a cons of what
+`:files-kept' when the loads left every file of the scenario as it was:
+the stale ones written after the modes were turned on, and the status
+files of a session.  `:server-kept' is non-nil when the remote-control
+server is the process it was, and `:server-functions' lists its filter,
+its sentinel and its log function, each the symbol it is or
+`not-a-symbol'.  `:saved' lists the notification functions the two
+backend modes saved, and `:restored' the ones in place once the modes
+were off.  `:tab-bar' lists `tab-bar-format' after the loads, before
+them and before the modes were turned on, and `:tab-bar-off' is what it
+was once they were off again.  `:maps-kept' is an alist from each of
+`agent-reload-test--maps' to whether it holds the keymap it held before
+the loads.  `:sessions' is a cons of what
 `agent-reload-test--session-states' found before the loads and after
 them, and `:events' lists the session events and state changes seen."
   (let ((directory (file-name-as-directory (make-temp-file "agent-reload" t))))
@@ -208,6 +210,7 @@ them, and `:events' lists the session events and state changes seen."
          (swept (progn (agent-reload-test--turn-modes-on)
                        (not (seq-some #'file-exists-p stale))))
          (files (progn (agent-reload-test--plant-stale-files)
+                       (agent-reload-test--plant-session-files)
                        (agent-reload-test--files directory)))
          (server agent-remote--server)
          (maps (mapcar #'symbol-value agent-reload-test--maps))
@@ -223,6 +226,12 @@ them, and `:events' lists the session events and state changes seen."
                 :server-kept (and (eq server agent-remote--server)
                                   (process-live-p server)
                                   t)
+                :server-functions
+                (mapcar (lambda (function)
+                          (if (symbolp function) function 'not-a-symbol))
+                        (list (process-filter server)
+                              (process-sentinel server)
+                              (process-contact server :log)))
                 :saved (list agent-claude--saved-notification-function
                              agent-codex--saved-notification-function)
                 :tab-bar (cons tab-bar-format tab-bar)
@@ -267,8 +276,8 @@ needs `doom-modeline' is one of them only once that package is loaded."
 Nothing is started for real: usage is never fetched, the remote-control
 server listens on a free port of this machine only, and no timer comes
 due while the scenario runs.  The user's notification functions and a
-key of the user's in each of `agent-reload-test--maps' are in
-place, as an init file would have left them."
+key of the user's in each of `agent-reload-test--maps' are in place, as
+an init file would have left them."
   (require 'doom-modeline nil t)
   (dolist (file (agent-reload-test--libraries))
     (require (intern (file-name-base file)) file))
@@ -314,6 +323,14 @@ ago."
       (write-region "{}" nil file nil 'silent)
       (set-file-times file (time-subtract nil (days-to-time 30))))
     files))
+
+(defun agent-reload-test--plant-session-files ()
+  "Write status files as a running Claude session keeps them."
+  (dolist (extension '("json" "state" "sid"))
+    (write-region "{}" nil
+                  (expand-file-name (concat "0123-abcd." extension)
+                                    agent-claude-status-directory)
+                  nil 'silent)))
 
 (defun agent-reload-test--turn-modes-on ()
   "Turn every global mode of the package on, and the capture mode in a buffer.
@@ -554,14 +571,19 @@ Each keymap is the one it was, since session buffers and
 (ert-deftest agent-reload-test-what-is-done-once-is-not-done-again ()
   "Leave alone what a mode does once when it is turned on.
 The stale files a mode deletes when it is turned on are deleted then and
-not by loading its file again, which touches no file at all; the server
-is not started again; the tab bar keeps the one sessions segment it was
-given; and the notification functions the backend modes saved are still
-the user's, not the ones the modes put in their place."
+not by loading its file again, which touches no file at all, a session's
+status files included; the server is not started again, and needs no
+starting to run the code just loaded, since it calls its functions by
+name; the tab bar keeps the one sessions segment it was given; and the
+notification functions the backend modes saved are still the user's,
+not the ones the modes put in their place."
   (let ((report (agent-reload-test--report)))
     (should (plist-get report :swept))
     (should (plist-get report :files-kept))
     (should (plist-get report :server-kept))
+    (should (equal (plist-get report :server-functions)
+                   '(agent-remote--filter agent-remote--sentinel
+                     agent-remote--log)))
     (pcase-let ((`(,after ,before ,_original) (plist-get report :tab-bar)))
       (should (memq 'agent-tab-bar-format-sessions before))
       (should (equal after before)))
