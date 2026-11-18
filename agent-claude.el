@@ -764,27 +764,30 @@ the diff is suppressed entirely; the terminal approval prompt suffices."
 Owned by `agent-claude-mode': started on enable, cancelled on
 disable.")
 
+(defconst agent-claude--monet-advice
+  '((monet-start-server-in-directory
+     :around agent-claude--monet-cleanup-before-start)
+    (monet--on-close-server
+     :after agent-claude--monet-close-server-on-disconnect)
+    (monet--display-diff-buffer :override agent-claude--display-diff-buffer))
+  "The advice `agent-claude-mode' gives monet, each a list of arguments.
+The arguments are those of `advice-add'.")
+
 (defun agent-claude--monet-install ()
-  "Install monet advice and the leak-reporting GC timer.
-Idempotent, so deferred installs after re-enables are safe."
-  (advice-add 'monet-start-server-in-directory :around
-              #'agent-claude--monet-cleanup-before-start)
-  (advice-add 'monet--on-close-server :after
-              #'agent-claude--monet-close-server-on-disconnect)
-  (advice-add 'monet--display-diff-buffer :override
-              #'agent-claude--display-diff-buffer)
-  (unless agent-claude--monet-gc-timer
-    (setq agent-claude--monet-gc-timer
-          (run-with-timer 60 60 #'agent-claude--monet-gc-orphaned-servers))))
+  "Install monet advice and the leak-reporting GC timer, each once.
+The timer replaces any timer already running the sweep, so installing
+again is safe: after the mode is enabled again, once monet is loaded,
+and when this file is loaded again while the mode is on."
+  (dolist (arguments agent-claude--monet-advice)
+    (apply #'advice-add arguments))
+  (cancel-function-timers #'agent-claude--monet-gc-orphaned-servers)
+  (setq agent-claude--monet-gc-timer
+        (run-with-timer 60 60 #'agent-claude--monet-gc-orphaned-servers)))
 
 (defun agent-claude--monet-remove ()
   "Remove monet advice and cancel the GC timer."
-  (advice-remove 'monet-start-server-in-directory
-                 #'agent-claude--monet-cleanup-before-start)
-  (advice-remove 'monet--on-close-server
-                 #'agent-claude--monet-close-server-on-disconnect)
-  (advice-remove 'monet--display-diff-buffer
-                 #'agent-claude--display-diff-buffer)
+  (pcase-dolist (`(,symbol ,_how ,function) agent-claude--monet-advice)
+    (advice-remove symbol function))
   (when agent-claude--monet-gc-timer
     (cancel-timer agent-claude--monet-gc-timer)
     (setq agent-claude--monet-gc-timer nil)))
@@ -3467,8 +3470,10 @@ every stop event, so sessions never learned that a turn had ended.")
 (define-minor-mode agent-claude-mode
   "Global minor mode wiring `claude-code' sessions into agent.
 Owns every hook, advice, and timer the Claude backend installs;
-nothing is installed at load time.  Disabling removes them
-symmetrically and restores `claude-code-notification-function'."
+nothing is installed when the file is loaded while the mode is off.
+Loading it again while the mode is on installs them again, each once.
+Disabling removes them symmetrically and restores
+`claude-code-notification-function'."
   :global t
   :group 'agent-claude
   (if agent-claude-mode
@@ -3476,54 +3481,84 @@ symmetrically and restores `claude-code-notification-function'."
     (agent-claude--mode-disable)))
 
 (defun agent-claude--mode-enable ()
-  "Install Claude backend hooks, advice, and timers."
+  "Turn the Claude backend on.
+Do what must happen once each time the mode is turned on: delete stale
+files, save `claude-code-notification-function' before replacing it,
+turn `agent-scroll-keys-global-mode' on and bring the sessions already
+running under the mode.  Everything that can be installed any number of
+times is left to `agent-claude--install'."
   (agent-claude--sweep-stale-status-files)
   (agent-claude--delete-stale-session-settings)
-  (advice-add 'claude-code--start :around
-              #'agent-claude--start-with-session-settings)
-  (advice-add 'claude-code-handle-hook :filter-args
-              #'agent-claude--route-hook-to-current-name)
   (setq agent-claude--saved-notification-function
         claude-code-notification-function)
   (setq claude-code-notification-function #'claude-code-default-notification)
-  (dolist (fn agent-claude--event-hook-functions)
-    (add-hook 'claude-code-event-hook fn agent-claude--event-hook-depth))
-  (add-hook 'kill-buffer-query-functions #'agent-protect-buffer)
-  (dolist (fn agent-claude--start-hook-functions)
-    (add-hook 'claude-code-start-hook fn))
-  (add-hook 'doom-modeline-mode-hook #'agent-claude--reapply-modelines)
-  (add-hook 'agent-session-derived-status-functions
-            #'agent-claude--derived-status)
+  (agent-claude--install)
   (agent-scroll-keys-global-mode 1)
   (agent-setup-scroll-keys-in-existing-buffers)
   (agent-setup-session-keys-in-existing-buffers)
-  (add-hook 'claude-code-process-environment-functions
-            #'agent-claude-account-env)
-  (add-hook 'claude-code-process-environment-functions
-            #'agent-claude--status-uuid-env)
-  (add-hook 'claude-code-process-environment-functions
-            #'agent-claude--server-env)
-  (add-hook 'claude-code-process-environment-functions
-            #'agent-claude--sync-theme-before-start)
-  ;; Last, so an entry another function sets, such as monet's
-  ;; CLAUDE_CODE_SSE_PORT, precedes the bare name and wins.
-  (add-hook 'claude-code-process-environment-functions
-            #'agent-claude--parent-session-env 90)
-  (advice-add 'claude-code--eat-send-return :before
-              #'agent-claude--note-user-submission)
-  (advice-add 'claude-code--vterm-send-return :before
-              #'agent-claude--note-user-submission)
-  (advice-add 'claude-code--do-send-command :before
-              #'agent-claude--note-submission)
-  (advice-add 'claude-code-send-escape :around
-              #'agent-claude--send-escape-in-current-buffer)
-  (advice-add 'claude-code--eat-synchronize-scroll :override
-              #'agent-claude--eat-synchronize-scroll)
+  (agent-claude--register-existing-session-teardowns))
+
+(defconst agent-claude--hooks
+  (append
+   (mapcar (lambda (function)
+             (list 'claude-code-event-hook function
+                   agent-claude--event-hook-depth))
+           agent-claude--event-hook-functions)
+   (mapcar (lambda (function) (list 'claude-code-start-hook function))
+           agent-claude--start-hook-functions)
+   '((doom-modeline-mode-hook agent-claude--reapply-modelines)
+     (agent-session-derived-status-functions agent-claude--derived-status)
+     (claude-code-process-environment-functions agent-claude-account-env)
+     (claude-code-process-environment-functions agent-claude--status-uuid-env)
+     (claude-code-process-environment-functions agent-claude--server-env)
+     (claude-code-process-environment-functions
+      agent-claude--sync-theme-before-start)
+     ;; Last, so an entry another function sets, such as monet's
+     ;; CLAUDE_CODE_SSE_PORT, precedes the bare name and wins.
+     (claude-code-process-environment-functions
+      agent-claude--parent-session-env 90)))
+  "The hooks of `agent-claude-mode', each a list (HOOK FUNCTION [DEPTH]).
+These are the arguments of `add-hook', so the functions go on the global
+value of each hook, in this order.")
+
+(defconst agent-claude--shared-hooks
+  '((kill-buffer-query-functions agent-protect-buffer))
+  "The hooks `agent-claude-mode' shares with `agent-codex-mode'.
+Each is a list as in `agent-claude--hooks'.  Turning the mode off
+removes them only while that mode is off too.")
+
+(defconst agent-claude--advice
+  '((claude-code--start :around agent-claude--start-with-session-settings)
+    (claude-code-handle-hook
+     :filter-args agent-claude--route-hook-to-current-name)
+    (claude-code--eat-send-return :before agent-claude--note-user-submission)
+    (claude-code--vterm-send-return :before agent-claude--note-user-submission)
+    (claude-code--do-send-command :before agent-claude--note-submission)
+    (claude-code-send-escape
+     :around agent-claude--send-escape-in-current-buffer)
+    (claude-code--eat-synchronize-scroll
+     :override agent-claude--eat-synchronize-scroll))
+  "The advice of `agent-claude-mode', each a list of arguments.
+The arguments are those of `advice-add'.")
+
+(defun agent-claude--install ()
+  "Install everything the mode needs while it is on, each thing once.
+That is its hooks, its advice and, once monet is loaded, what
+`agent-claude--monet-install' installs.  Calling this again changes
+nothing but the timer of monet's part, so the end of this file calls it
+when the file is loaded while the mode is on: an Emacs that turned the
+mode on with an older version of the file then has what this version
+installs, without the mode being toggled.  What must happen once each
+time the mode is turned on is in `agent-claude--mode-enable' and is
+never done by loading the file."
+  (dolist (arguments (append agent-claude--hooks agent-claude--shared-hooks))
+    (apply #'add-hook arguments))
+  (dolist (arguments agent-claude--advice)
+    (apply #'advice-add arguments))
   (if (featurep 'monet)
       (agent-claude--monet-install)
     (with-eval-after-load 'monet
-      (when agent-claude-mode (agent-claude--monet-install))))
-  (agent-claude--register-existing-session-teardowns))
+      (when agent-claude-mode (agent-claude--monet-install)))))
 
 (defun agent-claude--route-hook-to-current-name (args)
   "Return hook ARGS naming the session buffer by its current name.
@@ -3544,38 +3579,24 @@ to its new name."
   "Remove Claude backend hooks, advice, and timers."
   (setq claude-code-notification-function
         agent-claude--saved-notification-function)
-  (dolist (fn agent-claude--event-hook-functions)
-    (remove-hook 'claude-code-event-hook fn))
+  (pcase-dolist (`(,hook ,function . ,_) agent-claude--hooks)
+    (remove-hook hook function))
   (unless (bound-and-true-p agent-codex-mode)
-    (remove-hook 'kill-buffer-query-functions #'agent-protect-buffer)
+    (pcase-dolist (`(,hook ,function . ,_) agent-claude--shared-hooks)
+      (remove-hook hook function))
     (agent-scroll-keys-global-mode -1))
-  (dolist (fn agent-claude--start-hook-functions)
-    (remove-hook 'claude-code-start-hook fn))
-  (remove-hook 'doom-modeline-mode-hook #'agent-claude--reapply-modelines)
-  (remove-hook 'agent-session-derived-status-functions
-               #'agent-claude--derived-status)
-  (remove-hook 'claude-code-process-environment-functions
-               #'agent-claude-account-env)
-  (remove-hook 'claude-code-process-environment-functions
-               #'agent-claude--status-uuid-env)
-  (remove-hook 'claude-code-process-environment-functions
-               #'agent-claude--server-env)
-  (remove-hook 'claude-code-process-environment-functions
-               #'agent-claude--sync-theme-before-start)
-  (remove-hook 'claude-code-process-environment-functions
-               #'agent-claude--parent-session-env)
-  (advice-remove 'claude-code--start #'agent-claude--start-with-session-settings)
-  (advice-remove 'claude-code-handle-hook
-                 #'agent-claude--route-hook-to-current-name)
-  (advice-remove 'claude-code--eat-send-return #'agent-claude--note-user-submission)
-  (advice-remove 'claude-code--vterm-send-return #'agent-claude--note-user-submission)
-  (advice-remove 'claude-code--do-send-command #'agent-claude--note-submission)
-  (advice-remove 'claude-code-send-escape
-                 #'agent-claude--send-escape-in-current-buffer)
-  (advice-remove 'claude-code--eat-synchronize-scroll
-                 #'agent-claude--eat-synchronize-scroll)
+  (pcase-dolist (`(,symbol ,_how ,function) agent-claude--advice)
+    (advice-remove symbol function))
   (agent-claude--monet-remove)
   (agent-claude-stop-usage-polling))
+
+;;;; Loading again
+
+;; The mode's own function runs only when the mode is toggled.  Loading
+;; this file again while the mode is on, as when the package is updated
+;; in a running Emacs, therefore installs what this version needs.
+(when agent-claude-mode
+  (agent-claude--install))
 
 (provide 'agent-claude)
 ;;; agent-claude.el ends here

@@ -21,7 +21,33 @@
 ;;;; What the modes install
 
 (defconst agent-reload-test--hooks
-  '((agent-session-event-functions agent-auto--on-event)
+  '((claude-code-event-hook agent-claude--handle-notification)
+    (claude-code-event-hook agent-claude--handle-stop)
+    (claude-code-event-hook agent-claude--handle-session-state)
+    (claude-code-event-hook agent-claude--refresh-status-on-event)
+    (kill-buffer-query-functions agent-protect-buffer)
+    (claude-code-start-hook agent-setup-kill-on-exit)
+    (claude-code-start-hook agent-claude--capture-status-uuid)
+    (claude-code-start-hook agent-claude--capture-monet-key)
+    (claude-code-start-hook agent-claude-start-status-polling)
+    (claude-code-start-hook agent-claude-set-modeline)
+    (claude-code-start-hook agent--refresh-display-names)
+    (claude-code-start-hook agent-disable-scrollback-truncation)
+    (claude-code-start-hook agent-setup-scroll-keys)
+    (claude-code-start-hook agent-setup-snippet-keys)
+    (claude-code-start-hook agent-setup-session-keys)
+    (claude-code-start-hook agent--assign-session-key)
+    (claude-code-start-hook agent-claude--register-session-teardown)
+    (doom-modeline-mode-hook agent-claude--reapply-modelines)
+    (agent-session-derived-status-functions agent-claude--derived-status)
+    (claude-code-process-environment-functions agent-claude-account-env)
+    (claude-code-process-environment-functions agent-claude--status-uuid-env)
+    (claude-code-process-environment-functions agent-claude--server-env)
+    (claude-code-process-environment-functions
+     agent-claude--sync-theme-before-start)
+    (claude-code-process-environment-functions
+     agent-claude--parent-session-env)
+    (agent-session-event-functions agent-auto--on-event)
     (agent-session-id-functions agent-auto--on-id)
     (agent-delivery-functions agent-auto--record-delivery)
     (agent-recorded-session-functions agent-auto--recorded-session)
@@ -33,12 +59,26 @@
   "What the global modes put on hooks, each a list (HOOK FUNCTION).
 The functions are on the global value of each hook.")
 
+(defconst agent-reload-test--advice
+  '((claude-code--start agent-claude--start-with-session-settings)
+    (claude-code-handle-hook agent-claude--route-hook-to-current-name)
+    (claude-code--eat-send-return agent-claude--note-user-submission)
+    (claude-code--vterm-send-return agent-claude--note-user-submission)
+    (claude-code--do-send-command agent-claude--note-submission)
+    (claude-code-send-escape agent-claude--send-escape-in-current-buffer)
+    (claude-code--eat-synchronize-scroll agent-claude--eat-synchronize-scroll)
+    (monet-start-server-in-directory agent-claude--monet-cleanup-before-start)
+    (monet--on-close-server agent-claude--monet-close-server-on-disconnect)
+    (monet--display-diff-buffer agent-claude--display-diff-buffer))
+  "The advice of the global modes, each a list (SYMBOL FUNCTION).
+FUNCTION advises the function of SYMBOL.")
+
 (defconst agent-reload-test--inherited-variables
   '(agent-auto--link agent-auto--unattended)
   "What the modes add to `agent-session-inherited-variables'.")
 
 (defconst agent-reload-test--mode-timers
-  '(agent-auto--tick)
+  '(agent-claude--monet-gc-orphaned-servers agent-auto--tick)
   "The functions of the timers the modes run.")
 
 (defconst agent-reload-test--load-timers
@@ -284,6 +324,8 @@ That version turned the modes on and installed none of what the lists
 at the top of this file name."
   (dolist (entry agent-reload-test--hooks)
     (remove-hook (car entry) (cadr entry)))
+  (dolist (entry agent-reload-test--advice)
+    (advice-remove (car entry) (cadr entry)))
   (setq agent-session-inherited-variables
         (seq-difference agent-session-inherited-variables
                         agent-reload-test--inherited-variables))
@@ -299,7 +341,8 @@ at the top of this file name."
   "Return how often each thing the package installs is installed now.
 The value is a plist of alists, each from an entry of the list of the
 same name at the top of this file to a count: `:hooks' how often the
-function is on its hook, `:inherited' how often the variable is in
+function is on its hook, `:advice' how often it advises the function of
+the symbol, `:inherited' how often the variable is in
 `agent-session-inherited-variables', `:mode-timers' and `:load-timers'
 how many timers run the function.  `:user-keys' is an alist from each
 keymap to the command `agent-reload-test--user-key' runs in it."
@@ -310,6 +353,11 @@ keymap to the command `agent-reload-test--user-key' runs in it."
                                (and (default-boundp (car entry))
                                     (default-value (car entry))))))
                 agent-reload-test--hooks)
+        :advice
+        (mapcar (lambda (entry)
+                  (cons entry (agent-reload-test--advice-count
+                               (car entry) (cadr entry))))
+                agent-reload-test--advice)
         :inherited
         (mapcar (lambda (variable)
                   (cons variable (agent-reload-test--count
@@ -329,6 +377,15 @@ keymap to the command `agent-reload-test--user-key' runs in it."
   "Return how often ELEMENT is in LIST, which need not be a list."
   (seq-count (lambda (other) (eq other element))
              (if (listp list) list (list list))))
+
+(defun agent-reload-test--advice-count (symbol function)
+  "Return how often FUNCTION advises the function of SYMBOL."
+  (let ((count 0))
+    (advice-mapc (lambda (advice _properties)
+                   (when (eq advice function)
+                     (setq count (1+ count))))
+                 symbol)
+    count))
 
 (defun agent-reload-test--timer-count (function)
   "Return a cons of FUNCTION and the number of timers that run it."
@@ -359,6 +416,14 @@ after the first load, and none is there twice after the second."
     (let ((installed (plist-get (agent-reload-test--report) load)))
       (agent-reload-test--should-all-be 1 (plist-get installed :hooks))
       (agent-reload-test--should-all-be 1 (plist-get installed :inherited)))))
+
+(ert-deftest agent-reload-test-advice-is-installed-once ()
+  "Find each advice of the modes on its function once after each load.
+An advice the version that turned the modes on did not install is there
+after the first load, and none is there twice after the second."
+  (dolist (load '(:first :second))
+    (agent-reload-test--should-all-be
+     1 (plist-get (plist-get (agent-reload-test--report) load) :advice))))
 
 (ert-deftest agent-reload-test-one-timer-runs-each-function ()
   "Find one timer for each function the package runs on a timer.
@@ -403,12 +468,13 @@ of each buffer hold what they held."
 
 (ert-deftest agent-reload-test-turning-the-modes-off-removes-everything ()
   "Turn the modes off after the loads and find nothing of theirs left.
-Every hook function and timer of the modes is gone, and the notification
-functions are the user's again.  The timers the package runs whenever
-it is loaded stay."
+Every hook function, advice and timer of the modes is gone, and the
+notification functions are the user's again.  The timers the package
+runs whenever it is loaded stay."
   (let* ((report (agent-reload-test--report))
          (installed (plist-get report :off)))
     (agent-reload-test--should-all-be 0 (plist-get installed :hooks))
+    (agent-reload-test--should-all-be 0 (plist-get installed :advice))
     (agent-reload-test--should-all-be 0 (plist-get installed :inherited))
     (agent-reload-test--should-all-be 0 (plist-get installed :mode-timers))
     (agent-reload-test--should-all-be 1 (plist-get installed :load-timers))

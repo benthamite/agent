@@ -242,7 +242,7 @@ One poller serves every backend. It starts with the first session of any backend
 
 @findex agent-claude-mode
 @findex agent-codex-mode
-The global minor modes @code{agent-claude-mode} and @code{agent-codex-mode} own every hook@comma{} advice@comma{} timer@comma{} and notification handler their backend installs. Loading @samp{agent-claude.el} or @samp{agent-codex.el} installs nothing; the modes must be enabled explicitly. Disabling a mode removes its hooks and advice symmetrically and restores the backend's previous notification function@comma{} leaving running sessions untouched. A typical setup:
+The global minor modes @code{agent-claude-mode} and @code{agent-codex-mode} own every hook@comma{} advice@comma{} timer@comma{} and notification handler their backend installs. Loading @samp{agent-claude.el} or @samp{agent-codex.el} while its mode is off installs nothing; the modes must be enabled explicitly. Disabling a mode removes its hooks and advice symmetrically and restores the backend's previous notification function@comma{} leaving running sessions untouched. A typical setup:
 
 @lisp
 (use-package agent
@@ -253,6 +253,8 @@ The global minor modes @code{agent-claude-mode} and @code{agent-codex-mode} own 
   (agent-claude-mode 1)
   (agent-codex-mode 1))
 @end lisp
+
+Loading @samp{agent-claude.el} again while @code{agent-claude-mode} is on@comma{} as happens when the package is updated in a running Emacs@comma{} installs the hooks@comma{} the advice and the timer of the version just loaded@comma{} each of them once@comma{} so the mode does not have to be turned off and on to pick up what an update added. What the mode does once when it is turned on is not done again by loading the file: no stale status or session settings file is deleted@comma{} the notification function kept for restoring stays the one that was in place before the mode was turned on@comma{} and the sessions that are running are left as they are.
 
 @node User options
 @chapter User options
