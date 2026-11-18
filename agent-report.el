@@ -59,8 +59,14 @@ only the Lisp files.  Its commit goes into every report.")
   "Name of the buffer `agent-report' collects the description in.")
 
 (defvar-keymap agent-report-mode-map
-  "C-c C-c" #'agent-report-send
-  "C-c C-k" #'agent-report-cancel)
+  :doc "Keymap for `agent-report-mode'.")
+
+;; The keys are set outside the `defvar-keymap', whose value form runs
+;; only the first time: loading the package again in a running Emacs, as
+;; an update does, would otherwise leave the keymap with the keys of the
+;; old code.  Keys the user bound in the keymap stay.
+(keymap-set agent-report-mode-map "C-c C-c" #'agent-report-send)
+(keymap-set agent-report-mode-map "C-c C-k" #'agent-report-cancel)
 
 (define-derived-mode agent-report-mode text-mode "Agent-Report"
   "Mode for describing a bug or feature idea for `agent-report'."

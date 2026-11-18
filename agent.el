@@ -2739,21 +2739,25 @@ actionable."
   :type 'natnum
   :group 'agent)
 
-(defvar agent-scroll-keys-mode-map nil
+(defvar agent-scroll-keys-mode-map (make-sparse-keymap)
   "Keymap for `agent-scroll-keys-mode'.")
 
 (defvar agent-scroll-keys-global-mode-map nil
   "Obsolete global PageUp/PageDown keymap cleared during package load.")
 
-(setq agent-scroll-keys-mode-map
-      (let ((map (make-sparse-keymap)))
-        (define-key map [prior] #'agent-scroll-page-up)
-        (define-key map [next] #'agent-scroll-page-down)
-        (define-key map [kp-prior] #'agent-scroll-page-up)
-        (define-key map [kp-next] #'agent-scroll-page-down)
-        (define-key map [remap scroll-down-command] #'agent-scroll-page-up)
-        (define-key map [remap scroll-up-command] #'agent-scroll-page-down)
-        map))
+;; The keys are set outside the `defvar', whose value form runs only the
+;; first time, and in the keymap that is there: loading the package again
+;; in a running Emacs, as an update does, then gives the keys of the new
+;; code to the session buffers that hold the keymap, and keeps the keys
+;; the user bound in it.
+(define-key agent-scroll-keys-mode-map [prior] #'agent-scroll-page-up)
+(define-key agent-scroll-keys-mode-map [next] #'agent-scroll-page-down)
+(define-key agent-scroll-keys-mode-map [kp-prior] #'agent-scroll-page-up)
+(define-key agent-scroll-keys-mode-map [kp-next] #'agent-scroll-page-down)
+(define-key agent-scroll-keys-mode-map [remap scroll-down-command]
+            #'agent-scroll-page-up)
+(define-key agent-scroll-keys-mode-map [remap scroll-up-command]
+            #'agent-scroll-page-down)
 
 (define-minor-mode agent-scroll-keys-mode
   "Minor mode making PageUp and PageDown scroll AI terminal sessions."

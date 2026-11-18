@@ -647,6 +647,11 @@ In EAT-backed Claude and Codex session buffers@comma{} @code{agent-setup-scroll-
 (keymap-set agent-session-keys-mode-map "H-." #'agent-effort-increase)
 @end lisp
 
+@vindex agent-scroll-keys-mode-map
+@vindex agent-usage-mode-map
+@vindex agent-report-mode-map
+After an update there is no need to restart Emacs for the package's own keys. Each time its files are loaded@comma{} the package sets the keys of its keymaps again@comma{} in the keymaps that are already there@comma{} and leaves the keys you bound in them yourself: @code{agent-scroll-keys-mode-map} (PageUp and PageDown in sessions)@comma{} @code{agent-usage-mode-map} (the usage buffer)@comma{} @code{agent-report-mode-map} (the report buffer) and the keymap that binds @samp{TAB} to snippet expansion in sessions. Session buffers hold @code{agent-scroll-keys-mode-map} itself@comma{} so a key a new version binds in it reaches the sessions that are already open. @code{agent-session-keys-mode-map} is yours alone and is never touched.
+
 The command @code{agent-select-session} opens the session switcher@comma{} which contains only existing session entries. If no sessions are active@comma{} it reports that there are none; use @code{agent-start-new-session} (@samp{n}) to start one. Sessions receive stable home-row keys where possible and display backend icons next to their labels.
 
 The switcher lists every session in one flat list ordered by home-row key@comma{} whatever account each session runs under. The account is a column of its own@comma{} between the session name and its annotation@comma{} shown dimmed in the @code{agent-session-account} face. A session is therefore found at the key it always answers to@comma{} rather than at a position that moves when a neighbor's account changes. Sessions whose backend has no accounts configured leave the column blank@comma{} and when no session on screen records an account the column is left out altogether.

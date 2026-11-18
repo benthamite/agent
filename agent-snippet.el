@@ -142,12 +142,15 @@ if a snippet was expanded."
   (unless (agent-snippet--try-expand-at-prompt)
     (eat-self-input 1 ?\t)))
 
-(defvar agent-snippet--keys-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "TAB") #'agent-snippet-tab)
-    (define-key map [tab] #'agent-snippet-tab)
-    map)
+(defvar agent-snippet--keys-mode-map (make-sparse-keymap)
   "Keymap for `agent-snippet--keys-mode'.")
+
+;; The keys are set outside the `defvar', whose value form runs only the
+;; first time: loading the package again in a running Emacs, as an update
+;; does, would otherwise leave the keymap with the keys of the old code.
+;; Keys the user bound in the keymap stay.
+(define-key agent-snippet--keys-mode-map (kbd "TAB") #'agent-snippet-tab)
+(define-key agent-snippet--keys-mode-map [tab] #'agent-snippet-tab)
 
 (define-minor-mode agent-snippet--keys-mode
   "Minor mode providing yasnippet TAB expansion in AI session buffers."

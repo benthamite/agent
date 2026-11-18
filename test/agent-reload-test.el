@@ -2,8 +2,9 @@
 
 ;; What a running Emacs is left with once the package has been updated
 ;; and its files loaded again.  A mode's function runs only when the mode
-;; is toggled, so what a mode installed used to stay what the version
-;; that turned it on installed, however often its file was loaded.
+;; is toggled, and a `defvar' keeps the keymap its first load built, so
+;; what a mode installed and the keys of a keymap used to stay those of
+;; the version loaded first, however often the files were loaded.
 ;;
 ;; Loading every library again changes the Emacs that does it for good,
 ;; so the scenario runs once, in a batch Emacs of its own, and each test
@@ -118,12 +119,31 @@ FUNCTION advises the function of SYMBOL.")
   '(agent--refresh-derived-statuses agent--refresh-session-switcher)
   "The functions of the timers the package runs once it is loaded.")
 
-(defconst agent-reload-test--user-maps
-  '(agent-session-keys-mode-map)
-  "The keymaps of the package in which the scenario binds a key of its own.")
+(defconst agent-reload-test--keys
+  '((agent-report-mode-map "C-c C-c" agent-report-send)
+    (agent-report-mode-map "C-c C-k" agent-report-cancel)
+    (agent-usage-mode-map "g" agent-usage-refresh)
+    (agent-snippet--keys-mode-map "TAB" agent-snippet-tab)
+    (agent-snippet--keys-mode-map "<tab>" agent-snippet-tab)
+    (agent-scroll-keys-mode-map "<prior>" agent-scroll-page-up)
+    (agent-scroll-keys-mode-map "<next>" agent-scroll-page-down)
+    (agent-scroll-keys-mode-map "<kp-prior>" agent-scroll-page-up)
+    (agent-scroll-keys-mode-map "<kp-next>" agent-scroll-page-down)
+    (agent-scroll-keys-mode-map "<remap> <scroll-down-command>"
+                                agent-scroll-page-up)
+    (agent-scroll-keys-mode-map "<remap> <scroll-up-command>"
+                                agent-scroll-page-down))
+  "The keys the package binds in its keymaps, each a list (MAP KEY COMMAND).
+MAP is the variable that holds the keymap.")
+
+(defconst agent-reload-test--maps
+  '(agent-report-mode-map agent-usage-mode-map agent-snippet--keys-mode-map
+    agent-scroll-keys-mode-map agent-session-keys-mode-map)
+  "The keymaps of the package, in each of which the user binds a key.
+The last is the user's own, in which the package binds nothing.")
 
 (defconst agent-reload-test--user-key "C-c z"
-  "The key the scenario binds in each of `agent-reload-test--user-maps'.")
+  "The key the scenario binds in each of `agent-reload-test--maps'.")
 
 ;;;; The scenario
 
@@ -170,6 +190,8 @@ the notification functions the two backend modes saved, and `:restored'
 the ones in place once the modes were off.  `:tab-bar' lists
 `tab-bar-format' after the loads, before them and before the modes were
 turned on, and `:tab-bar-off' is what it was once they were off again.
+`:maps-kept' is an alist from each of `agent-reload-test--maps' to whether
+it holds the keymap it held before the loads.
 `:sessions' is a cons of what
 `agent-reload-test--session-states' found before the loads and after
 them, and `:events' lists the session events and state changes seen."
@@ -188,6 +210,7 @@ them, and `:events' lists the session events and state changes seen."
          (files (progn (agent-reload-test--plant-stale-files)
                        (agent-reload-test--files directory)))
          (server agent-remote--server)
+         (maps (mapcar #'symbol-value agent-reload-test--maps))
          (tab-bar (cons tab-bar-format tab-bar))
          (sessions (agent-reload-test--make-sessions))
          (states (agent-reload-test--session-states sessions))
@@ -203,6 +226,9 @@ them, and `:events' lists the session events and state changes seen."
                 :saved (list agent-claude--saved-notification-function
                              agent-codex--saved-notification-function)
                 :tab-bar (cons tab-bar-format tab-bar)
+                :maps-kept (cl-mapcar (lambda (map keymap)
+                                        (cons map (eq (symbol-value map) keymap)))
+                                      agent-reload-test--maps maps)
                 :sessions (cons states
                                 (agent-reload-test--session-states sessions))
                 :events agent-reload-test--events)))
@@ -241,7 +267,7 @@ needs `doom-modeline' is one of them only once that package is loaded."
 Nothing is started for real: usage is never fetched, the remote-control
 server listens on a free port of this machine only, and no timer comes
 due while the scenario runs.  The user's notification functions and a
-key of the user's in each of `agent-reload-test--user-maps' are in
+key of the user's in each of `agent-reload-test--maps' are in
 place, as an init file would have left them."
   (require 'doom-modeline nil t)
   (dolist (file (agent-reload-test--libraries))
@@ -262,7 +288,7 @@ place, as an init file would have left them."
         agent-remote-listen-address "127.0.0.1"
         agent-remote-allowed-networks '("127.0.0.0/8")
         agent-remote-port t)
-  (dolist (map agent-reload-test--user-maps)
+  (dolist (map agent-reload-test--maps)
     (keymap-set (symbol-value map) agent-reload-test--user-key
                 #'agent-reload-test-user-command)))
 
@@ -380,7 +406,9 @@ at the top of this file name."
         (seq-difference agent-session-inherited-variables
                         agent-reload-test--inherited-variables))
   (dolist (function agent-reload-test--mode-timers)
-    (cancel-function-timers function)))
+    (cancel-function-timers function))
+  (pcase-dolist (`(,map ,key ,_command) agent-reload-test--keys)
+    (keymap-unset (symbol-value map) key t)))
 
 (defun agent-reload-test--add-second-timers ()
   "Start a second timer for each function the modes run on a timer."
@@ -395,8 +423,10 @@ function is on its hook, `:local-hooks' how often it is on the hook in
 the capture buffer, `:advice' how often it advises the function of
 the symbol, `:inherited' how often the variable is in
 `agent-session-inherited-variables', `:mode-timers' and `:load-timers'
-how many timers run the function.  `:user-keys' is an alist from each
-keymap to the command `agent-reload-test--user-key' runs in it."
+how many timers run the function.  `:keys' is an alist from each entry
+of `agent-reload-test--keys' to the command its key runs, and
+`:user-keys' one from each keymap to the command
+`agent-reload-test--user-key' runs in it."
   (list :hooks
         (mapcar (lambda (entry)
                   (cons entry (agent-reload-test--count
@@ -426,11 +456,16 @@ keymap to the command `agent-reload-test--user-key' runs in it."
         (mapcar #'agent-reload-test--timer-count agent-reload-test--mode-timers)
         :load-timers
         (mapcar #'agent-reload-test--timer-count agent-reload-test--load-timers)
+        :keys
+        (mapcar (lambda (entry)
+                  (cons entry (agent-reload-test--binding
+                               (car entry) (cadr entry))))
+                agent-reload-test--keys)
         :user-keys
         (mapcar (lambda (map)
                   (cons map (agent-reload-test--binding
                              map agent-reload-test--user-key)))
-                agent-reload-test--user-maps)))
+                agent-reload-test--maps)))
 
 (defun agent-reload-test--count (element list)
   "Return how often ELEMENT is in LIST, which need not be a list."
@@ -495,12 +530,26 @@ after the second."
       (agent-reload-test--should-all-be 1 (plist-get installed :mode-timers))
       (agent-reload-test--should-all-be 1 (plist-get installed :load-timers)))))
 
+(ert-deftest agent-reload-test-declared-keys-are-bound ()
+  "Find each key the package declares bound to its command after each load.
+A key the version loaded first did not bind is bound after the first
+load: a `defvar' keeps the keymap that version built."
+  (dolist (load '(:first :second))
+    (let ((keys (plist-get (plist-get (agent-reload-test--report) load) :keys)))
+      (should keys)
+      (pcase-dolist (`(,entry . ,command) keys)
+        (should (equal (cons entry command) (cons entry (nth 2 entry))))))))
+
 (ert-deftest agent-reload-test-user-keys-are-kept ()
-  "Find the keys the user bound in the keymaps still bound after each load."
+  "Find the keys the user bound in the keymaps still bound after each load.
+Each keymap is the one it was, since session buffers and
+`minor-mode-map-alist' hold it."
   (dolist (load '(:first :second))
     (agent-reload-test--should-all-be
      'agent-reload-test-user-command
-     (plist-get (plist-get (agent-reload-test--report) load) :user-keys))))
+     (plist-get (plist-get (agent-reload-test--report) load) :user-keys)))
+  (agent-reload-test--should-all-be
+   t (plist-get (agent-reload-test--report) :maps-kept)))
 
 (ert-deftest agent-reload-test-what-is-done-once-is-not-done-again ()
   "Leave alone what a mode does once when it is turned on.

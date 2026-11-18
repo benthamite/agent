@@ -477,8 +477,13 @@ nothing if the timer is already running."
 
 (defvar-keymap agent-usage-mode-map
   :doc "Keymap for `agent-usage-mode'."
-  :parent tabulated-list-mode-map
-  "g" #'agent-usage-refresh)
+  :parent tabulated-list-mode-map)
+
+;; The keys are set outside the `defvar-keymap', whose value form runs
+;; only the first time: loading the package again in a running Emacs, as
+;; an update does, would otherwise leave the keymap with the keys of the
+;; old code.  Keys the user bound in the keymap stay.
+(keymap-set agent-usage-mode-map "g" #'agent-usage-refresh)
 
 (define-derived-mode agent-usage-mode tabulated-list-mode "Agent-Usage"
   "Major mode listing usage for configured and active accounts."
