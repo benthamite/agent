@@ -2225,12 +2225,13 @@ on their sessions: on the task at point, or on the marked tasks.")
 ;; old code.  Keys the user bound in the keymap stay.
 (keymap-set agent-task-keys-mode-map "s" #'agent-act-on-tasks)
 (keymap-set agent-task-keys-mode-map "S" #'agent-link-session)
+(keymap-set agent-task-keys-mode-map "D" #'agent-delegate-tasks)
 
 ;;;###autoload
 (define-minor-mode agent-task-keys-mode
   "Minor mode with keys for the tasks of a list and their sessions.
-The keys act on the task at point, and the one that starts sessions on
-the marked tasks when there are any.  The mode is for buffers that list
+The keys act on the task at point, and those that start sessions on the
+marked tasks when there are any.  The mode is for buffers that list
 tasks, such as an Org agenda, and is turned on in the lists it should
 work in from their hooks, as `org-agenda-mode-hook'.  Its keys take
 precedence over those of the buffer's major mode.

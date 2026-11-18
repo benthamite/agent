@@ -4352,6 +4352,52 @@ start is, and is not started again."
   (cadr (should-error (agent-auto-test--delegate file heading)
                       :type 'user-error)))
 
+(ert-deftest agent-auto-test-task-keys-mode-delegates-from-an-agenda ()
+  "Delegate tasks with D typed in an agenda that has the mode.
+The key is the mode's own, beside s and S: it runs the command only
+while the mode is on in the agenda, where it takes precedence over the
+agenda's key.  Typed on a line it delegates the task of that line, and
+typed with lines marked each marked task.  It goes through the command
+loop.  The mode is turned on from the agenda's hook, as a list that
+wants the keys turns it on, so the agenda built again after a start has
+it too."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks
+                 root "Answer Ann" "Answer Ben" "Answer Cleo"))
+          (org-agenda-mode-hook (list #'agent-task-keys-mode))
+          (pre-command-hook nil)
+          (post-command-hook nil))
+      (should (eq (keymap-lookup agent-task-keys-mode-map "D")
+                  #'agent-delegate-tasks))
+      (with-current-buffer (find-file-noselect file)
+        (agent-test-helper-in-agenda "Answer Ben"
+          (should (eq (key-binding (kbd "D")) #'agent-delegate-tasks))
+          (agent-task-keys-mode -1)
+          (should (eq (key-binding (kbd "D")) #'org-agenda-toggle-diary))
+          (agent-task-keys-mode 1)
+          (should (eq (key-binding (kbd "D")) #'agent-delegate-tasks))
+          (set-window-buffer (selected-window) (current-buffer))
+          (set-window-point (selected-window) (point))
+          (let ((inhibit-message t))
+            (execute-kbd-macro (kbd "D")))
+          (should (equal (agent-auto-test--started-instances)
+                         '("answer-ben")))
+          (agent-auto-test--mark-lines "Answer Cleo" "Answer Ann")
+          (set-window-point (selected-window) (point))
+          (let ((inhibit-message t))
+            (execute-kbd-macro (kbd "D")))
+          (should (equal (agent-auto-test--started-instances)
+                         '("answer-ben" "answer-cleo" "answer-ann")))
+          (should-not org-agenda-bulk-marked-entries)
+          (agent-task-keys-mode -1)
+          (should (eq (key-binding (kbd "D")) #'org-agenda-toggle-diary))))
+      (dolist (heading '("Answer Ann" "Answer Ben" "Answer Cleo"))
+        (should (agent-auto-test--records-its-session-p file heading))
+        (should (equal (agent-auto-test--tags file heading)
+                       '("listed" "agent"))))
+      (dolist (buffer agent-auto-test--buffers)
+        (should (buffer-local-value 'agent-auto--unattended buffer))))))
+
 ;;;; Where to look
 
 (ert-deftest agent-auto-test-looks-in-the-agenda-files-by-default ()
