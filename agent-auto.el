@@ -1528,11 +1528,27 @@ With prefix argument SEND, also send the session the task's text, as
      (send (agent-auto--send-task marker buffer (and from-session t)))
      ((agent-auto--confirm-link marker buffer)
       (agent-auto--link-task marker buffer)
+      (agent-auto--mark-linked marker)
       (message "Linked %s to the task “%s”"
                (agent-display-name buffer)
                (agent-auto--at-task
                 marker (lambda () (org-get-heading t t t t)))))
      (t (message "Nothing was linked")))))
+
+(defun agent-auto--mark-linked (marker)
+  "Move the task at MARKER to the in-progress keyword, as starting on it does.
+A session works on the task it is linked to as on one it was started
+from, so the task gets `agent-todo-in-progress-keyword' the same way,
+through `agent-todo--mark-in-progress'.  A task that has that keyword
+already, and one that is closed, keep the keyword they have."
+  (when (and agent-todo-in-progress-keyword
+             (agent-auto--at-task
+              marker
+              (lambda ()
+                (and (org-entry-is-todo-p)
+                     (not (equal (org-get-todo-state)
+                                 agent-todo-in-progress-keyword))))))
+    (agent-todo--mark-in-progress marker)))
 
 (defun agent-auto--task-at-point ()
   "Return a marker at the open Org task at point, or signal a `user-error'.

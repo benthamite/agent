@@ -2794,6 +2794,35 @@ the session writes its handover on the task."
       (should (equal (agent-auto-test--notes made "Made elsewhere")
                      '("Session closed: interrupted.\nDone: Half of it\nNext: the rest"))))))
 
+;; Seen live on 18 Nov 2026: a task a session was started from went to
+;; the in-progress keyword, and one a running session was linked to kept
+;; TODO, though a session was working on it just the same.
+(ert-deftest agent-auto-test-linking-marks-the-task-in-progress ()
+  "Move a task to the in-progress keyword when a session is linked to it.
+As when a session is started from the task, and saved when its buffer
+had no unsaved edits.  A task that has the keyword already keeps it, and
+with no in-progress keyword set nothing changes."
+  (dolist (case '(("DOING" "TODO" "DOING") ("DOING" "DOING" "DOING")
+                  (nil "TODO" "TODO")))
+    (pcase-let ((`(,keyword ,before ,after) case))
+      (agent-auto-test--with root
+        (let* ((agent-todo-in-progress-keyword keyword)
+               (file (agent-auto-test--file
+                      root (format "#+TODO: TODO DOING | DONE\n* %s Link me\n:PROPERTIES:\n:DIR: %s\n:END:\nIts body.\n"
+                                   before root)))
+               (buffer (agent-auto-test--open-session root "open" "sid-1")))
+          (agent-auto-test--completing "agent-test[^/]*\\'" _offered
+            (with-current-buffer (find-file-noselect file)
+              (goto-char (point-min))
+              (search-forward "Link me")
+              (agent-link-session)))
+          (should (buffer-local-value 'agent-auto--link buffer))
+          (should-not (buffer-modified-p (find-buffer-visiting file)))
+          (should (string-match-p (format "^\\* %s Link me" after)
+                                  (agent-auto-test--disk file)))
+          (should (string-match-p ":AGENT_SESSION: +sid-1"
+                                  (agent-auto-test--disk file))))))))
+
 (ert-deftest agent-auto-test-link-session-from-the-session ()
   "Link the session of the current buffer to a task chosen by completion.
 The open TODOs of the files searched are offered, those whose directory
