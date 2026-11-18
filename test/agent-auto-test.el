@@ -3444,6 +3444,48 @@ does not outlast the command."
           (let ((inhibit-message t))
             (org-agenda-bulk-unmark-all)))))))
 
+;; Protean bound s to a command of its own that wrapped agent.el's, in
+;; the lists it kept in step.  Sessions are agent.el's, so the key is too.
+(ert-deftest agent-auto-test-task-keys-mode-acts-on-tasks-from-an-agenda ()
+  "Act on tasks with s typed in an agenda that has the mode.
+The key is the mode's own: it runs the command only while the mode is on
+in the agenda, where it takes precedence over the agenda's key, beside S.
+Typed on a line it starts a session on the task of that line, and typed
+with lines marked a session on each marked task.  It goes through the
+command loop."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks
+                 root "Answer Ann" "Answer Ben" "Answer Cleo"))
+          (pre-command-hook nil)
+          (post-command-hook nil))
+      (should (eq (keymap-lookup agent-task-keys-mode-map "s")
+                  #'agent-act-on-tasks))
+      (should (eq (keymap-lookup agent-task-keys-mode-map "S")
+                  #'agent-link-session))
+      (with-current-buffer (find-file-noselect file)
+        (agent-test-helper-in-agenda "Answer Ben"
+          (should (eq (key-binding (kbd "s")) #'org-save-all-org-buffers))
+          (agent-task-keys-mode 1)
+          (should (eq (key-binding (kbd "s")) #'agent-act-on-tasks))
+          (set-window-buffer (selected-window) (current-buffer))
+          (set-window-point (selected-window) (point))
+          (agent-auto-test--keeping-buffer
+            (let ((inhibit-message t))
+              (execute-kbd-macro (kbd "s"))))
+          (should (equal (agent-auto-test--started-instances)
+                         '("answer-ben")))
+          (agent-auto-test--mark-lines "Answer Cleo" "Answer Ann")
+          (set-window-point (selected-window) (point))
+          (let ((inhibit-message t))
+            (execute-kbd-macro (kbd "s")))
+          (should (equal (agent-auto-test--started-instances)
+                         '("answer-ben" "answer-cleo" "answer-ann")))
+          (should-not org-agenda-bulk-marked-entries)
+          (agent-task-keys-mode -1)
+          (should (eq (key-binding (kbd "s")) #'org-save-all-org-buffers))))
+      (dolist (heading '("Answer Ann" "Answer Ben" "Answer Cleo"))
+        (should (agent-auto-test--records-its-session-p file heading))))))
+
 ;;;; Where to look
 
 (ert-deftest agent-auto-test-looks-in-the-agenda-files-by-default ()

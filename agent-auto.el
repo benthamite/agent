@@ -1850,22 +1850,24 @@ already, and the reason no session was started on each of the others."
 
 (defvar-keymap agent-task-keys-mode-map
   :doc "Keymap of `agent-task-keys-mode'.
-It holds the keys that act on the session of the task at point in a
-buffer that lists tasks.")
+It holds the keys that act on the tasks of a buffer that lists tasks and
+on their sessions: on the task at point, or on the marked tasks.")
 
 ;; The keys are set outside the `defvar-keymap', whose value form runs
 ;; only the first time: loading the package again in a running Emacs, as
 ;; an update does, would otherwise leave the keymap with the keys of the
 ;; old code.  Keys the user bound in the keymap stay.
+(keymap-set agent-task-keys-mode-map "s" #'agent-act-on-tasks)
 (keymap-set agent-task-keys-mode-map "S" #'agent-link-session)
 
 ;;;###autoload
 (define-minor-mode agent-task-keys-mode
-  "Minor mode with keys for the session of the task at point.
-It is for buffers that list tasks, such as an Org agenda, and is turned
-on in the lists it should work in from their hooks, as
-`org-agenda-mode-hook'.  Its keys take precedence over those of the
-buffer's major mode.
+  "Minor mode with keys for the tasks of a list and their sessions.
+The keys act on the task at point, and the one that starts sessions on
+the marked tasks when there are any.  The mode is for buffers that list
+tasks, such as an Org agenda, and is turned on in the lists it should
+work in from their hooks, as `org-agenda-mode-hook'.  Its keys take
+precedence over those of the buffer's major mode.
 
 \\{agent-task-keys-mode-map}"
   :keymap agent-task-keys-mode-map)
