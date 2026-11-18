@@ -5846,6 +5846,55 @@ every route ends in the same choice, with the suggestion selected."
          t))
       (should (equal sent (cons "url" target))))))
 
+(ert-deftest agent-test-before-delivery-functions-can-refuse ()
+  "Ask the before-delivery hook before a thing is sent to a running session.
+Each function gets the context and the session buffer, in the buffer the
+command was invoked from.  When one returns nil nothing is sent, the
+delivery hook and the after thunk do not run, and the command ends with
+a `user-error'.  The hook is not run for a session started for the
+thing."
+  (with-temp-buffer
+    (let* ((origin (current-buffer))
+           (target (generate-new-buffer " *agent-test-target*"))
+           (context (list :text "t" :payload "do it" :submit t
+                          :after (lambda () (error "Ran the after thunk"))))
+           (allow nil)
+           asked sent delivered)
+      (unwind-protect
+          (cl-letf (((symbol-function 'agent--read-session-buffer)
+                     (lambda () target))
+                    ((symbol-function 'agent-submit)
+                     (lambda (string _buffer) (push string sent)))
+                    ((symbol-function 'agent--start-session-in)
+                     (lambda (&rest _) target))
+                    ((symbol-function 'agent--resolve-backend) (lambda () 'test))
+                    ((symbol-function 'display-buffer) #'ignore))
+            (let ((agent-recorded-session-functions nil)
+                  (agent-before-delivery-functions
+                   (list (lambda (&rest arguments)
+                           (push (cons (current-buffer) arguments) asked)
+                           allow)))
+                  (agent-delivery-functions
+                   (list (lambda (&rest _) (setq delivered t)))))
+              (should-error (agent--act-on-context
+                             (agent-test--context-extractor context) t)
+                            :type 'user-error)
+              (should (equal asked (list (list origin context target))))
+              (should-not sent)
+              (should-not delivered)
+              (setq allow t
+                    context (list :text "t" :payload "do it" :submit t))
+              (agent--act-on-context (agent-test--context-extractor context) t)
+              (should (equal sent '("do it")))
+              (should delivered)
+              (setq asked nil allow nil)
+              (agent--act-on-context
+               (agent-test--context-extractor
+                (list :directory "/tmp/anchored/" :payload "do it" :submit t))
+               nil)
+              (should-not asked)))
+        (kill-buffer target)))))
+
 (ert-deftest agent-test-context-submits-when-it-asks ()
   "Submit the payload when the context says so, and run its after thunk."
   (with-temp-buffer

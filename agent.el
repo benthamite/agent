@@ -719,6 +719,16 @@ and before the context's `:after' thunk.  It is run for a session
 started for the thing and for a running session it was sent to; see
 `agent-at-point-things' for the context.")
 
+(defvar agent-before-delivery-functions nil
+  "Abnormal hook run before the thing at point is sent to a running session.
+Each function is called with the context plist the thing's extractor
+gave and the session buffer, in the buffer the command was invoked from,
+before anything is typed into the session.  When a function returns nil
+nothing is sent, `agent-delivery-functions' do not run, and the command
+ends with a `user-error'; a function that asks the user something
+returns nil for a declined question.  The hook is not run for a session
+started for the thing.")
+
 (defvar agent-recorded-session-functions nil
   "Abnormal hook finding the session the thing at point already has.
 `agent-act-on-thing-at-point' and the commands built on it run it before
@@ -4919,11 +4929,26 @@ a later one has its name read."
 
 (defun agent--deliver-to (context buffer origin)
   "Deliver CONTEXT's payload to running session BUFFER and return it.
-ORIGIN is the buffer the command was invoked from."
+ORIGIN is the buffer the command was invoked from.  Nothing is sent, and
+a `user-error' is signaled, when a function in
+`agent-before-delivery-functions' returns nil."
+  (agent--confirm-delivery context buffer origin)
   (if (plist-get context :submit)
       (agent-submit (plist-get context :payload) buffer)
     (agent-send-string (plist-get context :payload) buffer))
   (agent--finish-delivery context buffer origin))
+
+(defun agent--confirm-delivery (context buffer origin)
+  "Signal a `user-error' unless CONTEXT may be sent to running session BUFFER.
+It may when every function in `agent-before-delivery-functions' returns
+non-nil.  They run in ORIGIN, the buffer the command was invoked from,
+when it is still live."
+  (unless (with-current-buffer (if (buffer-live-p origin)
+                                   origin
+                                 (current-buffer))
+            (run-hook-with-args-until-failure
+             'agent-before-delivery-functions context buffer))
+    (user-error "Nothing was sent to %s" (agent-display-name buffer))))
 
 (defun agent--finish-delivery (context buffer origin)
   "Run CONTEXT's `:after' thunk, display session BUFFER and return it.
