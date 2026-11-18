@@ -1910,12 +1910,13 @@ session afterwards is, and takes the task back to its keyword."
 (ert-deftest agent-auto-test-wait-over-frees-that-task-alone ()
   "Take a task out of waiting when the hook says its wait is over.
 Its own session stays closed, and another session is open in the
-project.  The task alone goes back to its keyword, with a note that the
-wait is over; a task whose wait is not over stays, and so does the
-keyword of a task that was changed by hand, whose properties go all the
-same.  A function of the hook that signals is passed over.  The tasks
-are found by ripgrep: a file that records no wait is not visited, and
-without a function on the hook none is."
+project.  The task alone goes back to its keyword, with a note: the
+string the hook answered, or, for any other answer, that the wait is
+over.  A task whose wait is not over stays, and so does the keyword of a
+task that was changed by hand, whose properties go all the same.  The
+first function to answer decides, and one that signals is passed over.
+The tasks are found by ripgrep: a file that records no wait is not
+visited, and without a function on the hook none is."
   (agent-auto-test--with root
     (let* ((task (lambda (heading keyword session wait)
                    (format "* %s %s\n:PROPERTIES:\n:DIR: %s\n:AGENT_SESSION: %s\n:AGENT_KEYWORD: DOING\n:AGENT_WAIT: %s\n:END:\n"
@@ -1924,7 +1925,8 @@ without a function on the hook none is."
                   root (concat "#+TODO: TODO DOING WAITING | DONE\n"
                                (funcall task "First" "WAITING" "sid-1" "w-1")
                                (funcall task "Second" "WAITING" "sid-2" "w-2")
-                               (funcall task "Third" "TODO" "sid-3" "w-1"))))
+                               (funcall task "Third" "TODO" "sid-3" "w-3")
+                               (funcall task "Fourth" "WAITING" "sid-4" "w-4"))))
            (other (agent-auto-test--file root "* TODO Elsewhere\n" "other.org"))
            (asked nil))
       (agent-start-session
@@ -1933,15 +1935,21 @@ without a function on the hook none is."
       (should-not (find-buffer-visiting file))
       (let ((agent-auto-wait-over-functions
              (list (lambda (_wait) (error "Engine down"))
-                   (lambda (wait) (push wait asked) (equal wait "w-1")))))
+                   (lambda (wait)
+                     (push wait asked)
+                     (pcase wait
+                       ("w-1" "Ann replied.\n  She agrees.")
+                       ((or "w-3" "w-4") t)))
+                   (lambda (wait)
+                     (and (equal wait "w-1") "Never asked")))))
         (agent-auto-test--run))
-      (should (equal (sort asked #'string<) '("w-1" "w-1" "w-2")))
+      (should (equal (sort asked #'string<) '("w-1" "w-2" "w-3" "w-4")))
       (should-not (find-buffer-visiting other))
       (should (equal (agent-auto-test--keyword file "First") "DOING"))
       (should-not (agent-auto-test--property file "First" "AGENT_KEYWORD"))
       (should-not (agent-auto-test--property file "First" "AGENT_WAIT"))
       (should (equal (agent-auto-test--notes file "First")
-                     '("The wait is over: the task is DOING again.")))
+                     '("Ann replied.\nShe agrees.")))
       (should (equal (agent-auto-test--keyword file "Second") "WAITING"))
       (should (equal (agent-auto-test--property file "Second" "AGENT_WAIT")
                      "w-2"))
@@ -1951,6 +1959,9 @@ without a function on the hook none is."
       (should-not (agent-auto-test--property file "Third" "AGENT_WAIT"))
       (should (equal (agent-auto-test--notes file "Third")
                      '("The wait is over.")))
+      (should (equal (agent-auto-test--keyword file "Fourth") "DOING"))
+      (should (equal (agent-auto-test--notes file "Fourth")
+                     '("The wait is over: the task is DOING again.")))
       (should (string-match-p "^\\* DOING First" (agent-auto-test--disk file)))
       (should-not (buffer-modified-p (find-buffer-visiting file)))
       (should (= (length agent-auto-test--started) 1)))))

@@ -214,12 +214,15 @@ Each function is called with one argument, the wait a task records in
 `agent-auto-wait-property': the string its session's handover gave as
 `wait', which is whatever `agent-auto-wait-instructions' had the session
 register.  A non-nil value means the wait is over, whichever session
-heard of it: the task then goes back to the keyword it had before it
-was moved to `agent-auto-waiting-keyword', and a note in its log says
-that the wait is over.  The hook is run on every search of
-`agent-auto-mode', for each task that records a wait, so its functions
-must be quick and must not wait for anything; one that signals an error
-counts as answering nil.  With no function, tasks are not looked at."
+heard of it, and the first function to return one decides: the task
+then goes back to the keyword it had before it was moved to
+`agent-auto-waiting-keyword', and a note is added to its log.  A string
+is the text of that note, as \"Ann replied\" or \"No reply from Ann by
+the deadline\"; any other non-nil value gives a note that says the wait
+is over.  The hook is run on every search of `agent-auto-mode', for
+each task that records a wait, so its functions must be quick and must
+not wait for anything; one that signals an error counts as answering
+nil.  With no function, tasks are not looked at."
   :type 'hook
   :group 'agent-auto)
 
@@ -2532,8 +2535,9 @@ The task goes back to the keyword `agent-auto-keyword-property' records,
 and that property and `agent-auto-wait-property' go.  A task that is no
 longer in `agent-auto-waiting-keyword', its keyword having been changed
 by hand, keeps the keyword it has.  With OVER non-nil the wait itself is
-over, and a note in the task's log says so.  A task that records neither
-property is left as it is."
+over, and a note is added to the task's log: OVER when it is a string
+that is not blank, and otherwise one that says the wait is over.  A task
+that records neither property is left as it is."
   (let ((previous (org-entry-get nil agent-auto-keyword-property))
         (wait (org-entry-get nil agent-auto-wait-property))
         (back nil))
@@ -2548,16 +2552,20 @@ property is left as it is."
       (org-entry-delete nil agent-auto-wait-property)
       (when over
         (agent-auto--add-note
-         (list (if back
-                   (format "The wait is over: the task is %s again." previous)
-                 "The wait is over.")))))))
+         (cond ((and (stringp over) (not (string-blank-p over)))
+                (split-string (string-trim over) "[ \t]*\n[ \t\n]*"))
+               (back (list (format "The wait is over: the task is %s again."
+                                   previous)))
+               (t (list "The wait is over."))))))))
 
 (defun agent-auto--check-waits ()
   "Take out of waiting the tasks of the current buffer whose wait is over.
 A task's wait is over when a function in `agent-auto-wait-over-functions'
-says so of the wait the task records.  The tasks are found by searching
-for `agent-auto-wait-property', and nothing is searched while the hook
-has no function.  The buffer is saved when it was changed."
+says so of the wait the task records, and what the function answered
+decides the note the task gets; see `agent-auto--leave-waiting'.  The
+tasks are found by searching for `agent-auto-wait-property', and nothing
+is searched while the hook has no function.  The buffer is saved when it
+was changed."
   (when agent-auto-wait-over-functions
     (let ((regexp (format "^[ \t]*:%s:[ \t]+\\(.*?\\)[ \t]*$"
                           agent-auto-wait-property))
@@ -2566,15 +2574,18 @@ has no function.  The buffer is saved when it was changed."
       (org-with-wide-buffer
        (goto-char (point-min))
        (while (re-search-forward regexp nil t)
-         (when (and (agent-auto--wait-over-p (match-string-no-properties 1))
-                    (ignore-errors (org-back-to-heading t)))
-           (agent-auto--leave-waiting t))))
+         (when-let* ((over (agent-auto--wait-over-p
+                            (match-string-no-properties 1)))
+                     ((ignore-errors (org-back-to-heading t))))
+           (agent-auto--leave-waiting over))))
       (agent-todo--save))))
 
 (defun agent-auto--wait-over-p (wait)
-  "Return non-nil when `agent-auto-wait-over-functions' say WAIT is over.
-A function that signals an error is reported in *Messages* and counts as
-saying no, and the functions after it are still asked."
+  "Return what `agent-auto-wait-over-functions' answer for WAIT.
+That is the first non-nil value a function returns, which says that the
+wait is over, or nil.  A function that signals an error is reported in
+*Messages* and counts as answering nil, and the functions after it are
+still asked."
   (run-hook-wrapped
    'agent-auto-wait-over-functions
    (lambda (function)
