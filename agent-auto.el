@@ -1713,6 +1713,36 @@ is read in its own buffer; otherwise point is on the task already."
              (lambda (context)
                (agent--deliver-to context buffer origin)))))
 
+;;;; Acting on the tasks of a list
+
+;;;###autoload
+(defun agent-act-on-tasks (&optional existing)
+  "Act on the Org task at point, as `agent-act-on-thing-at-point' does.
+The task is the one the line at point shows in an agenda, or the heading
+at point in an Org buffer.  A session is started on it, or the session
+it records is shown, and resumed if need be.  With prefix argument
+EXISTING the task goes to a running session chosen by completion, and
+with a double prefix argument a new session is started whatever the task
+records.
+
+A task that is done or cancelled is refused, also when it records a
+session: the line of a task closed a moment ago is still in its list,
+and a session started on it would open the task again.
+
+The prefix argument is out of sight while the task is acted on.  An
+agenda that is built again meanwhile, by whichever package, is then
+built from its own search: with a prefix argument in sight, Org's
+rebuild of an agenda that searches for tags asks for the search again."
+  (interactive "P")
+  (unless (agent--org-entry-marker)
+    (user-error "Call this on an Org task or on an agenda line"))
+  (when (agent--at-org-entry #'org-entry-is-done-p)
+    (user-error "This task is closed"))
+  (let ((current-prefix-arg nil))
+    (agent-act-on-thing-at-point existing)))
+
+;;;; The keys of a list of tasks
+
 (defvar-keymap agent-task-keys-mode-map
   :doc "Keymap of `agent-task-keys-mode'.
 It holds the keys that act on the session of the task at point in a

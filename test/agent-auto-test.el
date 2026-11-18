@@ -3008,6 +3008,168 @@ point, and sends nothing."
                               (agent-auto-test--disk made)))
       (should (buffer-local-value 'agent-auto--link buffer)))))
 
+;;;; Acting on the tasks of a list
+
+(defun agent-auto-test--listed-tasks (root &rest headings)
+  "Write a file of open tasks named HEADINGS under ROOT and return it.
+Each task names ROOT as its directory, has a body, and carries the tag
+`listed' and no tag that offers it to an agent.  The file declares the
+keywords TODO and DOING, and DONE and CANCELLED for a closed task."
+  (agent-auto-test--file
+   root
+   (concat "#+TODO: TODO DOING | DONE CANCELLED\n"
+           (mapconcat
+            (lambda (heading)
+              (format "* TODO %s :listed:\n:PROPERTIES:\n:DIR: %s\n:END:\nBody of %s.\n"
+                      heading root heading))
+            headings ""))))
+
+(defun agent-auto-test--brief (heading)
+  "Return the brief of a task of `agent-auto-test--listed-tasks' named HEADING."
+  (format "%s\n\nBody of %s." heading heading))
+
+(ert-deftest agent-auto-test-act-on-tasks-acts-on-the-task-at-point ()
+  "Start a session on the task at point, and go back to it the next time.
+On a line of an agenda and on an Org heading the task gets what
+`agent-act-on-thing-at-point' gives it: a session in its directory,
+briefed with its text, which the task records.  Called again, the
+command shows that session and starts nothing."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks root "Fix it" "Ship it")))
+      (agent-auto-test--acting shown
+        (with-current-buffer (find-file-noselect file)
+          (agent-test-helper-in-agenda "Fix it"
+            (agent-auto-test--keeping-buffer (agent-act-on-tasks))
+            (should (= (length agent-auto-test--started) 1))
+            (pcase-let ((`(,session . ,options) (car agent-auto-test--started)))
+              (should (equal (agent-session-directory session) root))
+              (should (equal (agent-session-instance session) "fix-it"))
+              (should (equal (plist-get options :initial-prompt)
+                             (agent-auto-test--brief "Fix it"))))
+            (should (equal (agent-auto-test--property file "Fix it"
+                                                      "AGENT_SESSION")
+                           (buffer-name (car agent-auto-test--buffers))))
+            (setq shown nil)
+            (agent-auto-test--keeping-buffer (agent-act-on-tasks))
+            (should (equal shown (list (car agent-auto-test--buffers))))
+            (should (= (length agent-auto-test--started) 1)))
+          (goto-char (point-min))
+          (search-forward "Ship it")
+          (agent-auto-test--keeping-buffer (agent-act-on-tasks))
+          (should (= (length agent-auto-test--started) 2))
+          (should (equal (plist-get (cdar agent-auto-test--started)
+                                    :initial-prompt)
+                         (agent-auto-test--brief "Ship it")))
+          (should (equal (agent-auto-test--property file "Ship it"
+                                                    "AGENT_SESSION")
+                         (buffer-name (car agent-auto-test--buffers)))))))))
+
+;; `agent-act-on-thing-at-point' goes back to the session a closed task
+;; records.  A key typed on a line of a list is typed on what the line
+;; shows, and the line of a task closed a moment ago is still there.
+(ert-deftest agent-auto-test-act-on-tasks-refuses-a-closed-task ()
+  "Refuse a task that is done or cancelled, whatever the prefix argument.
+That holds for a task that records a running session, which is not
+shown, and for the line of a task closed from the agenda.  No session
+is started and the task keeps its state."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks root "Fix it" "Ship it"
+                                               "Drop it"))
+          (refusal (lambda (prefix)
+                     (cadr (should-error (agent-act-on-tasks prefix)
+                                         :type 'user-error)))))
+      (agent-auto-test--acting shown
+        (with-current-buffer (find-file-noselect file)
+          (goto-char (point-min))
+          (search-forward "Fix it")
+          (agent-auto-test--keeping-buffer (agent-act-on-tasks))
+          (should (= (length agent-auto-test--started) 1))
+          (org-todo "DONE")
+          (search-forward "Drop it")
+          (org-todo "CANCELLED")
+          (save-buffer)
+          (setq shown nil)
+          (dolist (closed '(("Fix it" . "DONE") ("Drop it" . "CANCELLED")))
+            (dolist (prefix '(nil (4) (16)))
+              (goto-char (point-min))
+              (search-forward (car closed))
+              (should (equal (funcall refusal prefix) "This task is closed"))
+              (should (equal (org-get-todo-state) (cdr closed)))))
+          (agent-test-helper-in-agenda "Ship it"
+            (let ((inhibit-message t))
+              (org-agenda-todo "DONE"))
+            (should (string-match-p "DONE Ship it"
+                                    (buffer-substring (pos-bol) (pos-eol))))
+            (should (equal (funcall refusal nil) "This task is closed"))))
+        (should-not shown))
+      (should (= (length agent-auto-test--started) 1))
+      (should (equal (agent-auto-test--keyword file "Ship it") "DONE")))))
+
+(ert-deftest agent-auto-test-act-on-tasks-needs-an-org-task ()
+  "Refuse to act where point is on no Org entry.
+The command is for tasks: it does not act on whatever else is at point,
+as `agent-act-on-thing-at-point' would."
+  (agent-auto-test--with root
+    (let ((message "Call this on an Org task or on an agenda line"))
+      (with-temp-buffer
+        (insert "Not a task.\n")
+        (should (equal (cadr (should-error (agent-act-on-tasks)
+                                           :type 'user-error))
+                       message))
+        (org-mode)
+        (should (equal (cadr (should-error (agent-act-on-tasks)
+                                           :type 'user-error))
+                       message)))
+      (should-not agent-auto-test--started))))
+
+;; Org rebuilds an agenda that searches for tags from a form that reads
+;; the prefix argument, and with one in sight asks for a new search.
+(ert-deftest agent-auto-test-act-on-tasks-keeps-the-prefix-argument-out-of-sight ()
+  "Pass the prefix argument on, and let no rebuild of the agenda see it.
+With one prefix argument the task goes to a running session, and with
+two to a new one.  Something else builds the agenda again while the task
+is acted on, as a package that keeps its list in step does, and does not
+hide the prefix argument itself: nothing is asked, and the agenda keeps
+its search."
+  (dolist (prefix '((4) (16)))
+    (agent-auto-test--with root
+      (let* ((file (agent-auto-test--listed-tasks root "Fix it"))
+             (open (agent-auto-test--open-session root "open" "sid-1"))
+             (rebuilt 0)
+             (agent-delivery-functions
+              (append agent-delivery-functions
+                      (list (lambda (&rest _)
+                              (when (derived-mode-p 'org-agenda-mode)
+                                (let ((inhibit-message t))
+                                  (org-agenda-redo t))
+                                (setq rebuilt (1+ rebuilt)))))))
+             asked)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt &rest _) (push prompt asked) "elsewhere"))
+                  ((symbol-function 'agent--read-session-buffer)
+                   (lambda () open)))
+          (with-current-buffer (find-file-noselect file)
+            (agent-test-helper-in-tags-agenda "listed" "Fix it"
+              (let ((current-prefix-arg prefix))
+                (agent-auto-test--keeping-buffer
+                  (call-interactively #'agent-act-on-tasks)))
+              (should (= rebuilt 1))
+              (should-not asked)
+              (should (equal org-agenda-query-string "listed"))
+              (goto-char (point-min))
+              (should (search-forward "Fix it" nil t)))))
+        (if (equal prefix '(4))
+            (progn
+              (should (equal agent-auto-test--submitted
+                             (list (cons (agent-auto-test--brief "Fix it")
+                                         open))))
+              (should (= (length agent-auto-test--started) 1)))
+          (should-not agent-auto-test--submitted)
+          (should (= (length agent-auto-test--started) 2))
+          (should (equal (plist-get (cdar agent-auto-test--started)
+                                    :initial-prompt)
+                         (agent-auto-test--brief "Fix it"))))))))
+
 ;;;; Where to look
 
 (ert-deftest agent-auto-test-looks-in-the-agenda-files-by-default ()
