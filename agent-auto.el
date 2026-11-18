@@ -42,6 +42,8 @@
 ;; task's log, its one-line result and its tag.  Each close has a
 ;; receipt on disk, kept until it is written on the task, so a handover
 ;; survives a task whose buffer has unsaved edits and a restart of Emacs.
+;; A session that closes without a handover leaves no note: its task's
+;; result says so, in one line.
 ;;
 ;; A timer does the looking.  It searches the files with ripgrep and
 ;; visits only those that have a ready task, edits an Org file only in
@@ -1735,9 +1737,9 @@ before then.  The arguments a hook passes are ignored."
 
 (defun agent-auto--session-killed ()
   "Follow the killing of the current buffer when it is a session.
-For `kill-buffer-hook'.  The marks are brought up to date, and a session
-linked to a task that closes without a handover leaves a note saying so;
-see `agent-auto--close-without-handover'."
+For `kill-buffer-hook'.  The marks are brought up to date, and the task
+of a session that closes without a handover says so in its result; see
+`agent-auto--close-without-handover'."
   (when agent--session
     (agent-auto--guard "noting a session's close"
       (agent-auto--close-without-handover (current-buffer)))
@@ -2054,8 +2056,9 @@ before, by an exit that was abandoned, is deleted."
   "Keep what session BUFFER wrote as its handover, for its task.
 This is the `:finish' function of the step `agent-auto--handover-step'
 gives.  A session that wrote nothing, or nothing that can be read,
-leaves a receipt saying so, and its exit goes on.  A session that was
-asked for no handover, or whose handover has been kept, leaves nothing."
+leaves a receipt saying so, which adds no note to the task and only
+replaces its result, and its exit goes on.  A session that was asked for
+no handover, or whose handover has been kept, leaves nothing."
   (when-let* ((file (buffer-local-value 'agent-auto--handover-answer buffer)))
     (let ((answer (agent-auto--read-answer file)))
       (agent-auto--forget-answer buffer)
@@ -2065,10 +2068,12 @@ asked for no handover, or whose handover has been kept, leaves nothing."
   "Leave a receipt for session BUFFER, which is being killed, if it has none.
 A session closed with `agent-exit' has left its handover by now.  One
 that is killed in any other way, as by `agent-exit-without-skills' or
-when its process ends, closes without one, and its task's log says so.
-What the session wrote before it was killed is kept all the same.  A
-session linked to no task leaves nothing, and neither does one killed
-for another to take its place; see `agent-session-being-replaced'."
+when its process ends, closes without one, and its task's result says
+so; no note is added to the task's log, since that is a common way to
+close a session and every note may be passed on to other people.  What
+the session wrote before it was killed is kept all the same.  A session
+linked to no task leaves nothing, and neither does one killed for
+another to take its place; see `agent-session-being-replaced'."
   (let ((file (buffer-local-value 'agent-auto--handover-answer buffer)))
     (when (and (buffer-local-value 'agent-auto--link buffer)
                (not (buffer-local-value 'agent-auto--handed-over buffer))
@@ -2132,7 +2137,10 @@ as the session left it: `:id', the receipt's own; `:created', the time;
 to a file of its own and then on the task, as soon as the task's buffer
 has no unsaved edits.  A session whose task is closed or gone leaves no
 receipt.  A handover replaces the result of the session's last turn, so
-one still waiting to be written is dropped."
+one still waiting to be written is dropped.  A close without a handover
+keeps that result, and takes what still waits to be written on the task
+for the result the task had, since it will have been written by the time
+the receipt is; see `agent-auto--waiting-result'."
   (with-current-buffer buffer
     (setq agent-auto--handed-over (plist-get answer :state)
           agent-auto--back nil))
@@ -2143,8 +2151,10 @@ one still waiting to be written is dropped."
                                  :file (agent-auto-link-file link)
                                  :session (agent-auto-link-recorded link))
                            task answer)))
-      (unless (equal (plist-get answer :state) "none")
-        (agent-auto--drop-pending link))
+      (if (agent-auto--handover-p receipt)
+          (agent-auto--drop-pending link)
+        (when-let* ((waiting (agent-auto--waiting-result link)))
+          (plist-put receipt :result waiting)))
       (agent-auto--save-handover receipt)
       (setq agent-auto--handovers
             (append agent-auto--handovers (list receipt)))
@@ -2187,17 +2197,41 @@ It is the time, to the microsecond, and four random digits."
                        (random #x10000))))
     (setq agent-auto--last-handover-id id)))
 
+(defun agent-auto--handover-p (receipt)
+  "Return non-nil when RECEIPT carries a handover.
+The receipt of a session that closed without one has the state \"none\"."
+  (not (equal (plist-get receipt :state) "none")))
+
 (defun agent-auto--drop-pending (link)
   "Forget the results still waiting to be written on the task of LINK."
   (setq agent-auto--pending
-        (seq-remove (lambda (entry)
-                      (let ((other (car entry)))
-                        (and (agent-auto--same-file-p
-                              (agent-auto-link-file other)
-                              (agent-auto-link-file link))
-                             (equal (agent-auto-link-recorded other)
-                                    (agent-auto-link-recorded link)))))
+        (seq-remove (lambda (entry) (agent-auto--same-link-p (car entry) link))
                     agent-auto--pending)))
+
+(defun agent-auto--waiting-result (link)
+  "Return the result that still waits to be written on the task of LINK, or nil.
+That is the result of the last handover whose receipt waits for the
+task, else that of the session's last turn."
+  (if-let* ((receipt (seq-find
+                      (lambda (receipt)
+                        (and (agent-auto--handover-p receipt)
+                             (agent-auto--same-file-p
+                              (plist-get receipt :file)
+                              (agent-auto-link-file link))
+                             (equal (agent-auto--handover-target receipt)
+                                    (agent-auto-link-recorded link))))
+                      (reverse agent-auto--handovers))))
+      (agent-auto--handover-result receipt)
+    (nth 2 (seq-find (lambda (entry)
+                       (agent-auto--same-link-p (car entry) link))
+                     agent-auto--pending))))
+
+(defun agent-auto--same-link-p (link other)
+  "Return non-nil when LINK and OTHER are links of the same task."
+  (and (agent-auto--same-file-p (agent-auto-link-file link)
+                                (agent-auto-link-file other))
+       (equal (agent-auto-link-recorded link)
+              (agent-auto-link-recorded other))))
 
 ;;;;; Receipts
 
@@ -2308,11 +2342,14 @@ done from a timer and not from inside this save."
 (defun agent-auto--flush-handovers ()
   "Write on their tasks the receipts that can now be written, the oldest first.
 A receipt is deleted once it is written and its task's buffer is saved.
-One whose task cannot be found is kept, and reported once."
+A handover whose task cannot be found is kept, and reported once; the
+receipt of a close without a handover has nothing to keep, and goes."
   (dolist (receipt (copy-sequence agent-auto--handovers))
     (pcase (agent-auto--apply-handover receipt)
       ('done (agent-auto--discard-handover receipt))
-      ('missing (agent-auto--report-lost-handover receipt)))))
+      ('missing (if (agent-auto--handover-p receipt)
+                    (agent-auto--report-lost-handover receipt)
+                  (agent-auto--discard-handover receipt))))))
 
 (defun agent-auto--apply-handover (receipt)
   "Write RECEIPT on its task; return `done', `deferred' or `missing'.
@@ -2323,7 +2360,7 @@ until the buffer is saved, and is then found written."
          (result (agent-auto--edit-at
                   file
                   (lambda () (agent-auto--goto-handover-task receipt))
-                  (lambda () (agent-auto--write-handover receipt)))))
+                  (lambda () (agent-auto--write-receipt receipt)))))
     (if (and (eq result 'done)
              (when-let* ((buffer (find-buffer-visiting file)))
                (buffer-modified-p buffer)))
@@ -2347,18 +2384,27 @@ one, and otherwise the one that records the receipt's session."
              (abbreviate-file-name (agent-auto--handover-file receipt)))
     (agent-auto--update-handover receipt :reported t)))
 
+(defun agent-auto--write-receipt (receipt)
+  "Write RECEIPT on the task at point.
+A handover leaves a note, a result, a tag and, for one state, a keyword;
+see `agent-auto--write-handover'.  A close without a handover leaves a
+result and nothing else; see `agent-auto--write-close'."
+  (if (agent-auto--handover-p receipt)
+      (agent-auto--write-handover receipt)
+    (agent-auto--write-close receipt)))
+
 (defun agent-auto--write-handover (receipt)
-  "Write RECEIPT on the task at point, unless it is written there already.
-The task records the id of the last receipt written on it, in
+  "Write the handover RECEIPT carries on the task at point, unless it is there.
+The task records the id of the last handover written on it, in
 `agent-auto-handover-property', so a receipt whose file outlived the
 writing, as when Emacs was killed in between, is not written twice.
 The dated note is history, and is always added.  The result, the tag
 and the keyword say where the task stands now, and are written only
-when `agent-auto--handover-current-p' holds."
+when `agent-auto--receipt-current-p' holds."
   (let ((id (plist-get receipt :id))
         (last (org-entry-get nil agent-auto-handover-property)))
     (unless (equal last id)
-      (let ((current (agent-auto--handover-current-p receipt last)))
+      (let ((current (agent-auto--receipt-current-p receipt last)))
         (agent-auto--add-note (agent-auto--handover-note receipt)
                               (plist-get receipt :created))
         (when current
@@ -2367,26 +2413,69 @@ when `agent-auto--handover-current-p' holds."
           (org-entry-put nil agent-auto-handover-property id))
         (agent-auto--log "handover %s: %s" id (plist-get receipt :state))))))
 
-(defun agent-auto--handover-current-p (receipt last)
+(defun agent-auto--write-close (receipt)
+  "Say in the result of the task at point that its session left no handover.
+RECEIPT is that of a session that closed without one.  The result is
+replaced only when `agent-auto--receipt-current-p' holds, as that of a
+handover is.  Nothing else is written: no note, since such a close is
+common and a note may be passed on to other people, and no tag, keyword
+or id.  A receipt written a second time finds the result changed, and
+writes nothing."
+  (when (agent-auto--receipt-current-p
+         receipt (org-entry-get nil agent-auto-handover-property))
+    (org-entry-put nil agent-auto-result-property
+                   (agent-auto--close-result receipt))
+    (agent-auto--log "closed without a handover: %s"
+                     (plist-get receipt :reason))))
+
+(defun agent-auto--close-result (receipt)
+  "Return the one-line result of RECEIPT, a close without a handover.
+It says that the session closed without one, and why, and keeps what the
+task's result said before: \"Closed without a handover (REASON); before
+that: RESULT\".  A result that already told of such a close is not
+nested: what came before that close is what is kept."
+  (let ((before (agent-auto--result-before-close (plist-get receipt :result))))
+    (agent-auto--one-line
+     (concat (format "Closed without a handover (%s)"
+                     (or (plist-get receipt :reason) "it left none"))
+             (and before (concat "; before that: " before))))))
+
+(defun agent-auto--result-before-close (result)
+  "Return what RESULT said before a close without a handover, or nil.
+RESULT is a task's result, or nil.  One that `agent-auto--close-result'
+made gives the result it kept, and any other is returned as it is."
+  (cond ((null result) nil)
+        ((string-match
+          "\\`Closed without a handover[^;]*\\(?:; before that: \\(.*\\)\\)?\\'"
+          result)
+         (match-string 1 result))
+        (t result)))
+
+(defun agent-auto--receipt-current-p (receipt last)
   "Return non-nil when RECEIPT still says where the task at point stands.
 A receipt written late must not undo what happened since its session
-closed.  It is current when it carries a handover; the task is open; it
-still records the session it recorded then; no later handover has been
-written on it, LAST being the id of the last one, or waits to be; and
-its result is the one it had then."
-  (and (not (equal (plist-get receipt :state) "none"))
-       (org-entry-is-todo-p)
+closed.  It is current when the task is open; it still records the
+session it recorded then; no later handover has been written on it, LAST
+being the id of the last one; no later receipt that replaces it waits to
+be, as `agent-auto--superseded-p' tells; and the task's result is the
+one it had then."
+  (and (org-entry-is-todo-p)
        (equal (org-entry-get nil agent-auto-session-property)
               (plist-get receipt :session))
        (not (and last (string> last (plist-get receipt :id))))
-       (not (agent-auto--later-handover-p receipt))
+       (not (agent-auto--superseded-p receipt))
        (equal (org-entry-get nil agent-auto-result-property)
               (plist-get receipt :result))))
 
-(defun agent-auto--later-handover-p (receipt)
-  "Return non-nil when a receipt later than RECEIPT waits for the same task."
+(defun agent-auto--superseded-p (receipt)
+  "Return non-nil when a later receipt waiting for the same task replaces RECEIPT.
+A handover gives way to a later handover only: a later close without one
+adds to what it says.  A close without a handover gives way to any later
+receipt."
   (seq-some (lambda (other)
               (and (string> (plist-get other :id) (plist-get receipt :id))
+                   (or (agent-auto--handover-p other)
+                       (not (agent-auto--handover-p receipt)))
                    (agent-auto--same-file-p (plist-get other :file)
                                             (plist-get receipt :file))
                    (if (plist-get receipt :org-id)
@@ -2446,26 +2535,22 @@ next step."
        (if (string-match-p "[.!?…]\\'" text) text (concat text "."))))
 
 (defun agent-auto--handover-note (receipt)
-  "Return the lines of the note RECEIPT leaves in its task's log.
-A handover gives how the session closed, what it did, the next step and
-every other field it gave, each in full.  A close without one says so,
-and why."
-  (if (equal (plist-get receipt :state) "none")
-      (list (format "Session closed without a handover: %s."
-                    (or (plist-get receipt :reason) "it left none")))
-    (cons (format "Session closed: %s."
-                  (pcase (plist-get receipt :state)
-                    ("waiting-on-someone" "waiting on someone")
-                    (_ (agent-auto--handover-title receipt))))
-          (delq nil
-                (mapcar (pcase-lambda (`(,label . ,field))
-                          (when-let* ((text (plist-get receipt field)))
-                            (format "%s: %s" label text)))
-                        '(("Done" . :summary)
-                          ("Next" . :next)
-                          ("Question" . :question)
-                          ("Waiting on" . :who)
-                          ("Waiting for" . :what)))))))
+  "Return the lines of the note the handover of RECEIPT leaves in a task's log.
+They give how the session closed, what it did, the next step and every
+other field the handover gave, each in full."
+  (cons (format "Session closed: %s."
+                (pcase (plist-get receipt :state)
+                  ("waiting-on-someone" "waiting on someone")
+                  (_ (agent-auto--handover-title receipt))))
+        (delq nil
+              (mapcar (pcase-lambda (`(,label . ,field))
+                        (when-let* ((text (plist-get receipt field)))
+                          (format "%s: %s" label text)))
+                      '(("Done" . :summary)
+                        ("Next" . :next)
+                        ("Question" . :question)
+                        ("Waiting on" . :who)
+                        ("Waiting for" . :what))))))
 
 ;;;;; Waiting on someone
 
