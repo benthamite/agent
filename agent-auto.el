@@ -195,6 +195,32 @@ default, adds nothing."
   :type 'string
   :group 'agent-auto)
 
+(defcustom agent-auto-waiting-keyword "WAITING"
+  "Org TODO keyword of a task whose session closed waiting on someone.
+A handover whose state is `waiting-on-someone' moves its task to this
+keyword, and records the keyword the task had, so that it can go back to
+it; see `agent-auto-keyword-property'.  No other state changes a task's
+keyword.  A task in a file whose keywords do not include it keeps its
+keyword.  Nil leaves the keyword of every task alone."
+  :type '(choice (const :tag "Leave the keyword alone" nil)
+                 (string :tag "Keyword"))
+  :group 'agent-auto)
+
+(defcustom agent-auto-wait-over-functions nil
+  "Abnormal hook telling whether a wait a task records is over.
+Each function is called with one argument, the wait a task records in
+`agent-auto-wait-property': the string its session's handover gave as
+`wait', which is whatever `agent-auto-wait-instructions' had the session
+register.  A non-nil value means the wait is over, whichever session
+heard of it: the task then goes back to the keyword it had before it
+was moved to `agent-auto-waiting-keyword', and a note in its log says
+that the wait is over.  The hook is run on every search of
+`agent-auto-mode', for each task that records a wait, so its functions
+must be quick and must not wait for anything; one that signals an error
+counts as answering nil.  With no function, tasks are not looked at."
+  :type 'hook
+  :group 'agent-auto)
+
 (defcustom agent-auto-handover-directory
   (expand-file-name "agent/handovers/" user-emacs-directory)
   "Directory holding the handover receipts not yet written on their tasks.
@@ -244,6 +270,16 @@ directory, as one given a worktree; a session is resumed where it ran.")
   "Org property holding the id of the last handover written on a task.
 A receipt whose id it holds has been written, and is not written again.")
 
+(defconst agent-auto-keyword-property "AGENT_KEYWORD"
+  "Org property recording the keyword a task had before it was set waiting.
+A handover that moves a task to `agent-auto-waiting-keyword' records it,
+and it goes when the task goes back to that keyword.")
+
+(defconst agent-auto-wait-property "AGENT_WAIT"
+  "Org property recording the wait a task's session registered.
+It holds the `wait' field of the session's handover; see
+`agent-auto-wait-over-functions'.")
+
 ;;;; State
 
 (cl-defstruct (agent-auto-link (:constructor agent-auto-link-create)
@@ -280,6 +316,11 @@ A session that works again is unsettled.")
 It is nil again once the session works on: a later close needs a
 handover of its own.")
 
+(defvar-local agent-auto--back nil
+  "Non-nil once this session's task was told that the session works again.
+A task that waits on someone goes back to its keyword when a turn starts
+in its session; the task is looked at for the first such turn only.")
+
 (defvar-local agent-auto--checked nil
   "The values of this session already searched for among the tasks.")
 
@@ -314,6 +355,10 @@ See `agent-auto--conclude'.")
   "The handover receipts not yet written on their tasks, the oldest first.
 Each is a plist, as `agent-auto--record-handover' makes it, and has a
 file of its own under `agent-auto-handover-directory'.")
+
+(defvar agent-auto--returning nil
+  "The links of the tasks to take out of waiting, their sessions working again.
+See `agent-auto--return'.")
 
 (defvar agent-auto--last-handover-id nil
   "The id of the receipt made last, so that the next one sorts after it.")
@@ -434,7 +479,7 @@ installs, without the mode being toggled."
   (agent-auto--guard "reading the handover receipts"
     (agent-auto--load-handovers))
   (cancel-function-timers #'agent-auto--run-flush)
-  (when (or agent-auto--handovers agent-auto--pending)
+  (when (or agent-auto--handovers agent-auto--pending agent-auto--returning)
     (agent-auto--schedule-flush))
   (cancel-function-timers #'agent-auto--tick)
   (setq agent-auto--timer
@@ -549,8 +594,10 @@ DIRECTORY is the home directory."
 ;;;; Searching
 
 (defun agent-auto--scan ()
-  "Search the files for ready tasks and recorded sessions.
-Each file ripgrep finds is then visited in a step of its own.  Nothing
+  "Search the files for ready tasks, recorded sessions and recorded waits.
+Waits are searched for only while `agent-auto-wait-over-functions' has a
+function to ask.  Each file ripgrep finds is then visited in a step of
+its own.  Nothing
 is searched while the steps of the search before are still running."
   (unless (or agent-auto--queue agent-auto--processes)
     (when-let* ((files (agent-auto--files)))
@@ -559,8 +606,11 @@ is searched while the steps of the search before are still running."
        (append '("--files-with-matches" "--null" "--fixed-strings"
                  "--no-messages")
                (mapcan (lambda (pattern) (list "-e" pattern))
-                       (cons (format ":%s:" agent-auto-ready-tag)
-                             (agent-auto--unchecked-values)))
+                       (append
+                        (list (format ":%s:" agent-auto-ready-tag))
+                        (and agent-auto-wait-over-functions
+                             (list (format ":%s:" agent-auto-wait-property)))
+                        (agent-auto--unchecked-values)))
                '("--")
                files)
        nil
@@ -599,11 +649,14 @@ once.  The values returned are marked as searched."
 
 (defun agent-auto--visit-file (file)
   "Link the sessions FILE records and queue its ready tasks.
-A file whose buffer has unsaved edits is left for a later search."
+The tasks whose wait is over leave the waiting keyword.  A file whose
+buffer has unsaved edits is left for a later search."
   (when-let* ((buffer (agent-auto--org-buffer file)))
     (with-current-buffer buffer
       (agent-auto--attach-recorded file))
     (when (eq (agent-auto--editable-buffer file) buffer)
+      (with-current-buffer buffer
+        (agent-auto--check-waits))
       (dolist (marker (with-current-buffer buffer
                         (agent-auto--ready-headings)))
         (agent-auto--enqueue
@@ -814,7 +867,8 @@ UNATTENDED is non-nil for a session the timer started; see
           agent-auto--last-event (float-time)
           agent-auto--settled nil
           agent-auto--exiting nil
-          agent-auto--handed-over nil))
+          agent-auto--handed-over nil
+          agent-auto--back nil))
   (agent-auto--schedule-marks))
 
 ;;;; Where sessions run
@@ -949,9 +1003,17 @@ For `agent-session-event-functions'."
 That is any turn but those of the session's exit; see
 `agent-auto--chain-turn-p'.  A handover the session left when its exit
 was asked for no longer closes it: the exit was abandoned, and a later
-one asks for a handover again."
+one asks for a handover again.  A task that waits on someone leaves the
+waiting keyword, the work on it being resumed, and a receipt not yet
+written on the task no longer sets it waiting."
   (with-current-buffer buffer
-    (setq agent-auto--handed-over nil)))
+    (setq agent-auto--handed-over nil))
+  (when-let* ((link (buffer-local-value 'agent-auto--link buffer)))
+    (agent-auto--mark-resumed link)
+    (unless (buffer-local-value 'agent-auto--back buffer)
+      (with-current-buffer buffer
+        (setq agent-auto--back t))
+      (agent-auto--return link))))
 
 (defun agent-auto--chain-turn-p (buffer)
   "Return non-nil when the turn of session BUFFER belongs to its exit.
@@ -1654,7 +1716,8 @@ session whose task is closed or gone leaves no receipt.  A handover
 replaces the result of the session's last turn, so one still waiting to
 be written is dropped."
   (with-current-buffer buffer
-    (setq agent-auto--handed-over (plist-get answer :state)))
+    (setq agent-auto--handed-over (plist-get answer :state)
+          agent-auto--back nil))
   (when-let* ((link (buffer-local-value 'agent-auto--link buffer))
               (task (agent-auto--task-at-close link)))
     (let ((receipt (append (list :id (agent-auto--handover-id)
@@ -1810,13 +1873,15 @@ before then.  A timer that was cancelled is replaced."
 Results go first: a receipt takes a result written since its session
 closed as a sign that the task has moved on."
   (agent-auto--flush-pending)
-  (agent-auto--flush-handovers))
+  (agent-auto--flush-handovers)
+  (agent-auto--flush-returning))
 
 (defun agent-auto--after-save ()
   "Write what waited for the current buffer to be saved.
 For `after-save-hook'.  The writing saves the buffer again, so it is
 done from a timer and not from inside this save."
-  (when (and (or agent-auto--pending agent-auto--handovers)
+  (when (and (or agent-auto--pending agent-auto--handovers
+                 agent-auto--returning)
              (derived-mode-p 'org-mode))
     (agent-auto--schedule-flush)))
 
@@ -1866,9 +1931,9 @@ one, and otherwise the one that records the receipt's session."
 The task records the id of the last receipt written on it, in
 `agent-auto-handover-property', so a receipt whose file outlived the
 writing, as when Emacs was killed in between, is not written twice.
-The dated note is history, and is always added.  The result and the tag
-say where the task stands now, and are written only when
-`agent-auto--handover-current-p' holds."
+The dated note is history, and is always added.  The result, the tag
+and the keyword say where the task stands now, and are written only
+when `agent-auto--handover-current-p' holds."
   (let ((id (plist-get receipt :id))
         (last (org-entry-get nil agent-auto-handover-property)))
     (unless (equal last id)
@@ -1913,7 +1978,9 @@ its result is the one it had then."
   "Give the task at point the result and the tag of RECEIPT.
 A session that closed finished leaves the review tag, and one that needs
 the user the blocked tag; the other two states leave none.  Whichever
-of the ready and result tags the task carried goes."
+of the ready and result tags the task carried goes.  A session that
+closed waiting on someone also sets the task waiting; see
+`agent-auto--set-waiting'."
   (let* ((tags (org-get-tags nil t))
          (lifecycle (list agent-auto-ready-tag agent-auto-review-tag
                           agent-auto-blocked-tag agent-auto-stuck-tag))
@@ -1924,7 +1991,9 @@ of the ready and result tags the task carried goes."
     (unless (equal new tags)
       (org-set-tags new))
     (org-entry-put nil agent-auto-result-property
-                   (agent-auto--handover-result receipt))))
+                   (agent-auto--handover-result receipt))
+    (when (equal (plist-get receipt :state) "waiting-on-someone")
+      (agent-auto--set-waiting receipt))))
 
 (defun agent-auto--handover-title (receipt)
   "Return in a few words how the session of RECEIPT closed."
@@ -1975,6 +2044,125 @@ and why."
                           ("Question" . :question)
                           ("Waiting on" . :who)
                           ("Waiting for" . :what)))))))
+
+;;;;; Waiting on someone
+
+(defun agent-auto--set-waiting (receipt)
+  "Move the task at point to the waiting keyword, as RECEIPT asks.
+The keyword is `agent-auto-waiting-keyword', when the buffer's keywords
+include it.  The task records the keyword it had in
+`agent-auto-keyword-property' and the wait the session registered in
+`agent-auto-wait-property'.  A task whose keyword changed since the
+session closed keeps the keyword it has, and so does one whose session
+has started a turn since: the work on it was resumed."
+  (let ((keyword agent-auto-waiting-keyword)
+        (current (org-get-todo-state))
+        (wait (plist-get receipt :wait)))
+    (when (and keyword
+               (member keyword org-todo-keywords-1)
+               (equal current (plist-get receipt :keyword))
+               (not (plist-get receipt :resumed)))
+      (unless (equal current keyword)
+        (agent-auto--set-keyword keyword)
+        (when (equal (org-get-todo-state) keyword)
+          (org-entry-put nil agent-auto-keyword-property
+                         (substring-no-properties current))))
+      (when (equal (org-get-todo-state) keyword)
+        (if wait
+            (org-entry-put nil agent-auto-wait-property wait)
+          (org-entry-delete nil agent-auto-wait-property))))))
+
+(defun agent-auto--set-keyword (keyword)
+  "Give the task at point the TODO KEYWORD, and log nothing of it.
+Org would otherwise ask for a note, or add a line to the log after the
+command, where a keyword is set up to be logged; the notes this file
+writes say what happened."
+  (let ((org-inhibit-logging t))
+    (org-todo keyword)))
+
+(defun agent-auto--mark-resumed (link)
+  "Note in the receipts waiting for the task of LINK that its session works on.
+Such a receipt, written later, no longer sets the task waiting."
+  (dolist (receipt agent-auto--handovers)
+    (when (and (equal (plist-get receipt :file) (agent-auto-link-file link))
+               (equal (agent-auto--handover-target receipt)
+                      (agent-auto-link-recorded link))
+               (not (plist-get receipt :resumed)))
+      (agent-auto--update-handover receipt :resumed t))))
+
+(defun agent-auto--return (link)
+  "Take the task of LINK out of waiting, its session working again.
+A task whose buffer has unsaved edits leaves it once the buffer is
+saved."
+  (unless (member link agent-auto--returning)
+    (setq agent-auto--returning (append agent-auto--returning (list link))))
+  (agent-auto--schedule-flush))
+
+(defun agent-auto--flush-returning ()
+  "Take out of waiting the tasks of `agent-auto--returning' that can be edited."
+  (setq agent-auto--returning
+        (seq-filter (lambda (link)
+                      (eq (agent-auto--edit-task link #'agent-auto--leave-waiting)
+                          'deferred))
+                    agent-auto--returning)))
+
+(defun agent-auto--leave-waiting (&optional over)
+  "Take the task at point out of the waiting a handover set it in.
+The task goes back to the keyword `agent-auto-keyword-property' records,
+and that property and `agent-auto-wait-property' go.  A task that is no
+longer in `agent-auto-waiting-keyword', its keyword having been changed
+by hand, keeps the keyword it has.  With OVER non-nil the wait itself is
+over, and a note in the task's log says so.  A task that records neither
+property is left as it is."
+  (let ((previous (org-entry-get nil agent-auto-keyword-property))
+        (wait (org-entry-get nil agent-auto-wait-property))
+        (back nil))
+    (when (or previous wait)
+      (when (and previous
+                 agent-auto-waiting-keyword
+                 (equal (org-get-todo-state) agent-auto-waiting-keyword)
+                 (member previous org-todo-keywords-1))
+        (agent-auto--set-keyword previous)
+        (setq back (equal (org-get-todo-state) previous)))
+      (org-entry-delete nil agent-auto-keyword-property)
+      (org-entry-delete nil agent-auto-wait-property)
+      (when over
+        (agent-auto--add-note
+         (list (if back
+                   (format "The wait is over: the task is %s again." previous)
+                 "The wait is over.")))))))
+
+(defun agent-auto--check-waits ()
+  "Take out of waiting the tasks of the current buffer whose wait is over.
+A task's wait is over when a function in `agent-auto-wait-over-functions'
+says so of the wait the task records.  The tasks are found by searching
+for `agent-auto-wait-property', and nothing is searched while the hook
+has no function.  The buffer is saved when it was changed."
+  (when agent-auto-wait-over-functions
+    (let ((regexp (format "^[ \t]*:%s:[ \t]+\\(.*?\\)[ \t]*$"
+                          agent-auto-wait-property))
+          (case-fold-search nil)
+          (inhibit-message t))
+      (org-with-wide-buffer
+       (goto-char (point-min))
+       (while (re-search-forward regexp nil t)
+         (when (and (agent-auto--wait-over-p (match-string-no-properties 1))
+                    (ignore-errors (org-back-to-heading t)))
+           (agent-auto--leave-waiting t))))
+      (agent-todo--save))))
+
+(defun agent-auto--wait-over-p (wait)
+  "Return non-nil when `agent-auto-wait-over-functions' say WAIT is over.
+A function that signals an error is reported in *Messages* and counts as
+saying no, and the functions after it are still asked."
+  (run-hook-wrapped
+   'agent-auto-wait-over-functions
+   (lambda (function)
+     (condition-case err
+         (funcall function wait)
+       (error (agent-auto--log "%s could not say whether the wait %s is over: %s"
+                               function wait (error-message-string err))
+              nil)))))
 
 ;;;;; Notes
 

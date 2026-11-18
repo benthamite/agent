@@ -91,6 +91,9 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-auto--flush-timer nil)
            (agent-auto-handover-directory (expand-file-name "handovers/" ,root))
            (agent-auto-wait-instructions "")
+           (agent-auto-waiting-keyword "WAITING")
+           (agent-auto-wait-over-functions nil)
+           (agent-auto--returning nil)
            (agent-before-exit-step-functions (list #'agent-auto--handover-step))
            (after-save-hook (list #'agent-auto--after-save))
            (org-log-into-drawer t)
@@ -1238,14 +1241,15 @@ written after this has seen the hook ask for it."
     (cancel-timer agent-auto--flush-timer)
     (agent-auto--run-flush)))
 
-(defun agent-auto-test--working-task (root &optional properties)
+(defun agent-auto-test--working-task (root &optional properties keywords)
   "Start a session by hand on the one task of a new file under ROOT.
-The file declares the keywords TODO, DOING, WAITING and DONE, and the
-task is left in DOING, as in the middle of the work.  PROPERTIES is text
-added to its property drawer.  The session has the id sid-1 and takes
-text; see `agent-auto-test--take-text'.  Return (FILE . BUFFER)."
+The file declares KEYWORDS, by default TODO, DOING, WAITING and DONE,
+and the task is left in DOING, as in the middle of the work.  PROPERTIES
+is text added to its property drawer.  The session has the id sid-1 and
+takes text; see `agent-auto-test--take-text'.  Return (FILE . BUFFER)."
   (let ((file (agent-auto-test--file
-               root (format "#+TODO: TODO DOING WAITING | DONE\n* TODO Fix it\n:PROPERTIES:\n:DIR: %s\n%s:END:\nThe body.\n"
+               root (format "#+TODO: %s\n* TODO Fix it\n:PROPERTIES:\n:DIR: %s\n%s:END:\nThe body.\n"
+                            (or keywords "TODO DOING WAITING | DONE")
                             root (or properties "")))))
     (with-current-buffer (find-file-noselect file)
       (goto-char (point-min))
@@ -1759,6 +1763,228 @@ Such a task has no Org ID and no longer records the session."
         (should-not (string-match-p "no task for a handover" messages)))
       (should (= (length (agent-auto-test--receipt-files)) 1))
       (should-not (agent-auto-test--notes file "Fix it")))))
+
+;;;; Waiting on someone
+
+(defconst agent-auto-test--waiting
+  '(:state "waiting-on-someone" :summary "Asked for the invoice"
+    :next "pay it" :who "the accountant" :what "the invoice" :wait "w-17")
+  "The handover of a session that closes waiting on someone.")
+
+(ert-deftest agent-auto-test-handover-waiting-on-someone ()
+  "Set a task waiting when its session closed waiting on someone, and back.
+The task moves to the waiting keyword and records the keyword it had and
+the wait its session registered; the note says who is waited for and for
+what.  Org logs nothing of the change of keyword and asks for no note,
+also where the keyword is set up to be logged.  Resuming the session
+changes nothing; a turn that starts in it takes the task back to its
+keyword, and both properties go."
+  (dolist (keywords '(nil "TODO(t) DOING(d) WAITING(w@/!) | DONE(x@)"))
+    (agent-auto-test--with root
+      (pcase-let* ((post-command-hook nil)
+                   (`(,file . ,buffer)
+                    (agent-auto-test--working-task root nil keywords)))
+        (agent-auto-test--hand-over buffer agent-auto-test--waiting)
+        (should-not post-command-hook)
+        (should (equal (agent-auto-test--keyword file "Fix it") "WAITING"))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_KEYWORD")
+                       "DOING"))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_WAIT")
+                       "w-17"))
+        (should-not (agent-auto-test--tags file "Fix it"))
+        (should (equal (agent-auto-test--notes file "Fix it")
+                       '("Session closed: waiting on someone.\nDone: Asked for the invoice\nNext: pay it\nWaiting on: the accountant\nWaiting for: the invoice")))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                       "Waiting on the accountant: Asked for the invoice. Next: pay it"))
+        (should (string-match-p "^\\* WAITING Fix it"
+                                (agent-auto-test--disk file)))
+        (should-not (string-match-p "State \"" (agent-auto-test--disk file)))
+        (setq buffer (agent-auto-test--resume root))
+        (agent-auto-test--flush-due)
+        (should (equal (agent-auto-test--keyword file "Fix it") "WAITING"))
+        (agent-session-event buffer 'user-submit)
+        (agent-auto-test--flush-due)
+        (should-not post-command-hook)
+        (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
+        (should-not (agent-auto-test--property file "Fix it" "AGENT_KEYWORD"))
+        (should-not (agent-auto-test--property file "Fix it" "AGENT_WAIT"))
+        (should (= (length (agent-auto-test--notes file "Fix it")) 1))
+        (should (string-match-p "^\\* DOING Fix it" (agent-auto-test--disk file)))
+        (should-not (string-match-p "State \"" (agent-auto-test--disk file)))
+        (should-not (buffer-modified-p (find-buffer-visiting file)))))))
+
+(ert-deftest agent-auto-test-waiting-survives-the-exit-chain ()
+  "Keep a task waiting through every turn of the chain that closes its session.
+The skills that follow the handover, the activity of their turns and the
+exit itself are no resumption of the work.  A turn started in the
+session afterwards is, and takes the task back to its keyword."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                (agent-before-exit-skill-names '("update-log" "retro")))
+      (agent-auto-test--exiting
+        (agent-auto-test--ask-exit buffer)
+        (agent-auto-test--answer buffer agent-auto-test--waiting)
+        (should (equal (agent-auto-test--keyword file "Fix it") "WAITING"))
+        (should (equal (caar agent-auto-test--submitted) "/update-log"))
+        (agent-session-event buffer 'activity)
+        (agent-session-event buffer 'stop)
+        (should (equal (caar agent-auto-test--submitted) "/retro"))
+        (agent-session-event buffer 'activity)
+        (agent-session-event buffer 'stop)
+        (should (eq (plist-get (buffer-local-value 'agent--before-exit buffer)
+                               :state)
+                    'closing))
+        (agent-submit "/exit" buffer)
+        (agent-auto-test--flush-due)
+        (should-not agent-auto--returning)
+        (should (equal (agent-auto-test--keyword file "Fix it") "WAITING"))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_KEYWORD")
+                       "DOING")))
+      (setq buffer (agent-auto-test--resume root))
+      (agent-session-event buffer 'submit)
+      (agent-auto-test--flush-due)
+      (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_KEYWORD")))))
+
+(ert-deftest agent-auto-test-wait-over-frees-that-task-alone ()
+  "Take a task out of waiting when the hook says its wait is over.
+Its own session stays closed, and another session is open in the
+project.  The task alone goes back to its keyword, with a note that the
+wait is over; a task whose wait is not over stays, and so does the
+keyword of a task that was changed by hand, whose properties go all the
+same.  A function of the hook that signals is passed over.  The tasks
+are found by ripgrep: a file that records no wait is not visited, and
+without a function on the hook none is."
+  (agent-auto-test--with root
+    (let* ((task (lambda (heading keyword session wait)
+                   (format "* %s %s\n:PROPERTIES:\n:DIR: %s\n:AGENT_SESSION: %s\n:AGENT_KEYWORD: DOING\n:AGENT_WAIT: %s\n:END:\n"
+                           keyword heading root session wait)))
+           (file (agent-auto-test--file
+                  root (concat "#+TODO: TODO DOING WAITING | DONE\n"
+                               (funcall task "First" "WAITING" "sid-1" "w-1")
+                               (funcall task "Second" "WAITING" "sid-2" "w-2")
+                               (funcall task "Third" "TODO" "sid-3" "w-1"))))
+           (other (agent-auto-test--file root "* TODO Elsewhere\n" "other.org"))
+           (asked nil))
+      (agent-start-session
+       (agent-session-create :backend 'stub :directory root :instance "open"))
+      (agent-auto-test--run)
+      (should-not (find-buffer-visiting file))
+      (let ((agent-auto-wait-over-functions
+             (list (lambda (_wait) (error "Engine down"))
+                   (lambda (wait) (push wait asked) (equal wait "w-1")))))
+        (agent-auto-test--run))
+      (should (equal (sort asked #'string<) '("w-1" "w-1" "w-2")))
+      (should-not (find-buffer-visiting other))
+      (should (equal (agent-auto-test--keyword file "First") "DOING"))
+      (should-not (agent-auto-test--property file "First" "AGENT_KEYWORD"))
+      (should-not (agent-auto-test--property file "First" "AGENT_WAIT"))
+      (should (equal (agent-auto-test--notes file "First")
+                     '("The wait is over: the task is DOING again.")))
+      (should (equal (agent-auto-test--keyword file "Second") "WAITING"))
+      (should (equal (agent-auto-test--property file "Second" "AGENT_WAIT")
+                     "w-2"))
+      (should-not (agent-auto-test--notes file "Second"))
+      (should (equal (agent-auto-test--keyword file "Third") "TODO"))
+      (should-not (agent-auto-test--property file "Third" "AGENT_KEYWORD"))
+      (should-not (agent-auto-test--property file "Third" "AGENT_WAIT"))
+      (should (equal (agent-auto-test--notes file "Third")
+                     '("The wait is over.")))
+      (should (string-match-p "^\\* DOING First" (agent-auto-test--disk file)))
+      (should-not (buffer-modified-p (find-buffer-visiting file)))
+      (should (= (length agent-auto-test--started) 1)))))
+
+(ert-deftest agent-auto-test-wait-over-waits-for-a-saved-buffer ()
+  "Leave a waiting task alone while its buffer has unsaved edits."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (concat "#+TODO: TODO DOING WAITING | DONE\n"
+                               "* WAITING First\n:PROPERTIES:\n:AGENT_KEYWORD: DOING\n:AGENT_WAIT: w-1\n:END:\n")))
+           (org (find-file-noselect file))
+           (agent-auto-wait-over-functions (list (lambda (_wait) t))))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (agent-auto-test--run)
+      (should (equal (agent-auto-test--keyword file "First") "WAITING"))
+      (with-current-buffer org
+        (save-buffer))
+      (agent-auto-test--run)
+      (should (equal (agent-auto-test--keyword file "First") "DOING")))))
+
+(ert-deftest agent-auto-test-waiting-keyword-can-be-off ()
+  "Leave the keyword alone when the option is nil or the file lacks the keyword.
+The note, the result and the tag are written all the same, and nothing
+is recorded of a keyword or a wait."
+  (dolist (case '((nil . nil) ("WAITING" . "TODO DOING | DONE")))
+    (agent-auto-test--with root
+      (pcase-let ((`(,file . ,buffer)
+                   (agent-auto-test--working-task root nil (cdr case)))
+                  (agent-auto-waiting-keyword (car case)))
+        (agent-test-helper-with-messages messages
+          (agent-auto-test--hand-over buffer agent-auto-test--waiting)
+          (let ((case-fold-search nil))
+            (should-not (string-match-p "WAITING\\|keyword" messages))))
+        (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
+        (should-not (agent-auto-test--property file "Fix it" "AGENT_KEYWORD"))
+        (should-not (agent-auto-test--property file "Fix it" "AGENT_WAIT"))
+        (should (= (length (agent-auto-test--notes file "Fix it")) 1))
+        (should (string-prefix-p
+                 "Waiting on the accountant"
+                 (agent-auto-test--property file "Fix it" "AGENT_RESULT")))))))
+
+(ert-deftest agent-auto-test-late-receipt-sets-nothing-waiting ()
+  "Leave the keyword alone when a receipt that asks for waiting is written late.
+After a turn started in the resumed session, and after the keyword was
+changed by hand: the note is added, and the task keeps its keyword."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                 (org (find-buffer-visiting file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (agent-auto-test--hand-over buffer agent-auto-test--waiting)
+      (setq buffer (agent-auto-test--resume root))
+      (agent-session-event buffer 'submit)
+      (with-current-buffer org
+        (save-buffer))
+      (agent-auto-test--flush-due)
+      (should (= (length (agent-auto-test--notes file "Fix it")) 1))
+      (should (equal (agent-auto-test--keyword file "Fix it") "DOING"))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_KEYWORD"))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_WAIT"))
+      (should-not (agent-auto-test--receipt-files))))
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                 (org (find-buffer-visiting file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (agent-auto-test--hand-over buffer agent-auto-test--waiting)
+      (agent-auto-test--at file "Fix it" (lambda () (org-todo "TODO")))
+      (with-current-buffer org
+        (save-buffer))
+      (agent-auto-test--flush-due)
+      (should (= (length (agent-auto-test--notes file "Fix it")) 1))
+      (should (equal (agent-auto-test--keyword file "Fix it") "TODO"))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_KEYWORD"))
+      (should-not (agent-auto-test--receipt-files)))))
+
+(ert-deftest agent-auto-test-hand-changed-keyword-is-left-alone ()
+  "Keep the keyword a waiting task was given by hand when its session works on.
+The properties that recorded the wait go all the same."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+      (agent-auto-test--hand-over buffer agent-auto-test--waiting)
+      (agent-auto-test--at file "Fix it" (lambda () (org-todo "TODO")))
+      (with-current-buffer (find-buffer-visiting file)
+        (save-buffer))
+      (setq buffer (agent-auto-test--resume root))
+      (agent-session-event buffer 'user-submit)
+      (agent-auto-test--flush-due)
+      (should (equal (agent-auto-test--keyword file "Fix it") "TODO"))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_KEYWORD"))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_WAIT")))))
 
 ;;;; Acting on a task that records a session
 
