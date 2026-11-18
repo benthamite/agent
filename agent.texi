@@ -473,7 +473,7 @@ A session that is closed before its task is finished leaves the task saying wher
 
 @vindex agent-auto-handover-prompt
 @vindex agent-auto-wait-instructions
-The prompt is @code{agent-auto-handover-prompt}. It asks the session to write one JSON object to a file whose name replaces @samp{%f} in it (@samp{%%} gives a percent sign)@comma{} with these fields@comma{} every value a string:
+The prompt is @code{agent-auto-handover-prompt}. It names the task by its heading@comma{} which replaces @samp{%t} in it@comma{} and asks the session to write one JSON object to a file whose name replaces @samp{%f} (@samp{%%} gives a percent sign)@comma{} with these fields@comma{} every value a string:
 
 @multitable {aaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Field
@@ -492,7 +492,7 @@ The prompt is @code{agent-auto-handover-prompt}. It asks the session to write on
 @tab For @samp{waiting-on-someone}: the id of the wait the session registered@comma{} or an empty string
 @end multitable
 
-The default prompt also forbids quoting or pasting a message@comma{} an email or any other private material: the session says what happened in its own words@comma{} since the note can travel beyond the Org file. It tells the session to do nothing else in that turn. A prompt of your own has to name the fields@comma{} since nothing else tells the session about them. @code{agent-auto-wait-instructions}@comma{} a string that is empty by default@comma{} is added to the prompt as its last paragraph; it is where you say how a session registers a wait for someone's reply@comma{} so that it can name the wait in @samp{wait}.
+The default prompt also forbids quoting or pasting a message@comma{} an email or any other private material: the session says what happened in its own words@comma{} since the note can travel beyond the Org file. It tells the session to do nothing else in that turn. A prompt of your own has to name the fields@comma{} since nothing else tells the session about them. @code{agent-auto-wait-instructions}@comma{} a string that is empty by default@comma{} is added at the end of the prompt@comma{} on the same line; it is where you say how a session registers a wait for someone's reply@comma{} so that it can name the wait in @samp{wait}.
 
 @vindex agent-auto-handover-property
 When the turn ends@comma{} the handover is written on the task with the machinery that writes results: in the buffer visiting the file@comma{} never through a window or point.

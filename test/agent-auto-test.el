@@ -1329,23 +1329,25 @@ skills."
             (should (string-search answer prompt))
             (should-not (file-exists-p answer))
             (should (file-directory-p (file-name-directory answer)))
-            (dolist (word '("`state'" "`finished'" "`needs-pablo'"
-                            "`waiting-on-someone'" "`interrupted'" "`summary'"
-                            "`next'" "`question'" "`who'" "`what'" "`wait'"
-                            "never quote"))
+            (dolist (word '("the task \"Fix it\"" "`state`" "`finished`"
+                            "`needs-pablo`" "`waiting-on-someone`"
+                            "`interrupted`" "`summary`" "`next`" "`question`"
+                            "`who`" "`what`" "`wait`" "never quote"))
               (should (string-search word prompt)))
-            (should (string-suffix-p "\n\nRegister the wait with waits add."
+            (should (string-suffix-p " anyone.  Register the wait with waits add."
                                      prompt))
+            (should-not (string-search "\n" prompt))
             (agent-auto-test--answer buffer '(:state "interrupted"))
             (should (equal (caar agent-auto-test--submitted) "/update-log"))
             (should-not (file-exists-p (file-name-directory answer)))))))))
 
 (ert-deftest agent-auto-test-handover-prompt-takes-the-file-name ()
-  "Put the file's name where the prompt has %f, and keep a doubled percent."
-  (let ((agent-auto-handover-prompt "Write to %f, 100%% of it.")
+  "Put the file's name where the prompt has %f and the task's heading for %t.
+A doubled percent sign is one, and any other is left as it is."
+  (let ((agent-auto-handover-prompt "For %t write to %f, 100%% of it, %x.")
         (agent-auto-wait-instructions ""))
-    (should (equal (agent-auto--handover-prompt "/tmp/x/handover.json")
-                   "Write to /tmp/x/handover.json, 100% of it."))))
+    (should (equal (agent-auto--handover-prompt "/tmp/x/handover.json" "Fix it")
+                   "For Fix it write to /tmp/x/handover.json, 100% of it, %x."))))
 
 (ert-deftest agent-auto-test-handover-is-asked-only-for-an-open-task ()
   "Ask no session for a handover that has no task, or whose task is closed.
@@ -1766,6 +1768,37 @@ the task had."
       (should-not (agent-auto-test--property file "Fix it" "AGENT_RESULT"))
       (should-not (agent-auto-test--receipt-files)))))
 
+(ert-deftest agent-auto-test-late-receipt-finds-a-task-given-another-session ()
+  "Write the note of a receipt whose task was linked to another session since.
+The task has no Org ID and no longer records the session that closed;
+the receipt finds it all the same, adds its note, and leaves the task
+with the session, the tags and the result it has."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                 (org (find-buffer-visiting file))
+                 (second (agent-auto-test--open-session root "second" "sid-2")))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n"))
+      (agent-auto-test--hand-over buffer '(:state "finished" :summary "It"))
+      (agent-auto-test--close buffer)
+      (agent-auto-test--completing "." _offered
+        (agent-auto-test--answering t _asked
+          (with-current-buffer second
+            (agent-link-session))))
+      (should (buffer-modified-p org))
+      (with-current-buffer org
+        (save-buffer))
+      (agent-auto-test--flush-due)
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed: finished.\nDone: It"
+                       "Session sid-1 (stub) is no longer linked to this task: another took its place.")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                     "sid-2"))
+      (should-not (agent-auto-test--tags file "Fix it"))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_RESULT"))
+      (should-not (agent-auto-test--receipt-files)))))
+
 (ert-deftest agent-auto-test-lost-task-keeps-the-receipt ()
   "Keep the receipt of a task that cannot be found, and say so once.
 Such a task has no Org ID and no longer records the session."
@@ -1782,13 +1815,13 @@ Such a task has no Org ID and no longer records the session."
         (save-buffer))
       (agent-test-helper-with-messages messages
         (agent-auto-test--flush-due)
-        (should (string-match-p "no task for a handover" messages)))
+        (should (string-match-p "no task “Fix it” for a handover" messages)))
       (should (= (length (agent-auto-test--receipt-files)) 1))
       (agent-test-helper-with-messages messages
         (agent-auto--flush)
         (agent-auto--load-handovers)
         (agent-auto--flush)
-        (should-not (string-match-p "no task for a handover" messages)))
+        (should-not (string-match-p "for a handover" messages)))
       (should (= (length (agent-auto-test--receipt-files)) 1))
       (should-not (agent-auto-test--notes file "Fix it")))))
 

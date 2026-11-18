@@ -371,7 +371,7 @@ A session that is closed before its task is finished leaves the task saying wher
 
 #+vindex: agent-auto-handover-prompt
 #+vindex: agent-auto-wait-instructions
-The prompt is ~agent-auto-handover-prompt~. It asks the session to write one JSON object to a file whose name replaces =%f= in it (=%%= gives a percent sign), with these fields, every value a string:
+The prompt is ~agent-auto-handover-prompt~. It names the task by its heading, which replaces =%t= in it, and asks the session to write one JSON object to a file whose name replaces =%f= (=%%= gives a percent sign), with these fields, every value a string:
 
 | Field         | Holds                                                                                    |
 |---------------+------------------------------------------------------------------------------------------|
@@ -382,7 +382,7 @@ The prompt is ~agent-auto-handover-prompt~. It asks the session to write one JSO
 | =who=, =what= | For =waiting-on-someone=: the person waited for, and what is awaited from them           |
 | =wait=        | For =waiting-on-someone=: the id of the wait the session registered, or an empty string |
 
-The default prompt also forbids quoting or pasting a message, an email or any other private material: the session says what happened in its own words, since the note can travel beyond the Org file. It tells the session to do nothing else in that turn. A prompt of your own has to name the fields, since nothing else tells the session about them. ~agent-auto-wait-instructions~, a string that is empty by default, is added to the prompt as its last paragraph; it is where you say how a session registers a wait for someone's reply, so that it can name the wait in =wait=.
+The default prompt also forbids quoting or pasting a message, an email or any other private material: the session says what happened in its own words, since the note can travel beyond the Org file. It tells the session to do nothing else in that turn. A prompt of your own has to name the fields, since nothing else tells the session about them. ~agent-auto-wait-instructions~, a string that is empty by default, is added at the end of the prompt, on the same line; it is where you say how a session registers a wait for someone's reply, so that it can name the wait in =wait=.
 
 #+vindex: agent-auto-handover-property
 When the turn ends, the handover is written on the task with the machinery that writes results: in the buffer visiting the file, never through a window or point.
