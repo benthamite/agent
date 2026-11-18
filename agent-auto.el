@@ -1715,31 +1715,136 @@ is read in its own buffer; otherwise point is on the task already."
 
 ;;;; Acting on the tasks of a list
 
+(defvar org-agenda-bulk-marked-entries)
+(declare-function org-agenda-bulk-unmark-all "org-agenda" ())
+
 ;;;###autoload
 (defun agent-act-on-tasks (&optional existing)
-  "Act on the Org task at point, as `agent-act-on-thing-at-point' does.
-The task is the one the line at point shows in an agenda, or the heading
-at point in an Org buffer.  A session is started on it, or the session
-it records is shown, and resumed if need be.  With prefix argument
-EXISTING the task goes to a running session chosen by completion, and
-with a double prefix argument a new session is started whatever the task
-records.
+  "Act on the Org task at point, or start a session on each marked task.
+The task at point is the one the line at point shows in an agenda, or
+the heading at point in an Org buffer.  It gets what
+`agent-act-on-thing-at-point' gives it: a session is started on it, or
+the session it records is shown, and resumed if need be.  With prefix
+argument EXISTING the task goes to a running session chosen by
+completion, and with a double prefix argument a new session is started
+whatever the task records.  A task that is done or cancelled is refused,
+also when it records a session: the line of a task closed a moment ago
+is still in its list, and a session started on it would open the task
+again.
 
-A task that is done or cancelled is refused, also when it records a
-session: the line of a task closed a moment ago is still in its list,
-and a session started on it would open the task again.
+With lines marked in the agenda, as `org-agenda-bulk-mark' marks them,
+one session is started for each marked task instead, in the order the
+lines were marked, and EXISTING is ignored.  None of the sessions is
+shown, the selected window stays selected, and the backend is asked for
+at most once.  A marked task whose recorded session is running is left
+alone.  The marks are then cleared, and a message says how many
+sessions were started, how many tasks had a running session already,
+and why no session was started on each of the others.
 
-The prefix argument is out of sight while the task is acted on.  An
+The prefix argument is out of sight while tasks are acted on.  An
 agenda that is built again meanwhile, by whichever package, is then
 built from its own search: with a prefix argument in sight, Org's
 rebuild of an agenda that searches for tags asks for the search again."
   (interactive "P")
+  (if (and (derived-mode-p 'org-agenda-mode) org-agenda-bulk-marked-entries)
+      (agent-auto--start-marked)
+    (agent-auto--act-on-task existing)))
+
+(defun agent-auto--act-on-task (existing)
+  "Act on the Org task at point, with EXISTING as the prefix argument.
+A task that is closed is refused; see `agent-act-on-tasks'."
   (unless (agent--org-entry-marker)
     (user-error "Call this on an Org task or on an agenda line"))
   (when (agent--at-org-entry #'org-entry-is-done-p)
     (user-error "This task is closed"))
   (let ((current-prefix-arg nil))
     (agent-act-on-thing-at-point existing)))
+
+(defun agent-auto--start-marked ()
+  "Start a session on each task marked in the current agenda; clear the marks.
+No session is shown and the selected window stays selected.  What came
+of it is said in the echo area; see `agent-auto--started-report'."
+  (let* ((markers (agent-auto--marked-tasks))
+         (outcomes
+          (unwind-protect
+              (save-selected-window
+                (let ((display-buffer-overriding-action
+                       '(display-buffer-no-window (allow-no-window . t)))
+                      ;; The backend is then asked for once, not for each task.
+                      (agent-reuse-backend-choice t)
+                      (current-prefix-arg nil))
+                  (mapcar #'agent-auto--start-marked-task markers)))
+            (dolist (marker markers)
+              (when marker
+                (set-marker marker nil))))))
+    (let ((inhibit-message t))
+      (org-agenda-bulk-unmark-all))
+    (message "%s" (agent-auto--started-report outcomes))))
+
+(defun agent-auto--marked-tasks ()
+  "Return a marker at each task marked in the current agenda, first marked first.
+Each is a copy of the marker Org keeps for a marked line.  Starting a
+session can have the agenda built again, which resets the agenda's own
+markers and forgets the marks: the copies still point at the headings of
+the tasks then, though the lines that showed them are gone.  A marked
+line whose marker points nowhere gives nil in its place.  The caller
+releases the markers."
+  (mapcar (lambda (marker)
+            (and (markerp marker) (marker-buffer marker) (copy-marker marker)))
+          (reverse org-agenda-bulk-marked-entries)))
+
+(defun agent-auto--start-marked-task (marker)
+  "Start a session on the marked task at MARKER, and return what came of it.
+MARKER is one of `agent-auto--marked-tasks', or nil for a marked line
+whose marker pointed nowhere.  Return `started', or `running' for a task
+whose recorded session is running, or, when no session was started, a
+string that says why: the task is no longer in its file, it is closed,
+or acting on it signaled an error.  A task whose marker points nowhere
+is not looked for elsewhere: the task of another line would be a guess."
+  (if (and marker (marker-buffer marker))
+      (condition-case err
+          (agent-auto--at-task marker #'agent-auto--start-task-at-point)
+        (error (error-message-string err)))
+    "a marked task is no longer in its file"))
+
+(defun agent-auto--start-task-at-point ()
+  "Start a session on the task at point, one that was marked in an agenda.
+The task is acted on at its own heading, as `agent-act-on-thing-at-point'
+acts on it there.  Return as `agent-auto--start-marked-task' does."
+  (let ((title (org-get-heading t t t t)))
+    (cond ((org-entry-is-done-p) (format "\"%s\" is closed" title))
+          ((agent-auto--session-running-p) 'running)
+          (t (condition-case err
+                 (progn (agent-act-on-thing-at-point)
+                        'started)
+               (error (format "\"%s\": %s" title
+                              (error-message-string err))))))))
+
+(defun agent-auto--session-running-p ()
+  "Return non-nil if the task at point records a session that is running.
+`agent-recorded-session-functions' answer, as they do when the task is
+acted on: the context of a running session names its buffer."
+  (buffer-live-p
+   (plist-get (run-hook-with-args-until-success
+               'agent-recorded-session-functions)
+              :buffer)))
+
+(defun agent-auto--started-report (outcomes)
+  "Return what to say of the sessions started on the marked tasks.
+OUTCOMES are what `agent-auto--start-marked-task' returned for them: how
+many sessions were started, how many tasks had a running session
+already, and the reason no session was started on each of the others."
+  (let ((started (seq-count (lambda (outcome) (eq outcome 'started)) outcomes))
+        (running (seq-count (lambda (outcome) (eq outcome 'running)) outcomes))
+        (failures (seq-filter #'stringp outcomes)))
+    (concat (if (and (zerop running) (null failures))
+                (format "Started %d session%s" started
+                        (if (= started 1) "" "s"))
+              (format "%d started, %d already running" started running))
+            (if failures
+                (format ", %d failed: %s" (length failures)
+                        (string-join failures "; "))
+              ""))))
 
 ;;;; The keys of a list of tasks
 

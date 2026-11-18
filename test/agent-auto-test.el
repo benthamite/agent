@@ -3170,6 +3170,280 @@ its search."
                                     :initial-prompt)
                          (agent-auto-test--brief "Fix it"))))))))
 
+(defconst agent-auto-test--display-buffer (symbol-function 'display-buffer)
+  "What `display-buffer' is where no test has replaced it.
+`agent-auto-test--with' has it show nothing; a test of what is shown
+gives it back this.")
+
+(defun agent-auto-test--mark-lines (&rest headings)
+  "Mark the lines of the current agenda that show HEADINGS, in that order."
+  (dolist (heading headings)
+    (goto-char (point-min))
+    (search-forward heading)
+    (let ((inhibit-message t))
+      (org-agenda-bulk-mark)))
+  (should (= (length org-agenda-bulk-marked-entries) (length headings)))
+  (should (= (agent-auto-test--marked-lines) (length headings))))
+
+(defun agent-auto-test--marked-lines ()
+  "Return how many lines of the current agenda Org shows as marked."
+  (seq-count (lambda (overlay)
+               (eq (overlay-get overlay 'type) 'org-marked-entry-overlay))
+             (overlays-in (point-min) (point-max))))
+
+(defun agent-auto-test--act-on-marked (&optional prefix)
+  "Call `agent-act-on-tasks' with PREFIX in the current agenda; return its report.
+The report is what the command said last."
+  (agent-test-helper-with-messages messages
+    (let ((current-prefix-arg prefix))
+      (call-interactively #'agent-act-on-tasks))
+    (car (last (split-string messages "\n" t)))))
+
+(defun agent-auto-test--started-instances ()
+  "Return the names of the sessions started, the first started first."
+  (reverse (mapcar (lambda (start) (agent-session-instance (car start)))
+                   agent-auto-test--started)))
+
+(defun agent-auto-test--records-its-session-p (file heading)
+  "Return non-nil if the task HEADING of FILE records the session named after it.
+That session is the one whose name is made from HEADING."
+  (when-let* ((buffer (seq-find
+                       (lambda (buffer)
+                         (equal (agent-session-instance (agent-session buffer))
+                                (agent-todo--slug heading)))
+                       agent-auto-test--buffers)))
+    (equal (agent-auto-test--property file heading "AGENT_SESSION")
+           (buffer-name buffer))))
+
+(ert-deftest agent-auto-test-act-on-tasks-starts-a-session-on-each-marked-task ()
+  "With lines marked in an agenda, start a session on each marked task.
+The sessions start in the order the lines were marked, whatever line
+point is on, each in its task's directory and briefed with its task,
+which records it and moves to the in-progress keyword, saved.  None of
+them is shown, and the selected window stays selected though a session
+that starts selects another.  The marks are cleared and the number of
+sessions is reported."
+  (agent-auto-test--with root
+    (let* ((agent-todo-in-progress-keyword "DOING")
+           (file (agent-auto-test--listed-tasks
+                  root "Answer Ann" "Answer Ben" "Answer Cleo" "Answer Dora"))
+           (started '("Answer Cleo" "Answer Ann" "Answer Ben"))
+           (start (symbol-function 'agent-auto-test--start-session)))
+      (cl-letf (((symbol-function 'display-buffer)
+                 agent-auto-test--display-buffer)
+                ((symbol-function 'agent-auto-test--start-session)
+                 (lambda (&rest arguments)
+                   (select-window (next-window))
+                   (apply start arguments))))
+        (with-current-buffer (find-file-noselect file)
+          (agent-test-helper-in-agenda "Answer Ann"
+            (let ((agenda (current-buffer))
+                  (window (selected-window)))
+              (delete-other-windows)
+              (split-window)
+              (apply #'agent-auto-test--mark-lines started)
+              (goto-char (point-min))
+              (search-forward "Answer Dora")
+              (set-window-point window (point))
+              (should (equal (agent-auto-test--act-on-marked)
+                             "Started 3 sessions"))
+              (should (eq (selected-window) window))
+              (should (eq (window-buffer window) agenda))
+              (should (eq (current-buffer) agenda))
+              (should (string-match-p "Answer Dora"
+                                      (buffer-substring (pos-bol) (pos-eol))))
+              (should (= (length agent-auto-test--buffers) 3))
+              (dolist (buffer agent-auto-test--buffers)
+                (should-not (get-buffer-window buffer t)))
+              (should-not org-agenda-bulk-marked-entries)
+              (should (zerop (agent-auto-test--marked-lines)))))))
+      (should (equal (agent-auto-test--started-instances)
+                     (mapcar #'agent-todo--slug started)))
+      (pcase-dolist (`(,session . ,options) agent-auto-test--started)
+        (should (equal (agent-session-directory session) root))
+        (should (member (plist-get options :initial-prompt)
+                        (mapcar #'agent-auto-test--brief started))))
+      (dolist (heading started)
+        (should (agent-auto-test--records-its-session-p file heading))
+        (should (string-match-p (format "^\\* DOING %s " heading)
+                                (agent-auto-test--disk file))))
+      (should (equal (agent-auto-test--keyword file "Answer Dora") "TODO"))
+      (should-not (agent-auto-test--property file "Answer Dora"
+                                             "AGENT_SESSION")))))
+
+(ert-deftest agent-auto-test-act-on-tasks-leaves-a-marked-task-whose-session-runs ()
+  "Start no second session on a marked task whose session is running.
+Such a task is counted and its session is not shown.  The prefix
+argument changes nothing for marked tasks: with two, which start a new
+session on the task at point whatever it records, none is started."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks
+                 root "Answer Ann" "Answer Ben" "Answer Cleo")))
+      (agent-auto-test--acting shown
+        (with-current-buffer (find-file-noselect file)
+          (agent-test-helper-in-agenda "Answer Ben"
+            (agent-auto-test--keeping-buffer (agent-act-on-tasks))
+            (should (equal (agent-auto-test--started-instances)
+                           '("answer-ben")))
+            (setq shown nil)
+            (agent-auto-test--mark-lines "Answer Ann" "Answer Ben"
+                                         "Answer Cleo")
+            (should (equal (agent-auto-test--act-on-marked)
+                           "2 started, 1 already running"))
+            (should (equal (agent-auto-test--started-instances)
+                           '("answer-ben" "answer-ann" "answer-cleo")))
+            (should-not org-agenda-bulk-marked-entries)
+            (agent-auto-test--mark-lines "Answer Cleo" "Answer Ben")
+            (should (equal (agent-auto-test--act-on-marked '(16))
+                           "0 started, 2 already running"))
+            (should (= (length agent-auto-test--started) 3))
+            (should-not shown)))))))
+
+;; A session that starts can have the agenda built again: agent.el builds
+;; it when it moves a task to the in-progress keyword from its line, and
+;; so does a package that keeps its list in step.  Org then resets the
+;; agenda's markers and forgets the marks, and the marked tasks still to
+;; be started were reported as no longer in the list.
+(ert-deftest agent-auto-test-act-on-tasks-starts-marked-tasks-of-an-agenda-built-again ()
+  "Start a session on every marked task though each start rebuilds the agenda.
+The lines the marks were read from are gone by the second task.  Each
+session still starts on its own task, which records it, and no mark is
+left.  The command is typed with a prefix argument, which no rebuild
+sees: the agenda, which searches for a tag, asks nothing and keeps its
+search."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--listed-tasks
+                  root "Answer Ann" "Answer Ben" "Answer Cleo"))
+           (marked '("Answer Ben" "Answer Cleo" "Answer Ann"))
+           (rebuilt 0)
+           (agenda nil)
+           (agent-delivery-functions
+            (append agent-delivery-functions
+                    (list (lambda (&rest _)
+                            (with-current-buffer agenda
+                              (let ((inhibit-message t))
+                                (org-agenda-redo t)))
+                            (setq rebuilt (1+ rebuilt))))))
+           asked)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt &rest _) (push prompt asked) "elsewhere")))
+        (with-current-buffer (find-file-noselect file)
+          (agent-test-helper-in-tags-agenda "listed" "Answer Ann"
+            (setq agenda (current-buffer))
+            (apply #'agent-auto-test--mark-lines marked)
+            (should (equal (agent-auto-test--act-on-marked '(4))
+                           "Started 3 sessions"))
+            (should (= rebuilt 3))
+            (should-not asked)
+            (should (equal org-agenda-query-string "listed"))
+            (should (eq (current-buffer) agenda))
+            (should-not org-agenda-bulk-marked-entries)
+            (should (zerop (agent-auto-test--marked-lines))))))
+      (should (equal (agent-auto-test--started-instances)
+                     (mapcar #'agent-todo--slug marked)))
+      (dolist (heading marked)
+        (should (agent-auto-test--records-its-session-p file heading))))))
+
+(ert-deftest agent-auto-test-act-on-tasks-says-why-a-marked-task-got-no-session ()
+  "Report each marked task no session was started on, and why.
+A task that is closed is named.  A task whose marker points nowhere,
+since its buffer was killed before the command or while an earlier task
+was started, is reported as no longer in its file: nothing is guessed in
+its place, and its file is not visited again.  An error of a start is
+reported with the task's title.  The other tasks are started."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--listed-tasks
+                  root "Answer Ann" "Answer Ben" "Answer Dora"))
+           (second (agent-auto-test--file
+                    root "* TODO Answer Cleo\n" "second.org"))
+           (third (agent-auto-test--file
+                   root "* TODO Answer Eve\n" "third.org"))
+           (kill (lambda (file)
+                   (with-current-buffer (find-buffer-visiting file)
+                     (set-buffer-modified-p nil)
+                     (kill-buffer)))))
+      (mapc #'find-file-noselect (list second third))
+      (with-current-buffer (find-file-noselect file)
+        (agent-test-helper--call-in-agenda
+         "Answer Ann"
+         (lambda ()
+           (agent-auto-test--mark-lines "Answer Ann" "Answer Cleo"
+                                        "Answer Ben")
+           (agent-auto-test--at file "Answer Ann" (lambda () (org-todo "DONE")))
+           (funcall kill second)
+           (should (equal (agent-auto-test--act-on-marked)
+                          (concat "1 started, 0 already running, 2 failed: "
+                                  "\"Answer Ann\" is closed; "
+                                  "a marked task is no longer in its file")))
+           (should (equal (agent-auto-test--started-instances)
+                          '("answer-ben")))
+           (should-not org-agenda-bulk-marked-entries)
+           (agent-auto-test--mark-lines "Answer Dora" "Answer Eve")
+           (cl-letf (((symbol-function 'agent-auto-test--start-session)
+                      (lambda (&rest _)
+                        (funcall kill third)
+                        (error "No such program"))))
+             (should (equal (agent-auto-test--act-on-marked)
+                            (concat "0 started, 0 already running, 2 failed: "
+                                    "\"Answer Dora\": No such program; "
+                                    "a marked task is no longer in its file"))))
+           (should-not org-agenda-bulk-marked-entries))
+         (lambda ()
+           (let ((org-agenda-files (list file second third)))
+             (org-todo-list)))))
+      (should (= (length agent-auto-test--started) 1))
+      (should-not (find-buffer-visiting second))
+      (should-not (find-buffer-visiting third))
+      (should-not (agent-auto-test--property file "Answer Dora"
+                                             "AGENT_SESSION")))))
+
+(ert-deftest agent-auto-test-act-on-tasks-asks-for-the-backend-once ()
+  "Ask which backend to use once for all the marked tasks.
+Two backends are registered and none is named for tasks.  The answer
+does not outlast the command."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks
+                 root "Answer Ann" "Answer Ben" "Answer Cleo"))
+          asked)
+      (agent-register-backend
+       'other
+       :buffer-p #'ignore
+       :find-all-buffers #'ignore
+       :label "Other"
+       :start-session (lambda (&rest _)
+                        (error "The backend `other' was asked for a session")))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt &rest _) (push prompt asked) "Stub")))
+        (with-current-buffer (find-file-noselect file)
+          (agent-test-helper-in-agenda "Answer Ann"
+            (agent-auto-test--mark-lines "Answer Ann" "Answer Ben"
+                                         "Answer Cleo")
+            (should (equal (agent-auto-test--act-on-marked)
+                           "Started 3 sessions")))))
+      (should (equal asked '("Backend: ")))
+      (should (= (length agent-auto-test--started) 3))
+      (should-not agent-reuse-backend-choice))))
+
+;; Without sticky agendas Org keeps the marks in a global variable, which
+;; an Org buffer sees too.
+(ert-deftest agent-auto-test-act-on-tasks-acts-on-a-heading-whatever-is-marked ()
+  "On an Org heading, act on its task though lines of an agenda are marked."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks root "Answer Ann" "Answer Ben")))
+      (with-current-buffer (find-file-noselect file)
+        (agent-test-helper-in-agenda "Answer Ann"
+          (agent-auto-test--mark-lines "Answer Ann")
+          (with-current-buffer (find-buffer-visiting file)
+            (should org-agenda-bulk-marked-entries)
+            (goto-char (point-min))
+            (search-forward "Answer Ben")
+            (agent-auto-test--keeping-buffer (agent-act-on-tasks)))
+          (should (equal (agent-auto-test--started-instances)
+                         '("answer-ben")))
+          (should (= (agent-auto-test--marked-lines) 1))
+          (let ((inhibit-message t))
+            (org-agenda-bulk-unmark-all)))))))
+
 ;;;; Where to look
 
 (ert-deftest agent-auto-test-looks-in-the-agenda-files-by-default ()
