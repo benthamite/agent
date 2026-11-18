@@ -67,6 +67,8 @@
     (codex-process-environment-functions agent-codex-account-env)
     (codex-process-environment-functions agent-codex--sync-theme-before-start)
     (codex-command-submitted-hook agent-codex--note-submission)
+    (window-selection-change-functions agent--tab-bar-selection-changed)
+    (window-buffer-change-functions agent--tab-bar-selection-changed)
     (agent-session-event-functions agent-auto--on-event)
     (agent-session-id-functions agent-auto--on-id)
     (agent-delivery-functions agent-auto--record-delivery)
@@ -101,7 +103,8 @@ FUNCTION advises the function of SYMBOL.")
   "What the modes add to `agent-session-inherited-variables'.")
 
 (defconst agent-reload-test--mode-timers
-  '(agent-claude--monet-gc-orphaned-servers agent-auto--tick)
+  '(agent-claude--monet-gc-orphaned-servers agent--tab-bar-refresh
+    agent-auto--tick)
   "The functions of the timers the modes run.")
 
 (defconst agent-reload-test--load-timers
@@ -154,7 +157,10 @@ turning the modes on deleted the stale files that were there, and
 the stale ones planted after that included.  `:server-kept' is non-nil
 when the remote-control server is the process it was.  `:saved' lists
 the notification functions the two backend modes saved, and `:restored'
-the ones in place once the modes were off.  `:sessions' is a cons of what
+the ones in place once the modes were off.  `:tab-bar' lists
+`tab-bar-format' after the loads, before them and before the modes were
+turned on, and `:tab-bar-off' is what it was once they were off again.
+`:sessions' is a cons of what
 `agent-reload-test--session-states' found before the loads and after
 them, and `:events' lists the session events and state changes seen."
   (let ((directory (file-name-as-directory (make-temp-file "agent-reload" t))))
@@ -166,11 +172,13 @@ them, and `:events' lists the session events and state changes seen."
   "Run the scenario with its files under DIRECTORY and return its report."
   (agent-reload-test--prepare directory)
   (let* ((stale (agent-reload-test--plant-stale-files))
+         (tab-bar (list tab-bar-format))
          (swept (progn (agent-reload-test--turn-modes-on)
                        (not (seq-some #'file-exists-p stale))))
          (files (progn (agent-reload-test--plant-stale-files)
                        (agent-reload-test--files directory)))
          (server agent-remote--server)
+         (tab-bar (cons tab-bar-format tab-bar))
          (sessions (agent-reload-test--make-sessions))
          (states (agent-reload-test--session-states sessions))
          (first (agent-reload-test--load-after #'agent-reload-test--make-older))
@@ -184,6 +192,7 @@ them, and `:events' lists the session events and state changes seen."
                                   t)
                 :saved (list agent-claude--saved-notification-function
                              agent-codex--saved-notification-function)
+                :tab-bar (cons tab-bar-format tab-bar)
                 :sessions (cons states
                                 (agent-reload-test--session-states sessions))
                 :events agent-reload-test--events)))
@@ -191,7 +200,8 @@ them, and `:events' lists the session events and state changes seen."
     (append report
             (list :off (agent-reload-test--installed)
                   :restored (list claude-code-notification-function
-                                  codex-notification-function)))))
+                                  codex-notification-function)
+                  :tab-bar-off tab-bar-format))))
 
 (defun agent-reload-test--load-after (change)
   "Call CHANGE, load every library again, and return what is installed.
@@ -469,12 +479,16 @@ after the second."
   "Leave alone what a mode does once when it is turned on.
 The stale files a mode deletes when it is turned on are deleted then and
 not by loading its file again, which touches no file at all; the server
-is not started again; and the notification functions the backend modes
-saved are still the user's, not the ones the modes put in their place."
+is not started again; the tab bar keeps the one sessions segment it was
+given; and the notification functions the backend modes saved are still
+the user's, not the ones the modes put in their place."
   (let ((report (agent-reload-test--report)))
     (should (plist-get report :swept))
     (should (plist-get report :files-kept))
     (should (plist-get report :server-kept))
+    (pcase-let ((`(,after ,before ,_original) (plist-get report :tab-bar)))
+      (should (memq 'agent-tab-bar-format-sessions before))
+      (should (equal after before)))
     (should (equal (plist-get report :saved)
                    '(agent-reload-test-claude-notification
                      agent-reload-test-codex-notification)))))
@@ -492,8 +506,8 @@ of each buffer hold what they held."
 (ert-deftest agent-reload-test-turning-the-modes-off-removes-everything ()
   "Turn the modes off after the loads and find nothing of theirs left.
 Every hook function, advice and timer of the modes is gone, and the
-notification functions are the user's again.  The timers the package
-runs whenever it is loaded stay."
+notification functions and the tab bar are the user's again.  The timers
+the package runs whenever it is loaded stay."
   (let* ((report (agent-reload-test--report))
          (installed (plist-get report :off)))
     (agent-reload-test--should-all-be 0 (plist-get installed :hooks))
@@ -503,7 +517,9 @@ runs whenever it is loaded stay."
     (agent-reload-test--should-all-be 1 (plist-get installed :load-timers))
     (should (equal (plist-get report :restored)
                    '(agent-reload-test-claude-notification
-                     agent-reload-test-codex-notification)))))
+                     agent-reload-test-codex-notification)))
+    (should (equal (plist-get report :tab-bar-off)
+                   (nth 2 (plist-get report :tab-bar))))))
 
 (provide 'agent-reload-test)
 

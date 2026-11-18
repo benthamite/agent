@@ -2193,6 +2193,13 @@ that the tab bar is re-rendered only when something visible changed.")
 (defvar agent--tab-bar-added-align-right nil
   "Non-nil when `agent-tab-bar-mode' added `tab-bar-format-align-right'.")
 
+(defconst agent--tab-bar-hooks
+  '((window-selection-change-functions agent--tab-bar-selection-changed)
+    (window-buffer-change-functions agent--tab-bar-selection-changed))
+  "The hooks of `agent-tab-bar-mode', each a list (HOOK FUNCTION).
+These are the arguments of `add-hook', so the functions go on the global
+value of each hook.")
+
 ;;;###autoload
 (define-minor-mode agent-tab-bar-mode
   "Show every AI session in the tab bar, colored by its state.
@@ -2212,26 +2219,32 @@ right-aligned entries."
   (if agent-tab-bar-mode
       (progn
         (agent--tab-bar-insert-format)
-        (add-hook 'window-selection-change-functions
-                  #'agent--tab-bar-selection-changed)
-        (add-hook 'window-buffer-change-functions
-                  #'agent--tab-bar-selection-changed)
-        (when (timerp agent--tab-bar-timer)
-          (cancel-timer agent--tab-bar-timer))
-        (setq agent--tab-bar-timer
-              (run-with-timer agent-tab-bar-refresh-interval
-                              agent-tab-bar-refresh-interval
-                              #'agent--tab-bar-refresh)))
+        (agent--tab-bar-install))
     (when agent--tab-bar-timer
       (cancel-timer agent--tab-bar-timer)
       (setq agent--tab-bar-timer nil))
-    (remove-hook 'window-selection-change-functions
-                 #'agent--tab-bar-selection-changed)
-    (remove-hook 'window-buffer-change-functions
-                 #'agent--tab-bar-selection-changed)
+    (pcase-dolist (`(,hook ,function) agent--tab-bar-hooks)
+      (remove-hook hook function))
     (agent--tab-bar-remove-format))
   (setq agent--tab-bar-signature nil)
   (force-mode-line-update t))
+
+(defun agent--tab-bar-install ()
+  "Install the hooks and the timer of `agent-tab-bar-mode', each once.
+The timer replaces any timer already running the refresh.  Calling this
+again changes nothing else, so the end of this file calls it when the
+file is loaded while the mode is on: an Emacs that turned the mode on
+with an older version of the file then has what this version installs,
+without the mode being toggled.  The segment is put into
+`tab-bar-format' only when the mode is turned on, never by loading the
+file."
+  (dolist (arguments agent--tab-bar-hooks)
+    (apply #'add-hook arguments))
+  (cancel-function-timers #'agent--tab-bar-refresh)
+  (setq agent--tab-bar-timer
+        (run-with-timer agent-tab-bar-refresh-interval
+                        agent-tab-bar-refresh-interval
+                        #'agent--tab-bar-refresh)))
 
 (defun agent--tab-bar-insert-format ()
   "Insert `agent-tab-bar-format-sessions' into `tab-bar-format'.
@@ -6226,6 +6239,14 @@ the section's commands have nothing to work with."
 ;; those who load it.
 (with-eval-after-load 'doom-modeline
   (require 'agent-doom-modeline))
+
+;;;; Loading again
+
+;; A mode's own function runs only when the mode is toggled.  Loading
+;; this file again while a mode is on, as when the package is updated in
+;; a running Emacs, therefore installs what this version needs of it.
+(when agent-tab-bar-mode
+  (agent--tab-bar-install))
 
 ;;;; Provide
 
