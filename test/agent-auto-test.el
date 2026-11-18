@@ -107,6 +107,9 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-session-event-functions (list #'agent-auto--on-event))
            (agent-session-id-functions (list #'agent-auto--on-id))
            (agent-delivery-functions (list #'agent-auto--record-delivery))
+           (agent-before-delivery-functions
+            (list #'agent-auto--confirm-delivery))
+           (agent-auto--approved nil)
            (agent-recorded-session-functions
             (list #'agent-auto--recorded-session))
            (agent-session-state-change-functions
@@ -2294,7 +2297,10 @@ session."
 
 (ert-deftest agent-auto-test-double-prefix-starts-a-new-session ()
   "Start a new session with a double prefix, whatever the task records.
-The task is linked to the new session, also while the old one is live."
+The task is linked to the new session, also while the old one is live.
+Nothing is asked, since a new session was asked for; the task's log
+names the session it no longer records, and that session, linked to no
+task now, writes nothing on it."
   (agent-auto-test--with root
     (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
       (agent--note-session-id buffer "sid-00001")
@@ -2307,6 +2313,11 @@ The task is linked to the new session, also while the old one is live."
                        "Fix it\n\nThe body."))
         (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
                        (buffer-name new)))
+        (should (equal (agent-auto-test--notes file "Fix it")
+                       '("Session sid-00001 (stub) is no longer linked to this task: another took its place.")))
+        (should-not (buffer-local-value 'agent-auto--link buffer))
+        (agent-auto-test--end-turn buffer "Status: waiting on you: still here?")
+        (should (equal (agent-auto-test--tags file "Fix it") '("agent")))
         (agent-auto-test--end-turn new "Status: done: second attempt")
         (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
                        "second attempt"))))))
@@ -2323,6 +2334,147 @@ The session the task records is not shown in its place."
                    (lambda (text target) (setq sent (list text target)))))
           (agent-auto-test--act file '(4)))
         (should (equal sent (list "Fix it\n\nThe body." buffer)))
+        (should (= (length agent-auto-test--started) 1))))))
+
+;;;; One session, one task
+
+(defun agent-auto-test--two-tasks (root)
+  "Start a session by hand on Task A of a new file under ROOT that has Task B.
+The session has the id sid-1 and takes text.  Return (FILE . BUFFER)."
+  (let ((file (agent-auto-test--file
+               root (concat (agent-auto-test--task root "Task A" "")
+                            (agent-auto-test--task root "Task B" "")))))
+    (agent-auto-test--act file nil nil "Task A")
+    (let ((buffer (car agent-auto-test--buffers)))
+      (agent--note-session-id buffer "sid-1")
+      (agent-auto-test--take-text)
+      (should (equal (agent-auto-test--property file "Task A" "AGENT_SESSION")
+                     "sid-1"))
+      (cons file buffer))))
+
+(defmacro agent-auto-test--choosing (buffer &rest body)
+  "Evaluate BODY with BUFFER as the session a prefix argument sends a task to."
+  (declare (indent 1) (debug (form body)))
+  `(cl-letf (((symbol-function 'agent--read-session-buffer)
+              (lambda (&rest _) ,buffer)))
+     ,@body))
+
+;; A task sent to a session that another task recorded left both tasks
+;; recording it, and the session's results went to the first.
+(ert-deftest agent-auto-test-sending-to-a-linked-session-asks ()
+  "Ask before a task takes a session from the task it is linked to.
+Declined, or where nothing may be asked, nothing is sent and nothing
+changes.  Accepted, the task is sent and records the session, the other
+task no longer records it and names it in its log, and the session's
+results reach the new task only."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--two-tasks root)))
+      (agent-auto-test--choosing buffer
+        (let ((before (agent-auto-test--disk file)))
+          (agent-auto-test--answering nil asked
+            (should-error (agent-auto-test--act file '(4) nil "Task B")
+                          :type 'user-error)
+            (should (= (length asked) 1))
+            (should (string-match-p "is linked to the task “Task A”"
+                                    (car asked))))
+          (let ((agent-inhibit-prompts t))
+            (agent-auto-test--answering (ert-fail "Asked with `y-or-n-p'") asked
+              (should-error (agent-auto-test--act file '(4) nil "Task B")
+                            :type 'user-error)))
+          (should-not agent-auto-test--submitted)
+          (should (equal (agent-auto-test--disk file) before))
+          (should-not (buffer-modified-p (find-buffer-visiting file))))
+        (agent-auto-test--answering t asked
+          (agent-auto-test--act file '(4) nil "Task B")
+          (should (= (length asked) 1))))
+      (should (equal agent-auto-test--submitted
+                     (list (cons "Task B\n\nThe body." buffer))))
+      (should (equal (agent-auto-test--property file "Task B" "AGENT_SESSION")
+                     "sid-1"))
+      (should (equal (agent-auto-test--property file "Task B" "AGENT_BACKEND")
+                     "stub"))
+      (should-not (agent-auto-test--property file "Task A" "AGENT_SESSION"))
+      (should-not (agent-auto-test--property file "Task A" "AGENT_BACKEND"))
+      (should (equal (agent-auto-test--notes file "Task A")
+                     '("Session sid-1 (stub) is no longer linked to this task: it was linked to another.")))
+      (should-not (agent-auto-test--notes file "Task B"))
+      (should-not (buffer-modified-p (find-buffer-visiting file)))
+      (agent-auto-test--end-turn buffer "Status: done: did B")
+      (should (equal (agent-auto-test--tags file "Task B") '("review")))
+      (should (equal (agent-auto-test--property file "Task B" "AGENT_RESULT")
+                     "did B"))
+      (should-not (agent-auto-test--tags file "Task A"))
+      (should-not (agent-auto-test--property file "Task A" "AGENT_RESULT")))))
+
+(ert-deftest agent-auto-test-sending-a-task-that-records-a-session-asks ()
+  "Ask before a task that records a session is given another.
+Declined, nothing is sent and the task keeps its session.  Accepted, the
+task records the new session and names the old in its log, and the old
+session, linked to no task now, writes nothing on it.  A session linked
+to another task as well makes two questions, and declining the second
+leaves all three as they were."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,first) (agent-auto-test--two-tasks root))
+                 (second (agent-start-session
+                          (agent-session-create :backend 'stub :directory root
+                                                :instance "second"))))
+      (agent--note-session-id second "sid-2")
+      (agent-auto-test--choosing second
+        (agent-auto-test--answering nil asked
+          (should-error (agent-auto-test--act file '(4) nil "Task A")
+                        :type 'user-error)
+          (should (equal (length asked) 1))
+          (should (string-match-p "records another session (sid-1)"
+                                  (car asked))))
+        (should-not agent-auto-test--submitted)
+        (should (equal (agent-auto-test--property file "Task A" "AGENT_SESSION")
+                       "sid-1"))
+        (agent-auto-test--answering t asked
+          (agent-auto-test--act file '(4) nil "Task A")))
+      (should (equal (agent-auto-test--property file "Task A" "AGENT_SESSION")
+                     "sid-2"))
+      (should (equal (agent-auto-test--notes file "Task A")
+                     '("Session sid-1 (stub) is no longer linked to this task: another took its place.")))
+      (should-not (buffer-local-value 'agent-auto--link first))
+      (should (buffer-local-value 'agent-auto--link second))
+      (agent-auto-test--end-turn first "Status: done: from the old session")
+      (should-not (agent-auto-test--tags file "Task A"))
+      (agent-auto-test--at
+       file "Task B"
+       (lambda () (org-entry-put nil "AGENT_SESSION" "sid-9")))
+      (with-current-buffer (find-buffer-visiting file)
+        (save-buffer))
+      (let ((before (agent-auto-test--disk file))
+            (answers (list t nil)))
+        (setq agent-auto-test--submitted nil)
+        (agent-auto-test--choosing second
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (_prompt) (pop answers))))
+            (should-error (agent-auto-test--act file '(4) nil "Task B")
+                          :type 'user-error)))
+        (should-not answers)
+        (should-not agent-auto-test--submitted)
+        (should (equal (agent-auto-test--disk file) before))))))
+
+(ert-deftest agent-auto-test-released-task-is-not-started-again ()
+  "Take the ready tag from a task whose session was linked to another.
+The task records no session any more, and the timer would otherwise
+start a new one on it."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file
+                 root (concat (agent-auto-test--task root "Task A")
+                              (agent-auto-test--task root "Task B" "")))))
+      (agent-auto-test--run)
+      (should (= (length agent-auto-test--started) 1))
+      (let ((buffer (car agent-auto-test--buffers)))
+        (agent--note-session-id buffer "sid-1")
+        (agent-auto-test--take-text)
+        (agent-auto-test--choosing buffer
+          (agent-auto-test--answering t _asked
+            (agent-auto-test--act file '(4) nil "Task B")))
+        (should-not (agent-auto-test--tags file "Task A"))
+        (should-not (buffer-local-value 'agent-auto--unattended buffer))
+        (agent-auto-test--run)
         (should (= (length agent-auto-test--started) 1))))))
 
 ;;;; Where to look
@@ -2715,6 +2867,7 @@ command that changed nothing."
 (defconst agent-auto-test--installed
   '((agent-session-event-functions . agent-auto--on-event)
     (agent-session-id-functions . agent-auto--on-id)
+    (agent-before-delivery-functions . agent-auto--confirm-delivery)
     (agent-delivery-functions . agent-auto--record-delivery)
     (agent-recorded-session-functions . agent-auto--recorded-session)
     (agent-session-state-change-functions . agent-auto--schedule-marks)
@@ -2736,6 +2889,7 @@ and it is turned off afterwards."
   `(let ((agent-session-event-functions nil)
          (agent-session-id-functions nil)
          (agent-delivery-functions nil)
+         (agent-before-delivery-functions nil)
          (agent-recorded-session-functions nil)
          (agent-session-inherited-variables nil)
          (agent-session-state-change-functions nil)
@@ -2795,6 +2949,7 @@ and it is turned off afterwards."
     (should-not agent-session-event-functions)
     (should-not agent-session-id-functions)
     (should-not agent-delivery-functions)
+    (should-not agent-before-delivery-functions)
     (should-not agent-recorded-session-functions)
     (should-not agent-session-inherited-variables)
     (should-not agent-session-state-change-functions)

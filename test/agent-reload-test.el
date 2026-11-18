@@ -72,6 +72,7 @@
     (window-buffer-change-functions agent--tab-bar-selection-changed)
     (agent-session-event-functions agent-auto--on-event)
     (agent-session-id-functions agent-auto--on-id)
+    (agent-before-delivery-functions agent-auto--confirm-delivery)
     (agent-delivery-functions agent-auto--record-delivery)
     (agent-recorded-session-functions agent-auto--recorded-session)
     (agent-session-state-change-functions agent-auto--schedule-marks)

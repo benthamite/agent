@@ -366,6 +366,12 @@ See `agent-auto--return'.")
 (defvar agent-auto--flush-timer nil
   "Timer running `agent-auto--run-flush', or nil when none is pending.")
 
+(defvar agent-auto--approved nil
+  "The link the user has just agreed to, though it replaces another, or nil.
+It is a cons of the marker of the task and the session's buffer, set by
+`agent-auto--confirm-delivery' and used up by
+`agent-auto--record-delivery'.")
+
 (defvar agent-auto--missing (make-hash-table :test #'equal)
   "Hash table from a recorded session that is not running to when that was seen.
 The key is a cons of the task's file and the recorded value.")
@@ -440,6 +446,7 @@ note in the task's log, its result and its tag."
 (defconst agent-auto--hooks
   '((agent-session-event-functions . agent-auto--on-event)
     (agent-session-id-functions . agent-auto--on-id)
+    (agent-before-delivery-functions . agent-auto--confirm-delivery)
     (agent-delivery-functions . agent-auto--record-delivery)
     (agent-recorded-session-functions . agent-auto--recorded-session)
     (agent-session-state-change-functions . agent-auto--schedule-marks)
@@ -1224,29 +1231,34 @@ For `agent-delivery-functions': a task sent to a session by hand is
 recorded as one started by the timer is, so the timer starts no second
 session on it, and the session's result is written on it.  The user is
 at the task, so it is recorded at once, also in a buffer with unsaved
-edits, which is then left unsaved."
+edits, which is then left unsaved.
+
+One session works on one task.  A session linked to another task is
+recorded here only when the user agreed to it, which
+`agent-auto--confirm-delivery' asked before the task was sent; without
+that, both tasks are left as they are.  A session the task recorded
+before is replaced unasked: it was a new session that was asked for."
   (when-let* ((marker (plist-get context :todo))
-              (org (marker-buffer marker))
-              (org (or (buffer-base-buffer org) org))
-              (file (buffer-file-name org)))
+              ((agent-auto--task-file marker)))
     (agent-auto--guard "recording a session on its task"
-      (let ((value (car (agent-auto--session-values buffer))))
-        (with-current-buffer org
-          (org-with-wide-buffer
-           (goto-char marker)
-           (org-back-to-heading t)
-           (let ((clean (not (buffer-modified-p))))
-             (unless (equal (org-entry-get nil agent-auto-session-property)
-                            value)
-               (agent-auto--record
-                value (agent-session-backend (agent-session buffer)))
-               (let ((inhibit-message t))
-                 (agent-auto--put-session buffer)))
-             (when clean
-               (agent-todo--save)))))
-        (unless (buffer-local-value 'agent-auto--link buffer)
-          (agent-auto--attach
-           buffer (agent-auto-link-create :file file :recorded value)))))))
+      (let ((approved (and (eq (car agent-auto--approved) marker)
+                           (eq (cdr agent-auto--approved) buffer))))
+        (setq agent-auto--approved nil)
+        (when (or approved
+                  (not (plist-get (agent-auto--link-conflicts marker buffer)
+                                  :task)))
+          (agent-auto--link-task marker buffer))))))
+
+(defun agent-auto--confirm-delivery (context buffer)
+  "Ask before the Org task CONTEXT was made from and session BUFFER are linked.
+For `agent-before-delivery-functions'.  Nothing is asked unless the link
+would replace another; see `agent-auto--confirm-link'.  Return nil when
+the user declines, so that the task is not sent."
+  (let ((marker (plist-get context :todo)))
+    (or (not (and marker (agent-auto--task-file marker)))
+        (not (agent-auto--link-conflicts marker buffer))
+        (and (agent-auto--confirm-link marker buffer)
+             (setq agent-auto--approved (cons marker buffer))))))
 
 (defun agent-auto--recorded-session ()
   "Return a context naming the session the Org task at point records, or nil.
@@ -1304,6 +1316,177 @@ A start that never got a session leaves a placeholder, and a session
 whose id the backend never reported leaves its buffer's name."
   (not (or (string-prefix-p "starting-" recorded)
            (string-prefix-p "*" recorded))))
+
+;;;; One session, one task
+
+(defun agent-auto--at-task (marker function)
+  "Call FUNCTION with point on the heading of the task at MARKER.
+MARKER is in an Org buffer, which can be an indirect one; the call is
+made in the buffer that visits the file, widened, and its value is
+returned."
+  (let ((org (marker-buffer marker)))
+    (with-current-buffer (or (buffer-base-buffer org) org)
+      (org-with-wide-buffer
+       (goto-char marker)
+       (org-back-to-heading t)
+       (funcall function)))))
+
+(defun agent-auto--task-file (marker)
+  "Return the file of the task at MARKER, or nil when it is in none."
+  (when-let* ((org (marker-buffer marker)))
+    (buffer-file-name (or (buffer-base-buffer org) org))))
+
+(defun agent-auto--link-conflicts (marker buffer)
+  "Return what linking session BUFFER to the task at MARKER would replace.
+The result is a plist: `:session' is the session the task records, when
+it records another than BUFFER's; `:task' is the title of the task
+BUFFER is linked to, when that is another task and it is still there.
+Nil when the link replaces nothing."
+  (let* ((link (buffer-local-value 'agent-auto--link buffer))
+         (recorded (agent-auto--at-task
+                    marker
+                    (lambda () (org-entry-get nil agent-auto-session-property))))
+         (own (and link (agent-auto--link-of-task-p link marker))))
+    (append
+     (and recorded
+          (not own)
+          (not (member recorded (agent-auto--session-values buffer)))
+          (list :session recorded))
+     (when-let* (((and link (not own)))
+                 (title (agent-auto--link-title link)))
+       (list :task title)))))
+
+(defun agent-auto--link-of-task-p (link marker)
+  "Return non-nil when LINK is the link of the task at MARKER."
+  (and (agent-auto--same-file-p (agent-auto-link-file link)
+                                (agent-auto--task-file marker))
+       (equal (agent-auto-link-recorded link)
+              (agent-auto--at-task
+               marker
+               (lambda () (org-entry-get nil agent-auto-session-property))))))
+
+(defun agent-auto--link-title (link)
+  "Return the title of the task of LINK, or nil when the task is gone."
+  (when-let* ((org (agent-auto--org-buffer (agent-auto-link-file link))))
+    (with-current-buffer org
+      (org-with-wide-buffer
+       (and (agent-auto--goto-recorded (agent-auto-link-recorded link))
+            (substring-no-properties (org-get-heading t t t t)))))))
+
+(defun agent-auto--confirm-link (marker buffer)
+  "Return non-nil when session BUFFER may be linked to the task at MARKER.
+It may when the link replaces nothing.  When the task records another
+session, or BUFFER is linked to another task, the user is asked about
+each, and declining either leaves everything as it is.  Where nothing
+may be asked, a link that would replace another is refused; see
+`agent-inhibit-prompts'."
+  (let* ((conflicts (agent-auto--link-conflicts marker buffer))
+         (session (plist-get conflicts :session))
+         (task (plist-get conflicts :task))
+         (name (agent-display-name buffer)))
+    (cond
+     ((null conflicts) t)
+     (agent-inhibit-prompts
+      (message "agent-auto: linking %s would replace another link; not done"
+               name)
+      nil)
+     (t (and (or (null session)
+                 (y-or-n-p (format "This task records another session (%s).  Replace it with %s? "
+                                   session name)))
+             (or (null task)
+                 (y-or-n-p (format "%s is linked to the task “%s”.  Link it to this task instead? "
+                                   name task))))))))
+
+(defun agent-auto--link-task (marker buffer)
+  "Record session BUFFER on the task at MARKER and link the two.
+The task records the session as one started from it does, and nothing
+is sent to the session.  Whatever the link replaces goes first: the task
+BUFFER was linked to stops recording it, and the session the task
+recorded is no longer linked to it; see `agent-auto--release-task' and
+`agent-auto--replace-recorded'.  The user is at the task, so all of it
+is written at once, also in a buffer with unsaved edits, which is then
+left unsaved."
+  (let ((link (buffer-local-value 'agent-auto--link buffer))
+        (file (agent-auto--task-file marker))
+        (value (car (agent-auto--session-values buffer))))
+    (when (and link (not (agent-auto--link-of-task-p link marker)))
+      (agent-auto--release-task link buffer)
+      (setq link nil))
+    (agent-auto--at-task
+     marker
+     (lambda ()
+       (let ((clean (not (buffer-modified-p)))
+             (recorded (org-entry-get nil agent-auto-session-property))
+             (inhibit-message t))
+         (unless (equal recorded value)
+           (when (and recorded
+                      (not (member recorded
+                                   (agent-auto--session-values buffer))))
+             (agent-auto--replace-recorded file recorded value))
+           (agent-auto--record
+            value (agent-session-backend (agent-session buffer)))
+           (agent-auto--put-session buffer))
+         (when clean
+           (agent-todo--save)))))
+    (if link
+        (setf (agent-auto-link-recorded link) value)
+      (agent-auto--attach
+       buffer (agent-auto-link-create :file file :recorded value)))))
+
+(defun agent-auto--release-task (link buffer)
+  "Make the task of LINK stop recording session BUFFER, which leaves it.
+A note in the task's log names the session, so that it can still be
+found.  The ready tag goes with the record: a task that carries it and
+records no session would be started again.  BUFFER is linked to no task
+afterwards."
+  (agent-auto--edit-task
+   link
+   (lambda ()
+     (agent-auto--add-note
+      (list (format "Session %s is no longer linked to this task: it was linked to another."
+                    (agent-auto--recorded-name
+                     (agent-auto-link-recorded link)))))
+     (dolist (property (list agent-auto-session-property
+                             agent-auto-backend-property
+                             agent-auto-directory-property))
+       (org-entry-delete nil property))
+     (let ((tags (org-get-tags nil t)))
+       (when (member agent-auto-ready-tag tags)
+         (org-set-tags (remove agent-auto-ready-tag tags)))))
+   t)
+  (with-current-buffer buffer
+    (setq agent-auto--link nil)))
+
+(defun agent-auto--replace-recorded (file recorded value)
+  "Note on the task at point that it no longer records session RECORDED.
+The task is in FILE and is about to record the session VALUE instead.  A
+note in its log names the session it recorded, unless that was only the
+placeholder of a start; a live session that was linked to the task is
+linked to none; and the receipts waiting for the task find it as VALUE."
+  (when (agent-auto--session-id-p recorded)
+    (agent-auto--add-note
+     (list (format "Session %s is no longer linked to this task: another took its place."
+                   (agent-auto--recorded-name recorded)))))
+  (dolist (buffer (agent-auto--linked-buffers))
+    (let ((link (buffer-local-value 'agent-auto--link buffer)))
+      (when (and (equal (agent-auto-link-recorded link) recorded)
+                 (agent-auto--same-file-p (agent-auto-link-file link) file))
+        (with-current-buffer buffer
+          (setq agent-auto--link nil)))))
+  (agent-auto--retarget-handovers file recorded value))
+
+(defun agent-auto--recorded-name (recorded)
+  "Return a name for the session the task at point records as RECORDED.
+It is the recorded value, with the backend that ran the session and the
+directory it ran in when the task records them, which is what resuming
+the session takes."
+  (let ((details (delq nil
+                       (list (org-entry-get nil agent-auto-backend-property)
+                             (org-entry-get nil
+                                            agent-auto-directory-property)))))
+    (if details
+        (format "%s (%s)" recorded (string-join details ", "))
+      recorded)))
 
 ;;;; Marks
 
@@ -1773,8 +1956,9 @@ It is the time, to the microsecond, and four random digits."
   (setq agent-auto--pending
         (seq-remove (lambda (entry)
                       (let ((other (car entry)))
-                        (and (equal (agent-auto-link-file other)
-                                    (agent-auto-link-file link))
+                        (and (agent-auto--same-file-p
+                              (agent-auto-link-file other)
+                              (agent-auto-link-file link))
                              (equal (agent-auto-link-recorded other)
                                     (agent-auto-link-recorded link)))))
                     agent-auto--pending)))
@@ -1847,7 +2031,7 @@ given another; see `agent-auto--retarget-handovers'."
 A task whose recorded session changes while a receipt waits for it would
 otherwise be lost to that receipt, unless it has an Org ID."
   (dolist (receipt agent-auto--handovers)
-    (when (and (equal (plist-get receipt :file) file)
+    (when (and (agent-auto--same-file-p (plist-get receipt :file) file)
                (equal (agent-auto--handover-target receipt) old))
       (agent-auto--update-handover receipt :found-as new))))
 
@@ -1966,7 +2150,8 @@ its result is the one it had then."
   "Return non-nil when a receipt later than RECEIPT waits for the same task."
   (seq-some (lambda (other)
               (and (string> (plist-get other :id) (plist-get receipt :id))
-                   (equal (plist-get other :file) (plist-get receipt :file))
+                   (agent-auto--same-file-p (plist-get other :file)
+                                            (plist-get receipt :file))
                    (if (plist-get receipt :org-id)
                        (equal (plist-get other :org-id)
                               (plist-get receipt :org-id))
@@ -2084,7 +2269,8 @@ writes say what happened."
   "Note in the receipts waiting for the task of LINK that its session works on.
 Such a receipt, written later, no longer sets the task waiting."
   (dolist (receipt agent-auto--handovers)
-    (when (and (equal (plist-get receipt :file) (agent-auto-link-file link))
+    (when (and (agent-auto--same-file-p (plist-get receipt :file)
+                                        (agent-auto-link-file link))
                (equal (agent-auto--handover-target receipt)
                       (agent-auto-link-recorded link))
                (not (plist-get receipt :resumed)))
@@ -2254,6 +2440,11 @@ Return non-nil when there is one in the current buffer."
                   agent-auto-session-property (regexp-quote value))
           nil t)
          (ignore-errors (org-back-to-heading t)))))
+
+(defun agent-auto--same-file-p (file other)
+  "Return non-nil when FILE and OTHER name the same file."
+  (or (equal file other)
+      (and file other (file-equal-p file other))))
 
 (defun agent-auto--goto-property (property value)
   "Move to the heading of the task whose PROPERTY is VALUE.
