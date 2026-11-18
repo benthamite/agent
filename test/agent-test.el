@@ -4359,6 +4359,29 @@ on; a step whose work is there is finished whatever the backend shows."
         (should finished)
         (should exited)))))
 
+(ert-deftest agent-test-before-exit-step-goes-on-at-the-idle-prompt ()
+  "Finish a step that waited at its stop when the idle prompt follows.
+The screen can lag behind the stop event and still show the session
+working; the idle prompt of the same turn, which a skill counts once
+with its stop, is looked at for a step, so the chain goes on then and
+not only when its watchdog fires."
+  (let ((busy nil) finished)
+    (agent-test--with-chain buf submitted exited
+        (list :idle-p (lambda (_buffer) (not busy)))
+      (let ((agent-before-exit-step-functions
+             (list (lambda (_buffer)
+                     (list :name "note" :prompt "Write the note."
+                           :done-p #'ignore
+                           :finish (lambda (_buffer) (setq finished t)))))))
+        (should-not (agent-run-skill-before-exit 'one buf))
+        (setq busy t)
+        (agent-session-event buf 'stop)
+        (should-not finished)
+        (setq busy nil)
+        (agent-session-event buf 'idle-prompt)
+        (should finished)
+        (should exited)))))
+
 (ert-deftest agent-test-before-exit-step-needs-a-backend-that-takes-text ()
   "Skip a step on a backend that text cannot be sent to."
   (let ((agent-backends nil)

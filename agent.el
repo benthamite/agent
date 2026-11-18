@@ -3614,7 +3614,10 @@ signals is reported and otherwise ignored.  Return nil, leaving the
 step for the next event, only while its `:done-p' function does not
 hold and the turn cannot have been the step's own or has not finished:
 the backend still shows the session working, or reports background work
-the turn left running.  See `agent-before-exit-step-functions'."
+the turn left running.  The next event is then looked at whatever it is,
+also the idle prompt that follows a stop: a screen that lagged behind
+the stop shows the session idle by then, and the chain goes on without
+waiting for its watchdog.  See `agent-before-exit-step-functions'."
   (let ((backend (agent--detect-backend buffer))
         (done-p (plist-get step :done-p))
         (name (plist-get step :name)))
@@ -3623,6 +3626,8 @@ the turn left running.  See `agent-before-exit-step-functions'."
              (or (agent--backend-denies-idle-p backend buffer)
                  (agent--backend-turn-end-background-p backend buffer)))
         (progn
+          (setq agent--before-exit
+                (plist-put agent--before-exit :last-completion nil))
           (message "agent: the %s step of %s has not finished; waiting"
                    name (buffer-name buffer))
           nil)
