@@ -65,7 +65,6 @@ User options
 * Unattended sessions close themselves::
 * Claude Code backend::
 * Codex backend::
-* Chief-of-staff loop::
 
 Commands
 
@@ -77,7 +76,6 @@ Commands
 * Branch navigation::
 * Org TODO commands::
 * Unattended task commands::
-* Chief-of-staff commands::
 * Claude Code commands::
 * Codex commands::
 
@@ -98,7 +96,7 @@ Indices
 @node Overview
 @chapter Overview
 
-@samp{agent.el} collects the Emacs integration layer for AI coding command-line tools. It provides a shared session model@comma{} a unified transient menu@comma{} notification handling@comma{} terminal helpers@comma{} backend modules for Claude Code and Codex@comma{} and an optional chief-of-staff loop.
+@samp{agent.el} collects the Emacs integration layer for AI coding command-line tools. It provides a shared session model@comma{} a unified transient menu@comma{} notification handling@comma{} terminal helpers@comma{} and backend modules for Claude Code and Codex.
 
 The package is split into a small backend-agnostic core and focused modules:
 
@@ -139,8 +137,6 @@ The package is split into a small backend-agnostic core and focused modules:
 @tab Quarantined undocumented Claude CLI conventions: Keychain credential naming@comma{} the usage API endpoint@comma{} the @samp{~/.claude/projects/} directory encoding@comma{} transcript JSONL parsing@comma{} and the @samp{.claude.json} merge engine
 @item @samp{agent-codex.el}
 @tab Codex backend: integrates @samp{codex.el} with theme sync@comma{} @samp{codex exec} execution@comma{} @samp{config.toml} helpers@comma{} modeline helpers@comma{} and @code{agent-codex-mode}
-@item @samp{agent-chief.el}
-@tab Inspectable chief-of-staff loop: Emacs owns timers@comma{} state@comma{} context collection@comma{} and notifications@comma{} while Claude Code or Codex provides one-shot judgment on each tick
 @item @samp{agent-setup.el}
 @tab First-run checks: finds the agent CLIs and @samp{emacsclient}@comma{} starts the Emacs server@comma{} checks the hooks passed to Claude sessions and offers to remove copies left in global settings@comma{} offers to link the bundled skills@comma{} and reports what is left
 @end multitable
@@ -251,7 +247,6 @@ The global minor modes @code{agent-claude-mode} and @code{agent-codex-mode} own 
   :config
   (require 'agent-claude)
   (require 'agent-codex)
-  (require 'agent-chief)
   (agent-claude-mode 1)
   (agent-codex-mode 1))
 @end lisp
@@ -270,7 +265,6 @@ Loading @samp{agent-claude.el} or @samp{agent-codex.el} again while its mode is 
 * Unattended sessions close themselves::
 * Claude Code backend::
 * Codex backend::
-* Chief-of-staff loop::
 @end menu
 
 @node Shared session behavior
@@ -621,37 +615,6 @@ The Codex backend options control account selection@comma{} skill discovery@comm
 
 The @samp{gptel} classifier requests used by backtrace debugging and project ranking ignore reasoning-block callback events and parse only the final response text. Backtrace debugging sends the model a truncated excerpt of the backtrace rather than the full contents: each line is cut at 400 characters and the excerpt is capped at 100@comma{}000 characters@comma{} since backtraces can embed multi-megabyte printed objects that exceed API payload limits@comma{} while the frame names at the start of each line suffice to identify packages. The agent session itself still receives the path to the complete backtrace file.
 
-@node Chief-of-staff loop
-@section Chief-of-staff loop
-
-@vindex agent-chief-backend
-@vindex agent-chief-mode
-@vindex agent-chief-interval
-@vindex agent-chief-directory
-@vindex agent-chief-session-instance-name
-@vindex agent-chief-state-file
-@vindex agent-chief-context-functions
-@vindex agent-chief-state-max-chars
-@vindex agent-chief-max-turns
-@vindex agent-chief-notify-function
-@vindex agent-chief-record-model-state-updates
-@vindex agent-chief-system-prompt
-The optional @samp{agent-chief} module runs a periodic@comma{} auditable chief-of-staff workflow. Emacs owns the schedule@comma{} explicit state@comma{} and notifications. In the default @samp{session} mode@comma{} the selected backend is an ordinary long-lived Claude Code or Codex session that receives heartbeat prompts and remains available for normal conversation.
-
-@code{agent-chief-backend} selects @samp{codex} or @samp{claude-code}. @code{agent-chief-mode} defaults to @samp{session}; set it to @samp{stateless} to use the older one-shot JSON-decision path. @code{agent-chief-interval} controls the timer interval in seconds. @code{agent-chief-directory} is the working directory for chief sessions and one-shot calls; it defaults to @code{user-emacs-directory}. @code{agent-chief-session-instance-name} defaults to @samp{chief} and is used as the instance name for the dedicated interactive session.
-
-@code{agent-chief-state-file} is an Org file used as the durable@comma{} inspectable state store; @samp{agent-chief} never writes opaque memory. Day plans and manual notes are appended there and@comma{} when a chief session is live@comma{} submitted into that session as conversational context.
-
-State context treats only a @samp{Plan YYYY-MM-DD} heading dated today as current. Older plan headings are supplied as historical context@comma{} not active obligations@comma{} unless restated in today's plan.
-
-@code{agent-chief-record-model-state-updates} controls whether model-proposed state updates from stateless ticks are appended to the state file. It defaults to nil because periodic model observations are not user-approved durable memory. Use explicit notes and day plans for ordinary state updates.
-
-@code{agent-chief-context-functions} is the extension point for agenda@comma{} task@comma{} calendar@comma{} project@comma{} or custom status snippets. Each function is called with no arguments and should return a string. Nil and empty strings are ignored. The state file is included separately@comma{} truncated to @code{agent-chief-state-max-chars} characters. @code{agent-chief-max-turns} limits Claude Code ticks; Codex ticks use the existing @samp{codex exec} settings from @samp{agent-codex}.
-
-In session mode@comma{} @code{agent-chief-start-session} sends only a short conversational kickoff asking the model to ask for today's plan; it does not dump the state file or stateless JSON contract into the visible transcript. Heartbeat prompts ask the model to respond exactly @samp{No nudge.} when no contact is warranted@comma{} or @samp{Nudge: MESSAGE} when it should alert the user. The backend's ordinary notification event tells @samp{agent-chief} when the response is complete; @samp{agent-chief} then inspects the session text since the heartbeat and calls @code{agent-chief-notify-function} only for a nudge. The default notification function logs the message and uses @samp{alert.el} when available. @code{agent-chief-system-prompt} is the standing instruction that makes the loop selective and forbids inventing obligations not present in the supplied context.
-
-In stateless mode@comma{} backend output may include echoed CLI transcript text before the answer. The chief loop scans that output and uses the last valid JSON object with a @samp{notify} field as the decision@comma{} so echoed response-schema examples do not confuse the parser.
-
 @node Commands
 @chapter Commands
 
@@ -664,7 +627,6 @@ In stateless mode@comma{} backend output may include echoed CLI transcript text 
 * Branch navigation::
 * Org TODO commands::
 * Unattended task commands::
-* Chief-of-staff commands::
 * Claude Code commands::
 * Codex commands::
 @end menu
@@ -1317,25 +1279,6 @@ With lines marked in an agenda@comma{} as @samp{m} (@code{org-agenda-bulk-mark})
 @end lisp
 
 Like the package's other keymaps@comma{} this one keeps the keys you bind in it@comma{} and the package's own keys are set in it again each time its files are loaded (@ref{Shared commands, , Shared commands}).
-
-@node Chief-of-staff commands
-@section Chief-of-staff commands
-
-@findex agent-chief-start
-@findex agent-chief-start-session
-@findex agent-chief-stop
-@findex agent-chief-tick
-@findex agent-chief-stateless-tick
-@findex agent-chief-session-heartbeat
-@findex agent-chief-switch-to-session
-@findex agent-chief-open-state
-@findex agent-chief-add-note
-@findex agent-chief-set-day-plan
-The command @code{agent-chief-start-session} starts or reuses a dedicated Claude Code or Codex session using @code{agent-chief-session-instance-name}@comma{} sends the chief-of-staff operating contract into the session@comma{} asks the model to request today's plan there@comma{} and starts the heartbeat timer. The command @code{agent-chief-switch-to-session} jumps back to that session so the user can reply normally.
-
-The command @code{agent-chief-start} starts only the repeating Emacs timer. Without a prefix argument it also schedules an immediate tick; with a prefix argument@comma{} it waits @code{agent-chief-interval} seconds before the first tick. @code{agent-chief-stop} cancels the timer. @code{agent-chief-tick} runs one check using @code{agent-chief-mode}. @code{agent-chief-session-heartbeat} forces a session-mode heartbeat@comma{} while @code{agent-chief-stateless-tick} forces one stateless JSON-decision check.
-
-The command @code{agent-chief-open-state} opens the auditable Org state file. @code{agent-chief-add-note} appends a manual note@comma{} and @code{agent-chief-set-day-plan} appends today's plan. When a chief session is active@comma{} both commands also submit the new context into that session. These commands are intentionally simple: the durable source of truth remains ordinary text that can be reviewed@comma{} edited@comma{} and audited outside the model.
 
 @node Claude Code commands
 @section Claude Code commands

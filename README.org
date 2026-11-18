@@ -24,7 +24,7 @@ directory prevents the session from starting.
 :CUSTOM_ID: h:overview
 :END:
 
-=agent.el= collects the Emacs integration layer for AI coding command-line tools. It provides a shared session model, a unified transient menu, notification handling, terminal helpers, backend modules for Claude Code and Codex, and an optional chief-of-staff loop.
+=agent.el= collects the Emacs integration layer for AI coding command-line tools. It provides a shared session model, a unified transient menu, notification handling, terminal helpers, and backend modules for Claude Code and Codex.
 
 The package is split into a small backend-agnostic core and focused modules:
 
@@ -47,7 +47,6 @@ The package is split into a small backend-agnostic core and focused modules:
 | =agent-claude.el=    | Claude Code backend: integrates =claude-code.el= with status and usage polling, hook setup, and ~agent-claude-mode~                                                                                                          |
 | =agent-claude-cli.el= | Quarantined undocumented Claude CLI conventions: Keychain credential naming, the usage API endpoint, the =~/.claude/projects/= directory encoding, transcript JSONL parsing, and the =.claude.json= merge engine            |
 | =agent-codex.el=     | Codex backend: integrates =codex.el= with theme sync, =codex exec= execution, =config.toml= helpers, modeline helpers, and ~agent-codex-mode~                                                                               |
-| =agent-chief.el=     | Inspectable chief-of-staff loop: Emacs owns timers, state, context collection, and notifications, while Claude Code or Codex provides one-shot judgment on each tick                                                        |
 | =agent-setup.el=     | First-run checks: finds the agent CLIs and =emacsclient=, starts the Emacs server, checks the hooks passed to Claude sessions and offers to remove copies left in global settings, offers to link the bundled skills, and reports what is left |
 
 The main workflow is to load =agent.el=, require the backend modules you use, and enable their minor modes (see [[#h:minor-modes][Backend minor modes]]); loading a backend module installs nothing by itself. Once the Claude and Codex modules are active, =M-x agent-menu= and =M-x agent-select-session= operate across both tools. Sessions are listed with their account in a column of its own, highlighted when waiting for input, and disambiguated by project and instance name when several sessions share a directory.
@@ -160,7 +159,6 @@ The global minor modes ~agent-claude-mode~ and ~agent-codex-mode~ own every hook
   :config
   (require 'agent-claude)
   (require 'agent-codex)
-  (require 'agent-chief)
   (agent-claude-mode 1)
   (agent-codex-mode 1))
 #+end_src
@@ -499,39 +497,6 @@ The Codex backend options control account selection, skill discovery, and non-in
 ~agent-codex-exec-approval-policy~, ~agent-codex-exec-sandbox-mode~, and ~agent-codex-exec-skip-git-repo-check~ configure the non-interactive Codex calls used by skill workflows. The approval policy is passed as a top-level Codex CLI option before the =exec= subcommand, while the sandbox and repository-check options are passed to =codex exec= itself.
 
 The =gptel= classifier requests used by backtrace debugging and project ranking ignore reasoning-block callback events and parse only the final response text. Backtrace debugging sends the model a truncated excerpt of the backtrace rather than the full contents: each line is cut at 400 characters and the excerpt is capped at 100,000 characters, since backtraces can embed multi-megabyte printed objects that exceed API payload limits, while the frame names at the start of each line suffice to identify packages. The agent session itself still receives the path to the complete backtrace file.
-
-** Chief-of-staff loop
-:PROPERTIES:
-:CUSTOM_ID: h:chief-options
-:END:
-
-#+vindex: agent-chief-backend
-#+vindex: agent-chief-mode
-#+vindex: agent-chief-interval
-#+vindex: agent-chief-directory
-#+vindex: agent-chief-session-instance-name
-#+vindex: agent-chief-state-file
-#+vindex: agent-chief-context-functions
-#+vindex: agent-chief-state-max-chars
-#+vindex: agent-chief-max-turns
-#+vindex: agent-chief-notify-function
-#+vindex: agent-chief-record-model-state-updates
-#+vindex: agent-chief-system-prompt
-The optional =agent-chief= module runs a periodic, auditable chief-of-staff workflow. Emacs owns the schedule, explicit state, and notifications. In the default =session= mode, the selected backend is an ordinary long-lived Claude Code or Codex session that receives heartbeat prompts and remains available for normal conversation.
-
-~agent-chief-backend~ selects =codex= or =claude-code=. ~agent-chief-mode~ defaults to =session=; set it to =stateless= to use the older one-shot JSON-decision path. ~agent-chief-interval~ controls the timer interval in seconds. ~agent-chief-directory~ is the working directory for chief sessions and one-shot calls; it defaults to ~user-emacs-directory~. ~agent-chief-session-instance-name~ defaults to =chief= and is used as the instance name for the dedicated interactive session.
-
-~agent-chief-state-file~ is an Org file used as the durable, inspectable state store; =agent-chief= never writes opaque memory. Day plans and manual notes are appended there and, when a chief session is live, submitted into that session as conversational context.
-
-State context treats only a =Plan YYYY-MM-DD= heading dated today as current. Older plan headings are supplied as historical context, not active obligations, unless restated in today's plan.
-
-~agent-chief-record-model-state-updates~ controls whether model-proposed state updates from stateless ticks are appended to the state file. It defaults to nil because periodic model observations are not user-approved durable memory. Use explicit notes and day plans for ordinary state updates.
-
-~agent-chief-context-functions~ is the extension point for agenda, task, calendar, project, or custom status snippets. Each function is called with no arguments and should return a string. Nil and empty strings are ignored. The state file is included separately, truncated to ~agent-chief-state-max-chars~ characters. ~agent-chief-max-turns~ limits Claude Code ticks; Codex ticks use the existing =codex exec= settings from =agent-codex=.
-
-In session mode, ~agent-chief-start-session~ sends only a short conversational kickoff asking the model to ask for today's plan; it does not dump the state file or stateless JSON contract into the visible transcript. Heartbeat prompts ask the model to respond exactly =No nudge.= when no contact is warranted, or =Nudge: MESSAGE= when it should alert the user. The backend's ordinary notification event tells =agent-chief= when the response is complete; =agent-chief= then inspects the session text since the heartbeat and calls ~agent-chief-notify-function~ only for a nudge. The default notification function logs the message and uses =alert.el= when available. ~agent-chief-system-prompt~ is the standing instruction that makes the loop selective and forbids inventing obligations not present in the supplied context.
-
-In stateless mode, backend output may include echoed CLI transcript text before the answer. The chief loop scans that output and uses the last valid JSON object with a =notify= field as the decision, so echoed response-schema examples do not confuse the parser.
 
 * Commands
 :PROPERTIES:
@@ -1193,27 +1158,6 @@ With lines marked in an agenda, as =m= (~org-agenda-bulk-mark~) marks them, ~age
 #+end_src
 
 Like the package's other keymaps, this one keeps the keys you bind in it, and the package's own keys are set in it again each time its files are loaded ([[#h:shared-commands][Shared commands]]).
-
-** Chief-of-staff commands
-:PROPERTIES:
-:CUSTOM_ID: h:chief-commands
-:END:
-
-#+findex: agent-chief-start
-#+findex: agent-chief-start-session
-#+findex: agent-chief-stop
-#+findex: agent-chief-tick
-#+findex: agent-chief-stateless-tick
-#+findex: agent-chief-session-heartbeat
-#+findex: agent-chief-switch-to-session
-#+findex: agent-chief-open-state
-#+findex: agent-chief-add-note
-#+findex: agent-chief-set-day-plan
-The command ~agent-chief-start-session~ starts or reuses a dedicated Claude Code or Codex session using ~agent-chief-session-instance-name~, sends the chief-of-staff operating contract into the session, asks the model to request today's plan there, and starts the heartbeat timer. The command ~agent-chief-switch-to-session~ jumps back to that session so the user can reply normally.
-
-The command ~agent-chief-start~ starts only the repeating Emacs timer. Without a prefix argument it also schedules an immediate tick; with a prefix argument, it waits ~agent-chief-interval~ seconds before the first tick. ~agent-chief-stop~ cancels the timer. ~agent-chief-tick~ runs one check using ~agent-chief-mode~. ~agent-chief-session-heartbeat~ forces a session-mode heartbeat, while ~agent-chief-stateless-tick~ forces one stateless JSON-decision check.
-
-The command ~agent-chief-open-state~ opens the auditable Org state file. ~agent-chief-add-note~ appends a manual note, and ~agent-chief-set-day-plan~ appends today's plan. When a chief session is active, both commands also submit the new context into that session. These commands are intentionally simple: the durable source of truth remains ordinary text that can be reviewed, edited, and audited outside the model.
 
 ** Claude Code commands
 :PROPERTIES:
