@@ -982,12 +982,16 @@ event, as the successor of a handoff is, counts from now."
   "Make the task of session BUFFER record the session as it is now.
 A session is recorded by its id, and by its buffer's name until the id
 is known; the session a handoff starts replaces the one it took over
-from.  A session whose task is gone is unlinked."
+from.  A session whose task is gone is unlinked.  The record is brought
+up to date also in a buffer with unsaved edits, which is left unsaved:
+it is there already, and an id that waited for the buffer to be saved
+was lost when the session ended first, leaving a task whose session
+nothing could resume."
   (let ((link (buffer-local-value 'agent-auto--link buffer))
         (value (car (agent-auto--session-values buffer))))
     (unless (equal value (agent-auto-link-recorded link))
       (pcase (agent-auto--edit-task
-              link (lambda () (agent-auto--put-session buffer)))
+              link (lambda () (agent-auto--put-session buffer)) t)
         ('done (setf (agent-auto-link-recorded link) value))
         ('missing (with-current-buffer buffer
                     (setq agent-auto--link nil)))))))
@@ -1389,14 +1393,16 @@ ONLY-READY non-nil the task must carry the ready tag."
 
 ;;;; Editing tasks
 
-(defun agent-auto--edit-task (link function)
+(defun agent-auto--edit-task (link function &optional unsaved)
   "Call FUNCTION with point on the heading of the task of LINK.
 Return `done' after the call, when the buffer is saved if FUNCTION
 changed it; `deferred' when the task's buffer has unsaved edits, and is
 therefore left alone; and `missing' when the file or the task is gone.
-The edit is made in the buffer visiting the file, widened, without
-moving point or touching a window."
-  (let ((buffer (agent-auto--editable-buffer (agent-auto-link-file link))))
+With UNSAVED non-nil a buffer with unsaved edits is edited too, and
+left unsaved.  The edit is made in the buffer visiting the file,
+widened, without moving point or touching a window."
+  (let ((buffer (agent-auto--editable-buffer (agent-auto-link-file link)
+                                             unsaved)))
     (cond
      ((eq buffer 'gone) 'missing)
      ((null buffer) 'deferred)
@@ -1404,9 +1410,11 @@ moving point or touching a window."
           (org-with-wide-buffer
            (if (not (agent-auto--goto-recorded (agent-auto-link-recorded link)))
                'missing
-             (let ((inhibit-message t))
-               (funcall function))
-             (agent-todo--save)
+             (let ((clean (not (buffer-modified-p)))
+                   (inhibit-message t))
+               (funcall function)
+               (when clean
+                 (agent-todo--save)))
              'done)))))))
 
 (defun agent-auto--goto-recorded (value)
@@ -1420,16 +1428,18 @@ Return non-nil when there is one in the current buffer."
           nil t)
          (ignore-errors (org-back-to-heading t)))))
 
-(defun agent-auto--editable-buffer (file)
+(defun agent-auto--editable-buffer (file &optional unsaved)
   "Return the buffer visiting FILE when it may be edited.
 Return nil when it has unsaved edits or is read-only, and the symbol
-`gone' when FILE does not exist or is no Org file.  A buffer whose file
-changed on disk is reverted first, since it has no edits to lose."
+`gone' when FILE does not exist or is no Org file.  With UNSAVED non-nil
+a buffer with unsaved edits may be edited too.  A buffer without them
+whose file changed on disk is reverted first, since it has no edits to
+lose."
   (let ((buffer (agent-auto--org-buffer file)))
     (cond
      ((null buffer) 'gone)
-     ((with-current-buffer buffer (or (buffer-modified-p) buffer-read-only))
-      nil)
+     ((buffer-local-value 'buffer-read-only buffer) nil)
+     ((buffer-modified-p buffer) (and unsaved buffer))
      (t (unless (verify-visited-file-modtime buffer)
           (with-current-buffer buffer
             (let ((inhibit-message t))

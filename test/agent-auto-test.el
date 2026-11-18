@@ -909,6 +909,56 @@ buffer that had unsaved edits is left unsaved, with both changes in it."
       (should-not (string-match-p "AGENT_SESSION\\|Typing"
                                   (agent-auto-test--disk file))))))
 
+;; A task sent by hand from a buffer with unsaved edits recorded its
+;; session by the buffer's name, and the id waited for the buffer to be
+;; saved.  A session closed before that left the task with a record
+;; that nothing could resume.
+(ert-deftest agent-auto-test-id-reaches-a-task-with-unsaved-edits ()
+  "Record a session's id on its task also in a buffer with unsaved edits.
+The buffer is left unsaved.  Once it is saved, the task names its
+session by id, although the session ended meanwhile, so that acting on
+the task resumes it."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (agent-auto-test--task root nil "")))
+           (org (find-file-noselect file)))
+      (with-current-buffer org
+        (goto-char (point-max))
+        (insert "Typing.\n")
+        (goto-char (point-min))
+        (agent-act-on-thing-at-point))
+      (let ((session (car agent-auto-test--buffers))
+            (kill-buffer-query-functions nil))
+        (agent--note-session-id session "sid-1")
+        (should (buffer-modified-p org))
+        (should (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                       "sid-1"))
+        (should-not (string-match-p "AGENT_SESSION\\|Typing"
+                                    (agent-auto-test--disk file)))
+        (kill-buffer session))
+      (with-current-buffer org
+        (save-buffer)
+        (goto-char (point-min))
+        (let ((context (agent-auto--recorded-session)))
+          (should-not (plist-get context :lost))
+          (should (equal (plist-get context :resume-id) "sid-1")))))))
+
+(ert-deftest agent-auto-test-read-only-buffer-keeps-the-id-waiting ()
+  "Leave a read-only buffer alone, and record the id once it can be edited."
+  (agent-auto-test--with root
+    (pcase-let* ((`(,file . ,session) (agent-auto-test--hand-started-task root))
+                 (org (find-buffer-visiting file)))
+      (with-current-buffer org
+        (setq buffer-read-only t))
+      (agent--note-session-id session "sid-1")
+      (should-not (equal (agent-auto-test--property file "Fix it" "AGENT_SESSION")
+                         "sid-1"))
+      (with-current-buffer org
+        (setq buffer-read-only nil))
+      (agent-auto-test--run)
+      (should (string-match-p ":AGENT_SESSION: +sid-1"
+                              (agent-auto-test--disk file))))))
+
 (defun agent-auto-test--hand-started-task (root &optional tags)
   "Start by hand the one task of a new file under ROOT; return (FILE . BUFFER).
 The task carries TAGS, a tag string, and no tag when TAGS is nil."
