@@ -4230,6 +4230,153 @@ Bind `buf', the session buffer; `sent', the commands submitted; and
         (should-not (plist-get agent--before-exit :queue))
         (should (eq (plist-get agent--before-exit :state) 'running))))))
 
+(defmacro agent-test--with-chain (buffer submitted exited backend-keys &rest body)
+  "Evaluate BODY in a session buffer whose before-exit chain can run.
+BUFFER is a symbol, bound to the buffer.  SUBMITTED is a symbol, bound
+to the texts submitted to it, the latest first, and EXITED one that is
+set once the session is exited.  BACKEND-KEYS is a form giving more
+slots of the backend, which takes slash commands.  No skill is
+configured, and no watchdog runs."
+  (declare (indent 4) (debug (symbolp symbolp symbolp form body)))
+  `(let ((agent-backends nil)
+         (agent-before-exit-skill-names nil)
+         (agent-before-exit-skill-name nil)
+         (agent-before-exit-skill-directories nil)
+         (agent-before-exit-step-functions nil)
+         ,submitted ,exited)
+     (with-temp-buffer
+       (let ((,buffer (current-buffer)))
+         (apply #'agent-register-backend
+                'one
+                (apply #'agent-test--backend
+                       :buffer-p (lambda (candidate) (eq candidate ,buffer))
+                       :skill-command-prefix "/"
+                       :submit (lambda (text &optional _buffer)
+                                 (push text ,submitted))
+                       ,backend-keys))
+         (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                    (lambda (_buffer) nil))
+                   ((symbol-function 'agent--exit-session)
+                    (lambda (_buffer) (setq ,exited t)))
+                   ((symbol-function 'run-at-time)
+                    (lambda (_time _repeat function &rest args)
+                      (apply function args))))
+           ,@body)))))
+
+(ert-deftest agent-test-before-exit-steps-run-before-the-skills ()
+  "Run the steps the hook gives before the skills, each as a turn of its own.
+A step's prompt is submitted as it stands, its `:finish' function is
+called with the buffer when its turn ends, and the chain then goes on to
+the skills and exits after the last."
+  (agent-test--with-chain buf submitted exited nil
+    (let* ((finished nil)
+           (agent-before-exit-skill-names '("update-log"))
+           (agent-before-exit-step-functions
+            (list (lambda (buffer)
+                    (and (eq buffer buf)
+                         (list :name "note" :prompt "Write the note."
+                               :finish (lambda (buffer)
+                                         (push buffer finished)))))
+                  #'ignore)))
+      (should-not (agent-run-skill-before-exit 'one buf))
+      (should (equal submitted '("Write the note.")))
+      (should-not finished)
+      (should (agent--before-exit-transition buf 'step))
+      (should (equal finished (list buf)))
+      (should (equal submitted '("/update-log" "Write the note.")))
+      (should-not exited)
+      (should (agent--before-exit-transition buf 'step))
+      (should (equal finished (list buf)))
+      (should exited))))
+
+(ert-deftest agent-test-before-exit-step-alone-makes-a-chain ()
+  "Run a step where no skill is configured, and exit after it."
+  (agent-test--with-chain buf submitted exited nil
+    (let ((agent-before-exit-step-functions
+           (list (lambda (_buffer) (list :name "note" :prompt "Write it.")))))
+      (should-not (agent-run-skill-before-exit 'one buf))
+      (should (equal submitted '("Write it.")))
+      (should (agent--before-exit-transition buf 'step))
+      (should exited))))
+
+(ert-deftest agent-test-before-exit-step-never-stops-the-chain ()
+  "Go on with the chain whatever a step does.
+A `:finish' function that signals an error is reported and the next
+entry is submitted; a function of the hook that signals gives no step,
+and the steps of the others still run."
+  (agent-test--with-chain buf submitted exited nil
+    (let ((agent-before-exit-skill-names '("update-log"))
+          (agent-before-exit-step-functions
+           (list (lambda (_buffer) (error "No step from here"))
+                 (lambda (_buffer)
+                   (list :name "note" :prompt "Write the note."
+                         :finish (lambda (_buffer) (error "Could not read it")))))))
+      (agent-test-helper-with-messages messages
+        (should-not (agent-run-skill-before-exit 'one buf))
+        (should (string-match-p "No step from here" messages))
+        (should (equal submitted '("Write the note.")))
+        (should (agent--before-exit-transition buf 'step))
+        (should (string-match-p "note step .* failed: Could not read it"
+                                messages)))
+      (should (equal submitted '("/update-log" "Write the note.")))
+      (should (agent--before-exit-transition buf 'step))
+      (should exited))))
+
+(ert-deftest agent-test-before-exit-step-waits-for-its-own-turn ()
+  "Leave a step whose work is not there while the session still works.
+The stop event then belongs to an earlier turn.  Once the backend shows
+the session idle the step is finished, done or not, and the chain goes
+on; a step whose work is there is finished whatever the backend shows."
+  (let ((busy t) (done nil) finished)
+    (agent-test--with-chain buf submitted exited
+        (list :idle-p (lambda (_buffer) (not busy)))
+      (let ((agent-before-exit-step-functions
+             (list (lambda (_buffer)
+                     (list :name "note" :prompt "Write the note."
+                           :done-p (lambda (_buffer) done)
+                           :finish (lambda (_buffer) (setq finished t)))))))
+        (setq busy nil)
+        (should-not (agent-run-skill-before-exit 'one buf))
+        (setq busy t)
+        (should-not (agent--before-exit-transition buf 'step))
+        (should-not finished)
+        (should-not exited)
+        (setq done t)
+        (should (agent--before-exit-transition buf 'step))
+        (should finished)
+        (should exited)))
+    (setq busy t done nil finished nil)
+    (agent-test--with-chain buf submitted exited
+        (list :idle-p (lambda (_buffer) (not busy)))
+      (let ((agent-before-exit-step-functions
+             (list (lambda (_buffer)
+                     (list :name "note" :prompt "Write the note."
+                           :done-p (lambda (_buffer) done)
+                           :finish (lambda (_buffer) (setq finished t)))))))
+        (setq busy nil)
+        (should-not (agent-run-skill-before-exit 'one buf))
+        (should (agent--before-exit-transition buf 'step))
+        (should finished)
+        (should exited)))))
+
+(ert-deftest agent-test-before-exit-step-needs-a-backend-that-takes-text ()
+  "Skip a step on a backend that text cannot be sent to."
+  (let ((agent-backends nil)
+        (agent-before-exit-skill-names nil)
+        (agent-before-exit-skill-name nil)
+        (agent-before-exit-step-functions
+         (list (lambda (_buffer) (list :name "note" :prompt "Write it.")))))
+    (with-temp-buffer
+      (let ((buf (current-buffer)))
+        (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (eq candidate buf))))
+        (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
+                   (lambda (_buffer) nil)))
+          (should (agent-run-skill-before-exit 'one buf))
+          (should-not agent--before-exit))))))
+
 (ert-deftest agent-test-discover-all-skills-skips-non-invocable ()
   "Do not expose skills marked `user-invocable: false' interactively."
   (let* ((agent-backends nil)

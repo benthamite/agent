@@ -113,6 +113,26 @@ When nil, run a configured skill before exiting every session.  An entry in
   :type '(repeat directory)
   :group 'agent)
 
+(defvar agent-before-exit-step-functions nil
+  "Abnormal hook supplying the steps `agent-exit' runs before its skills.
+Each function is called with the session buffer when the before-exit
+chain starts, and returns nil, for no step, or a step: a plist.  `:name'
+is a string naming the step in messages.  `:prompt' is the text
+submitted to the session, as it stands.  `:done-p', when given, is a
+function of the session buffer returning non-nil once the step has left
+what it was asked for, such as a file it was to write.  `:finish', when
+given, is a function of the session buffer called once, when the turn
+the prompt started has ended.
+
+The steps run first, in the order of the hook, each as a turn of its
+own, and the skills of `agent-before-exit-skill-names' follow.  A step
+never stops the chain: when its turn has ended, `:finish' is called and
+the chain goes on, whatever the turn did and whatever `:finish' returns
+or signals.  A turn that ended without `:done-p' holding is waited for
+only while the backend still shows the session working, or reports
+background work the turn left running, as for a skill that has not
+written its receipt.  A function that signals an error gives no step.")
+
 (defcustom agent-before-exit-timeout 600
   "Seconds between checks on an unfinished before-exit skill.
 The watchdog restarts whenever the chain advances to another skill.
@@ -127,10 +147,12 @@ eventually finishes."
 (defvar-local agent--before-exit nil
   "State of the before-exit skill chain in this session buffer.
 Nil when no chain has started.  Otherwise a plist with keys
-`:queue' (skill entries not yet submitted), `:state'
+`:queue' (entries not yet submitted: the steps of
+`agent-before-exit-step-functions', each a cons of `:step' and its
+plist, then the skill entries), `:state'
 \\(`waiting-for-idle', `running', or `closing'), `:started-at'
 \\(`float-time' when the chain started), and `:timer' (the watchdog
-timer, or nil).  `:current-entry' names the running skill entry,
+timer, or nil).  `:current-entry' names the running entry,
 and `:receipt-file' is its expected closeout receipt, or nil for
 an ungated entry.  `:last-completion' records the last accepted
 `stop' or `idle-prompt' event so their duplicate pair advances the
@@ -3435,12 +3457,15 @@ non-nil when the chain consumed the event."
         (_ (error "Unknown before-exit event: %s" event))))))
 
 (defun agent--before-exit-start (buffer)
-  "Start the before-exit skill chain in BUFFER.
+  "Start the before-exit chain in BUFFER.
+The chain is the steps `agent-before-exit-step-functions' give for
+BUFFER, then the skills that apply to it.
 Return non-nil when a chain started and the exit must wait.
 An existing chain also returns non-nil so a repeated exit request
-cannot bypass it.  Return nil when no skill applies, nothing could
-be submitted, or `agent--session-unstarted-p' holds, since a skill has
-no conversation to work on there and its text could land in a picker."
+cannot bypass it.  Return nil when no step or skill applies, nothing
+could be submitted, or `agent--session-unstarted-p' holds, since a skill
+has no conversation to work on there and its text could land in a
+picker."
   (cond
    (agent--before-exit
     (message "Before-exit chain already armed (%s); use `agent-exit-without-skills' to bypass it"
@@ -3449,7 +3474,8 @@ no conversation to work on there and its text could land in a picker."
    ((agent--session-unstarted-p buffer) nil)
    (t
     (let* ((backend (agent--detect-backend buffer))
-           (queue (agent--before-exit-skill-queue backend buffer))
+           (queue (append (agent--before-exit-steps buffer)
+                          (agent--before-exit-skill-queue backend buffer)))
            (busy (and (eq (agent-session-display-state buffer backend) 'busy)
                       (not (agent--backend-affirms-idle-p backend buffer)))))
       (when queue
@@ -3470,6 +3496,28 @@ no conversation to work on there and its text could land in a picker."
               t
             (agent--before-exit-reset)
             nil)))))))
+
+(defun agent--before-exit-steps (buffer)
+  "Return the steps `agent-before-exit-step-functions' give for BUFFER.
+Each is a cons of `:step' and the plist a function returned, in the
+order of the hook.  A function that signals an error gives no step, so
+that a step can never keep a session from being exited."
+  (let (steps)
+    (run-hook-wrapped
+     'agent-before-exit-step-functions
+     (lambda (function)
+       (condition-case err
+           (when-let* ((step (funcall function buffer)))
+             (push (cons :step step) steps))
+         (error (message "agent: %s gave no before-exit step: %s"
+                         function (error-message-string err))))
+       nil))
+    (nreverse steps)))
+
+(defun agent--before-exit-step-entry-p (entry)
+  "Return non-nil when chain ENTRY is a step and not a skill.
+See `agent-before-exit-step-functions'."
+  (eq (car-safe entry) :step))
 
 (defun agent--session-unstarted-p (buffer)
   "Return non-nil when session BUFFER shows no sign of a conversation.
@@ -3524,6 +3572,7 @@ Return non-nil when the chain consumed the event."
 
 (defun agent--before-exit-accept-receipt-p (buffer)
   "Return non-nil if BUFFER's current entry has an accepted receipt.
+A step is not judged by a receipt; see `agent--before-exit-finish-step'.
 Ungated entries need no receipt.  A held receipt stops the chain
 without a warning and keeps BUFFER open for the user.  A missing,
 invalid, or failed receipt stops the chain with a warning and keeps
@@ -3535,6 +3584,42 @@ earlier turn (a late Stop hook or a stray idle notification).  Or the
 turn may have ended with background work still running: the skill is
 waiting on a subagent or a background shell, and will resume and write
 its receipt when that work reports back."
+  (if-let* ((entry (plist-get agent--before-exit :current-entry))
+            ((agent--before-exit-step-entry-p entry)))
+      (agent--before-exit-finish-step buffer (cdr entry))
+    (agent--before-exit-accept-skill-receipt-p buffer)))
+
+(defun agent--before-exit-finish-step (buffer step)
+  "Finish STEP, the step of BUFFER's chain whose turn has ended.
+Return non-nil when the chain may go on, which it may whatever the turn
+did: STEP's `:finish' function is called with BUFFER, and an error it
+signals is reported and otherwise ignored.  Return nil, leaving the
+step for the next event, only while its `:done-p' function does not
+hold and the turn cannot have been the step's own or has not finished:
+the backend still shows the session working, or reports background work
+the turn left running.  See `agent-before-exit-step-functions'."
+  (let ((backend (agent--detect-backend buffer))
+        (done-p (plist-get step :done-p))
+        (name (plist-get step :name)))
+    (if (and done-p
+             (not (funcall done-p buffer))
+             (or (agent--backend-denies-idle-p backend buffer)
+                 (agent--backend-turn-end-background-p backend buffer)))
+        (progn
+          (message "agent: the %s step of %s has not finished; waiting"
+                   name (buffer-name buffer))
+          nil)
+      (when-let* ((finish (plist-get step :finish)))
+        (condition-case err
+            (funcall finish buffer)
+          (error (message "agent: the %s step of %s failed: %s"
+                          name (buffer-name buffer)
+                          (error-message-string err)))))
+      t)))
+
+(defun agent--before-exit-accept-skill-receipt-p (buffer)
+  "Return non-nil if the skill BUFFER's chain is running has an accepted receipt.
+See `agent--before-exit-accept-receipt-p'."
   (if-let* ((file (plist-get agent--before-exit :receipt-file)))
       (let ((result (agent--before-exit-read-receipt file))
             (backend (agent--detect-backend buffer)))
@@ -3698,7 +3783,7 @@ the input prompt."
   t)
 
 (defun agent--before-exit-submit-next (buffer)
-  "Submit the next queued before-exit skill in BUFFER.
+  "Submit the next queued before-exit step or skill in BUFFER.
 Skip entries that yield no command, and return non-nil when one
 is submitted."
   (let ((backend (agent--detect-backend buffer))
@@ -3724,7 +3809,10 @@ is submitted."
                             (shell-quote-argument receipt-file)))))
           (agent-submit command buffer)
           (message "Started %s; this session will close when the before-exit skills finish"
-                   command)
+                   (if (agent--before-exit-step-entry-p entry)
+                       (format "the %s step"
+                               (agent--before-exit-skill-entry-name entry))
+                     command))
           (setq sent t))))
     sent))
 
@@ -3839,8 +3927,11 @@ single-entry list built from `agent-before-exit-skill-name'."
            (list agent-before-exit-skill-name))))
 
 (defun agent--before-exit-skill-entry-name (entry)
-  "Return the skill-name string for before-exit ENTRY."
-  (if (consp entry) (car entry) entry))
+  "Return the name of before-exit ENTRY, a skill or a step."
+  (cond ((agent--before-exit-step-entry-p entry)
+         (or (plist-get (cdr entry) :name) "before-exit"))
+        ((consp entry) (car entry))
+        (t entry)))
 
 (defun agent--before-exit-skill-entry-directories (entry)
   "Return the directory restriction for before-exit ENTRY.
@@ -3875,12 +3966,17 @@ _BACKEND is unused; the directory comes from BUFFER's
 
 (defun agent--before-exit-skill-command (backend entry)
   "Return the interactive command string for before-exit ENTRY on BACKEND.
-Append ENTRY's `:args' when present."
-  (when-let* ((struct (agent-backend backend))
-              (prefix (agent-backend-skill-command-prefix struct)))
-    (let ((args (agent--before-exit-skill-entry-args entry)))
-      (concat prefix (agent--before-exit-skill-entry-name entry)
-              (and args (concat " " args))))))
+Append ENTRY's `:args' when present.  A step's command is its prompt,
+on a backend that text can be sent to."
+  (when-let* ((struct (agent-backend backend)))
+    (if (agent--before-exit-step-entry-p entry)
+        (and (or (agent-backend-submit struct)
+                 (agent-backend-send-string struct))
+             (plist-get (cdr entry) :prompt))
+      (when-let* ((prefix (agent-backend-skill-command-prefix struct)))
+        (let ((args (agent--before-exit-skill-entry-args entry)))
+          (concat prefix (agent--before-exit-skill-entry-name entry)
+                  (and args (concat " " args))))))))
 
 (defun agent--skill-argument-candidates (skill)
   "Return completion candidates for SKILL's arguments.

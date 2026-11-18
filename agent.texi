@@ -1025,6 +1025,9 @@ the turn ends.
 duration. @code{agent-exit-without-skills} is the only exit command that bypasses
 the skill hook; it still runs other before-exit functions.
 
+@vindex agent-before-exit-step-functions
+A module can put steps of its own at the head of the chain with @code{agent-before-exit-step-functions}@comma{} an abnormal hook. Each function is called with the session buffer when the chain starts and returns nil@comma{} or a step: a plist of @code{:name}@comma{} a string naming the step in messages; @code{:prompt}@comma{} the text submitted to the session as it stands; @code{:done-p}@comma{} optionally@comma{} a function of the session buffer that returns non-nil once the step has left what it was asked for@comma{} such as a file; and @code{:finish}@comma{} optionally@comma{} a function of the session buffer called once when the turn the prompt started has ended. The steps run first@comma{} in the order of the hook@comma{} each as a turn of its own@comma{} and the configured skills follow; a session no skill applies to still runs its steps. A step never stops the chain: when its turn ends@comma{} @code{:finish} is called and the chain goes on@comma{} whatever the turn did and whatever @code{:finish} returns or signals. A turn that ended without @code{:done-p} holding is waited for only while the backend still shows the session working or reports background work the turn left running@comma{} as for a skill that has not written its receipt. A function that signals an error gives no step@comma{} and a step is skipped on a backend that text cannot be sent to. Like the skills@comma{} the steps do not run with @code{agent-exit-without-skills}.
+
 A session with no native id on which no session event has ever arrived has not
 started a conversation. That is what a CLI started with a bare @samp{--resume} looks
 like while it shows its picker@comma{} which would take submitted text as a search and
