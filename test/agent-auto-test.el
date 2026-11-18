@@ -2685,10 +2685,10 @@ and stays open."
       (should-not (buffer-live-p buffer))
       (should-not (agent-session-buffers))
       (should (equal (agent-auto-test--tags file "Fix it") '("review")))
-      (should (string-prefix-p
-               "Handover, finished: "
-               (agent-auto-test--property file "Fix it" "AGENT_RESULT")))
-      (should (= (length (agent-auto-test--notes file "Fix it")) 1))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Handover, finished: the gather now keeps all-day events. Fixed the filter. Next: review the diff"))
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed: finished.\nReported: the gather now keeps all-day events\nDone: Fixed the filter\nNext: review the diff")))
       (should (agent-auto-test--at file "Fix it" #'org-entry-is-todo-p))
       (should-not agent-auto--handovers))))
 
@@ -2726,6 +2726,102 @@ it is not closed for him when it reports the task done."
            resumed "Status: done: the work calendar it is")
           (should (buffer-live-p resumed))
           (should (equal (agent-auto-test--tags file "Fix it") '("review"))))))))
+
+(defun agent-auto-test--close-itself (root reply answer &optional before)
+  "Have an unattended session close itself, and return its task's file.
+The session of a new task under ROOT ends its turn with REPLY and writes
+ANSWER as its handover; see `agent-auto-test--answer'.  It then goes
+through its one skill and is exited.  BEFORE, when given, is called with
+the task's file before the turn ends."
+  (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root))
+              (agent-before-exit-skill-names '("update-log")))
+    (when before
+      (funcall before file))
+    (agent-auto-test--closing
+      (agent-auto-test--end-turn buffer reply)
+      (should (agent-auto-test--handover-asked-p buffer))
+      (agent-auto-test--answer buffer answer)
+      (should (equal (caar agent-auto-test--submitted) "/update-log"))
+      (agent-session-event buffer 'stop)
+      (agent-auto-test--exit-due)
+      (agent-auto-test--flush-due))
+    (should-not (buffer-live-p buffer))
+    file))
+
+;; The handover replaces the result of the session's last turn with the
+;; session's own account of where the task stands, and its tag with the
+;; one its state gives.  For a session that closed itself that lost what
+;; the user is to hear: the question, or what is still to be verified.
+(ert-deftest agent-auto-test-self-closed-session-keeps-what-it-reported ()
+  "Keep on the task what an unattended session reported, through its handover.
+A session that ends done pending verification closes through the
+handover and the chain, and the task keeps what is still to be verified
+and when: first in its result and on a line of the note, also when the
+turn's own result was never written, the task's buffer having unsaved
+edits until after the close.  A question the session asked is kept the
+same way, with the blocked tag, whatever state its handover names; a
+question the handover asks as well is left to the note.  The tag is the
+one of what the turn reported.  A session that leaves no handover keeps
+its tag, and its result says what it had reported."
+  (agent-auto-test--with root
+    (let* ((org nil)
+           (file (agent-auto-test--close-itself
+                  root
+                  "Status: done, pending verification: the nightly run at 03:00"
+                  '(:state "finished" :summary "Fixed the filter"
+                    :next "check the run")
+                  (lambda (file)
+                    (setq org (find-buffer-visiting file))
+                    (with-current-buffer org
+                      (goto-char (point-max))
+                      (insert "Typing.\n"))))))
+      (should (equal (agent-auto-test--tags file "Fix it") '("agent")))
+      (should-not (agent-auto-test--property file "Fix it" "AGENT_RESULT"))
+      (with-current-buffer org
+        (save-buffer))
+      (agent-auto-test--flush-due)
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Handover, finished: pending verification: the nightly run at 03:00. Fixed the filter. Next: check the run"))
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed: finished.\nReported: pending verification: the nightly run at 03:00\nDone: Fixed the filter\nNext: check the run")))
+      (should-not (agent-auto-test--receipt-files))))
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--close-itself
+                 root "Status: waiting on you: which calendar is the source?"
+                 '(:state "interrupted" :summary "Compared the two"))))
+      (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Handover, interrupted: which calendar is the source? Compared the two."))
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed: interrupted.\nReported: waiting on you: which calendar is the source?\nDone: Compared the two")))))
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--close-itself
+                 root "Status: waiting on you: which calendar is the source?"
+                 '(:state "needs-user" :summary "Compared the two"
+                   :question "The work one or the home one?"))))
+      (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Handover, needs a decision: which calendar is the source? Compared the two."))
+      (should (equal (agent-auto-test--notes file "Fix it")
+                     '("Session closed: needs a decision.\nReported: waiting on you: which calendar is the source?\nDone: Compared the two\nQuestion: The work one or the home one?")))))
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--close-itself
+                 root "Status: done: fixed the filter"
+                 '(:state "needs-user" :summary "Fixed it"
+                   :question "Shall I also fix the other one?"))))
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Handover, needs a decision: fixed the filter. Shall I also fix the other one? Fixed it."))))
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--close-itself
+                 root
+                 "Status: done, pending verification: the nightly run at 03:00"
+                 nil)))
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "Closed without a handover (it wrote no receipt); before that: pending verification: the nightly run at 03:00"))
+      (should-not (agent-auto-test--notes file "Fix it")))))
 
 (ert-deftest agent-auto-test-unattended-session-with-more-to-do-stays-open ()
   "Leave open, and snoozed, an unattended session that has more to do.

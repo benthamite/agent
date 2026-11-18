@@ -333,6 +333,13 @@ A session that works again is unsettled.")
 It is nil again once the session works on: a later close needs a
 handover of its own.")
 
+(defvar-local agent-auto--closing nil
+  "What this session reported when it began to close itself, or nil.
+A cons of the kind of the result, `review' or `blocked', and its text;
+see `agent-auto--close-itself'.  The handover of that close keeps both,
+whatever the session then says in it.  It is nil again once a turn of
+the user's starts in the session.")
+
 (defvar-local agent-auto--back nil
   "Non-nil once this session's task was told that the session works again.
 A task that waits on someone goes back to its keyword when a turn starts
@@ -901,6 +908,7 @@ UNATTENDED is non-nil for a session the timer started; see
           agent-auto--settled nil
           agent-auto--exiting nil
           agent-auto--handed-over nil
+          agent-auto--closing nil
           agent-auto--back nil))
   (agent-auto--schedule-marks))
 
@@ -1038,11 +1046,13 @@ For `agent-session-event-functions'."
 That is any turn but those of the session's exit; see
 `agent-auto--chain-turn-p'.  A handover the session left when its exit
 was asked for no longer closes it: the exit was abandoned, and a later
-one asks for a handover again.  A task that waits on someone leaves the
+one asks for a handover again, which no longer keeps what the session
+reported before a close of its own.  A task that waits on someone leaves the
 waiting keyword, the work on it being resumed, and a receipt not yet
 written on the task no longer sets it waiting."
   (with-current-buffer buffer
-    (setq agent-auto--handed-over nil))
+    (setq agent-auto--handed-over nil
+          agent-auto--closing nil))
   (when-let* ((link (buffer-local-value 'agent-auto--link buffer)))
     (agent-auto--mark-resumed link)
     (unless (buffer-local-value 'agent-auto--back buffer)
@@ -1061,7 +1071,8 @@ a status line no longer leaves its task stuck."
   (when (buffer-local-value 'agent-auto--unattended buffer)
     (agent-auto--unsnooze buffer)
     (with-current-buffer buffer
-      (setq agent-auto--unattended nil))
+      (setq agent-auto--unattended nil
+            agent-auto--closing nil))
     (agent-auto--log "%s is attended from now on" (buffer-name buffer))))
 
 (defun agent-auto--unsnooze (buffer)
@@ -1155,17 +1166,20 @@ KIND and TEXT are as for `agent-auto--conclude'.  An unattended session
 has then done what it could, whether it finished or needs the user, and
 is closed for him; see `agent-auto--close-itself'."
   (agent-auto--settle buffer kind text)
-  (agent-auto--close-itself buffer))
+  (agent-auto--close-itself buffer kind text))
 
-(defun agent-auto--close-itself (buffer)
+(defun agent-auto--close-itself (buffer kind text)
   "Close session BUFFER for the user as `agent-exit' would, if it is to close.
-Whether it is, `agent-auto--closes-itself-p' tells.  The session goes
-through the whole of its before-exit chain: the handover on its task,
-the configured skills, then the exit.  Nothing is asked, and nothing is
-said in the echo area.  A session that cannot be exited, as one that
-holds captured prompts, is left open and is the user's from then on; see
-`agent-auto--attend'."
+Whether it is, `agent-auto--closes-itself-p' tells.  KIND and TEXT are
+the result its turn reported, which the handover of this close keeps;
+see `agent-auto--closing'.  The session goes through the whole of its
+before-exit chain: the handover on its task, the configured skills, then
+the exit.  Nothing is asked, and nothing is said in the echo area.  A
+session that cannot be exited, as one that holds captured prompts, is
+left open and is the user's from then on; see `agent-auto--attend'."
   (when (agent-auto--closes-itself-p buffer)
+    (with-current-buffer buffer
+      (setq agent-auto--closing (cons kind text)))
     (agent-auto--log "closing %s, whose turn ended with a result"
                      (buffer-name buffer))
     (condition-case err
@@ -2419,7 +2433,9 @@ plist that adds what finds the task and what tells whether it is still
 as the session left it: `:id', the receipt's own; `:created', the time;
 `:file', the task's file; `:session', the session the task records;
 `:title', its heading; `:org-id', its Org ID, when it has one;
-`:result', its result; and `:keyword', its TODO keyword.  It is written
+`:result', its result; and `:keyword', its TODO keyword.  The receipt of
+a session that is closing itself also has what its last turn reported;
+see `agent-auto--reported'.  It is written
 to a file of its own and then on the task, as soon as the task's buffer
 has no unsaved edits.  A session whose task is closed or gone leaves no
 receipt.  A handover replaces the result of the session's last turn, so
@@ -2436,7 +2452,7 @@ the receipt is; see `agent-auto--waiting-result'."
                                  :created (float-time)
                                  :file (agent-auto-link-file link)
                                  :session (agent-auto-link-recorded link))
-                           task answer)))
+                           task answer (agent-auto--reported buffer))))
       (if (agent-auto--handover-p receipt)
           (agent-auto--drop-pending link)
         (when-let* ((waiting (agent-auto--waiting-result link)))
@@ -2446,6 +2462,18 @@ the receipt is; see `agent-auto--waiting-result'."
             (append agent-auto--handovers (list receipt)))
       (agent-auto--schedule-flush)
       receipt)))
+
+(defun agent-auto--reported (buffer)
+  "Return what session BUFFER reported when it began to close itself, or nil.
+The result is a plist of `:reported-kind', \"review\" or \"blocked\",
+and `:reported', the text of the result.  A session that is closing
+itself was closed because its turn ended with that result, which is why
+the user hears of it: its handover must not lose the question it asked,
+or what is still to be verified and when.  Nil for a session the user is
+closing."
+  (when-let* ((closing (buffer-local-value 'agent-auto--closing buffer)))
+    (list :reported-kind (symbol-name (car closing))
+          :reported (cdr closing))))
 
 (defun agent-auto--task-at-close (link)
   "Return what the open task of LINK is like now, or nil.
@@ -2773,24 +2801,31 @@ receipt."
 
 (defun agent-auto--write-handover-result (receipt)
   "Give the task at point the result and the tag of RECEIPT.
-A session that closed finished leaves the review tag, and one that needs
-the user the blocked tag; the other two states leave none.  Whichever
-of the ready and result tags the task carried goes.  A session that
-closed waiting on someone also sets the task waiting; see
+The tag is the one `agent-auto--handover-tags' gives.  Whichever of the
+ready and result tags the task carried goes.  A session that closed
+waiting on someone also sets the task waiting; see
 `agent-auto--set-waiting'."
   (let* ((tags (org-get-tags nil t))
          (lifecycle (list agent-auto-ready-tag agent-auto-review-tag
                           agent-auto-blocked-tag agent-auto-stuck-tag))
          (new (append (seq-difference tags lifecycle)
-                      (pcase (plist-get receipt :state)
-                        ("finished" (list agent-auto-review-tag))
-                        ("needs-user" (list agent-auto-blocked-tag))))))
+                      (agent-auto--handover-tags receipt))))
     (unless (equal new tags)
       (org-set-tags new))
     (org-entry-put nil agent-auto-result-property
                    (agent-auto--handover-result receipt))
     (when (equal (plist-get receipt :state) "waiting-on-someone")
       (agent-auto--set-waiting receipt))))
+
+(defun agent-auto--handover-tags (receipt)
+  "Return the result tag RECEIPT gives its task, in a list, or nil for none.
+A session that closed finished gives the review tag, and one that needs
+the user the blocked tag; the other two states give none.  A session
+that closed itself gives the tag of what its last turn reported instead,
+whatever state its handover names: that result is why it was closed."
+  (pcase (or (plist-get receipt :reported-kind) (plist-get receipt :state))
+    ((or "review" "finished") (list agent-auto-review-tag))
+    ((or "blocked" "needs-user") (list agent-auto-blocked-tag))))
 
 (defun agent-auto--handover-title (receipt)
   "Return in a few words how the session of RECEIPT closed."
@@ -2805,10 +2840,20 @@ closed waiting on someone also sets the task waiting; see
   "Return the one-line result RECEIPT gives its task.
 It starts with \"Handover, \" and how the session closed, which tells
 it from the result of a turn; see `agent-auto--untagged-result-p'.  The
-question the session asks, what it did and the next step follow."
+question the session asks, what it did and the next step follow.  For a
+session that closed itself, what its last turn reported comes first, so
+that the question it asked, or what is still to be verified and when,
+outlasts the handover; a question the handover asks after one the turn
+asked is left to the note."
   (let* ((next (plist-get receipt :next))
+         (reported (plist-get receipt :reported))
+         (asked (and reported
+                     (equal (plist-get receipt :reported-kind) "blocked")))
          (parts (delq nil
-                      (list (agent-auto--sentence (plist-get receipt :question))
+                      (list (agent-auto--sentence reported)
+                            (and (not asked)
+                                 (agent-auto--sentence
+                                  (plist-get receipt :question)))
                             (agent-auto--sentence (plist-get receipt :summary))
                             (and next (concat "Next: " next))))))
     (agent-auto--one-line
@@ -2823,20 +2868,32 @@ question the session asks, what it did and the next step follow."
 (defun agent-auto--handover-note (receipt)
   "Return the lines of the note the handover of RECEIPT leaves in a task's log.
 They give how the session closed, what it did, the next step and every
-other field the handover gave, each in full."
+other field the handover gave, each in full.  For a session that closed
+itself, the second line gives what its last turn reported."
   (cons (format "Session closed: %s."
                 (pcase (plist-get receipt :state)
                   ("waiting-on-someone" "waiting on someone")
                   (_ (agent-auto--handover-title receipt))))
         (delq nil
-              (mapcar (pcase-lambda (`(,label . ,field))
-                        (when-let* ((text (plist-get receipt field)))
-                          (format "%s: %s" label text)))
-                      '(("Done" . :summary)
-                        ("Next" . :next)
-                        ("Question" . :question)
-                        ("Waiting on" . :who)
-                        ("Waiting for" . :what))))))
+              (cons (agent-auto--reported-line receipt)
+                    (mapcar (pcase-lambda (`(,label . ,field))
+                              (when-let* ((text (plist-get receipt field)))
+                                (format "%s: %s" label text)))
+                            '(("Done" . :summary)
+                              ("Next" . :next)
+                              ("Question" . :question)
+                              ("Waiting on" . :who)
+                              ("Waiting for" . :what)))))))
+
+(defun agent-auto--reported-line (receipt)
+  "Return the line of a note that says what the session of RECEIPT reported.
+Nil for a session the user closed, which keeps no such report."
+  (when-let* ((reported (plist-get receipt :reported)))
+    (format "Reported: %s%s"
+            (if (equal (plist-get receipt :reported-kind) "blocked")
+                "waiting on you: "
+              "")
+            reported)))
 
 ;;;;; Waiting on someone
 
