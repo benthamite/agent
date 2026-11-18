@@ -786,9 +786,12 @@ It is given the silence timeout to come back, as after Emacs restarts."
         (should (= (length agent-auto-test--started) 1))))))
 
 (ert-deftest agent-auto-test-removed-result-tag-is-not-added-back ()
-  "Leave a task alone once the user removed its result tag."
+  "Leave a task alone once the user removed its result tag.
+The session is one he wrote in, which is therefore not closed for him
+when it reports its task done."
   (agent-auto-test--with root
     (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+      (agent-session-event buffer 'user-submit)
       (agent-auto-test--end-turn buffer "Status: done: fixed")
       (agent-auto-test--at file "Fix it" (lambda () (org-set-tags nil)))
       (with-current-buffer (find-buffer-visiting file)
@@ -1533,11 +1536,14 @@ that closed interrupted removes it."
 
 (ert-deftest agent-auto-test-handover-replaces-the-result ()
   "Write the result of each turn as before, and the handover over it.
-The ready tag of a task the timer started goes with the result tags."
+The ready tag of a task the timer started goes with the result tags.
+The user wrote in the session, so it is his to close."
   (agent-auto-test--with root
     (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
       (agent--note-session-id buffer "sid-1")
       (agent-auto-test--take-text)
+      (agent-session-event buffer 'user-submit)
+      (agent-session-event buffer 'stop)
       (agent-auto-test--end-turn buffer "Status: waiting on you: which one?")
       (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
       (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
@@ -2615,6 +2621,219 @@ The session the task records is not shown in its place."
           (agent-auto-test--act file '(4)))
         (should (equal sent (list "Fix it\n\nThe body." buffer)))
         (should (= (length agent-auto-test--started) 1))))))
+
+;;;; Sessions that close themselves
+
+(defun agent-auto-test--unattended-task (root)
+  "Start unattended the one task of a new file under ROOT; return (FILE . BUFFER).
+The timer starts the session, which has the id sid-1 and takes text, so
+that its exit chain runs; see `agent-auto-test--take-text'."
+  (pcase-let ((`(,file . ,buffer) (agent-auto-test--started-task root)))
+    (agent--note-session-id buffer "sid-1")
+    (agent-auto-test--take-text)
+    (cons file buffer)))
+
+(defmacro agent-auto-test--closing (&rest body)
+  "Evaluate BODY with an exit chain that runs no watchdog and whose exit kills.
+The session a chain exits has its buffer killed with the mode's function
+on `kill-buffer-hook', as when its process ends, once
+`agent-auto-test--exit-due' runs the exit the chain scheduled."
+  (declare (indent 0) (debug (body)))
+  `(cl-letf (((symbol-function 'agent--before-exit-start-watchdog) #'ignore)
+             ((symbol-function 'agent--exit-session) #'agent-auto-test--close))
+     ,@body))
+
+(defun agent-auto-test--exit-due ()
+  "Run the exit that an exit chain scheduled at its end, unless it has run."
+  (dolist (timer (copy-sequence timer-list))
+    (when (eq (timer--function timer) #'agent--exit-after-before-exit-skill)
+      (cancel-timer timer)
+      (apply #'agent--exit-after-before-exit-skill (timer--args timer)))))
+
+(defun agent-auto-test--handover-asked-p (buffer)
+  "Return non-nil when the text submitted last asks session BUFFER for a handover.
+That is the prompt that names the file BUFFER is to write."
+  (when-let* ((answer (buffer-local-value 'agent-auto--handover-answer buffer))
+              (last (car agent-auto-test--submitted)))
+    (and (eq (cdr last) buffer)
+         (string-search answer (car last))
+         t)))
+
+(ert-deftest agent-auto-test-unattended-session-closes-itself-when-done ()
+  "Close a session the timer started when its turn reports its task done.
+It goes through the whole exit chain by itself: the handover, which
+leaves its note and its result on the task, then the skill, then the
+exit, after which no session is left.  The task shows the review tag
+and stays open."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root))
+                (agent-before-exit-skill-names '("update-log")))
+      (agent-auto-test--closing
+        (agent-auto-test--end-turn
+         buffer "Fixed.\n\nStatus: done: the gather now keeps all-day events")
+        (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+        (should (agent-auto-test--handover-asked-p buffer))
+        (should (= (length agent-auto-test--submitted) 1))
+        (agent-auto-test--answer
+         buffer '(:state "finished" :summary "Fixed the filter"
+                  :next "review the diff"))
+        (should (equal (caar agent-auto-test--submitted) "/update-log"))
+        (should (buffer-live-p buffer))
+        (agent-session-event buffer 'stop)
+        (agent-auto-test--exit-due)
+        (agent-auto-test--flush-due))
+      (should-not (buffer-live-p buffer))
+      (should-not (agent-session-buffers))
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+      (should (string-prefix-p
+               "Handover, finished: "
+               (agent-auto-test--property file "Fix it" "AGENT_RESULT")))
+      (should (= (length (agent-auto-test--notes file "Fix it")) 1))
+      (should (agent-auto-test--at file "Fix it" #'org-entry-is-todo-p))
+      (should-not agent-auto--handovers))))
+
+(ert-deftest agent-auto-test-unattended-session-closes-itself-with-a-question ()
+  "Close an unattended session whose turn ends waiting on the user.
+The task shows the blocked tag with the question.  Acting on the task
+then resumes the conversation, and the resumed session is the user's:
+it is not closed for him when it reports the task done."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root)))
+      (agent-auto-test--closing
+        (agent-auto-test--end-turn
+         buffer "Status: waiting on you: which calendar is the source?")
+        (should (agent-auto-test--handover-asked-p buffer))
+        (agent-auto-test--answer
+         buffer '(:state "needs-user" :summary "Compared the two calendars"
+                  :question "Which calendar is the source?"))
+        (agent-auto-test--exit-due)
+        (agent-auto-test--flush-due))
+      (should-not (buffer-live-p buffer))
+      (should (equal (agent-auto-test--tags file "Fix it") '("blocked")))
+      (should (string-search
+               "hich calendar is the source?"
+               (agent-auto-test--property file "Fix it" "AGENT_RESULT")))
+      (agent-auto-test--acting shown
+        (agent-auto-test--act file)
+        (let ((resumed (car agent-auto-test--buffers)))
+          (should (equal shown (list resumed)))
+          (should (equal (plist-get (cdar agent-auto-test--started) :resume-id)
+                         "sid-1"))
+          (should-not (buffer-local-value 'agent-auto--unattended resumed))
+          (should-not (agent-session-snoozed-p resumed))
+          (agent--note-session-id resumed "sid-1")
+          (agent-auto-test--end-turn
+           resumed "Status: done: the work calendar it is")
+          (should (buffer-live-p resumed))
+          (should (equal (agent-auto-test--tags file "Fix it") '("review"))))))))
+
+(ert-deftest agent-auto-test-unattended-session-with-more-to-do-stays-open ()
+  "Leave open, and snoozed, an unattended session that has more to do.
+That is one that reports itself in progress; one whose turn ended with
+background work still running, whatever its status line says and
+whichever report of its backend tells of the work; and one in which a
+turn has started since.  The result is written all the same, and the
+session closes once a turn ends with nothing left to do."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root))
+                (backend (agent-backend 'stub))
+                (work nil))
+      (setf (agent-backend-turn-end-background-p backend)
+            (lambda (_buffer) (eq work 'turn))
+            (agent-backend-background-tasks-p backend)
+            (lambda (_buffer) (eq work 'shown)))
+      (agent-auto-test--closing
+        (agent-auto-test--end-turn
+         buffer "Status: in progress: the build finishes next")
+        (should (equal (agent-auto-test--tags file "Fix it") '("agent")))
+        (dolist (kind '(turn shown))
+          (setq work kind)
+          (agent-auto-test--end-turn
+           buffer "Status: done, pending verification: the nightly run at 03:00")
+          (should (equal (agent-auto-test--tags file "Fix it") '("review"))))
+        (setq work nil)
+        (agent-session-event buffer 'activity)
+        (agent-auto-test--end-turn buffer "Status: done: built")
+        (should-not agent-auto-test--submitted)
+        (should (buffer-live-p buffer))
+        (should (agent-session-snoozed-p buffer))
+        (should (buffer-local-value 'agent-auto--unattended buffer))
+        (agent-session-event buffer 'stop)
+        (agent-auto--turn-end buffer)
+        (should (agent-auto-test--handover-asked-p buffer))))))
+
+(ert-deftest agent-auto-test-session-the-user-writes-in-is-not-closed ()
+  "Close no session the user has written in, whenever he wrote.
+After its turn ended and before the close has begun, and during the
+closing, which his prompt cancels: the session stays open and is his,
+out of its snooze, and reporting its task done no longer closes it.  A
+prompt a program submits and a turn the session's background work starts
+are not his: the session still closes when it reports done."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root)))
+      (agent-auto-test--closing
+        (with-current-buffer buffer
+          (setq agent-auto-test--reply "Status: done: fixed"))
+        (agent-session-event buffer 'stop)
+        (agent-session-event buffer 'user-submit)
+        (agent-auto--turn-end buffer)
+        (agent-auto-test--exit-due))
+      (should-not agent-auto-test--submitted)
+      (should (buffer-live-p buffer))
+      (should-not (agent-session-snoozed-p buffer))
+      (should-not (buffer-local-value 'agent-auto--unattended buffer))
+      (should (equal (agent-auto-test--tags file "Fix it") '("review")))))
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root)))
+      (agent-auto-test--closing
+        (agent-auto-test--end-turn buffer "Status: done: fixed")
+        (should (agent-auto-test--handover-asked-p buffer))
+        (should (buffer-local-value 'agent--before-exit buffer))
+        (let ((inhibit-message t))
+          (agent-session-event buffer 'user-submit))
+        (should-not (buffer-local-value 'agent--before-exit buffer))
+        (should-not (agent-session-snoozed-p buffer))
+        (should-not (buffer-local-value 'agent-auto--unattended buffer))
+        (agent-session-event buffer 'stop)
+        (agent-auto-test--end-turn buffer "Status: done: and the other thing")
+        (agent-auto-test--exit-due))
+      (should (= (length agent-auto-test--submitted) 1))
+      (should (buffer-live-p buffer))
+      (should (equal (agent-auto-test--property file "Fix it" "AGENT_RESULT")
+                     "and the other thing"))))
+  (agent-auto-test--with root
+    (pcase-let ((`(,_file . ,buffer) (agent-auto-test--unattended-task root)))
+      (agent-auto-test--closing
+        (agent-submit "A notice from a program." buffer)
+        (agent-session-event buffer 'stop)
+        (agent-session-event buffer 'activity)
+        (agent-session-event buffer 'stop)
+        (should (buffer-local-value 'agent-auto--unattended buffer))
+        (should (agent-session-snoozed-p buffer))
+        (should (= (length agent-auto-test--submitted) 1))
+        (with-current-buffer buffer
+          (setq agent-auto-test--reply "Status: done: fixed"))
+        (agent-auto--turn-end buffer)
+        (should (agent-auto-test--handover-asked-p buffer))))))
+
+(ert-deftest agent-auto-test-session-that-cannot-be-exited-is-left-to-the-user ()
+  "Leave open a session that reports done and cannot be exited, and say so.
+A session that holds captured prompts is refused an exit nobody
+confirmed.  It leaves its snooze and is the user's from then on."
+  (agent-auto-test--with root
+    (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root)))
+      (agent-auto-test--closing
+        (cl-letf (((symbol-function 'agent-capture-pending-count)
+                   (lambda (&rest _) 1)))
+          (agent-test-helper-with-messages messages
+            (agent-auto-test--end-turn buffer "Status: done: fixed")
+            (should (string-match-p "could not be closed: .*captured prompts"
+                                    messages)))))
+      (should-not agent-auto-test--submitted)
+      (should (buffer-live-p buffer))
+      (should-not (agent-session-snoozed-p buffer))
+      (should-not (buffer-local-value 'agent-auto--unattended buffer))
+      (should (equal (agent-auto-test--tags file "Fix it") '("review"))))))
 
 ;;;; One session, one task
 

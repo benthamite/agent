@@ -62,6 +62,7 @@ User options
 * Org TODO workflows::
 * Unattended sessions on tagged tasks::
 * Handover of a closing session::
+* Unattended sessions close themselves::
 * Claude Code backend::
 * Codex backend::
 * Chief-of-staff loop::
@@ -101,7 +102,7 @@ Indices
 
 The package is split into a small backend-agnostic core and focused modules:
 
-@multitable {aaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+@multitable {aaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 @headitem Module
 @tab Role
 @item @samp{agent.el}
@@ -129,7 +130,7 @@ The package is split into a small backend-agnostic core and focused modules:
 @item @samp{agent-todo.el}
 @tab Org TODO workflow that works with any backend: routing the entry at point to a session
 @item @samp{agent-auto.el}
-@tab Unattended sessions on Org tasks tagged for an agent: a timer starts a session on each ready task@comma{} the task records its session@comma{} and the tag that marked it ready is replaced by one saying how the session ended; a session closed before its task is finished leaves a handover on the task
+@tab Unattended sessions on Org tasks tagged for an agent: a timer starts a session on each ready task@comma{} the task records its session@comma{} and the tag that marked it ready is replaced by one saying how the session ended; a session closed before its task is finished leaves a handover on the task@comma{} and an unattended session closes itself when its turn ends with a result
 @item @samp{agent-util.el}
 @tab File helpers shared by the backends@comma{} such as reading a transcript's first line whatever its length; depends on no other module
 @item @samp{agent-claude.el}
@@ -266,6 +267,7 @@ Loading @samp{agent-claude.el} or @samp{agent-codex.el} again while its mode is 
 * Org TODO workflows::
 * Unattended sessions on tagged tasks::
 * Handover of a closing session::
+* Unattended sessions close themselves::
 * Claude Code backend::
 * Codex backend::
 * Chief-of-staff loop::
@@ -524,6 +526,30 @@ The keyword is the task's state and the note its status@comma{} so one state onl
 A task set waiting goes back to the keyword in @samp{AGENT_KEYWORD}@comma{} and both properties are removed@comma{} in two cases. One is that a turn starts in the task's session outside an exit chain@comma{} which is the work being resumed; showing or resuming the session is not enough@comma{} and the turns of the chain that closes it@comma{} which follow the handover@comma{} never count. The other is that the wait is over@comma{} whichever session heard of it@comma{} since a reply can reach another session of the project while the task's own stays closed. @code{agent-auto-wait-over-functions} is an abnormal hook for that: each function is called with the wait a task records@comma{} a non-nil answer means it is over@comma{} and the first function to give one decides. The task then goes back to its keyword and gets a note in its log. A string the function returned is the text of that note@comma{} as @samp{Ann replied} or @samp{No reply from Ann by the deadline}; any other non-nil answer gives @samp{The wait is over: the task is KEYWORD again.} The hook is run on every search of the timer for each task that records a wait; such tasks are found by the same ripgrep search that finds ready tasks@comma{} so no file without one is visited@comma{} and nothing is searched while the hook has no function. Its functions must be quick and must not wait for anything; one that signals an error counts as answering nil@comma{} and the others are still asked. A task whose buffer has unsaved edits is left for a later search. In both cases a keyword that was changed by hand meanwhile is left as it is@comma{} and only the two properties go.
 
 Closing always works. A skill of the chain whose receipt is missing stops the chain; the handover is the exception. If the session ends its handover turn without having written the file@comma{} or wrote something that is not a JSON object naming one of the four states@comma{} the chain goes on@comma{} and the session has closed without a handover. So has a linked session whose buffer is killed without one: by @code{agent-exit-without-skills}@comma{} which runs no step of the chain@comma{} by @code{agent-kill-session-buffer}@comma{} or because its process ended. Such a close adds no note to the task's log: it is a common way to close a session@comma{} and a note may be passed on to other people. It only replaces the task's one-line result@comma{} by @samp{Closed without a handover (REASON)}@comma{} the reason being @samp{it wrote no receipt}@comma{} @samp{its receipt is not valid JSON}@comma{} @samp{its receipt names no known state} or @samp{its buffer was killed}@comma{} followed by @samp{; before that:} and the result the task had@comma{} when it had one; a second such close keeps that earlier result and does not nest the first. Nothing of what an unreadable file held is repeated. The tag@comma{} the keyword and the other properties stay as they are. The result is written under the same conditions as a handover's@comma{} waits for a saved buffer and for the next start in the same way@comma{} and follows the result of the session's last turn when that one waited too. With two closes before a save@comma{} a close without a handover adds to the result of an earlier handover@comma{} and gives way to a later one. A session that left a handover changes nothing when its buffer is then killed@comma{} and neither does a session killed for a handoff or a restart@comma{} since it goes on in a new buffer. When Emacs itself quits or crashes nothing is written: the task keeps its last result.
+
+@node Unattended sessions close themselves
+@section Unattended sessions close themselves
+
+An unattended session is one nobody is watching: the timer started it on a tagged task (@ref{Unattended sessions on tagged tasks, , Unattended sessions on tagged tasks}). It starts snoozed and unshown@comma{} and it is closed for you when its turn ends with a result@comma{} so that you hear of it again through its task and through nothing else. What decides is why the turn ended@comma{} not the tag the task gets:
+
+@multitable {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa} {aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+@headitem The turn ended
+@tab The session
+@item with @samp{Status: done} or @samp{Status: done@comma{} pending verification}
+@tab is closed; the task shows @code{agent-auto-review-tag}
+@item with @samp{Status: waiting on you}
+@tab is closed; the task shows @code{agent-auto-blocked-tag}@comma{} and acting on the task resumes the conversation
+@item with @samp{Status: in progress}
+@tab stays open@comma{} snoozed
+@item with any status line@comma{} while background work of its is still running
+@tab stays open@comma{} snoozed: closing it would kill the work that is to report back
+@end multitable
+
+Closing is what @code{agent-exit} does (@ref{Shared commands, , Shared commands})@comma{} through the whole before-exit chain: the handover on the task (@ref{Handover of a closing session, , Handover of a closing session})@comma{} then the configured skills@comma{} then the exit. Nothing is asked along the way. The task stays open@comma{} with its result tag@comma{} until you close it.
+
+Background work is what the session's backend reports: what the turn that just ended left running@comma{} such as a subagent or a background shell@comma{} and what the session shows while it waits. A session left open for it is looked at again when its next turn ends@comma{} which is normally the turn that the work starts when it reports back. A session in which a turn has started since the one that reported@comma{} as when a notice was delivered to it meanwhile@comma{} is likewise left to that turn's end.
+
+The session is yours once you step in. Submitting a prompt in it@comma{} at any moment@comma{} makes it your own: it leaves its snooze and is not closed for you@comma{} whatever it reports afterwards. That holds before a close has begun@comma{} and during the closing@comma{} which the prompt cancels as it cancels any before-exit chain. Only your own prompt counts@comma{} which is the one a backend reports as typed in the session's terminal; a prompt a program submits@comma{} as a notice delivered with @code{agent-deliver}@comma{} and a turn the session's own background work starts leave it unattended. Claude Code sessions report a typed prompt. Codex sessions report every prompt alike@comma{} so typing in an unattended Codex session does not make it yours. A session resumed from its task is yours from the start. A session that reports a result but cannot be exited@comma{} as one that holds captured prompts@comma{} is left open@comma{} which is said in the echo area@comma{} and is yours from then on.
 
 @node Claude Code backend
 @section Claude Code backend

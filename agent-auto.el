@@ -45,6 +45,12 @@
 ;; A session that closes without a handover leaves no note: its task's
 ;; result says so, in one line.
 ;;
+;; A session the timer starts is unattended: nobody is watching it.  It
+;; starts snoozed and unshown, and it is closed for the user, through the
+;; exit chain and so with a handover, when its turn ends with a result,
+;; unless background work of its is still running.  It is the user's
+;; own, and is no longer closed for him, once he submits a prompt in it.
+;;
 ;; A timer does the looking.  It searches the files with ripgrep and
 ;; visits only those that have a ready task, edits an Org file only in
 ;; the buffer visiting it and only when that buffer has no unsaved
@@ -437,7 +443,14 @@ agenda show `agent-auto-working-mark' or `agent-auto-waiting-mark'.
 
 A session that `agent-exit' closes while its task is open is first asked
 for a handover, with `agent-auto-handover-prompt', which becomes a dated
-note in the task's log, its result and its tag."
+note in the task's log, its result and its tag.
+
+A session the timer starts is unattended.  It starts snoozed and
+unshown, and is closed in the same way, by itself, when its turn ends
+with \"Status: done\", \"Status: done, pending verification\" or
+\"Status: waiting on you\", unless its backend reports background work
+still running.  Once the user submits a prompt in it, it is his own and
+is no longer closed for him."
   :global t
   :group 'agent-auto
   (agent-auto--reset)
@@ -1113,25 +1126,79 @@ STRICT is as for `agent-auto--apply-reply-text'."
 TEXT is nil when the session has no reply that can be read.  Done and
 done pending verification are a review, waiting is blocked, and in
 progress changes nothing.  With STRICT non-nil, a reply without a status
-line is stuck; otherwise it changes nothing either."
+line is stuck; otherwise it changes nothing either.  A reply that
+reports a result closes an unattended session; see `agent-auto--report'."
   (let* ((status (and text (agent--reply-text-status text)))
          (detail (agent-auto--one-line (plist-get status :detail))))
     (pcase (plist-get status :status)
       ('done
-       (agent-auto--settle
+       (agent-auto--report
         buffer 'review
         (or detail (agent-auto--summary text (plist-get status :line)) "done")))
       ('pending-verification
-       (agent-auto--settle
+       (agent-auto--report
         buffer 'review (concat "pending verification"
                                (and detail (concat ": " detail)))))
       ('waiting
-       (agent-auto--settle buffer 'blocked
+       (agent-auto--report buffer 'blocked
                            (or detail "the session is waiting on you")))
       ('in-progress nil)
       (_ (when strict
            (agent-auto--settle
             buffer 'stuck "the session stopped without a status line"))))))
+
+;;;; Closing unattended sessions
+
+(defun agent-auto--report (buffer kind text)
+  "Write the result KIND with TEXT that the turn of session BUFFER reported.
+KIND and TEXT are as for `agent-auto--conclude'.  An unattended session
+has then done what it could, whether it finished or needs the user, and
+is closed for him; see `agent-auto--close-itself'."
+  (agent-auto--settle buffer kind text)
+  (agent-auto--close-itself buffer))
+
+(defun agent-auto--close-itself (buffer)
+  "Close session BUFFER for the user as `agent-exit' would, if it is to close.
+Whether it is, `agent-auto--closes-itself-p' tells.  The session goes
+through the whole of its before-exit chain: the handover on its task,
+the configured skills, then the exit.  Nothing is asked, and nothing is
+said in the echo area.  A session that cannot be exited, as one that
+holds captured prompts, is left open and is the user's from then on; see
+`agent-auto--attend'."
+  (when (agent-auto--closes-itself-p buffer)
+    (agent-auto--log "closing %s, whose turn ended with a result"
+                     (buffer-name buffer))
+    (condition-case err
+        (let ((agent-inhibit-prompts t)
+              (inhibit-message t))
+          (agent-exit-buffer buffer))
+      (error
+       (message "agent-auto: %s could not be closed: %s"
+                (buffer-name buffer) (error-message-string err))
+       (agent-auto--attend buffer)))))
+
+(defun agent-auto--closes-itself-p (buffer)
+  "Return non-nil when session BUFFER, whose turn gave a result, is to close.
+It is when the session is unattended, see `agent-auto--unattended', and
+nothing shows that it has more to do: no exit of it is under way; no
+turn has started in it since the one that ended, whose own end will tell;
+and its backend reports no background work, which closing would kill
+before it reported back; see `agent-auto--background-work-p'."
+  (and (buffer-live-p buffer)
+       (buffer-local-value 'agent-auto--unattended buffer)
+       (not (buffer-local-value 'agent--before-exit buffer))
+       (not (agent-auto--chain-turn-p buffer))
+       (not (eq (buffer-local-value 'agent--session-state buffer) 'busy))
+       (not (agent-auto--background-work-p buffer))))
+
+(defun agent-auto--background-work-p (buffer)
+  "Return non-nil when the backend of session BUFFER reports background work.
+Both of its reports count: what the turn that just ended left running,
+as a subagent or a background shell, and what the session shows while it
+waits.  A backend that makes neither report answers nil."
+  (let ((backend (agent--detect-backend buffer)))
+    (or (agent--backend-turn-end-background-p backend buffer)
+        (agent--backend-background-tasks-p buffer backend))))
 
 (defun agent-auto--one-line (text)
   "Return TEXT on one line of at most 300 characters, or nil when empty."
