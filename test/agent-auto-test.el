@@ -288,6 +288,34 @@ submitted.  The task records the session and when it started, on disk."
                (agent-auto-test--property file "Fix it" "AGENT_STARTED")))
       (should (equal (agent-auto-test--tags file "Fix it") '("agent"))))))
 
+(ert-deftest agent-auto-test-unattended-session-starts-snoozed-and-unshown ()
+  "Start a session on a tagged task snoozed, and show it in no window.
+The backend shows the session it starts, as a real one does: the windows
+are as they were afterwards.  A session started by hand on a task is not
+snoozed."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file
+                 root (concat (agent-auto-test--task root)
+                              (agent-auto-test--task root "By hand" ""))))
+          (start (symbol-function 'agent-auto-test--start-session))
+          (window (selected-window))
+          (shown (window-buffer)))
+      (cl-letf (((symbol-function 'display-buffer)
+                 agent-auto-test--display-buffer)
+                ((symbol-function 'agent-auto-test--start-session)
+                 (lambda (&rest arguments)
+                   (pop-to-buffer (apply start arguments)))))
+        (agent-auto-test--run)
+        (should (= (length agent-auto-test--buffers) 1))
+        (let ((buffer (car agent-auto-test--buffers)))
+          (should (agent-session-snoozed-p buffer))
+          (should-not (get-buffer-window buffer t))
+          (should (eq (selected-window) window))
+          (should (eq (window-buffer window) shown))))
+      (agent-auto-test--act file nil nil "By hand")
+      (should (= (length agent-auto-test--buffers) 2))
+      (should-not (agent-session-snoozed-p (car agent-auto-test--buffers))))))
+
 (ert-deftest agent-auto-test-always-submits-the-brief ()
   "Submit the brief of a Linear issue too, whatever its submit property.
 Started by hand such a task is left in the prompt to be edited."

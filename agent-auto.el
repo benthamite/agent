@@ -840,7 +840,9 @@ stuck."
 START is an entry of `agent-auto--starting'.  The session is named
 after SLUG and runs under the account ACCOUNT-DIRECTORY gets, which is
 the task's own directory even when DIRECTORY is a worktree made for it.
-Nothing is asked, and the windows are left as they are."
+Nothing is asked, and the windows are left as they are.  The session
+starts snoozed, since nobody is watching it: it is listed with the
+sessions set aside and fires no ready alert."
   (condition-case err
       (let* ((directory (file-name-as-directory (expand-file-name directory)))
              (buffer
@@ -857,6 +859,7 @@ Nothing is asked, and the windows are left as they are."
                      :initial-prompt brief))))))
         (setq agent-auto--starting (delq start agent-auto--starting))
         (agent-auto--attach buffer (car start) t)
+        (agent--set-snoozed buffer t)
         (agent-auto--sync-session buffer)
         (run-with-timer agent-auto--start-check-delay nil
                         #'agent-auto--check-dialog buffer)
