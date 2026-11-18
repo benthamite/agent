@@ -1030,7 +1030,8 @@ For `agent-session-event-functions'."
            (unless (agent-auto--chain-turn-p buffer)
              (agent-auto--settle
               buffer 'blocked
-              "the session waits at a permission or input prompt, or was interrupted")))
+              "the session waits at a permission or input prompt, or was interrupted"))
+           (agent-auto--unsnooze buffer))
           ('exit-request (setq agent-auto--exiting t))
           ('user-submit (setq agent-auto--exiting nil
                               agent-auto--settled nil)
@@ -1077,8 +1078,10 @@ a status line no longer leaves its task stuck."
 
 (defun agent-auto--unsnooze (buffer)
   "Take session BUFFER, started unattended, out of the snooze it started in.
-A session that is not unattended is left as it is: its snooze is the
-user's own."
+This is for a session that needs the user at its terminal, as one that
+is stuck or shows a dialog, so that it shows among the sessions that
+wait, and for one he has made his own.  A session that is not unattended
+is left as it is: its snooze is the user's own."
   (when (and (buffer-local-value 'agent-auto--unattended buffer)
              (agent-session-snoozed-p buffer))
     (agent--set-snoozed buffer nil)))
@@ -1138,7 +1141,8 @@ TEXT is nil when the session has no reply that can be read.  Done and
 done pending verification are a review, waiting is blocked, and in
 progress changes nothing.  With STRICT non-nil, a reply without a status
 line is stuck; otherwise it changes nothing either.  A reply that
-reports a result closes an unattended session; see `agent-auto--report'."
+reports a result closes an unattended session; see `agent-auto--report'.
+One that leaves its task stuck takes the session out of its snooze."
   (let* ((status (and text (agent--reply-text-status text)))
          (detail (agent-auto--one-line (plist-get status :detail))))
     (pcase (plist-get status :status)
@@ -1156,7 +1160,8 @@ reports a result closes an unattended session; see `agent-auto--report'."
       ('in-progress nil)
       (_ (when strict
            (agent-auto--settle
-            buffer 'stuck "the session stopped without a status line"))))))
+            buffer 'stuck "the session stopped without a status line")
+           (agent-auto--unsnooze buffer))))))
 
 ;;;; Closing unattended sessions
 
@@ -1245,18 +1250,36 @@ to trust a directory it has not seen, comes with no event: the brief
 waits behind it and nothing reports the wait.  The screen is therefore
 looked at, once a moment after the session starts and then on every
 search, for as long as the session has no result.  Answering the dialog
-lets the turn run, and its end writes the result as usual."
+lets the turn run, and its end writes the result as usual.
+
+An unattended session that shows a dialog leaves its snooze, since the
+dialog needs the user at its terminal.  That holds during the turns of
+its exit too, of which nothing is written on the task: the screen of a
+session that is being closed while snoozed is looked at for as long as
+it is snoozed, and a dialog it shows is said once."
   (when (and (buffer-live-p buffer)
-             (buffer-local-value 'agent-auto--link buffer)
-             (not (buffer-local-value 'agent-auto--settled buffer))
-             (not (agent-auto--chain-turn-p buffer)))
+             (buffer-local-value 'agent-auto--link buffer))
     (agent-auto--guard "looking at a session's screen"
-      (when (agent-auto--dialog-p buffer)
-        (message "agent-auto: %s waits at a dialog that needs an answer"
-                 (buffer-name buffer))
+      (cond
+       ((agent-auto--chain-turn-p buffer)
+        (when (and (buffer-local-value 'agent-auto--unattended buffer)
+                   (agent-session-snoozed-p buffer)
+                   (agent-auto--dialog-p buffer))
+          (agent-auto--say-dialog buffer)
+          (agent-auto--unsnooze buffer)))
+       ((buffer-local-value 'agent-auto--settled buffer))
+       ((agent-auto--dialog-p buffer)
+        (agent-auto--say-dialog buffer)
         (agent-auto--settle
          buffer 'blocked
-         "the session waits at a dialog that needs an answer, such as whether to trust its directory")))))
+         "the session waits at a dialog that needs an answer, such as whether to trust its directory")
+        (agent-auto--unsnooze buffer))))))
+
+(defun agent-auto--say-dialog (buffer)
+  "Say in the echo area that session BUFFER waits at a dialog.
+Somebody has to answer it, so this is said even from a timer."
+  (message "agent-auto: %s waits at a dialog that needs an answer"
+           (buffer-name buffer)))
 
 (defun agent-auto--dialog-p (buffer)
   "Return non-nil when session BUFFER shows a dialog in place of its input box."
@@ -1265,7 +1288,8 @@ lets the turn run, and its end writes the result as usual."
              :dialog))
 
 (defun agent-auto--check-silence ()
-  "Mark stuck the tasks whose sessions gave no sign of life for too long."
+  "Mark stuck the tasks whose sessions gave no sign of life for too long.
+An unattended session that is given up on leaves its snooze."
   (let ((limit (* 60 agent-auto-silence-timeout))
         (now (float-time)))
     (dolist (buffer (agent-auto--linked-buffers))
@@ -1275,7 +1299,8 @@ lets the turn run, and its end writes the result as usual."
            buffer 'stuck
            (format "no sign of life from the session for %d minutes"
                    agent-auto-silence-timeout)
-           t))))))
+           t)
+          (agent-auto--unsnooze buffer))))))
 
 (defun agent-auto--last-sign (buffer)
   "Return the float time of the last sign of life of session BUFFER.

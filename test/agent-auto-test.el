@@ -2858,6 +2858,87 @@ session closes once a turn ends with nothing left to do."
         (agent-auto--turn-end buffer)
         (should (agent-auto-test--handover-asked-p buffer))))))
 
+(ert-deftest agent-auto-test-session-that-needs-the-user-leaves-its-snooze ()
+  "Leave open, and out of its snooze, an unattended session that needs the user.
+One that stops without a status line, one silent for too long, one at a
+permission prompt an event reports and one showing a dialog that no
+event reported: its task says what happened, nothing is submitted to it,
+and it shows among the sessions that wait.  It is still unattended, so
+it closes once the prompt is answered and its turn ends done."
+  (dolist (cause '(no-status silence prompt dialog))
+    (agent-auto-test--with root
+      (pcase-let* ((`(,file . ,buffer) (agent-auto-test--unattended-task root))
+                   (dialog nil)
+                   (agent-session-input-state-functions
+                    (list (lambda (_session) (list :dialog dialog)))))
+        (agent-auto-test--closing
+          (pcase cause
+            ('no-status
+             (agent-auto-test--end-turn buffer "API Error: overloaded"))
+            ('silence
+             (with-current-buffer buffer
+               (setq agent-auto--last-event (- (float-time) (* 31 60))))
+             (agent-auto-test--run))
+            ('prompt (agent-session-event buffer 'blocked))
+            ('dialog (setq dialog t)
+                     (let ((inhibit-message t))
+                       (agent-auto-test--run))
+                     (setq dialog nil)))
+          (should (equal (agent-auto-test--tags file "Fix it")
+                         (list (if (memq cause '(no-status silence))
+                                   "stuck"
+                                 "blocked"))))
+          (should (buffer-live-p buffer))
+          (should-not (agent-session-snoozed-p buffer))
+          (should (buffer-local-value 'agent-auto--unattended buffer))
+          (should-not agent-auto-test--submitted)
+          (agent-session-event buffer 'activity)
+          (agent-session-event buffer 'stop)
+          (with-current-buffer buffer
+            (setq agent-auto-test--reply "Status: done: fixed"))
+          (agent-auto--turn-end buffer)
+          (should (agent-auto-test--handover-asked-p buffer)))))))
+
+(ert-deftest agent-auto-test-dialog-during-the-closing-leaves-the-snooze ()
+  "Take a session that is closing itself out of its snooze when it shows a dialog.
+Whether an event reports the permission prompt of a turn of the exit
+chain, or the screen shows a dialog nothing reported, which is then said
+once.  Nothing is written on the task for it, the session stays open
+and its exit stays armed: once the dialog is answered the chain goes on
+and the session closes."
+  (dolist (reported '(t nil))
+    (agent-auto-test--with root
+      (pcase-let ((`(,file . ,buffer) (agent-auto-test--unattended-task root))
+                  (agent-before-exit-skill-names '("update-log")))
+        (agent-auto-test--closing
+          (agent-auto-test--end-turn buffer "Status: done: fixed")
+          (agent-auto-test--answer
+           buffer '(:state "finished" :summary "Fixed it"))
+          (should (equal (caar agent-auto-test--submitted) "/update-log"))
+          (should (agent-session-snoozed-p buffer))
+          (let ((result (agent-auto-test--property file "Fix it"
+                                                   "AGENT_RESULT")))
+            (if reported
+                (agent-session-event buffer 'blocked)
+              (let ((agent-session-input-state-functions
+                     (list (lambda (_session) (list :dialog t)))))
+                (agent-test-helper-with-messages messages
+                  (agent-auto-test--run)
+                  (should (string-match-p "waits at a dialog" messages)))
+                (agent-test-helper-with-messages messages
+                  (agent-auto-test--run)
+                  (should-not (string-match-p "waits at a dialog" messages)))))
+            (should-not (agent-session-snoozed-p buffer))
+            (should (buffer-live-p buffer))
+            (should (buffer-local-value 'agent--before-exit buffer))
+            (should (equal (agent-auto-test--tags file "Fix it") '("review")))
+            (should (equal (agent-auto-test--property file "Fix it"
+                                                      "AGENT_RESULT")
+                           result)))
+          (agent-session-event buffer 'stop)
+          (agent-auto-test--exit-due))
+        (should-not (buffer-live-p buffer))))))
+
 (ert-deftest agent-auto-test-session-the-user-writes-in-is-not-closed ()
   "Close no session the user has written in, whenever he wrote.
 After its turn ended and before the close has begun, and during the
