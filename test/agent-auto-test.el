@@ -4352,6 +4352,83 @@ start is, and is not started again."
   (cadr (should-error (agent-auto-test--delegate file heading)
                       :type 'user-error)))
 
+(defmacro agent-auto-test--asking-nothing (&rest body)
+  "Evaluate BODY, failing if anything is asked in the minibuffer."
+  (declare (indent 0) (debug (body)))
+  `(cl-letf (((symbol-function 'y-or-n-p)
+              (lambda (prompt &rest _) (ert-fail (list "Asked" prompt))))
+             ((symbol-function 'yes-or-no-p)
+              (lambda (prompt &rest _) (ert-fail (list "Asked" prompt))))
+             ((symbol-function 'read-from-minibuffer)
+              (lambda (prompt &rest _) (ert-fail (list "Asked" prompt))))
+             ((symbol-function 'read-string)
+              (lambda (prompt &rest _) (ert-fail (list "Asked" prompt))))
+             ((symbol-function 'completing-read)
+              (lambda (prompt &rest _) (ert-fail (list "Asked" prompt))))
+             ((symbol-function 'read-char-choice)
+              (lambda (prompt &rest _) (ert-fail (list "Asked" prompt))))
+             ((symbol-function 'read-multiple-choice)
+              (lambda (prompt &rest _) (ert-fail (list "Asked" prompt)))))
+     ,@body))
+
+(ert-deftest agent-auto-test-unattended-life-asks-nothing ()
+  "Ask nothing in the minibuffer in the whole life of an unattended session.
+From the command that delegates the task, with two backends registered,
+through the end of its turn, its handover, a skill that owes a receipt
+and the exit, the buffer being killed without a question about the
+session's branches.  That holds for a session that reports its task done
+and for one that asks a question, which reaches the user as the blocked
+tag on the task with the question, and for one the timer starts."
+  (dolist (how '(delegated timer))
+    (dolist (reply '("Status: done: fixed"
+                     "Status: waiting on you: which calendar is the source?"))
+      (agent-auto-test--with root
+        (let ((file (agent-auto-test--file
+                     root (agent-auto-test--task
+                           root "Fix it" (if (eq how 'timer) ":agent:" ""))))
+              (agent-auto-backend 'stub)
+              (agent-before-exit-skill-names '(("update-log" :receipt t)))
+              (question (string-search "waiting" reply)))
+          (agent-register-backend
+           'other
+           :buffer-p #'ignore
+           :find-all-buffers #'ignore
+           :label "Other"
+           :start-session (lambda (&rest _) (error "Asked for `other'")))
+          (agent-auto-test--asking-nothing
+            (if (eq how 'timer)
+                (agent-auto-test--run)
+              (let ((inhibit-message t))
+                (agent-auto-test--delegate file "Fix it")))
+            (should (= (length agent-auto-test--buffers) 1))
+            (let ((buffer (car agent-auto-test--buffers)))
+              (agent--note-session-id buffer "sid-1")
+              (agent-auto-test--take-text)
+              (agent-auto-test--closing
+                (agent-auto-test--end-turn buffer reply)
+                (should-not (buffer-local-value 'agent-warn-kill-with-branches
+                                                buffer))
+                (agent-auto-test--answer
+                 buffer (if question
+                            '(:state "needs-user" :summary "Compared them")
+                          '(:state "finished" :summary "Fixed it")))
+                (write-region "{\"status\":\"success\"}" nil
+                              (plist-get (buffer-local-value
+                                          'agent--before-exit buffer)
+                                         :receipt-file)
+                              nil 'silent)
+                (agent-session-event buffer 'stop)
+                (agent-auto-test--exit-due)
+                (agent-auto-test--flush-due))
+              (should-not (buffer-live-p buffer))))
+          (should (equal (agent-auto-test--tags file "Fix it")
+                         (list (if question "blocked" "review"))))
+          (when question
+            (should (string-search
+                     "which calendar is the source?"
+                     (agent-auto-test--property file "Fix it"
+                                                "AGENT_RESULT")))))))))
+
 (ert-deftest agent-auto-test-task-keys-mode-delegates-from-an-agenda ()
   "Delegate tasks with D typed in an agenda that has the mode.
 The key is the mode's own, beside s and S: it runs the command only
