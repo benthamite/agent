@@ -708,6 +708,27 @@ answered the end of the turn writes the result."
             (kill-buffer buffer))
           (agent-auto--check-dialog buffer))))))
 
+;; agent.el looks at the screen of every session started with a brief; a
+;; task's session is left to `agent-auto--check-dialog', which said its
+;; dialog before, so that the dialog is not said twice.
+(ert-deftest agent-auto-test-task-session-dialog-is-left-to-the-task ()
+  "Leave a task's session to `agent-auto--check-dialog' at agent.el's look."
+  (should (member '(agent-start-dialog-owner-functions
+                    . agent-auto--looks-after-dialog-p)
+                  agent-auto--hooks))
+  (agent-auto-test--with root
+    (pcase-let ((`(,_file . ,buffer) (agent-auto-test--started-task root))
+                (agent-start-dialog-owner-functions
+                 (list #'agent-auto--looks-after-dialog-p))
+                (agent-session-input-state-functions
+                 (list (lambda (_session) (list :dialog t)))))
+      (should (timerp (buffer-local-value 'agent--start-dialog-timer buffer)))
+      (agent-test-helper-with-messages messages
+        (agent--check-start-dialog buffer)
+        (should (equal messages "")))
+      (should (agent-session-snoozed-p buffer))
+      (should-not (buffer-local-value 'agent--start-dialog-timer buffer)))))
+
 ;; A turn that ends within seconds of the session's start can end before
 ;; the backend has reported the id by which the transcript is found; the
 ;; task was then stuck for want of a status line nobody had read.

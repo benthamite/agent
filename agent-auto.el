@@ -521,6 +521,7 @@ in it, it is his own and is no longer closed for him."
 (defconst agent-auto--hooks
   '((agent-session-event-functions . agent-auto--on-event)
     (agent-session-id-functions . agent-auto--on-id)
+    (agent-start-dialog-owner-functions . agent-auto--looks-after-dialog-p)
     (agent-before-delivery-functions . agent-auto--confirm-delivery)
     (agent-delivery-functions . agent-auto--record-delivery)
     (agent-recorded-session-functions . agent-auto--recorded-session)
@@ -1366,11 +1367,11 @@ it is snoozed, and a dialog it shows is said once."
        ((agent-auto--chain-turn-p buffer)
         (when (and (buffer-local-value 'agent-auto--unattended buffer)
                    (agent-session-snoozed-p buffer)
-                   (agent-auto--dialog-p buffer))
+                   (agent-session-dialog-p buffer))
           (agent-auto--say-dialog buffer)
           (agent-auto--unsnooze buffer)))
        ((buffer-local-value 'agent-auto--settled buffer))
-       ((agent-auto--dialog-p buffer)
+       ((agent-session-dialog-p buffer)
         (agent-auto--say-dialog buffer)
         (agent-auto--settle
          buffer 'blocked
@@ -1383,11 +1384,11 @@ Somebody has to answer it, so this is said even from a timer."
   (message "agent-auto: %s waits at a dialog that needs an answer"
            (buffer-name buffer)))
 
-(defun agent-auto--dialog-p (buffer)
-  "Return non-nil when session BUFFER shows a dialog in place of its input box."
-  (plist-get (run-hook-with-args-until-success
-              'agent-session-input-state-functions buffer)
-             :dialog))
+(defun agent-auto--looks-after-dialog-p (buffer)
+  "Return non-nil when session BUFFER works on a task.
+Its dialogs are then looked at by `agent-auto--check-dialog'.  For
+`agent-start-dialog-owner-functions'."
+  (and (buffer-local-value 'agent-auto--link buffer) t))
 
 (defun agent-auto--check-silence ()
   "Mark stuck the tasks whose sessions gave no sign of life for too long.

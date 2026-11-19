@@ -453,7 +453,9 @@ a nil account slot is then filled from `agent-account-resolve' for
 that directory, so `agent-account-directory-rules' apply and the
 recorded identity always matches the environment the backend spawns
 with (still nil when the backend has no accounts configured).
-INITIAL-PROMPT is submitted as the first user message.  RESUME-ID
+INITIAL-PROMPT is submitted as the first user message; until the
+session's first turn begins, its screen is looked at for a dialog that
+holds the prompt back, see `agent--watch-start-dialog'.  RESUME-ID
 resumes that session id instead of starting fresh; a non-fork
 RESUME-ID also seeds the session's `id' slot, because that identity is
 already known, while a fork acquires a fresh id that only the backend
@@ -476,7 +478,6 @@ second session in a directory, asked by `agent--read-instance-name' when
 SESSION names none, where an empty answer takes a free \"new-N\" name;
 with `agent-inhibit-prompts' bound, that name is taken without asking.
 Return the new session buffer."
-  (ignore initial-prompt)
   (when (and (agent-session-id session) (not resume-id))
     (user-error "Session id `%s' would start a fresh session; pass :resume-id to resume it"
                 (agent-session-id session)))
@@ -501,10 +502,87 @@ Return the new session buffer."
       (when account
         (agent-account-sync backend account))
       (let ((agent-account--starting (and account (cons backend account))))
-        (agent--mark-named
-         (apply (agent-backend-start-session (agent-backend backend))
-                session options)
-         typed)))))
+        (agent--watch-start-dialog
+         (agent--mark-named
+          (apply (agent-backend-start-session (agent-backend backend))
+                 session options)
+          typed)
+         initial-prompt)))))
+
+(defvar agent-start-dialog-interval 10
+  "Seconds between looks at a new session's screen for a dialog.
+See `agent--watch-start-dialog'.")
+
+(defvar agent-start-dialog-owner-functions nil
+  "Abnormal hook telling whether a module looks after a session's dialogs.
+Each function is called with a session buffer that is being watched by
+`agent--watch-start-dialog'.  When one returns non-nil, the session is
+left to it and its screen is no longer looked at.")
+
+(defvar-local agent--start-dialog-timer nil
+  "Timer looking at this session's screen for a dialog, or nil.
+Set by `agent--watch-start-dialog' until the session's first turn
+begins.")
+
+(defun agent--watch-start-dialog (buffer brief)
+  "Look at the screen of session BUFFER for a dialog until its first turn.
+Only a session started with BRIEF, its first prompt, non-nil is looked
+at.  A dialog a session opens before its first turn, as Claude Code's
+question whether to trust a directory it has not seen, comes with no
+event: the brief waits behind it and nothing reports the wait.  So the
+screen is looked at every `agent-start-dialog-interval' seconds until
+the first turn begins, which `agent-session-event' reports, or the
+buffer is killed; see `agent--check-start-dialog'.  Return BUFFER."
+  (when (and brief (bufferp buffer) (buffer-live-p buffer))
+    (agent--stop-start-dialog-watch buffer)
+    (with-current-buffer buffer
+      (setq agent--start-dialog-timer
+            (run-with-timer agent-start-dialog-interval
+                            agent-start-dialog-interval
+                            #'agent--check-start-dialog buffer))
+      (add-hook 'kill-buffer-hook #'agent--stop-start-dialog-watch-current
+                nil t)))
+  buffer)
+
+(defun agent--check-start-dialog (buffer)
+  "Say once that session BUFFER, before its first turn, shows a dialog.
+Only a session whose screen `agent--watch-start-dialog' still looks at
+is looked at.  A session that a function of
+`agent-start-dialog-owner-functions' looks after is left to it.  One
+that shows a dialog is said in the echo area, since somebody has to
+answer it, and leaves any snooze it is in: no turn of the user's has
+begun in it, so nobody is watching it, and the dialog needs him at its
+terminal.  The screen is then no longer looked at.  Being run from a
+timer, this never signals."
+  (condition-case err
+      (when (and (buffer-live-p buffer)
+                 (buffer-local-value 'agent--start-dialog-timer buffer))
+        (cond
+         ((run-hook-with-args-until-success
+           'agent-start-dialog-owner-functions buffer)
+          (agent--stop-start-dialog-watch buffer))
+         ((agent-session-dialog-p buffer)
+          (agent--stop-start-dialog-watch buffer)
+          (message "agent: %s waits at a dialog that needs an answer"
+                   (buffer-name buffer))
+          (when (agent-session-snoozed-p buffer)
+            (agent--set-snoozed buffer nil)))))
+    (error (message "agent: looking at a session's screen: %s"
+                    (error-message-string err)))))
+
+(defun agent--stop-start-dialog-watch (buffer)
+  "Stop looking at the screen of session BUFFER for a dialog."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (timerp agent--start-dialog-timer)
+        (cancel-timer agent--start-dialog-timer))
+      (setq agent--start-dialog-timer nil)
+      (remove-hook 'kill-buffer-hook #'agent--stop-start-dialog-watch-current
+                   t))))
+
+(defun agent--stop-start-dialog-watch-current ()
+  "Stop looking at the current session's screen for a dialog."
+  (agent--stop-start-dialog-watch (current-buffer)))
 
 (defun agent--read-typed-instance-name (session)
   "Set SESSION's instance from `agent--read-instance-name'.
@@ -2670,7 +2748,10 @@ calls to it and never set session state directly.  Every event first
 runs `agent-session-event-functions'.  A `submit'
 event delivered while BUFFER is already busy is ignored, because
 backend submission hooks can fire multiple times per submission
-and on submissions that start no turn.
+and on submissions that start no turn.  A `submit', `user-submit' or
+`activity' event begins a turn, so the screen of a session started with
+a first prompt is no longer looked at for a dialog holding it back; see
+`agent--watch-start-dialog'.
 
 A `submit' or `user-submit' marks the agent's published status as
 stale, since a prompt sent from Emacs may give the agent new work; it
@@ -2681,6 +2762,8 @@ leaves it current: a turn started by a background notification usually
 continues the work the status already describes."
   (when (buffer-live-p buffer)
     (run-hook-with-args 'agent-session-event-functions buffer event)
+    (when (memq event '(submit user-submit activity))
+      (agent--stop-start-dialog-watch buffer))
     (pcase event
       ((or 'stop 'idle-prompt 'blocked)
        (agent--session-event-awaiting-input buffer event))
@@ -3336,6 +3419,14 @@ it is sent."
             ((plist-get state :dialog) "a dialog is open")
             ((not (plist-get state :box)) "the input box is not showing")
             ((plist-get state :input) "input box holds unsent text")))))
+
+(defun agent-session-dialog-p (buffer)
+  "Return non-nil when session BUFFER shows a dialog in place of its input box.
+That is what the function of `agent-session-input-state-functions' that
+answers for BUFFER says."
+  (plist-get (run-hook-with-args-until-success
+              'agent-session-input-state-functions buffer)
+             :dialog))
 
 (defun agent--deliver-state-refusal (buffer)
   "Return why session BUFFER's state rules out a delivery now, or nil."

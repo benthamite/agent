@@ -7392,5 +7392,109 @@ collects the texts submitted to it."
     (should (equal (agent-deliver buf nil) "nothing to send"))
     (should-not sent)))
 
+;;;; A dialog before a session's first turn
+
+(defmacro agent-test--with-dialog-session (dialog buffer brief &rest body)
+  "Evaluate BODY with BUFFER a session of a stub backend started with BRIEF.
+The session's screen shows a dialog while the variable DIALOG is
+non-nil.  It is started through `agent-start-session', with no task."
+  (declare (indent 3) (debug (symbolp symbolp form body)))
+  `(let ((agent-backends nil)
+         (agent-account-directory-rules nil)
+         (agent-start-dialog-owner-functions nil)
+         (,dialog nil)
+         (buffers nil))
+     (unwind-protect
+         (progn
+           (apply #'agent-register-backend
+                  'one
+                  (agent-test--backend
+                   :buffer-p (lambda (&optional b) (memq b buffers))
+                   :find-all-buffers (lambda () buffers)
+                   :start-session
+                   (lambda (session &rest _)
+                     (let ((buffer (generate-new-buffer " *agent-dialog*")))
+                       (agent--set-session buffer session)
+                       (push buffer buffers)
+                       buffer))))
+           (cl-letf (((symbol-function 'agent-session-buffers)
+                      (lambda () buffers))
+                     ((symbol-function 'read-string)
+                      (lambda (&rest _) (error "Asked for a name"))))
+             (let ((agent-session-input-state-functions
+                    (list (lambda (_buffer) (list :box (not ,dialog)
+                                                  :dialog ,dialog))))
+                   (,buffer (agent-start-session
+                             (agent-session-create
+                              :backend 'one
+                              :directory (make-temp-name "/tmp/agent-dialog-"))
+                             :initial-prompt ,brief)))
+               ,@body)))
+       (let ((kill-buffer-query-functions nil))
+         (mapc #'kill-buffer (seq-filter #'buffer-live-p buffers))))))
+
+(ert-deftest agent-test-start-dialog-is-said-once ()
+  "Say once that a session started with a brief and no task shows a dialog.
+The session is looked at many times; it leaves its snooze, and is no
+longer looked at once it has been said."
+  (agent-test--with-dialog-session dialog buffer "Do the thing"
+    (let ((timer (buffer-local-value 'agent--start-dialog-timer buffer)))
+      (should (timerp timer))
+      (should (memq timer timer-list))
+      (agent--set-snoozed buffer t)
+      (agent-test-helper-with-messages messages
+        (dotimes (_ 3) (agent--check-start-dialog buffer))
+        (should (equal messages "")))
+      (should (agent-session-snoozed-p buffer))
+      (setq dialog t)
+      (agent-test-helper-with-messages messages
+        (dotimes (_ 5) (agent--check-start-dialog buffer))
+        (should (equal messages
+                       (format "agent: %s waits at a dialog that needs an answer\n"
+                               (buffer-name buffer)))))
+      (should-not (agent-session-snoozed-p buffer))
+      (should-not (buffer-local-value 'agent--start-dialog-timer buffer))
+      (should-not (memq timer timer-list)))))
+
+(ert-deftest agent-test-start-dialog-look-stops-at-the-first-turn ()
+  "Stop looking at a session's screen once its first turn begins."
+  (dolist (event '(submit user-submit activity))
+    (agent-test--with-dialog-session dialog buffer "Do the thing"
+      (let ((timer (buffer-local-value 'agent--start-dialog-timer buffer)))
+        (should (memq timer timer-list))
+        (agent-session-event buffer event)
+        (should-not (buffer-local-value 'agent--start-dialog-timer buffer))
+        (should-not (memq timer timer-list))
+        (should (timerp timer))))))
+
+(ert-deftest agent-test-start-dialog-look-stops-when-killed ()
+  "Stop looking at a session's screen once its buffer is killed."
+  (agent-test--with-dialog-session dialog buffer "Do the thing"
+    (let ((timer (buffer-local-value 'agent--start-dialog-timer buffer))
+          (kill-buffer-query-functions nil))
+      (kill-buffer buffer)
+      (should-not (memq timer timer-list))
+      (setq dialog t)
+      (agent-test-helper-with-messages messages
+        (agent--check-start-dialog buffer)
+        (should (equal messages ""))))))
+
+(ert-deftest agent-test-start-dialog-needs-a-brief ()
+  "Leave the screen of a session started without a brief alone."
+  (agent-test--with-dialog-session dialog buffer nil
+    (should-not (buffer-local-value 'agent--start-dialog-timer buffer))))
+
+(ert-deftest agent-test-start-dialog-leaves-an-owned-session ()
+  "Leave a session whose dialogs a module looks after to that module."
+  (agent-test--with-dialog-session dialog buffer "Do the thing"
+    (let ((agent-start-dialog-owner-functions (list (lambda (_buffer) t))))
+      (setq dialog t)
+      (agent--set-snoozed buffer t)
+      (agent-test-helper-with-messages messages
+        (agent--check-start-dialog buffer)
+        (should (equal messages "")))
+      (should (agent-session-snoozed-p buffer))
+      (should-not (buffer-local-value 'agent--start-dialog-timer buffer)))))
+
 (provide 'agent-test)
 ;;; agent-test.el ends here
