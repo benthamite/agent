@@ -591,7 +591,7 @@ comments, when the decision takes comments; \\`x' drops it; \\`q' quits."
                  :transient (not (agent-decision--asking-last-p asking)))))
    (when (agent-decision--asking-comments asking)
      (list (list "c" "comment" 'agent-decision-menu-comment)))
-   (list (list "x" "drop the decision" 'agent-decision-menu-drop)
+   (list (list "x" "remove this decision (the task stays open)" 'agent-decision-menu-drop)
          (list "q" "quit" 'transient-quit-one))))
 
 (defun agent-decision--menu-act (command action)

@@ -5276,7 +5276,7 @@ not.  A stale decision cannot be answered."
       (agent-session-event buffer 'user-submit)
       (should (agent-decision-get (agent-auto-test--decision file) 'stale))
       (should (string-match-p
-               "stale"
+               "out of date"
                (cadr (should-error
                       (agent-auto-test--with-box
                         (agent-auto-test--decide file (list 13)))

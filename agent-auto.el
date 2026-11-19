@@ -2384,7 +2384,7 @@ be read, it is not open, it names a command not on
                            (save-excursion
                              (run-hook-with-args-until-success
                               'agent-decision-stale-functions record)))))
-      (user-error "This decision is stale: %s" stale))
+      (user-error "This decision is out of date (%s); press the key again once the task shows the new one" stale))
     record))
 
 (defun agent-auto--still-open (marker record)
@@ -2463,7 +2463,9 @@ saying why, and so does a command that signals an error."
                    (format " %s" (mapconcat (lambda (label) (format "“%s”" label))
                                             labels ", "))
                  (if comment " with a comment" ""))
-               (if for-session "; a session carries it out" "")))))
+               (if for-session
+                   "; a session is carrying it out out of sight, and the task will show how it went"
+                 "")))))
 
 (defun agent-auto--carry-effects (marker record commands for-session comment)
   "Carry out the answer RECORD holds on the task at MARKER; return nil, or why not.
