@@ -146,9 +146,35 @@ functions must be quick and must not change the buffer.
 `agent-delegate-tasks' asks the same functions, with `agent-auto-by-hand'
 non-nil, for a task the user delegates.  A function that refuses such a
 task can say why by signaling a `user-error', whose message the command
-shows."
+shows.
+
+While they run, `agent-auto-approval' says whether the user approved the
+exact text the session is to be given."
   :type 'hook
   :group 'agent-auto)
+
+(defcustom agent-auto-approval-functions nil
+  "Abnormal hook telling whether a task holds text its user did not write.
+Each function is called with no arguments, with point on the task's
+heading in the buffer visiting its file, widened.  A non-nil value from
+any of them, or an error, means the task's title or body was written by
+someone else, as a task made from a message is: no unattended session is
+then started or resumed on the task unless the user approved the exact
+text it is given and the directory it runs in, shown to him in full.
+The timer never starts such a task, `agent-delegate-tasks' shows its text
+and asks, and so does `agent-decide' for an answer that goes to its
+session.  With no function, the text of every task counts as the user's
+own.  The functions must be quick and must not change the buffer."
+  :type 'hook
+  :group 'agent-auto)
+
+(defvar agent-auto-approval nil
+  "The user's approval of the text an unattended session is to be given, or nil.
+It is bound while `agent-auto-eligible-functions' run: non-nil, a hash of
+the exact text and the directory, only when the user approved that text
+for that directory a moment before, as `agent-auto--approve' asks him.
+The timer binds nil.  A function can so refuse a task whose text needs
+approval, whatever told agent.el that it does.")
 
 (defcustom agent-auto-instructions
   "You are working on this task unattended: nobody is watching this \
@@ -787,14 +813,18 @@ instead; see `agent-auto--check-missing'."
 (defun agent-auto--eligible-directory ()
   "Return the directory of the task at point if it may be started, or nil.
 The directory is the one `agent-todo-directory-property' names, and must
-exist.  Any function in `agent-auto-eligible-functions' can veto the
-task."
+exist.  A task whose text needs the user's approval is never started by
+the timer; see `agent-auto-approval-functions'.  Any function in
+`agent-auto-eligible-functions' can veto the task, asked with
+`agent-auto-approval' nil."
   (when-let* ((agent-todo-directory-property)
               (directory (let ((inhibit-message t))
                            (agent-todo--property-directory)))
-              ((save-excursion
-                 (run-hook-with-args-until-failure
-                  'agent-auto-eligible-functions))))
+              ((not (agent-auto--approval-required-p)))
+              ((let ((agent-auto-approval nil))
+                 (save-excursion
+                   (run-hook-with-args-until-failure
+                    'agent-auto-eligible-functions)))))
     directory))
 
 (defun agent-auto--check-missing (file recorded)
@@ -833,13 +863,20 @@ A session being started counts."
 
 ;;;; Starting
 
-(defun agent-auto--start (file directory &optional unsaved answer)
+(defun agent-auto--start (file directory &optional unsaved answer approval)
   "Start a session in DIRECTORY on the task at point, which is in FILE.
 The task records the start before anything else happens, so that it is
 never started twice, and its buffer is then saved.  With UNSAVED non-nil
 the buffer is left unsaved: the user has edits of his own in it.  ANSWER,
 when non-nil, is the user's answer to the task's decision, which ends
-the brief.  Return the link of the task to its session."
+the brief.  APPROVAL is the user's approval of the task's text and
+ANSWER for DIRECTORY, as `agent-auto--approve' returns it, or nil; a
+task that needs one, and one given APPROVAL, is not started, with an
+error, unless APPROVAL is of the text and directory as they are now; see
+`agent-auto--unapproved'.  Return the link of the task to its session."
+  (when-let* ((problem (agent-auto--unapproved
+                        directory (agent-auto--task-text answer) approval)))
+    (error "No session was started: %s" problem))
   (let* ((backend (agent-auto--backend))
          (entry (agent-todo--collect-at-point))
          (link (agent-auto-link-create :file file
@@ -899,6 +936,114 @@ It is the task's heading and body, then `agent-auto-instructions'."
   "Return the TEXTS that are not nil or empty, as paragraphs."
   (string-join (seq-remove (lambda (text) (member text '(nil ""))) texts)
                "\n\n"))
+
+;;;; Approving the text an unattended session is given
+
+(defun agent-auto--approval-required-p ()
+  "Return non-nil when the text of the task at point needs the user's approval.
+That is when a function of `agent-auto-approval-functions' returns
+non-nil, or signals an error."
+  (save-excursion
+    (run-hook-wrapped 'agent-auto-approval-functions
+                      (lambda (function)
+                        (condition-case nil
+                            (funcall function)
+                          (error t))))))
+
+(defun agent-auto--task-text (&optional answer)
+  "Return the text of the task at point that a new session on it is given.
+It is the task's heading and body, then ANSWER when non-nil: the parts
+of the brief that come from the task and from an answer to its
+decision, which an approval covers.  `agent-auto-instructions' and
+`agent-auto-decision-instructions', the user's own configuration, are
+added to them in the brief."
+  (agent-auto--join (agent-todo--format-prompt (agent-todo--collect-at-point))
+                    answer))
+
+(defun agent-auto--approval-hash (directory text)
+  "Return the approval of TEXT given to a session in DIRECTORY.
+It is the SHA-256 of DIRECTORY, as an absolute directory name, and of
+TEXT, so that a change to either of them gives another."
+  (secure-hash 'sha256
+               (concat (file-name-as-directory (expand-file-name directory))
+                       "\0" text)))
+
+(defun agent-auto--unapproved (directory text approval)
+  "Return why TEXT may not go to an unattended session in DIRECTORY, or nil.
+Point is on the task.  TEXT needs approval when the task's text does, as
+`agent-auto--approval-required-p' says, and when APPROVAL is non-nil, the
+caller having asked for it.  It may then go only when APPROVAL is the
+hash of TEXT and DIRECTORY that `agent-auto--approval-hash' gives: a
+change to the task's title or body, to an answer, or to the directory,
+since the user approved them, voids the approval."
+  (when (or approval (agent-auto--approval-required-p))
+    (cond ((null approval) "its text has not been approved")
+          ((not (equal approval (agent-auto--approval-hash directory text)))
+           "its text or its directory changed after you approved them"))))
+
+(defun agent-auto--approve (plans)
+  "Show PLANS to the user and ask him to approve them; return their approvals.
+Each plan is a plist of `:title', the task's title; `:how', which
+session the text goes to; `:directory', where that session runs; and
+`:text', the exact text it is given, as `agent-auto--unapproved' checks
+it.  Every text is shown in full, in a buffer of its own, before the
+question.  Return the approval of each plan, in order, when the user
+approves them all; signal a `user-error' when he does not."
+  (unless (agent-auto--ask-approval (agent-auto--approval-text plans)
+                                    (length plans))
+    (user-error "Nothing was done: you did not approve the text"))
+  (mapcar (lambda (plan)
+            (agent-auto--approval-hash (plist-get plan :directory)
+                                       (plist-get plan :text)))
+          plans))
+
+(defun agent-auto--approve-some (plans)
+  "Ask the user to approve those of PLANS that are not nil, all at once.
+Return a list as long as PLANS: the approval of each plan, and nil in
+place of nil.  Nothing is asked when every plan is nil.  See
+`agent-auto--approve'."
+  (let ((approvals (and (delq nil (copy-sequence plans))
+                        (agent-auto--approve (delq nil (copy-sequence plans))))))
+    (mapcar (lambda (plan) (and plan (pop approvals))) plans)))
+
+(defun agent-auto--approval-text (plans)
+  "Return what the user reads before approving PLANS.
+See `agent-auto--approve'."
+  (concat
+   "Nobody will be watching: each session below is given exactly the text\n"
+   "between the lines, then works unattended.  A new session's brief also\n"
+   "holds your `agent-auto-instructions' and `agent-auto-decision-instructions'.\n"
+   "Approve only text you have read: any change voids the approval.\n"
+   (mapconcat
+    (lambda (plan)
+      (format "\nTask: %s\nGoes to: %s, in %s\n-----\n%s\n-----\n"
+              (plist-get plan :title) (plist-get plan :how)
+              (abbreviate-file-name (plist-get plan :directory))
+              (plist-get plan :text)))
+    plans "")))
+
+(defconst agent-auto--approval-buffer "*Agent approval*"
+  "The name of the buffer that shows the text the user is asked to approve.")
+
+(defun agent-auto--ask-approval (text count)
+  "Show TEXT and ask the user whether COUNT sessions may be given it.
+TEXT is shown in a buffer of its own, which is gone after the answer.
+Return non-nil when the user says yes."
+  (let ((buffer (get-buffer-create agent-auto--approval-buffer)))
+    (unwind-protect
+        (save-window-excursion
+          (with-current-buffer buffer
+            (special-mode)
+            (let ((inhibit-read-only t))
+              (erase-buffer)
+              (insert text))
+            (goto-char (point-min)))
+          (pop-to-buffer buffer)
+          (y-or-n-p (format "Give %s exactly this text, unattended? "
+                            (if (= count 1)
+                                "this session"
+                              (format "these %d sessions" count)))))
+      (kill-buffer buffer))))
 
 (defun agent-auto--launch (link backend directory slug brief
                                 &optional decision-file)
@@ -2128,13 +2273,22 @@ lines were marked.  The marks are then cleared, and a message says how
 many sessions were started and why none was started on each of the
 other tasks.
 
+A task whose text you did not write, as `agent-auto-approval-functions'
+tell, is started only with your approval: its heading and body, and the
+directory its session runs in, are shown in full first, and you are
+asked whether the session may be given exactly that text.  With several
+such tasks marked, you are asked once for all of them, and nothing is
+started when you say no.  A task that changed after you approved it is
+not started.
+
 No session is started, and the task is left as it was, when it is closed
 or is no TODO, names no directory that exists, already records a
 session, which `agent-act-on-tasks' goes back to, or may not run
 unattended, a function of `agent-auto-eligible-functions' having vetoed
 it.  The command then says why.  Those functions are asked with
 `agent-auto-by-hand' non-nil: your command stands for the mark they
-would want before the timer may start the task."
+would want before the timer may start the task.  `agent-auto-approval'
+is then your approval, when the task's text needed one."
   (interactive)
   (unless agent-auto-mode
     (user-error "Turn `agent-auto-mode' on first"))
@@ -2151,7 +2305,7 @@ agenda shows the tasks as they now are, and what came of it is said in
 the echo area; see `agent-auto--delegated-report'."
   (let* ((markers (agent-auto--marked-tasks))
          (outcomes (unwind-protect
-                       (mapcar #'agent-auto--delegate-task markers)
+                       (agent-auto--delegate markers)
                      (dolist (marker markers)
                        (when marker
                          (set-marker marker nil))))))
@@ -2166,52 +2320,97 @@ Signal a `user-error' that says why when no session was started; see
 `agent-auto--delegate-task'."
   (let* ((marker (or (agent--org-entry-marker)
                      (user-error "Call this on an Org task or on an agenda line")))
-         (outcome (unwind-protect (agent-auto--delegate-task marker)
+         (outcome (unwind-protect (car (agent-auto--delegate (list marker)))
                     (set-marker marker nil))))
     (unless (eq outcome 'started)
       (user-error "%s" outcome))
     (agent-auto--show-delegated (list outcome))
     (message "%s" (agent-auto--delegated-report (list outcome)))))
 
-(defun agent-auto--delegate-task (marker)
+(defun agent-auto--delegate (markers)
+  "Start an unattended session on the task at each of MARKERS; return what came.
+The text of the tasks that need the user's approval is shown first, and
+approved, or refused, all at once; see `agent-auto--delegate-plan'.
+Return a list of what came of each task, as `agent-auto--delegate-task'
+returns it."
+  (cl-mapcar #'agent-auto--delegate-task
+             markers
+             (agent-auto--approve-some
+              (mapcar #'agent-auto--delegate-plan markers))))
+
+(defun agent-auto--delegate-plan (marker)
+  "Return what the user must approve to delegate the task at MARKER, or nil.
+That is a plan as `agent-auto--approve' takes it, for a task whose text
+needs approval and that is not refused before that; see
+`agent-auto--delegate-problem'.  MARKER can be nil, as for
+`agent-auto--delegate-task'."
+  (when (and marker (marker-buffer marker))
+    (agent-auto--at-task
+     marker
+     (lambda ()
+       (let ((title (substring-no-properties (org-get-heading t t t t))))
+         (unless (or (agent-auto--delegate-problem title)
+                     (not (agent-auto--approval-required-p)))
+           (list :title title :how "a new unattended session"
+                 :directory (agent-auto--task-directory)
+                 :text (agent-auto--task-text))))))))
+
+(defun agent-auto--delegate-task (marker &optional approval)
   "Start an unattended session on the task at MARKER; return what came of it.
 MARKER is nil for a marked line whose marker pointed nowhere; see
-`agent-auto--marked-tasks'.  Return `started', or a string that says why
-no session was started: the task is no longer in its file,
+`agent-auto--marked-tasks'.  APPROVAL is the user's approval of the
+task's text, or nil.  Return `started', or a string that says why no
+session was started: the task is no longer in its file,
 `agent-auto--delegate-refusal' refused it, or starting it signaled an
 error."
   (if (and marker (marker-buffer marker))
       (condition-case err
-          (agent-auto--at-task marker #'agent-auto--delegate-task-at-point)
+          (agent-auto--at-task
+           marker (lambda () (agent-auto--delegate-task-at-point approval)))
         (error (error-message-string err)))
     "a marked task is no longer in its file"))
 
-(defun agent-auto--delegate-task-at-point ()
+(defun agent-auto--delegate-task-at-point (&optional approval)
   "Start an unattended session on the task at point, which the user delegated.
 Point is on the task's heading in the buffer that visits its file,
-widened.  The task gets the ready tag and its session is started as the
-timer starts one; see `agent-auto--start'.  A buffer that had no unsaved
-edits is saved, and one that had is left unsaved, since the user is at
-the task.  Return as `agent-auto--delegate-task' does; a task that is
+widened.  APPROVAL is the user's approval of the task's text, or nil.
+The task gets the ready tag and its session is started as the timer
+starts one; see `agent-auto--start'.  A buffer that had no unsaved edits
+is saved, and one that had is left unsaved, since the user is at the
+task.  Return as `agent-auto--delegate-task' does; a task that is
 refused is left as it was."
   (let ((title (substring-no-properties (org-get-heading t t t t)))
         (clean (not (buffer-modified-p))))
-    (or (agent-auto--delegate-refusal title)
+    (or (agent-auto--delegate-refusal title approval)
         (let ((directory (agent-auto--task-directory)))
           (agent-auto--tag-ready)
           (if (agent-auto--session-live-p
                (agent-auto-link-recorded
-                (agent-auto--start (buffer-file-name) directory (not clean))))
+                (agent-auto--start (buffer-file-name) directory (not clean)
+                                   nil approval)))
               'started
             (format "\"%s\": its session could not be started" title))))))
 
-(defun agent-auto--delegate-refusal (title)
+(defun agent-auto--delegate-refusal (title &optional approval)
   "Return why the task at point, headed TITLE, cannot be delegated, or nil.
+The reasons, in the order they are looked for, are those of
+`agent-auto--delegate-problem'; then that its text needs approval and
+APPROVAL is not of its text and directory as they are now, as
+`agent-auto--unapproved' tells; and that it may not run unattended, as
+`agent-auto--veto' tells, asked with APPROVAL."
+  (or (agent-auto--delegate-problem title)
+      (when-let* ((problem (agent-auto--unapproved
+                            (agent-auto--task-directory)
+                            (agent-auto--task-text) approval)))
+        (format "\"%s\": %s" title problem))
+      (agent-auto--veto title approval)))
+
+(defun agent-auto--delegate-problem (title)
+  "Return why the task at point, headed TITLE, cannot be delegated at all, or nil.
 The reasons, in the order they are looked for: it is no TODO; it is
 closed; its buffer visits no file; it already records a session, which
 the key of `agent-act-on-tasks' goes back to; it names no directory, or
-one that does not exist; no backend can be chosen for its session; and
-it may not run unattended, as `agent-auto--veto' tells."
+one that does not exist; and no backend can be chosen for its session."
   (let ((directory (agent-auto--task-directory)))
     (cond
      ((not (org-get-todo-state))
@@ -2230,20 +2429,22 @@ it may not run unattended, as `agent-auto--veto' tells."
       (format "\"%s\" names no directory" title))
      ((not (file-directory-p directory))
       (format "\"%s\" names a directory that does not exist" title))
-     (t (or (condition-case err
-                (ignore (agent-auto--backend))
-              (error (format "\"%s\": %s" title (error-message-string err))))
-            (agent-auto--veto title))))))
+     (t (condition-case err
+            (ignore (agent-auto--backend))
+          (error (format "\"%s\": %s" title (error-message-string err))))))))
 
-(defun agent-auto--veto (title)
+(defun agent-auto--veto (title &optional approval)
   "Return why the task at point, headed TITLE, may not run unattended, or nil.
 `agent-auto-eligible-functions' are asked as the timer asks them, but
-with `agent-auto-by-hand' non-nil, the user having delegated the task.
-A function that returns nil vetoes the task, and so does one that
-signals an error.  The message of a `user-error' is the reason the
-function gives, and is returned as it stands after the title; that of
-any other error is added to a reason of this function's own."
-  (let ((agent-auto-by-hand t))
+with `agent-auto-by-hand' non-nil, the user having delegated the task,
+and `agent-auto-approval' bound to APPROVAL, his approval of the text
+the session is given, or nil.  A function that returns nil vetoes the
+task, and so does one that signals an error.  The message of a
+`user-error' is the reason the function gives, and is returned as it
+stands after the title; that of any other error is added to a reason of
+this function's own."
+  (let ((agent-auto-by-hand t)
+        (agent-auto-approval approval))
     (condition-case err
         (unless (save-excursion
                   (run-hook-with-args-until-failure
@@ -2324,6 +2525,15 @@ if need be, or to a new session, unattended and snoozed, as
 `agent-delegate-tasks' starts one, and asked of
 `agent-auto-eligible-functions' with `agent-auto-by-hand' non-nil.
 
+Before an answer goes to a session, the exact message it is given, and
+for a new session the task's heading and body before it, are shown in
+full with the directory the session runs in, and the user is asked to
+approve them: the menu shows an option's label, not the instruction the
+session gets.  This is asked for every chosen option that goes to a
+session, and for a comment when the task's text is not the user's own;
+see `agent-auto--answer-plan'.  Nothing is done when he declines, or when
+the text or the decision changed meanwhile.
+
 The command refuses a decision that is not open, as one answered
 already or being carried out, one that is stale, as a function of
 `agent-decision-stale-functions' or a later turn of the session that
@@ -2369,14 +2579,58 @@ DRAFTS is the text of each send, as the menu showed it.  REPLY is what
         (agent-auto--still-open marker record)
         (pcase reply
           (`(answer . ,choices)
-           (agent-auto--carry-out marker (agent-decision-answer record choices
-                                                                drafts)))
+           (agent-auto--carry-approved
+            marker record (agent-decision-answer record choices drafts)))
           (`(comment . ,text)
-           (agent-auto--carry-out marker (agent-decision-comment record text)))
+           (agent-auto--carry-approved
+            marker record (agent-decision-comment record text)))
           (`(drop)
            (agent-auto--at-task-saving marker #'agent-decision-drop)
            (message "Dropped the decision"))))
     (set-marker marker nil)))
+
+(defun agent-auto--carry-approved (marker record answered)
+  "Carry out ANSWERED, RECORD answered, on the task at MARKER, once approved.
+What the answer gives a session is shown to the user first, when it
+needs his approval, and carried out only if he approves it and RECORD
+is still the task's open decision then; see `agent-auto--answer-plan'."
+  (let ((approval (car (agent-auto--approve-some
+                        (list (agent-auto--answer-plan marker answered))))))
+    (agent-auto--still-open marker record)
+    (agent-auto--carry-out marker answered approval)))
+
+(defun agent-auto--answer-plan (marker record)
+  "Return what the user must approve before RECORD, answered, is carried out.
+MARKER is at the task.  That is a plan as `agent-auto--approve' takes it,
+of the message that gives the answer to a session, or nil when nothing
+needs approval: the answer goes to no session; or it holds only a
+comment, the user's own words, on a task whose text is his own too.  A
+chosen option that goes to a session, as `session' and `send' effects
+do, always needs approval: its instruction was written by whoever
+proposed the decision, and the menu shows only its label.  Nil too when
+no session can take the answer, which carrying it out then says."
+  (when (agent-auto--for-session-p record)
+    (let* ((message (agent-auto--answer-message record marker))
+           (plan (agent-auto--at-task
+                  marker (lambda () (agent-auto--session-plan message)))))
+      (and (consp plan)
+           (or (agent-auto--chooses-session-p record)
+               (agent-auto--at-task marker #'agent-auto--approval-required-p))
+           plan))))
+
+(defun agent-auto--for-session-p (record)
+  "Return non-nil when the answer RECORD holds goes to a session.
+That is a comment on a session's decision, or a chosen option that goes
+to a session; see `agent-auto--chooses-session-p'."
+  (or (and (agent-decision-get record 'comment)
+           (equal (agent-decision-get record 'proposer) "session"))
+      (agent-auto--chooses-session-p record)))
+
+(defun agent-auto--chooses-session-p (record)
+  "Return non-nil when the answer RECORD holds chose a session or a send."
+  (seq-some (lambda (choice)
+              (member (agent-auto--choice-kind choice) '("session" "send")))
+            (agent-decision-chosen record)))
 
 (defun agent-auto--open-decision ()
   "Return the decision of the task at point, which can be answered now.
@@ -2440,13 +2694,15 @@ Return what FUNCTION returns."
 
 ;;;;; Carrying an answer out
 
-(defun agent-auto--carry-out (marker record)
+(defun agent-auto--carry-out (marker record &optional approval)
   "Record RECORD, an answered decision, on the task at MARKER, and carry it out.
 The commands it chose run first, then what goes to a session, which
 leaves the decision being carried out until the session's turn ends.  A
 decision with nothing for a session is done once its commands have run.
 An answer that cannot be carried out puts the decision back as open,
-saying why, and so does a command that signals an error."
+saying why, and so does a command that signals an error.  APPROVAL is
+the user's approval of what goes to the session, or nil; see
+`agent-auto--carry-to-session'."
   (let* ((id (agent-decision-get record 'id))
          (chosen (agent-decision-chosen record))
          (comment (agent-decision-get record 'comment))
@@ -2454,18 +2710,12 @@ saying why, and so does a command that signals an error."
                                  (equal (agent-auto--choice-kind choice)
                                         "command"))
                                chosen))
-         (for-session (or (and comment
-                               (equal (agent-decision-get record 'proposer)
-                                      "session"))
-                          (seq-some (lambda (choice)
-                                      (member (agent-auto--choice-kind choice)
-                                              '("session" "send")))
-                                    chosen))))
+         (for-session (agent-auto--for-session-p record)))
     (agent-auto--at-task-saving marker (lambda () (agent-decision-write record)))
     (agent-auto--decision-at
      marker id (lambda (now) (agent-decision-put now 'state "carrying-out")))
     (if-let* ((reason (agent-auto--carry-effects
-                       marker record commands for-session comment)))
+                       marker record commands for-session comment approval)))
         (progn
           (agent-auto--decision-at
            marker id (lambda (now) (agent-decision-reopen now reason)))
@@ -2485,12 +2735,13 @@ saying why, and so does a command that signals an error."
                    "; a session is carrying it out out of sight, and the task will show how it went"
                  "")))))
 
-(defun agent-auto--carry-effects (marker record commands for-session comment)
+(defun agent-auto--carry-effects (marker record commands for-session comment
+                                         &optional approval)
   "Carry out the answer RECORD holds on the task at MARKER; return nil, or why not.
 COMMANDS are the chosen options whose effect is a command, which run
-first.  FOR-SESSION is non-nil when the answer goes to a session, and
-COMMENT is the user's comment, when he commented instead of choosing;
-a comment that goes to no session goes to
+first.  FOR-SESSION is non-nil when the answer goes to a session, with
+APPROVAL, and COMMENT is the user's comment, when he commented instead
+of choosing; a comment that goes to no session goes to
 `agent-decision-comment-function'."
   (condition-case err
       (progn
@@ -2499,7 +2750,7 @@ a comment that goes to no session goes to
         (cond
          (for-session
           (agent-auto--carry-to-session
-           marker (agent-auto--answer-message record marker)))
+           marker (agent-auto--answer-message record marker) nil approval))
          (comment
           (ignore (agent-auto--at-task
                    marker (lambda ()
@@ -2574,32 +2825,87 @@ CHOICE is (ITEM OPTION TEXT), as `agent-decision-chosen' gives it."
                 (agent-decision-get effect 'to)
                 (or text "")))))))
 
-(defun agent-auto--carry-to-session (marker message &optional resume-only)
+(defun agent-auto--carry-to-session (marker message &optional resume-only
+                                            approval)
   "Give MESSAGE to a session on the task at MARKER; return nil, or why not.
-The session is the one the task records, when it is running; else that
-session resumed, unattended and snoozed; else, unless RESUME-ONLY is
-non-nil, a new session, started as `agent-delegate-tasks' starts one,
-whose brief MESSAGE ends.  Each is told where to write a decision; see
-`agent-auto-decision-instructions'.  The task must pass
-`agent-auto-eligible-functions', asked with `agent-auto-by-hand'
-non-nil.  MESSAGE reaches a running session as a program's prompt,
-never as one the user typed, so that an unattended session stays so."
+The session is the one `agent-auto--session-plan' finds: the one the
+task records, when it is running; else that session resumed, unattended
+and snoozed; else, unless RESUME-ONLY is non-nil, a new session, started
+as `agent-delegate-tasks' starts one, whose brief MESSAGE ends.  Each is
+told where to write a decision; see `agent-auto-decision-instructions'.
+What the session is given must have been approved, with APPROVAL, when
+it needs to be, as the plan's text and directory are now; see
+`agent-auto--unapproved'.  The task must pass
+`agent-auto-eligible-functions', asked with `agent-auto-by-hand' non-nil
+and `agent-auto-approval' bound to APPROVAL.  MESSAGE reaches a running
+session as a program's prompt, never as one the user typed, so that an
+unattended session stays so."
   (agent-auto--at-task
    marker
    (lambda ()
-     (let* ((title (substring-no-properties (org-get-heading t t t t)))
-            (task (agent-auto--recorded-at-point))
-            (recorded (plist-get task :session))
-            (buffer (and recorded (agent-auto--session-buffer recorded))))
-       (or (agent-auto--veto title)
-           (cond
-            (buffer (agent-auto--answer-running buffer message))
-            ((and recorded (plist-get task :backend)
-                  (or (plist-get task :ran-in) (plist-get task :directory))
-                  (agent-auto--session-id-p recorded))
-             (agent-auto--answer-resumed task message))
-            (resume-only "the task records no session that can be resumed")
-            (t (agent-auto--answer-new title message))))))))
+     (let ((plan (agent-auto--session-plan message resume-only)))
+       (if (stringp plan)
+           plan
+         (or (agent-auto--unapproved (plist-get plan :directory)
+                                     (plist-get plan :text) approval)
+             (agent-auto--veto (plist-get plan :title) approval)
+             (pcase (plist-get plan :route)
+               ('running (agent-auto--answer-running (plist-get plan :buffer)
+                                                     message))
+               ('resumed (agent-auto--answer-resumed (plist-get plan :task)
+                                                     message))
+               ('new (agent-auto--answer-new (plist-get plan :title) message
+                                             approval)))))))))
+
+(defun agent-auto--session-plan (message &optional resume-only)
+  "Return where MESSAGE would go for the task at point, or why it would not.
+The session is the one the task records, when it is running; else that
+session, resumed; else, unless RESUME-ONLY is non-nil, a new session.
+The value is a plan as `agent-auto--approve' takes it, with `:route',
+one of `running', `resumed' and `new', and `:buffer' for a running
+session or `:task', what the task records, for one to resume.  Its
+`:text' is MESSAGE, and for a new session the task's text followed by
+MESSAGE, as `agent-auto--start' gives it.  A string says why MESSAGE
+cannot go anywhere."
+  (let* ((title (substring-no-properties (org-get-heading t t t t)))
+         (task (agent-auto--recorded-at-point))
+         (recorded (plist-get task :session))
+         (buffer (and recorded (agent-auto--session-buffer recorded)))
+         (directory (agent-auto--task-directory)))
+    (cond
+     (buffer
+      (list :route 'running :buffer buffer :title title
+            :how "its running session"
+            :directory (agent-auto--buffer-directory buffer) :text message))
+     ((and recorded (plist-get task :backend)
+           (or (plist-get task :ran-in) (plist-get task :directory))
+           (agent-auto--session-id-p recorded))
+      (list :route 'resumed :task task :title title
+            :how "its session, resumed"
+            :directory (agent-auto--resume-directory task) :text message))
+     (resume-only "the task records no session that can be resumed")
+     ((not (buffer-file-name))
+      (format "\"%s\" is in a buffer that visits no file" title))
+     ((not directory) (format "\"%s\" names no directory" title))
+     ((not (file-directory-p directory))
+      (format "\"%s\" names a directory that does not exist" title))
+     (t (list :route 'new :title title :how "a new session"
+              :directory directory :text (agent-auto--task-text message))))))
+
+(defun agent-auto--buffer-directory (buffer)
+  "Return the directory session BUFFER runs in."
+  (file-name-as-directory
+   (expand-file-name
+    (or (when-let* ((session (buffer-local-value 'agent--session buffer)))
+          (agent-session-directory session))
+        (buffer-local-value 'default-directory buffer)))))
+
+(defun agent-auto--resume-directory (task)
+  "Return the directory the session TASK records is resumed in.
+TASK is as `agent-auto--recorded-at-point' returns it: the directory the
+session ran in, when it is recorded, else the task's own."
+  (file-name-as-directory
+   (expand-file-name (or (plist-get task :ran-in) (plist-get task :directory)))))
 
 (defun agent-auto--answer-running (buffer message)
   "Submit MESSAGE to the running session BUFFER; return nil, or why not.
@@ -2623,8 +2929,7 @@ its first prompt, without showing it or asking anything."
   (condition-case err
       (let* ((backend (plist-get task :backend))
              (own (plist-get task :directory))
-             (directory (file-name-as-directory
-                         (expand-file-name (or (plist-get task :ran-in) own))))
+             (directory (agent-auto--resume-directory task))
              (file (agent-auto--new-decision-file))
              (link (agent-auto-link-create :file (buffer-file-name)
                                            :recorded (plist-get task :session)))
@@ -2649,10 +2954,12 @@ its first prompt, without showing it or asking anything."
         nil)
     (error (error-message-string err))))
 
-(defun agent-auto--answer-new (title message)
+(defun agent-auto--answer-new (title message &optional approval)
   "Start a session on the task at point, headed TITLE, with MESSAGE.
 Return nil, or why it could not be started.  The session is started as
-`agent-delegate-tasks' starts one, and its brief ends with MESSAGE."
+`agent-delegate-tasks' starts one, and its brief ends with MESSAGE.
+APPROVAL is the user's approval of the task's text and MESSAGE, or nil;
+see `agent-auto--start'."
   (let ((directory (agent-auto--task-directory))
         (clean (not (buffer-modified-p))))
     (cond
@@ -2669,7 +2976,7 @@ Return nil, or why it could not be started.  The session is started as
               (unless (agent-auto--session-live-p
                        (agent-auto-link-recorded
                         (agent-auto--start (buffer-file-name) directory
-                                           (not clean) message)))
+                                           (not clean) message approval)))
                 "its session could not be started")))))))
 
 ;;;;; Asking a session for its decision
@@ -2682,7 +2989,9 @@ asked to write a decision.  The session the task records is resumed,
 unattended and snoozed, or given the request if it is running, with only
 the request to write its decision file; it then closes, through its
 handover, as an unattended session does, and its decision is written on
-the task, where `agent-decide' answers it."
+the task, where `agent-decide' answers it.  The request names the task by
+its title, so for a task whose text is not the user's own it is shown
+and approved first; see `agent-auto-approval-functions'."
   (interactive)
   (unless agent-auto-mode
     (user-error "Turn `agent-auto-mode' on first"))
@@ -2692,14 +3001,29 @@ the task, where `agent-decide' answers it."
                       marker (lambda ()
                                (substring-no-properties
                                 (org-get-heading t t t t))))))
-          (when-let* ((reason (agent-auto--carry-to-session
-                               marker
-                               (format "The user asks for the decision you are waiting on, on the task \"%s\".  In this turn, do nothing else: do not go on with the task, and do not send a message to anyone.  Write the decision as the instructions below say, then end your reply with `Status: waiting on you: ' and the question."
-                                       title)
-                               t)))
+          (when-let* ((message (format "The user asks for the decision you are waiting on, on the task \"%s\".  In this turn, do nothing else: do not go on with the task, and do not send a message to anyone.  Write the decision as the instructions below say, then end your reply with `Status: waiting on you: ' and the question."
+                                       title))
+                      (reason (agent-auto--carry-to-session
+                               marker message t
+                               (car (agent-auto--approve-some
+                                     (list (agent-auto--request-plan
+                                            marker message)))))))
             (user-error "No decision was asked for: %s" reason))
           (message "Asked the session of “%s” for its decision" title))
       (set-marker marker nil))))
+
+(defun agent-auto--request-plan (marker message)
+  "Return what the user must approve to give MESSAGE to the session at MARKER.
+That is the plan of `agent-auto--session-plan' for the session the task
+records, when the task's text needs approval, since MESSAGE names the
+task by its title; otherwise nil."
+  (agent-auto--at-task
+   marker
+   (lambda ()
+     (when-let* (((agent-auto--approval-required-p))
+                 (plan (agent-auto--session-plan message t))
+                 ((consp plan)))
+       plan))))
 
 ;;;;; Marked tasks
 
@@ -2707,8 +3031,9 @@ the task, where `agent-decide' answers it."
   "Answer the decisions of the tasks marked in the current agenda, at once.
 Every marked task must have an open decision of one item that can be
 answered.  The options offered are those all of them have, the same
-label with the same effect, and the one chosen answers each.  The marks
-are then cleared."
+label with the same effect, and the one chosen answers each.  What the
+answers give sessions is approved, when it needs to be, once for all of
+them; see `agent-auto--answer-plan'.  The marks are then cleared."
   (let* ((markers (agent-auto--marked-tasks))
          (records (mapcar #'agent-auto--marked-decision markers))
          (common (agent-auto--common-options records))
@@ -2717,15 +3042,18 @@ are then cleared."
      records common
      (lambda (choice)
        (unwind-protect
-           (progn
-             (cl-mapc (lambda (marker record)
-                        (agent-auto--carry-out
-                         marker
-                         (agent-decision-answer
-                          record (list (cons 0 (agent-auto--option-index
-                                                record choice)))
-                          nil)))
-                      markers records)
+           (let* ((answers
+                   (cl-mapcar (lambda (record)
+                                (agent-decision-answer
+                                 record (list (cons 0 (agent-auto--option-index
+                                                       record choice)))
+                                 nil))
+                              records))
+                  (approvals (agent-auto--approve-some
+                              (cl-mapcar #'agent-auto--answer-plan
+                                         markers answers))))
+             (cl-mapc #'agent-auto--still-open markers records)
+             (cl-mapc #'agent-auto--carry-out markers answers approvals)
              (when (buffer-live-p agenda)
                (with-current-buffer agenda
                  (let ((inhibit-message t))

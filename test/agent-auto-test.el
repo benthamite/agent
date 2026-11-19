@@ -41,6 +41,21 @@ Each is a cons of the `agent-session' and the options it was started with.")
   "What was submitted to stub sessions, the latest first.
 Each element is a cons of the text and the session's buffer.")
 
+(defvar agent-auto-test--asked nil
+  "The texts the user was asked to approve, the latest first.")
+
+(defvar agent-auto-test--approve t
+  "Whether the user approves the text he is asked about.
+A function is called with the text shown, during the question, and its
+value is the answer.")
+
+(defun agent-auto-test--ask-approval (text _count)
+  "Record TEXT as shown to the user, and answer as `agent-auto-test--approve'."
+  (push text agent-auto-test--asked)
+  (if (functionp agent-auto-test--approve)
+      (funcall agent-auto-test--approve text)
+    agent-auto-test--approve))
+
 (defun agent-auto-test--start-session (session &rest options)
   "Start a stub session for SESSION with OPTIONS and return its buffer."
   (when agent-auto-test--start-error
@@ -72,6 +87,9 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-auto-test--start-error nil)
            (agent-auto-test--resume-error nil)
            (agent-auto-test--submitted nil)
+           (agent-auto-test--asked nil)
+           (agent-auto-test--approve t)
+           (agent-auto-approval-functions nil)
            (agent-before-exit-skill-names nil)
            (agent-before-exit-skill-name nil)
            (agent-before-exit-skill-directories nil)
@@ -143,7 +161,9 @@ directory in the property DIR, and worktrees go under ROOT."
                             (agent-session-id (agent-session buffer)))
         :session-history #'agent-auto-test--history)
        (unwind-protect
-           (cl-letf (((symbol-function 'display-buffer) #'ignore))
+           (cl-letf (((symbol-function 'display-buffer) #'ignore)
+                     ((symbol-function 'agent-auto--ask-approval)
+                      #'agent-auto-test--ask-approval))
              ,@body)
          (agent-auto--reset)
          (agent-auto-test--kill-buffers ,root)))))
@@ -5544,6 +5564,288 @@ recommended: the menu offers no RET, and a digit chooses it."
                      '("Answer Ann" "Answer Ben")))
       (should (equal (agent-auto-test--decision-state file "Answer Ann") "done"))
       (should (equal (agent-auto-test--decision-state file "Answer Ben") "done")))))
+
+;;;; Approving the text of an unattended session
+
+(defun agent-auto-test--foreign-p ()
+  "Return non-nil for a task whose text its user did not write: one with FROM."
+  (org-entry-get nil "FROM"))
+
+(defun agent-auto-test--foreign-task (root heading &optional tags)
+  "Return the text of a TODO HEADING under ROOT whose text is not the user's.
+It has the property FROM, and TAGS, by default none."
+  (format "* TODO %s %s\n:PROPERTIES:\n:DIR: %s\n:FROM: chat\n:END:\nBody of %s.\n"
+          heading (or tags "") root heading))
+
+(defun agent-auto-test--set-body (file heading body)
+  "Make BODY the body of HEADING in FILE, as a program rewrites it."
+  (agent-auto-test--at
+   file heading
+   (lambda ()
+     (org-end-of-meta-data t)
+     (delete-region (point) (save-excursion (outline-next-heading) (point)))
+     (insert body "\n"))))
+
+(ert-deftest agent-auto-test-timer-never-starts-text-that-needs-approval ()
+  "Leave unstarted a tagged task whose text needs approval.
+The eligibility functions are not even asked of it, and are asked of a
+task whose text is the user's own with `agent-auto-approval' nil."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (concat (agent-auto-test--foreign-task root "Theirs" ":agent:")
+                               (agent-auto-test--task root "Mine"))))
+           (seen nil)
+           (agent-auto-approval-functions (list #'agent-auto-test--foreign-p))
+           (agent-auto-eligible-functions
+            (list (lambda ()
+                    (push (cons (org-get-heading t t t t) agent-auto-approval) seen)
+                    t))))
+      (agent-auto-test--run)
+      (should (equal seen '(("Mine"))))
+      (should (equal (agent-auto-test--started-instances) '("mine")))
+      (should-not (agent-auto-test--property file "Theirs" "AGENT_SESSION"))
+      (should-not agent-auto-test--asked))))
+
+(ert-deftest agent-auto-test-approval-functions-fail-closed ()
+  "Count a task as needing approval when an approval function signals."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file root (agent-auto-test--task root "Mine")))
+          (agent-auto-approval-functions (list (lambda () (error "Cannot tell")))))
+      (agent-auto-test--run)
+      (should-not agent-auto-test--started)
+      (should-not (agent-auto-test--property file "Mine" "AGENT_SESSION")))))
+
+(ert-deftest agent-auto-test-delegate-shows-the-text-and-asks ()
+  "Delegate a task whose text needs approval only once the user approves it.
+He is shown the task's heading, its body and its directory in full.  The
+eligibility functions are then asked with `agent-auto-approval' the hash
+of that text and directory, and the session is given exactly that text,
+then the standing instructions.  A task whose text is his own is not
+asked about."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (concat (agent-auto-test--foreign-task root "Theirs")
+                               (agent-auto-test--task root "Mine" ""))))
+           (seen nil)
+           (agent-auto-approval-functions (list #'agent-auto-test--foreign-p))
+           (agent-auto-eligible-functions
+            (list (lambda () (push agent-auto-approval seen) t))))
+      (should (equal (agent-auto-test--delegate file "Mine")
+                     "Started 1 unattended session"))
+      (should-not agent-auto-test--asked)
+      (should (equal seen '(nil)))
+      (should (equal (agent-auto-test--delegate file "Theirs")
+                     "Started 1 unattended session"))
+      (should (= (length agent-auto-test--asked) 1))
+      (let ((shown (car agent-auto-test--asked)))
+        (should (string-search "Task: Theirs\n" shown))
+        (should (string-search (abbreviate-file-name root) shown))
+        (should (string-search "-----\nTheirs\n\nBody of Theirs.\n-----" shown)))
+      (should (equal (car seen) (agent-auto--approval-hash
+                                 root "Theirs\n\nBody of Theirs.")))
+      (should (equal (plist-get (cdar agent-auto-test--started) :initial-prompt)
+                     "Theirs\n\nBody of Theirs.\n\nStanding."))
+      (should-not agent-auto-approval))))
+
+(ert-deftest agent-auto-test-delegate-starts-nothing-the-user-declines ()
+  "Start nothing, and tag nothing, when the user does not approve the text."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file
+                 root (agent-auto-test--foreign-task root "Theirs")))
+          (agent-auto-approval-functions (list #'agent-auto-test--foreign-p))
+          (agent-auto-test--approve nil))
+      (should (string-match-p "did not approve"
+                              (agent-auto-test--delegate-refused file "Theirs")))
+      (should-not (agent-auto-test--tags file "Theirs")))))
+
+(ert-deftest agent-auto-test-delegate-refuses-text-changed-after-approval ()
+  "Start nothing when the task's text changed while the user was asked.
+A program rewrites the body during the question: the approval was of
+the text he read, so the task is refused, untagged, and says why."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (agent-auto-test--foreign-task root "Theirs")))
+           (agent-auto-approval-functions (list #'agent-auto-test--foreign-p))
+           (agent-auto-test--approve
+            (lambda (_text)
+              (agent-auto-test--set-body file "Theirs" "Do something else.")
+              t)))
+      (should (string-match-p
+               "\"Theirs\": its text or its directory changed after you approved them"
+               (cadr (should-error (agent-auto-test--delegate file "Theirs")
+                                   :type 'user-error))))
+      (should-not agent-auto-test--started)
+      (should-not (agent-auto-test--tags file "Theirs"))
+      (should-not (agent-auto-test--property file "Theirs" "AGENT_SESSION")))))
+
+(ert-deftest agent-auto-test-approval-binds-the-directory ()
+  "Void an approval when the directory or the text is another."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (agent-auto-test--foreign-task root "Theirs")))
+           (agent-auto-approval-functions (list #'agent-auto-test--foreign-p))
+           (other (file-name-as-directory (expand-file-name "other" root)))
+           (approval (agent-auto--approval-hash root "Theirs\n\nBody of Theirs.")))
+      (make-directory other)
+      (agent-auto-test--at
+       file "Theirs"
+       (lambda ()
+         (should-not (agent-auto--unapproved root (agent-auto--task-text) approval))
+         (should (agent-auto--unapproved other (agent-auto--task-text) approval))
+         (should (agent-auto--unapproved root (agent-auto--task-text "More.")
+                                         approval))
+         (should (equal (agent-auto--unapproved root (agent-auto--task-text) nil)
+                        "its text has not been approved"))
+         (should-error (agent-auto--start file other nil nil approval)))))
+    (should-not agent-auto-test--started)))
+
+(ert-deftest agent-auto-test-delegate-asks-once-for-marked-tasks ()
+  "Ask once for every marked task whose text needs approval.
+The task whose text is the user's own is not shown.  When he declines,
+no task is started, his own included."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (concat "#+TODO: TODO | DONE\n"
+                               (agent-auto-test--foreign-task root "Ann")
+                               (agent-auto-test--foreign-task root "Ben")
+                               (agent-auto-test--task root "Mine" ""))))
+           (agent-auto-approval-functions (list #'agent-auto-test--foreign-p)))
+      (with-current-buffer (find-file-noselect file)
+        (let ((agent-auto-test--approve nil))
+          (agent-test-helper-in-agenda "Ann"
+            (agent-auto-test--mark-lines "Ann" "Ben" "Mine")
+            (should-error (call-interactively #'agent-delegate-tasks)
+                          :type 'user-error)))
+        (should (= (length agent-auto-test--asked) 1))
+        (let ((shown (car agent-auto-test--asked)))
+          (should (string-search "Task: Ann\n" shown))
+          (should (string-search "Task: Ben\n" shown))
+          (should-not (string-search "Task: Mine" shown)))
+        (should-not agent-auto-test--started)
+        (agent-test-helper-in-agenda "Ann"
+          (agent-auto-test--mark-lines "Ann" "Ben" "Mine")
+          (should (equal (agent-auto-test--delegate-marked)
+                         "Started 3 unattended sessions"))))
+      (should (= (length agent-auto-test--asked) 2))
+      (should (equal (agent-auto-test--started-instances) '("ann" "ben" "mine"))))))
+
+(ert-deftest agent-auto-test-answer-shows-the-instruction-and-asks ()
+  "Show what an answer gives a session, and carry it out only once approved.
+A session option's instruction is not in the menu, only its label, so
+the user is shown the message with it, after the task's own text for a
+new session, even on a task whose text is his own.  Declining leaves the
+decision open and starts nothing.  A command is not asked about."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file root (agent-auto-test--task root nil "")))
+          (agent-auto-test--commanded nil)
+          (agent-decision-commands '(agent-auto-test--nothing-needed)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "engine" "chat:145" (list agent-auto-test--session-option
+                                  agent-auto-test--command-option)
+        0))
+      (let ((agent-auto-test--approve nil))
+        (should-error (agent-auto-test--decide file (list 13)) :type 'user-error))
+      (should (= (length agent-auto-test--asked) 1))
+      (let ((shown (car agent-auto-test--asked)))
+        (should (string-search "Goes to: a new session" shown))
+        (should (string-search "-----\nFix it\n\nThe body.\n\n" shown))
+        (should (string-search "Instruction: Rework the draft." shown)))
+      (should-not agent-auto-test--started)
+      (should (equal (agent-auto-test--decision-state file) "open"))
+      (agent-auto-test--decide file (list 13))
+      (should (= (length agent-auto-test--asked) 2))
+      (let ((brief (plist-get (cdar agent-auto-test--started) :initial-prompt)))
+        (should (string-search "Instruction: Rework the draft." brief)))
+      (should (equal (agent-auto-test--decision-state file) "carrying-out")))))
+
+(ert-deftest agent-auto-test-answer-asks-nothing-for-a-command ()
+  "Ask no approval for an answer that only runs a command."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--file root (agent-auto-test--task root nil "")))
+          (agent-auto-test--commanded nil)
+          (agent-auto-approval-functions (list #'always))
+          (agent-decision-commands '(agent-auto-test--nothing-needed)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "engine" "chat:145" (list agent-auto-test--command-option) 0))
+      (agent-auto-test--decide file (list 13))
+      (should (equal agent-auto-test--commanded '("Fix it")))
+      (should-not agent-auto-test--asked))))
+
+(ert-deftest agent-auto-test-answer-refuses-a-task-changed-after-approval ()
+  "Do nothing when the task's text changed while the user was asked.
+The decision is put back as open, saying why, and no session starts."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file root (agent-auto-test--task root nil "")))
+           (agent-auto-test--approve
+            (lambda (_text)
+              (agent-auto-test--set-body file "Fix it" "Other words.")
+              t)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "engine" "chat:145" (list agent-auto-test--session-option) 0))
+      (should (string-match-p
+               "changed after you approved"
+               (cadr (should-error (agent-auto-test--decide file (list 13))
+                                   :type 'user-error))))
+      (should-not agent-auto-test--started)
+      (should (equal (agent-auto-test--decision-state file) "open")))))
+
+(ert-deftest agent-auto-test-answer-resumed-asks-for-the-message ()
+  "Show the message, and the directory, given to a session that is resumed."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--closed-task root "sid-1")))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "session" "sid-1" (list agent-auto-test--session-option) 0))
+      (agent-auto-test--decide file (list 13))
+      (let ((shown (car agent-auto-test--asked)))
+        (should (string-search "Goes to: its session, resumed, in " shown))
+        (should (string-search "Instruction: Rework the draft." shown))
+        (should-not (string-search "The body." shown)))
+      (should (equal (plist-get (cdar agent-auto-test--started) :resume-id)
+                     "sid-1")))))
+
+(ert-deftest agent-auto-test-comment-asks-only-for-foreign-text ()
+  "Ask approval of a comment only when the task's text is not the user's.
+The comment is his, but the message names the task by its title."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--closed-task root "sid-1")))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "session" "sid-1" (list agent-auto-test--session-option) 0))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "Look again.")))
+        (agent-auto-test--decide file (list "c"))
+        (should-not agent-auto-test--asked)
+        (should (= (length agent-auto-test--started) 2))
+        (agent-auto-test--put-decision
+         file "Fix it"
+         (agent-auto-test--decision-json
+          "session" "sid-1" (list agent-auto-test--session-option) 0 "d2"))
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer (car agent-auto-test--buffers)))
+        (let ((agent-auto-approval-functions (list #'always)))
+          (agent-auto-test--decide file (list "c")))
+        (should (string-search "Look again." (car agent-auto-test--asked)))))))
+
+(ert-deftest agent-auto-test-request-decision-asks-for-foreign-text ()
+  "Ask approval before requesting a decision on a task whose text is not his."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--closed-task root "sid-1"))
+          (agent-auto-approval-functions (list #'always))
+          (agent-auto-test--approve nil))
+      (should-error
+       (agent-auto-test--at file "Fix it"
+                            (lambda () (call-interactively #'agent-request-decision)))
+       :type 'user-error)
+      (should (string-search "asks for the decision" (car agent-auto-test--asked)))
+      (should (= (length agent-auto-test--started) 1)))))
 
 ;;;; What a task waits on
 
