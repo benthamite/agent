@@ -5524,5 +5524,81 @@ recommended: the menu offers no RET, and a digit chooses it."
       (should (equal (agent-auto-test--decision-state file "Answer Ann") "done"))
       (should (equal (agent-auto-test--decision-state file "Answer Ben") "done")))))
 
+;;;; What a task waits on
+
+(defun agent-auto-test--task-report (properties)
+  "Return `agent-auto-task-report' on a task with PROPERTIES, an alist.
+The call is made with point on the heading of the task in an indirect
+buffer narrowed to it, as a program that shows the task makes it, and
+the test fails if the call changes the task's text, its modified flag
+or point."
+  (agent-test-helper-with-org-file
+      (concat "* TODO Answer Ann\n:PROPERTIES:\n"
+              (mapconcat (pcase-lambda (`(,name . ,value))
+                           (format ":%s: %s\n" name value))
+                         properties "")
+              ":END:\nThe draft.\n* TODO Next\n")
+    (let ((text (buffer-string))
+          (indirect (make-indirect-buffer (current-buffer)
+                                          " *agent-auto-test-task*" t)))
+      (unwind-protect
+          (with-current-buffer indirect
+            (goto-char (point-min))
+            (org-narrow-to-subtree)
+            (let ((report (agent-auto-task-report)))
+              (should (equal (point) (point-min)))
+              (should (equal (with-current-buffer (buffer-base-buffer indirect)
+                               (save-restriction (widen) (buffer-string)))
+                             text))
+              (should-not (buffer-modified-p (buffer-base-buffer indirect)))
+              report))
+        (kill-buffer indirect)))))
+
+(defun agent-auto-test--open-decision-json (state &rest questions)
+  "Return a decision record in STATE asking QUESTIONS, as one line of JSON."
+  (agent-decision-serialize
+   `((id . "d1") (proposer . "session") (state . ,state)
+     (items . ,(vconcat
+                (mapcar (lambda (question)
+                          `((question . ,question) (recommended . :null)
+                            (why . "") (options . [((label . "Yes")
+                                                    (effect . ((kind . "session")
+                                                               (instruction . "Go."))))])))
+                        questions))))))
+
+(ert-deftest agent-auto-test-task-report-says-the-result ()
+  "Report what the task's session last reported, and nothing more."
+  (should (equal (agent-auto-test--task-report
+                  '(("AGENT_RESULT" . "Fixed the parser; tests pass")))
+                 "Session reported: Fixed the parser; tests pass")))
+
+(ert-deftest agent-auto-test-task-report-says-an-open-decision ()
+  "Report the questions of an open decision, one to a line when several."
+  (should (equal (agent-auto-test--task-report
+                  `(("AGENT_DECISION"
+                     . ,(agent-auto-test--open-decision-json "open" "Send the reply?"))))
+                 "Decision awaiting you: Send the reply?"))
+  (should (equal (agent-auto-test--task-report
+                  `(("AGENT_DECISION"
+                     . ,(agent-auto-test--open-decision-json
+                         "open" "Send the reply?" "Close the ticket?"))))
+                 "Decisions awaiting you:\n- Send the reply?\n- Close the ticket?")))
+
+(ert-deftest agent-auto-test-task-report-says-both ()
+  "Report the result first and the open decision's question after it."
+  (should (equal (agent-auto-test--task-report
+                  `(("AGENT_RESULT" . "Waiting on you: which draft")
+                    ("AGENT_DECISION"
+                     . ,(agent-auto-test--open-decision-json "open" "Which draft?"))))
+                 "Session reported: Waiting on you: which draft\nDecision awaiting you: Which draft?")))
+
+(ert-deftest agent-auto-test-task-report-is-nil-without-either ()
+  "Report nothing for a task with no result and no open decision.
+A decision already answered awaits nobody."
+  (should-not (agent-auto-test--task-report nil))
+  (should-not (agent-auto-test--task-report
+               `(("AGENT_DECISION"
+                  . ,(agent-auto-test--open-decision-json "done" "Send the reply?"))))))
+
 (provide 'agent-auto-test)
 ;;; agent-auto-test.el ends here

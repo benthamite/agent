@@ -3204,6 +3204,47 @@ keyword and keeps the property of the line it replaced."
 
 ;;;; Results
 
+;;;###autoload
+(defun agent-auto-task-report ()
+  "Return, as short plain text, what the task at point waits on, or nil.
+That is what the task's session last reported, its result in
+`agent-auto-result-property', on a line \"Session reported: RESULT\",
+and the questions of a decision on the task that is still open, on a
+line \"Decision awaiting you: QUESTION\", or under \"Decisions awaiting
+you:\" one to a line when there are several.  Nil when the task has
+neither.  Point is on the task's heading, in its buffer or an indirect
+buffer of it, and nothing is changed.  This is for a program that shows
+a task, as a function of its hook asking what to show above it."
+  (let* ((result (org-entry-get nil agent-auto-result-property))
+         (questions (agent-auto--open-questions (agent-decision-read)))
+         (lines (append
+                 (unless (or (null result) (string-blank-p result))
+                   (list (concat "Session reported: " (string-trim result))))
+                 (agent-auto--questions-lines questions))))
+    (when lines
+      (string-join lines "\n"))))
+
+(defun agent-auto--open-questions (record)
+  "Return the questions of decision RECORD while it is open, else nil."
+  (when (and record (equal (agent-decision-state record) "open"))
+    (delq nil (mapcar (lambda (item)
+                        (let ((question (and (consp item)
+                                             (agent-decision-get
+                                              item 'question))))
+                          (when (and (stringp question)
+                                     (not (string-blank-p question)))
+                            (agent-auto--one-line question))))
+                      (agent-decision-items record)))))
+
+(defun agent-auto--questions-lines (questions)
+  "Return the lines showing QUESTIONS, a list of strings, as awaiting the user."
+  (cond ((null questions) nil)
+        ((null (cdr questions))
+         (list (concat "Decision awaiting you: " (car questions))))
+        (t (cons "Decisions awaiting you:"
+                 (mapcar (lambda (question) (concat "- " question))
+                         questions)))))
+
 (defun agent-auto--conclude (link kind text &optional only-ready)
   "Write the result KIND with TEXT on the task of LINK.
 KIND is `review', `blocked' or `stuck'.  With ONLY-READY non-nil the
