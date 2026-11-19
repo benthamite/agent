@@ -5366,6 +5366,59 @@ and is told where to write a decision."
         (should (buffer-local-value 'agent-auto--decision-file buffer)))
       (should (equal (agent-auto-test--decision-state file) "carrying-out")))))
 
+(ert-deftest agent-auto-test-answer-tags-the-heading-whatever-the-windows ()
+  "Tag the task's heading when the answer resumes its session, not the body.
+The task's file is shown in a window other than the selected one, its
+cursor on a line of the body, and starting the session shows the session
+in a window, as a real start does; putting the windows back must not
+move the task's point onto that line before the task is tagged."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--closed-task root "sid-1"))
+           (org (find-file-noselect file))
+           (body nil))
+      (agent-auto-test--at file "Fix it"
+                           (lambda ()
+                             (org-set-tags (list agent-auto-blocked-tag))
+                             (org-end-of-meta-data t)
+                             (insert "Draft line\n")
+                             (forward-line -1)
+                             (setq body (point))
+                             (save-buffer)))
+      (agent-auto-test--put-decision
+       file "Fix it"
+       (agent-auto-test--decision-json
+        "session" "sid-1" (list agent-auto-test--session-option) 0))
+      (setq body (agent-auto-test--at file "Fix it"
+                                      (lambda ()
+                                        (search-forward "Draft line")
+                                        (line-beginning-position))))
+      (save-window-excursion
+        (delete-other-windows)
+        (switch-to-buffer (get-buffer-create " *inbox*"))
+        (let ((task-window (split-window)))
+          (set-window-buffer task-window org)
+          (set-window-point task-window body))
+        ;; As a real start does, show the session, here in the window of
+        ;; the task, and select it.
+        (advice-add 'agent--start-named-session :filter-return
+                    (lambda (buffer)
+                      (select-window (get-buffer-window org))
+                      (switch-to-buffer buffer)
+                      buffer)
+                    '((name . agent-auto-test-show)))
+        (unwind-protect
+            (agent-auto-test--decide file (list 13))
+          (advice-remove 'agent--start-named-session 'agent-auto-test-show)))
+      (should (equal (agent-auto-test--decision-state file) "carrying-out"))
+      (should (member "agent" (agent-auto-test--tags file "Fix it")))
+      (should (equal (agent-auto-test--at file "Fix it"
+                                          (lambda ()
+                                            (search-forward "Draft line")
+                                            (buffer-substring-no-properties
+                                             (line-beginning-position)
+                                             (line-end-position))))
+                     "Draft line")))))
+
 (ert-deftest agent-auto-test-failed-start-leaves-the-decision-open ()
   "Put the decision back as open, saying why, when no session can take it."
   (agent-auto-test--with root

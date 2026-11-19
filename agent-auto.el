@@ -925,6 +925,18 @@ its decision to."
                              decision-file))
       (error (agent-auto--start-failed start (error-message-string err))))))
 
+(defun agent-auto--start-out-of-sight (session name &rest options)
+  "Start SESSION named after NAME with OPTIONS, and return its buffer.
+OPTIONS are as `agent--start-named-session' takes them.  Nothing is
+asked, and the windows, the current buffer and its point are left as
+they were.  Point is kept apart from the windows: putting a window back
+moves the point of its buffer to the window's, and a caller with point
+on a task's heading must still have it there."
+  (save-excursion
+    (save-window-excursion
+      (let ((agent-inhibit-prompts t))
+        (apply #'agent--start-named-session session name options)))))
+
 (defun agent-auto--spawn (start backend directory account-directory slug brief
                                &optional decision-file)
   "Start the BACKEND session of START in DIRECTORY with BRIEF.
@@ -938,17 +950,14 @@ decision to DECISION-FILE."
   (condition-case err
       (let* ((directory (file-name-as-directory (expand-file-name directory)))
              (buffer
-              (save-window-excursion
-                (save-current-buffer
-                  (let ((agent-inhibit-prompts t))
-                    (agent--start-named-session
-                     (agent-session-create
-                      :backend backend
-                      :account (agent-account-resolve backend nil
-                                                      account-directory)
-                      :directory directory)
-                     slug
-                     :initial-prompt brief))))))
+              (agent-auto--start-out-of-sight
+               (agent-session-create
+                :backend backend
+                :account (agent-account-resolve backend nil
+                                                account-directory)
+                :directory directory)
+               slug
+               :initial-prompt brief)))
         (setq agent-auto--starting (delq start agent-auto--starting))
         (agent-auto--attach buffer (car start) t)
         (with-current-buffer buffer
@@ -1690,7 +1699,7 @@ afterwards."
        (org-entry-delete nil property))
      (let ((tags (org-get-tags nil t)))
        (when (member agent-auto-ready-tag tags)
-         (org-set-tags (remove agent-auto-ready-tag tags)))))
+         (agent-auto--set-tags (remove agent-auto-ready-tag tags)))))
    t)
   (with-current-buffer buffer
     (setq agent-auto--link nil)))
@@ -2243,6 +2252,14 @@ any other error is added to a reason of this function's own."
       (error (format "\"%s\" may not run unattended: %s"
                      title (error-message-string err))))))
 
+(defun agent-auto--set-tags (tags)
+  "Make TAGS the tags of the task at point, wherever point is in it.
+`org-set-tags' writes them on the line point is on, which must be the
+heading's; point can be anywhere in the task, as `org-get-tags' allows."
+  (save-excursion
+    (org-back-to-heading t)
+    (org-set-tags tags)))
+
 (defun agent-auto--tag-ready ()
   "Give the task at point the ready tag, in place of any result tag it carries."
   (let* ((tags (org-get-tags nil t))
@@ -2250,7 +2267,7 @@ any other error is added to a reason of this function's own."
                       (list agent-auto-ready-tag)))
          (inhibit-message t))
     (unless (equal new tags)
-      (org-set-tags new))))
+      (agent-auto--set-tags new))))
 
 (defun agent-auto--lifecycle-tags ()
   "Return the ready tag and the three result tags."
@@ -2611,21 +2628,17 @@ its first prompt, without showing it or asking anything."
              (link (agent-auto-link-create :file (buffer-file-name)
                                            :recorded (plist-get task :session)))
              (buffer
-              (save-window-excursion
-                (save-current-buffer
-                  (let ((agent-inhibit-prompts t))
-                    (agent--start-named-session
-                     (agent-session-create
-                      :backend backend
-                      :account (agent-account-resolve backend nil
-                                                      (or own directory))
-                      :directory directory)
-                     (plist-get task :instance)
-                     :resume-id (plist-get task :session)
-                     :initial-prompt (agent-auto--join
-                                      message
-                                      (agent-auto--decision-instructions
-                                       file))))))))
+              (agent-auto--start-out-of-sight
+               (agent-session-create
+                :backend backend
+                :account (agent-account-resolve backend nil
+                                                (or own directory))
+                :directory directory)
+               (plist-get task :instance)
+               :resume-id (plist-get task :session)
+               :initial-prompt (agent-auto--join
+                                message
+                                (agent-auto--decision-instructions file)))))
         (agent-auto--tag-ready)
         (agent-auto--attach buffer link t)
         (with-current-buffer buffer
@@ -3240,7 +3253,7 @@ non-nil the task must carry the ready tag."
       (let ((new (append (seq-difference tags lifecycle)
                          (list (agent-auto--tag kind)))))
         (unless (equal new tags)
-          (org-set-tags new)))
+          (agent-auto--set-tags new)))
       (unless (equal result text)
         (org-entry-put nil agent-auto-result-property text))
       (agent-auto--log "%s: %s" (agent-auto--tag kind) text))))
@@ -3798,7 +3811,7 @@ waiting on someone also sets the task waiting; see
          (new (append (seq-difference tags lifecycle)
                       (agent-auto--handover-tags receipt))))
     (unless (equal new tags)
-      (org-set-tags new))
+      (agent-auto--set-tags new))
     (org-entry-put nil agent-auto-result-property
                    (agent-auto--handover-result receipt))
     (when (equal (plist-get receipt :state) "waiting-on-someone")
