@@ -5595,6 +5595,7 @@ gives none still gets a name made from the session id."
   (dolist (backend '(claude-code codex))
     (let ((holders nil) started)
       (cl-letf (((symbol-function 'agent--buffer-for-session-id) #'ignore)
+                ((symbol-function 'agent--check-resumable) #'ignore)
                 ((symbol-function 'agent--instance-holders)
                  (lambda (holder-backend directory)
                    (should (eq holder-backend backend))
@@ -5656,6 +5657,7 @@ never does."
     (let ((buffer (current-buffer))
           started)
       (cl-letf (((symbol-function 'agent--buffer-for-session-id) #'ignore)
+                ((symbol-function 'agent--check-resumable) #'ignore)
                 ((symbol-function 'agent-start-session)
                  (lambda (session &rest options)
                    (setq started (list session options))
@@ -5671,6 +5673,44 @@ never does."
           (should (equal (agent-session-directory session) "/w/proj/"))
           (should (equal (agent-session-instance session) "resume-0e4735ae"))
           (should (equal (cadr started) '(:resume-id "0e4735ae-23ff"))))))))
+
+;; A task whose session was closed before its first message records an
+;; id with no transcript.  Acting on the task resumed that id, and the
+;; CLI exited at once with "No conversation found".
+(ert-deftest agent-test-resume-context-refuses-a-session-with-nothing-to-resume ()
+  "An id the backend has no conversation for is refused before any start.
+The check is asked under the account the directory resolves to when the
+context names none, and a recorded session that fails it leads to the
+question whether to start a new one."
+  (let (asked started)
+    (cl-letf* ((backend (agent-backend--create
+                         :resumable-p
+                         (lambda (id account)
+                           (push (list id account) asked)
+                           nil)))
+               ((symbol-function 'agent-backend)
+                (lambda (_name) backend))
+               ((symbol-function 'agent-account-resolve)
+                (lambda (_backend _prompt directory)
+                  (should (equal directory "/w/proj/"))
+                  "work"))
+               ((symbol-function 'agent--buffer-for-session-id) #'ignore)
+               ((symbol-function 'agent-start-session)
+                (lambda (&rest args) (push args started)))
+               ((symbol-function 'agent--start-named-session)
+                (lambda (&rest args) (push args started)))
+               ((symbol-function 'pop-to-buffer) #'ignore))
+      (let ((context '(:resume-id "1b103b71-516c" :backend claude-code
+                       :directory "/w/proj" :instance "fix-it")))
+        (should-error (agent--resume-context-session context))
+        (should (equal asked '(("1b103b71-516c" "work"))))
+        (should-not started)
+        (let ((question nil))
+          (cl-letf (((symbol-function 'y-or-n-p)
+                     (lambda (prompt) (setq question prompt) t)))
+            (should-not (agent--recorded-session-buffer context)))
+          (should (string-match-p "no conversation to resume" question)))
+        (should-not started)))))
 
 (ert-deftest agent-test-extractor-at-point-finds-a-forge-topic ()
   "Route a topic in a Magit-derived buffer to the Forge router."

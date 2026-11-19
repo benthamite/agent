@@ -261,6 +261,7 @@ Source: lobehub/lobe-icons (MIT).")
   :interrupt #'agent-claude--interrupt
   :step-effort #'agent-claude--step-effort
   :prepare-fork #'agent-claude--prepare-fork
+  :resumable-p #'agent-claude--resumable-p
   :resume #'claude-code-resume)
 
 ;;;; Functions
@@ -1710,6 +1711,17 @@ session id holds can lead outside the account's projects directory."
       (if (and expected (file-exists-p expected))
           expected
         (agent-claude--searched-transcript buffer id projects)))))
+
+(defun agent-claude--resumable-p (session-id account)
+  "Return non-nil when SESSION-ID has a transcript under ACCOUNT.
+ACCOUNT is the account the session would be resumed under, or nil for
+the default configuration.  The CLI writes a transcript only once a
+session gets its first message, and resuming an id without one fails."
+  (agent-claude-cli--session-file
+   session-id
+   (expand-file-name "projects/"
+                     (or (agent-claude--account-config-dir account)
+                         (expand-file-name "~/.claude/")))))
 
 (defun agent-claude--searched-transcript (buffer id projects)
   "Return the transcript of session ID found by searching PROJECTS, or nil.

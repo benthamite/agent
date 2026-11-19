@@ -2782,6 +2782,20 @@ its fixed port was reported and deleted as a leaked monet server."
              (lambda () nil)))
     (should-not (agent-claude--session-headers (current-buffer)))))
 
+;; Resuming an id the CLI never wrote a transcript for fails at once.
+(ert-deftest agent-claude-test-resumable-p-looks-in-the-account-projects ()
+  "A session id is resumable when the account holds its transcript."
+  (let ((home (make-temp-file "agent-claude-home" t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'agent-claude--account-config-dir)
+                   (lambda (account) (should (equal account "work")) home)))
+          (should-not (agent-claude--resumable-p "abc-123" "work"))
+          (make-directory (expand-file-name "projects/-w-proj" home) t)
+          (write-region "" nil (expand-file-name "projects/-w-proj/abc-123.jsonl"
+                                                 home))
+          (should (agent-claude--resumable-p "abc-123" "work")))
+      (delete-directory home t))))
+
 (provide 'agent-claude-test)
 
 ;;;; Session status reported by Claude Code

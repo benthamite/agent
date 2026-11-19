@@ -191,7 +191,7 @@ chain only once.  Only
   session-history screen-state
   ;; New slots go last: a running Emacs that reloads this file keeps its
   ;; registered backends, and earlier slots must stay where they were.
-  icon-svg interrupt turn-end-background-p step-effort)
+  icon-svg interrupt turn-end-background-p step-effort resumable-p)
 
 (defvar agent-backends nil
   "Alist of registered AI backends.
@@ -241,6 +241,13 @@ reason, when it has one that cannot be found, else a plist as
 with the screen's text, returning a plist as
 `agent-claude-cli-screen-state' documents).  A backend that omits a key
 does not support the commands that dispatch on it.
+
+The optional `:resumable-p' key is a function called with a session id
+and the account it would be resumed under, which may be nil.  It
+returns non-nil when the backend holds a conversation to resume under
+that id.  A session closed before its first message has an id but no
+transcript, and resuming it only starts a CLI that exits with an error.
+Without the key every id is taken to be resumable.
 
 The optional `:icon-svg' key is the SVG source of the backend's icon,
 for displays outside Emacs such as the phone page of `agent-remote'.
@@ -4881,14 +4888,33 @@ Return the session buffer."
                    :instance (unless name
                                (agent--resume-instance-name session-id))))
          (buffer (or (agent--buffer-for-session-id session-id)
-                     (if name
-                         (agent--start-named-session
-                          session name :resume-id session-id)
-                       (agent-start-session session
-                                            :resume-id session-id)))))
+                     (progn
+                       (agent--check-resumable session session-id)
+                       (if name
+                           (agent--start-named-session
+                            session name :resume-id session-id)
+                         (agent-start-session session
+                                              :resume-id session-id))))))
     (pop-to-buffer buffer '((display-buffer-reuse-window
                              display-buffer-same-window)))
     buffer))
+
+(defun agent--check-resumable (session session-id)
+  "Signal an error unless SESSION-ID can be resumed as SESSION.
+SESSION is the `agent-session' it would be resumed as.  The check is
+the `:resumable-p' function of SESSION's backend, asked under SESSION's
+account, or when it has none the account `agent-account-resolve' gives
+its directory, as `agent-start-session' would.  A backend without the
+function is not checked."
+  (when-let* ((backend (agent-session-backend session))
+              (check (agent-backend-resumable-p (agent-backend backend))))
+    (let ((account (or (agent-session-account session)
+                       (let ((agent-inhibit-prompts t))
+                         (agent-account-resolve
+                          backend nil (agent-session-directory session))))))
+      (unless (funcall check session-id account)
+        (error "Session %s has no conversation to resume; it was closed before its first message"
+               session-id)))))
 
 (defun agent--resume-instance-name (session-id)
   "Return an instance name derived from SESSION-ID to resume it under."
