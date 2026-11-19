@@ -90,7 +90,7 @@ directory in the property DIR, and worktrees go under ROOT."
            (agent-decision-stale-functions nil)
            (agent-decision-task-functions nil)
            (agent-decision-comment-function nil)
-           (before-save-hook (list #'agent-auto--before-save))
+           (agent-decision-draft-functions nil)
            (agent-auto-silence-timeout 30)
            (agent-auto--pending nil)
            (agent-auto--handovers nil)
@@ -5078,15 +5078,17 @@ the recommended option or nil, and ID the decision's, d1 by default."
   (agent-decision-state (agent-auto-test--decision file heading)))
 
 (defun agent-auto-test--decide (file keys &optional heading)
-  "Call `agent-decide' from the keyboard on HEADING of FILE, typing KEYS.
+  "Call `agent-decide' from the keyboard on HEADING of FILE, pressing KEYS.
+KEYS are pressed in its menu; see `agent-test-helper-decision-keys'.
 HEADING defaults to Fix it.  Return what the command said last."
   (agent-test-helper-with-messages messages
     (agent-auto-test--at file (or heading "Fix it")
                          (lambda ()
-                           (let ((this-command 'agent-decide)
-                                 (last-input-event ?Y)
-                                 (unread-command-events keys))
-                             (call-interactively #'agent-decide))))
+                           (cl-letf (((symbol-function 'agent-decision-ask)
+                                      (agent-test-helper-decision-keys keys)))
+                             (let ((this-command 'agent-decide)
+                                   (last-input-event ?Y))
+                               (call-interactively #'agent-decide)))))
     (car (last (split-string messages "\n" t)))))
 
 (defmacro agent-auto-test--with-box (&rest body)
@@ -5110,11 +5112,10 @@ press of the key is refused."
         "engine" "chat:145" (list agent-auto-test--command-option
                                   agent-auto-test--session-option)
         0))
-      (should (equal (agent-auto-test--decide file (list 13)) "Answered"))
+      (should (equal (agent-auto-test--decide file (list 13)) "Answered “Nothing needed”"))
       (should (equal agent-auto-test--commanded '("Fix it")))
       (should (equal (agent-auto-test--decision-state file) "done"))
-      (should (string-search "Answered "
-                             (agent-auto-test--disk file)))
+      (should-not (string-search "begin_decision" (agent-auto-test--disk file)))
       (should (string-match-p
                "answered already"
                (cadr (should-error (agent-auto-test--decide file (list 13))
@@ -5157,7 +5158,8 @@ inhibited, as in a process filter, answers nothing."
       (agent-auto-test--at
        file "Fix it"
        (lambda ()
-         (let ((unread-command-events (list 13)))
+         (cl-letf (((symbol-function 'agent-decision-ask)
+                    (lambda (&rest _) (error "The menu was opened"))))
            (let ((this-command 'eval-expression))
              (should-error (call-interactively #'agent-decide)
                            :type 'user-error))
@@ -5170,26 +5172,27 @@ inhibited, as in a process filter, answers nothing."
       (should (equal (agent-auto-test--decision-state file) "open")))))
 
 (ert-deftest agent-auto-test-decide-sends-the-draft-as-it-stands ()
-  "Give the session the draft as the block shows it when the user answers.
-The answer is a program's prompt, never the user's own, and the record
-keeps the approved text, which a later edit of the block leaves alone.
-A second press, while the answer is carried out, is refused, and the
-end of the session's turn makes the decision done."
+  "Give the session the draft as it stands when the user opens the decision.
+The text comes from `agent-decision-draft-functions', which reads it
+from where the user edits it; the answer is a program's prompt, never
+the user's own, and the record keeps the approved text, which a later
+edit of the draft leaves alone.  A second press, while the answer is
+carried out, is refused, and the end of the session's turn makes the
+decision done."
   (agent-auto-test--with root
-    (pcase-let ((`(,file . ,buffer) (agent-auto-test--working-task root)))
+    (pcase-let* ((`(,file . ,buffer) (agent-auto-test--working-task root))
+                 (draft "Hi Ann, I can come on Monday.\nHello Ann.")
+                 (agent-decision-draft-functions
+                  (list (lambda (effect)
+                          (and (equal (agent-decision-get effect 'to) "chat:145")
+                               draft)))))
       (agent-auto-test--put-decision
        file "Fix it"
        (agent-auto-test--decision-json
         "engine" "chat:145" (list agent-auto-test--send-option
                                   agent-auto-test--session-option)
         0))
-      (should (string-search "#+begin_example\nHello Ann.\n#+end_example"
-                             (agent-auto-test--disk file)))
-      (with-current-buffer (find-buffer-visiting file)
-        (goto-char (point-min))
-        (search-forward "#+begin_example\n")
-        (insert "Hi Ann, I can come on Monday.\n")
-        (save-buffer))
+      (should-not (string-search "Hello Ann.\n" (agent-auto-test--disk file)))
       (agent-auto-test--with-box
         (agent-auto-test--decide file (list 13)))
       (let ((sent (caar agent-auto-test--submitted)))
@@ -5202,11 +5205,7 @@ end of the session's turn makes the decision done."
       (should (equal (nth 2 (car (agent-decision-chosen
                                   (agent-auto-test--decision file))))
                      "Hi Ann, I can come on Monday.\nHello Ann."))
-      (with-current-buffer (find-buffer-visiting file)
-        (goto-char (point-min))
-        (search-forward "#+begin_example\n")
-        (insert "Changed after.\n")
-        (save-buffer))
+      (setq draft "Changed after.")
       (should (equal (nth 2 (car (agent-decision-chosen
                                   (agent-auto-test--decision file))))
                      "Hi Ann, I can come on Monday.\nHello Ann."))
@@ -5276,8 +5275,6 @@ not.  A stale decision cannot be answered."
       (agent-session-event buffer 'stop)
       (agent-session-event buffer 'user-submit)
       (should (agent-decision-get (agent-auto-test--decision file) 'stale))
-      (should (string-search "Stale: the session worked on"
-                             (agent-auto-test--disk file)))
       (should (string-match-p
                "stale"
                (cadr (should-error
@@ -5289,7 +5286,7 @@ not.  A stale decision cannot be answered."
 (ert-deftest agent-auto-test-session-writes-its-decision-before-closing ()
   "Put on its task the decision an unattended session wrote, then close it.
 The brief names the decision file.  The decision is the session's, and
-is on the task with its block before the exit chain asks for the
+is on the task, as data only, before the exit chain asks for the
 handover, whose prompt asks for a decision too."
   (agent-auto-test--with root
     (let ((agent-auto-decision-instructions "Decide in %f."))
@@ -5315,8 +5312,12 @@ handover, whose prompt asks for a decision too."
               (should (equal (agent-decision-get record 'proposer) "session"))
               (should (equal (agent-decision-get record 'source) "sid-1"))
               (should (equal (agent-decision-state record) "open")))
-            (should (string-search "#+begin_decision\nWhich calendar?\n1. Work (recommended)\n2. Home\n"
-                                   (agent-auto-test--disk file)))
+            (should (equal (agent-decision-get
+                            (car (agent-decision-items
+                                  (agent-auto-test--decision file)))
+                            'question)
+                           "Which calendar?"))
+            (should-not (string-search "begin_decision" (agent-auto-test--disk file)))
             (should-not (file-exists-p decision-file))
             (agent-auto-test--answer
              buffer '(:state "needs-user" :summary "Compared the calendars"))
@@ -5351,7 +5352,8 @@ and is told where to write a decision."
         "session" "sid-1" (list agent-auto-test--session-option
                                 agent-auto-test--send-option)
         nil))
-      (agent-auto-test--decide file (list 13 ?1))
+      ;; No recommendation: the menu offers no RET, and a digit answers.
+      (agent-auto-test--decide file (list ?1))
       (let ((options (cdar agent-auto-test--started))
             (buffer (car agent-auto-test--buffers)))
         (should (equal (plist-get options :resume-id) "sid-1"))
@@ -5380,9 +5382,7 @@ and is told where to write a decision."
       (let ((record (agent-auto-test--decision file)))
         (should (equal (agent-decision-state record) "open"))
         (should (string-search "no such conversation"
-                               (agent-decision-get record 'failure))))
-      (should (string-search "The last answer could not be carried out"
-                             (agent-auto-test--disk file))))))
+                               (agent-decision-get record 'failure)))))))
 
 (ert-deftest agent-auto-test-answer-starts-a-session-on-a-task-without-one ()
   "Start a session, unattended, on a task that records none, with the answer."
@@ -5438,7 +5438,7 @@ and is told where to write a decision."
 (ert-deftest agent-auto-test-decide-on-marked-lines ()
   "Offer the options common to the marked tasks' decisions, and answer all.
 The decisions recommend different sends, so the common option is not
-recommended and needs a digit."
+recommended: the menu offers no RET, and a digit chooses it."
   (agent-auto-test--with root
     (let ((file (agent-auto-test--listed-tasks root "Answer Ann" "Answer Ben"))
           (agent-auto-test--commanded nil)
@@ -5460,10 +5460,11 @@ recommended and needs a digit."
       (with-current-buffer (find-file-noselect file)
         (agent-test-helper-in-agenda "Answer Ann"
           (agent-auto-test--mark-lines "Answer Ann" "Answer Ben")
-          (let ((this-command 'agent-decide)
-                (last-input-event ?Y)
-                (unread-command-events (list 13 ?1)))
-            (call-interactively #'agent-decide))
+          (cl-letf (((symbol-function 'agent-decision-ask)
+                     (agent-test-helper-decision-keys '("1"))))
+            (let ((this-command 'agent-decide)
+                  (last-input-event ?Y))
+              (call-interactively #'agent-decide)))
           (should-not org-agenda-bulk-marked-entries)))
       (should (equal (sort (copy-sequence agent-auto-test--commanded) #'string<)
                      '("Answer Ann" "Answer Ben")))

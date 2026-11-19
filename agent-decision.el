@@ -31,17 +31,23 @@
 ;; the task's property `agent-decision-property', whoever proposed it: a
 ;; program that files tasks, or a session that needs the user.
 ;;
+;; The record is data only: nothing of it is written in the task's body.
+;; A send's text is read when the user opens the decision, from where
+;; the program that proposed it keeps the draft (see
+;; `agent-decision-draft-functions'), so that there is one copy of it,
+;; which the user edits where it is.
+;;
 ;; This file holds what is generic about a decision: reading and writing
-;; the record, the block that shows it at the top of the task's body, the
-;; states it goes through, and the prompt that reads the user's answer
-;; from the keyboard.  Carrying an answer out, which can start or resume
-;; a session, is `agent-auto''s; see `agent-decide'.
+;; the record, the states it goes through, and the menu that reads the
+;; user's answer from the keyboard.  Carrying an answer out, which can
+;; start or resume a session, is `agent-auto''s; see `agent-decide'.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'org)
 (require 'subr-x)
+(require 'transient)
 
 ;;;; Customization
 
@@ -58,8 +64,10 @@ decision follows: `id', `proposer' (\"engine\" or \"session\"),
 Each option has `label' and `effect'.  An effect has `kind', one of
 \"session\", \"send\" and \"command\": \"session\" and \"send\" carry
 an `instruction', \"send\" also `to' and `to_label', the conversation
-the text goes to, and may carry `text', its first draft; \"command\"
-names a `command'.  The answer adds `state', `answer' and `answered_at'."
+the text goes to, and may carry `text', its draft, which
+`agent-decision-draft-functions' can supersede; \"command\" names a
+`command'.  The answer adds `state', `answer' and `answered_at'.  The
+record is data only: nothing of it is written in the task's body."
   :type 'string
   :group 'agent-decision)
 
@@ -98,11 +106,25 @@ point, or the one the agenda line at point shows."
 A comment on a decision a session proposed goes to that session.  A
 decision with any other proposer can be commented on only when this is
 a function, and it is called twice: with the record and nil, when the
-prompt opens, to ask whether the decision takes comments, which it does
+menu opens, to ask whether the decision takes comments, which it does
 when the function returns non-nil; and with the record and the comment,
 which it passes on.  Point is on the task's heading both times.  Nil
 offers no comment on such a decision."
   :type '(choice (const :tag "No comments" nil) function)
+  :group 'agent-decision)
+
+(defcustom agent-decision-draft-functions nil
+  "Abnormal hook giving the text a send would send.
+Each function is called with the effect of an option that sends, an
+alist as the record has it, with point on the task's heading, when the
+user opens the decision.  The first string a function returns is the
+text: the menu shows it under the option, and it is what the answer
+keeps and the session is given to send, whatever happens to the task
+afterwards.  A function returns nil for a send it does not know.  With
+no string from any, the text is the effect's `text', else empty.  This
+lets the program that proposed the decision keep the draft where the
+user edits it, such as in the task's body, as the only copy."
+  :type 'hook
   :group 'agent-decision)
 
 (defcustom agent-decision-functions nil
@@ -113,12 +135,6 @@ the task's heading.  A decision the user drops is passed with the state
 proposed the decision can thus record what came of it."
   :type 'hook
   :group 'agent-decision)
-
-(defconst agent-decision-shown-property "AGENT_DECISION_SHOWN"
-  "Org property recording which record the decision block of a task shows.
-Its value is the record's id and a hash of the property's value, so the
-block is shown again when the record changes, and only then: the drafts
-the user edited in the block are his until the record changes.")
 
 (defconst agent-decision-states
   '("open" "answered" "carrying-out" "done" "failed" "uncertain")
@@ -245,7 +261,7 @@ kind, with what that kind needs."
 (defun agent-decision-sends (record)
   "Return each send effect of RECORD as a list (ITEM OPTION EFFECT).
 ITEM and OPTION are indices.  The order is that of the record, which is
-the order of the drafts in the block."
+the order in which the menu shows them."
   (let ((sends nil) (i 0))
     (dolist (item (agent-decision-items record))
       (let ((j 0))
@@ -277,8 +293,8 @@ The recommended option comes first, the others follow in their order."
   (agent-decision-parse (org-entry-get nil agent-decision-property)))
 
 (defun agent-decision-write (record)
-  "Make RECORD the decision of the task at point, and show it.
-A nil RECORD removes the decision and its block.  Every function in
+  "Make RECORD the decision of the task at point.
+A nil RECORD removes the decision.  Every function in
 `agent-decision-functions' is told when the state changed."
   (let ((before (agent-decision-read))
         (inhibit-message t))
@@ -286,7 +302,6 @@ A nil RECORD removes the decision and its block.  Every function in
         (org-entry-put nil agent-decision-property
                        (agent-decision-serialize record))
       (org-entry-delete nil agent-decision-property))
-    (agent-decision-render)
     (when (and record
                (not (and before
                          (equal (agent-decision-get before 'id)
@@ -315,215 +330,34 @@ The functions of `agent-decision-functions' get it with the state
                           (agent-decision-put record 'state "dropped")))
     (agent-decision-write nil)))
 
-;;;; The block
+;;;; The text of a send
 
-(defun agent-decision-render ()
-  "Show the decision of the task at point in a block at the top of its body.
-The block is `#+begin_decision' to `#+end_decision', right after the
-heading's planning line and drawers.  It is written again only when the
-record changed since it was last written, as
-`agent-decision-shown-property' tells; the drafts in it are kept while
-the record is the same open decision, since they are the user's to edit.
-A task whose decision is gone loses its block."
-  (save-excursion
-    (org-back-to-heading t)
-    (let* ((value (org-entry-get nil agent-decision-property))
-           (record (agent-decision-parse value))
-           (shown (org-entry-get nil agent-decision-shown-property))
-           (stamp (and record (agent-decision--stamp record value))))
-      (cond
-       ((null record)
-        (when shown
-          (agent-decision--replace-block nil)
-          (org-entry-delete nil agent-decision-shown-property)))
-       ((or (not (equal shown stamp)) (not (agent-decision--block-bounds)))
-        (let ((drafts (and shown
-                           (equal (car (split-string shown))
-                                  (agent-decision-get record 'id))
-                           (agent-decision-block-drafts))))
-          (org-entry-put nil agent-decision-shown-property stamp)
-          (agent-decision--replace-block
-           (agent-decision-block-text record drafts))))))))
+(defun agent-decision-drafts (record)
+  "Return the text each send of RECORD would send, from the task at point.
+The result is an alist from (ITEM . OPTION), indices into RECORD, to
+the text, in the order of `agent-decision-sends'.  The text is the
+first string a function of `agent-decision-draft-functions' returns
+for the send's effect, else the effect's `text', else an empty string.
+It is read once, when the user opens the decision: the menu shows it,
+and it is the text the answer keeps and a session sends."
+  (mapcar (pcase-lambda (`(,i ,j ,effect))
+            (cons (cons i j) (agent-decision--draft effect)))
+          (agent-decision-sends record)))
 
-(defun agent-decision--stamp (record value)
-  "Return what `agent-decision-shown-property' holds for RECORD.
-VALUE is the property's text, from which RECORD was read."
-  (format "%s %s" (agent-decision-get record 'id)
-          (substring (secure-hash 'md5 value) 0 12)))
-
-(defun agent-decision--block-bounds ()
-  "Return (START . END) of the decision block of the task at point, or nil.
-START is where its first line begins and END is after its last line.
-Point is on the task's heading."
-  (save-excursion
-    (let ((limit (save-excursion (outline-next-heading) (point))))
-      (org-end-of-meta-data t)
-      (let ((case-fold-search t))
-        (when (and (< (point) limit)
-                   (looking-at "^[ \t]*#\\+begin_decision\\b"))
-          (let ((start (point)))
-            (when (re-search-forward "^[ \t]*#\\+end_decision\\b.*$" limit t)
-              (cons start (min (1+ (point)) (point-max))))))))))
-
-(defun agent-decision--replace-block (text)
-  "Replace the decision block of the task at point with TEXT.
-A nil TEXT removes the block.  A task without a block gets one at the
-top of its body."
-  (save-excursion
-    (let ((bounds (agent-decision--block-bounds)))
-      (if bounds
-          (progn (goto-char (car bounds))
-                 (delete-region (car bounds) (cdr bounds)))
-        (org-end-of-meta-data t)
-        (unless (bolp) (insert "\n")))
-      (when text
-        (insert text)))))
-
-(defun agent-decision-block-drafts ()
-  "Return the drafts in the decision block of the task at point, in order.
-Each is the text of an example block inside the decision block."
-  (when-let* ((bounds (agent-decision--block-bounds)))
-    (save-excursion
-      (goto-char (car bounds))
-      (let ((case-fold-search t) drafts)
-        (while (re-search-forward "^[ \t]*#\\+begin_example\\b.*\n" (cdr bounds) t)
-          (let ((start (point)))
-            (when (re-search-forward "^[ \t]*#\\+end_example\\b" (cdr bounds) t)
-              (push (org-unescape-code-in-string
-                     (string-remove-suffix
-                      "\n" (buffer-substring-no-properties
-                            start (line-beginning-position))))
-                    drafts))))
-        (nreverse drafts)))))
-
-(defun agent-decision-drafts (record &optional drafts)
-  "Return the text of each send effect of RECORD, as `agent-decision-sends'.
-The result is an alist from (ITEM . OPTION) to the text.  DRAFTS, the
-drafts of the block in order, are taken first; a send with no draft has
-its record's `text', else an empty string."
-  (let ((k 0) result)
-    (pcase-dolist (`(,i ,j ,effect) (agent-decision-sends record))
-      (push (cons (cons i j)
-                  (or (nth k drafts) (agent-decision-get effect 'text) ""))
-            result)
-      (setq k (1+ k)))
-    (nreverse result)))
-
-(defun agent-decision-block-text (record &optional drafts)
-  "Return the decision block of RECORD, ending with a newline.
-DRAFTS are the drafts to show for its send effects, in order; see
-`agent-decision-drafts'.  An answered decision shows what was answered,
-and the text that was approved in place of the draft.  A record that is
-no decision that can be shown says so in the block, and why."
-  (if-let* ((problem (agent-decision-problem record)))
-      (format "#+begin_decision\nThis decision cannot be shown: %s.\n#+end_decision\n"
-              problem)
-    (agent-decision--valid-block-text record drafts)))
-
-(defun agent-decision--valid-block-text (record drafts)
-  "Return the decision block of RECORD, a valid decision, with DRAFTS.
-See `agent-decision-block-text'."
-  (let* ((answered (agent-decision--answered-texts record))
-         (texts (append answered (agent-decision-drafts record drafts)))
-         (items (agent-decision-items record))
-         (count (length items)))
-    (concat "#+begin_decision\n"
-            (agent-decision--status-text record)
-            (mapconcat
-             (lambda (index)
-               (agent-decision--item-text (nth index items) index count texts))
-             (number-sequence 0 (1- count))
-             "\n")
-            "#+end_decision\n")))
-
-(defun agent-decision--answered-texts (record)
-  "Return the texts RECORD's answer approved, as `agent-decision-drafts' does."
-  (delq nil (mapcar (lambda (choice)
-                      (when-let* ((text (agent-decision-get choice 'text)))
-                        (cons (cons (agent-decision-get choice 'item)
-                                    (agent-decision-get choice 'option))
-                              text)))
-                    (agent-decision-get record 'answer))))
-
-(defun agent-decision--status-text (record)
-  "Return the lines saying where RECORD stands, or an empty string."
-  (let ((state (agent-decision-state record))
-        (answer (agent-decision--answer-summary record)))
-    (concat
-     (when-let* ((failure (agent-decision-get record 'failure)))
-       (format "The last answer could not be carried out: %s\n" failure))
-     (when-let* (((equal state "open"))
-                 (stale (agent-decision-get record 'stale)))
-       (format "Stale: %s.\n" stale))
-     (unless (equal state "open")
-       (format "Answered%s: %s.  %s\n"
-               (if-let* ((time (agent-decision-get record 'answered_at)))
-                   (concat " " time)
-                 "")
-               answer
-               (pcase state
-                 ((or "answered" "carrying-out") "Being carried out.")
-                 ("done" "Carried out.")
-                 ("failed" (format "Not carried out%s."
-                                   (agent-decision--outcome record)))
-                 ("uncertain" (format "Outcome uncertain%s; nothing resends it."
-                                      (agent-decision--outcome record)))
-                 (_ "")))))))
-
-(defun agent-decision--outcome (record)
-  "Return \": OUTCOME\" for the outcome RECORD names, or an empty string."
-  (if-let* ((outcome (agent-decision-get record 'outcome)))
-      (concat ": " outcome)
-    ""))
-
-(defun agent-decision--answer-summary (record)
-  "Return the answer of RECORD in a few words."
-  (if-let* ((comment (agent-decision-get record 'comment)))
-      (format "commented, %S" comment)
-    (mapconcat (lambda (choice) (or (agent-decision-get choice 'label) "?"))
-               (agent-decision-get record 'answer) "; ")))
-
-(defun agent-decision--item-text (item index count texts)
-  "Return the lines of ITEM, item INDEX of COUNT, in the block.
-TEXTS maps (ITEM . OPTION) to the text of a send; see
-`agent-decision-drafts'."
-  (let ((options (agent-decision-options item))
-        (recommended (agent-decision-recommended item))
-        (n 0))
-    (concat
-     (if (> count 1)
-         (format "Question %d of %d: %s\n" (1+ index) count
-                 (agent-decision-get item 'question))
-       (format "%s\n" (agent-decision-get item 'question)))
-     (mapconcat (lambda (j)
-                  (setq n (1+ n))
-                  (format "%d. %s%s\n" n
-                          (agent-decision-get (nth j options) 'label)
-                          (if (eql j recommended) " (recommended)" "")))
-                (agent-decision-display-order item) "")
-     (when-let* ((why (agent-decision-get item 'why)))
-       (format "Why: %s\n" why))
-     (mapconcat (lambda (j)
-                  (let ((effect (agent-decision-effect (nth j options))))
-                    (if (equal (agent-decision-kind effect) "send")
-                        (format "Draft of “%s”, to %s (edit it here before answering):\n#+begin_example\n%s#+end_example\n"
-                                (agent-decision-get (nth j options) 'label)
-                                (agent-decision--to-label effect)
-                                (agent-decision--example-body
-                                 (alist-get (cons index j) texts nil nil #'equal)))
-                      "")))
-                (number-sequence 0 (1- (length options))) ""))))
+(defun agent-decision--draft (effect)
+  "Return the text the send EFFECT would send, for the task at point.
+See `agent-decision-drafts'."
+  (or (save-excursion
+        (run-hook-wrapped 'agent-decision-draft-functions
+                          (lambda (function)
+                            (let ((text (funcall function effect)))
+                              (and (stringp text) text)))))
+      (agent-decision-get effect 'text)
+      ""))
 
 (defun agent-decision--to-label (effect)
   "Return the name of the conversation the send EFFECT goes to."
   (or (agent-decision-get effect 'to_label) (agent-decision-get effect 'to)))
-
-(defun agent-decision--example-body (text)
-  "Return TEXT as the body of an example block, ending with a newline."
-  (let ((body (org-escape-code-in-string (or text ""))))
-    (if (or (string-empty-p body) (string-suffix-p "\n" body))
-        body
-      (concat body "\n"))))
 
 ;;;; The answer
 
@@ -538,103 +372,267 @@ through `emacsclient' runs."
        (or (integerp last-input-event)
            (and (symbolp last-input-event) last-input-event t))))
 
-(defun agent-decision-read-answer (record drafts &optional comments)
-  "Read from the keyboard the user's answer to RECORD, a decision.
+;;;; The menu
+
+(cl-defstruct (agent-decision--asking
+               (:constructor agent-decision--asking-create)
+               (:copier nil))
+  "A decision being answered in `agent-decision-menu'.
+RECORD is the decision, DRAFTS the text of each of its sends, as
+`agent-decision-drafts' returns it, COMMENTS non-nil when it takes a
+comment and CALLBACK the function that gets the answer.  INDEX is the
+item shown, and CHOICES the options chosen for the items before it, as
+\(ITEM . OPTION), last first."
+  record drafts comments callback (index 0) choices)
+
+(defun agent-decision-ask (record drafts comments callback)
+  "Show RECORD, a decision, in a menu, and pass the user's answer to CALLBACK.
 DRAFTS maps each send of RECORD to the text it would send, as
-`agent-decision-drafts' returns it; the prompt shows the text with the
-option.  The items are taken in order.  For each, \\`RET' takes the
-recommended option and a digit the option shown with it; an item with
-no recommendation needs a digit.  \\`x' drops the decision, \\`c', when
-COMMENTS is non-nil, reads a comment instead of an answer, and \\`C-g'
-quits, so that nothing is answered.
+`agent-decision-drafts' returns it, and the menu shows the text under
+the option.  The menu, `agent-decision-menu', shows one item at a time,
+in order, and stays until the user acts on it.  For each item a digit
+chooses the option shown with it and \\`RET' the recommended one, when
+there is one; \\`x' drops the decision; \\`c', when COMMENTS is non-nil,
+reads a comment instead of an answer; and \\`q' or \\`C-g' quits, so that
+nothing is answered, also when it comes before the last item.
 
-Return (answer . CHOICES), where CHOICES is a list of (ITEM . OPTION),
-one for each item, as indices into the record; (comment . TEXT); or
-\(drop)."
-  (let* ((items (agent-decision-items record))
-         (count (length items))
-         (index 0)
-         choices)
-    (catch 'done
-      (dolist (item items)
-        (let ((choice (agent-decision--read-item item index count drafts
-                                                 comments)))
-          (if (consp choice)
-              (throw 'done choice)
-            (push (cons index choice) choices)))
-        (setq index (1+ index)))
-      (cons 'answer (nreverse choices)))))
+CALLBACK is called once the answer is complete, from the command that
+completed it, with (answer . CHOICES), where CHOICES is a list of
+\(ITEM . OPTION), one for each item, as indices into RECORD;
+\(comment . TEXT); or (drop).  It is not called when the user quits."
+  (transient-setup 'agent-decision-menu nil nil
+                   :scope (agent-decision--asking-create
+                           :record record :drafts drafts :comments comments
+                           :callback callback)))
 
-(defun agent-decision--read-item (item index count drafts comments)
-  "Read the option chosen for ITEM, item INDEX of COUNT, and return its index.
-Return a cons instead for a comment or a drop; see
-`agent-decision-read-answer', which says what DRAFTS and COMMENTS are."
-  (let* ((order (agent-decision-display-order item))
+(transient-define-prefix agent-decision-menu ()
+  "Answer the decision of a task.
+This menu is opened by `agent-decision-ask', with the decision; called
+on its own, it has no decision to show."
+  :refresh-suffixes t
+  [:description agent-decision--menu-heading
+   :class transient-column
+   :setup-children agent-decision--menu-options]
+  [:class transient-row
+   :setup-children agent-decision--menu-actions]
+  (interactive)
+  (user-error "Open a task's decision with `agent-decide'"))
+
+(defclass agent-decision--option (transient-suffix)
+  ((option :initarg :option :initform nil
+           :documentation "The index of the option in its item."))
+  "A suffix of `agent-decision-menu' that chooses an option.")
+
+(transient-define-suffix agent-decision-menu-choose ()
+  "Choose the option of this key for the question shown."
+  :class 'agent-decision--option
+  (interactive)
+  (agent-decision--menu-act 'agent-decision-menu-choose
+                            (cons 'choose (oref (transient-suffix-object)
+                                                option))))
+
+(transient-define-suffix agent-decision-menu-accept ()
+  "Choose the recommended option for the question shown."
+  (interactive)
+  (agent-decision--menu-act 'agent-decision-menu-accept '(accept)))
+
+(transient-define-suffix agent-decision-menu-comment ()
+  "Comment on the decision instead of answering it."
+  (interactive)
+  (agent-decision--menu-act 'agent-decision-menu-comment '(comment)))
+
+(transient-define-suffix agent-decision-menu-drop ()
+  "Drop the decision, answering nothing."
+  (interactive)
+  (agent-decision--menu-act 'agent-decision-menu-drop '(drop)))
+
+(defun agent-decision--menu-asking ()
+  "Return the decision `agent-decision-menu' is showing, or nil."
+  (let ((asking (transient-scope 'agent-decision-menu)))
+    (and (agent-decision--asking-p asking) asking)))
+
+(defun agent-decision--asking-item (asking)
+  "Return the item ASKING shows."
+  (nth (agent-decision--asking-index asking)
+       (agent-decision-items (agent-decision--asking-record asking))))
+
+(defun agent-decision--asking-last-p (asking)
+  "Return non-nil when ASKING shows the last item of its decision."
+  (= (1+ (agent-decision--asking-index asking))
+     (length (agent-decision-items (agent-decision--asking-record asking)))))
+
+(defun agent-decision--menu-heading ()
+  "Return the heading of `agent-decision-menu': the question it shows."
+  (when-let* ((asking (agent-decision--menu-asking)))
+    (agent-decision--heading asking)))
+
+(defun agent-decision--heading (asking)
+  "Return the question ASKING shows, with its place among several."
+  (let ((count (length (agent-decision-items
+                        (agent-decision--asking-record asking)))))
+    (concat (propertize (agent-decision-get (agent-decision--asking-item asking)
+                                            'question)
+                        'face 'transient-heading)
+            (if (> count 1)
+                (propertize (format "  (question %d of %d)"
+                                    (1+ (agent-decision--asking-index asking))
+                                    count)
+                            'face 'shadow)
+              ""))))
+
+(defun agent-decision--menu-options (_)
+  "Return the suffixes of `agent-decision-menu' for the item it shows."
+  (when-let* ((asking (agent-decision--menu-asking)))
+    (transient-parse-suffixes 'agent-decision-menu
+                              (agent-decision--option-specs asking))))
+
+(defun agent-decision--menu-actions (_)
+  "Return the suffixes of `agent-decision-menu' that answer otherwise."
+  (when-let* ((asking (agent-decision--menu-asking)))
+    (transient-parse-suffixes 'agent-decision-menu
+                              (agent-decision--action-specs asking))))
+
+(defun agent-decision--option-specs (asking)
+  "Return the suffix specs of the options of the item ASKING shows.
+Why the last answer could not be carried out comes first, when it
+could not; then the item's reason; then its options, numbered in the order
+they are shown, the recommended one first and marked; under an option
+that sends, the conversation and the text it sends, wrapped.  Choosing
+an option of the last item ends the menu; one of another goes on to the
+next item."
+  (let* ((item (agent-decision--asking-item asking))
+         (index (agent-decision--asking-index asking))
+         (options (agent-decision-options item))
          (recommended (agent-decision-recommended item))
-         (prompt (agent-decision--item-prompt item index count drafts comments))
-         (problem nil)
-         result)
-    (while (not result)
-      (let ((key (read-key (if problem (concat problem "\n" prompt) prompt))))
-        (setq problem nil)
-        (cond
-         ((eql key ?\C-g) (keyboard-quit))
-         ((memq key '(13 return))
-          (if recommended
-              (setq result (list recommended))
-            (setq problem "This question has no recommendation: choose a number.")))
-         ((and (integerp key) (<= ?1 key ?9) (<= (- key ?0) (length order)))
-          (setq result (list (nth (- key ?1) order))))
-         ((eq key ?x) (setq result (list '(drop))))
-         ((and comments (eq key ?c))
-          (let ((text (string-trim (read-string "Comment: "))))
-            (if (string-empty-p text)
-                (setq problem "The comment was empty.")
-              (setq result (list (cons 'comment text))))))
-         (t (setq problem "Not a choice.")))))
-    (car result)))
-
-(defun agent-decision--item-prompt (item index count drafts comments)
-  "Return the prompt for ITEM, item INDEX of COUNT.
-DRAFTS and COMMENTS are as for `agent-decision-read-answer'."
-  (let ((options (agent-decision-options item))
-        (recommended (agent-decision-recommended item))
-        (n 0))
-    (concat
-     (if (> count 1)
-         (format "Decision, question %d of %d: " (1+ index) count)
-       "Decision: ")
-     (agent-decision-get item 'question) "\n"
-     (mapconcat
+         (stay (not (agent-decision--asking-last-p asking)))
+         (n 0))
+    (append
+     (when-let* ((failure (agent-decision-get (agent-decision--asking-record
+                                               asking)
+                                              'failure)))
+       (list (list :info* (propertize
+                           (agent-decision--wrap
+                            (format "The last answer could not be carried out: %s."
+                                    failure)
+                            1 0)
+                           'face 'warning))))
+     (when-let* ((why (agent-decision-get item 'why)))
+       (list (list :info* (concat (agent-decision--wrap why 1 0) "\n "))))
+     (mapcan
       (lambda (j)
         (let* ((option (nth j options))
                (effect (agent-decision-effect option)))
           (setq n (1+ n))
-          (concat
-           (format "  %d. %s%s\n" n (agent-decision-get option 'label)
-                   (if (eql j recommended) " (recommended)" ""))
-           (when (equal (agent-decision-kind effect) "send")
-             (concat (format "     sends to %s exactly:\n"
-                             (agent-decision--to-label effect))
-                     (mapconcat (lambda (line) (concat "     | " line "\n"))
-                                (split-string
-                                 (or (alist-get (cons index j) drafts
-                                                nil nil #'equal)
-                                     "")
-                                 "\n")
-                                ""))))))
-      (agent-decision-display-order item) "")
-     (when-let* ((why (agent-decision-get item 'why)))
-       (format "Why: %s\n" why))
-     (format "%s%s, x drops the decision%s, C-g cancels: "
-             (if recommended "RET takes the recommendation, " "")
-             (if (= (length options) 1) "1 chooses" (format "1-%d choose" (length options)))
-             (if comments ", c comments" "")))))
+          (cons (list (number-to-string n)
+                      (concat (agent-decision-get option 'label)
+                              (if (eql j recommended)
+                                  (propertize "  (recommended)" 'face 'success)
+                                ""))
+                      'agent-decision-menu-choose
+                      :option j :transient stay)
+                (when (equal (agent-decision-kind effect) "send")
+                  (list (list :info* (agent-decision--send-text
+                                      effect
+                                      (alist-get (cons index j)
+                                                 (agent-decision--asking-drafts
+                                                  asking)
+                                                 nil nil #'equal))))))))
+      (agent-decision-display-order item)))))
+
+(defconst agent-decision--draft-column 3
+  "The column at which the menu shows the text of a send.
+It is that of the options' labels, under which the text is shown.")
+
+(defun agent-decision--send-text (effect text)
+  "Return what the menu shows under the send EFFECT: where TEXT goes, and TEXT.
+Transient indents the first line of an information by one column, which
+the first line here leaves out."
+  (let ((indent (make-string agent-decision--draft-column ?\s)))
+    (concat (substring indent 1)
+            (propertize (format "To %s:" (agent-decision--to-label effect))
+                        'face 'shadow)
+            "\n"
+            (if (string-blank-p (or text ""))
+                (concat indent (propertize "(no text)" 'face 'warning))
+              (agent-decision--wrap text agent-decision--draft-column))
+            ;; A blank line parts the text from the next option.
+            "\n ")))
+
+(defun agent-decision--wrap (text indent &optional first)
+  "Return TEXT filled to the frame's width, each line indented by INDENT.
+The first line is indented by FIRST instead, when it is given.  The
+lines TEXT breaks stay broken; only lines too long are filled."
+  (let ((fill-column (max 30 (min 80 (- (frame-width) indent 4))))
+        (prefix (make-string indent ?\s))
+        (lines (split-string (string-trim-right text) "\n")))
+    (string-remove-prefix
+     (make-string (- indent (or first indent)) ?\s)
+     (mapconcat
+      (lambda (line)
+        (if (string-blank-p line)
+            ""
+          (with-temp-buffer
+            (insert line)
+            (let ((fill-prefix prefix))
+              (goto-char (point-min))
+              (insert prefix)
+              (fill-region (point-min) (point-max) nil t))
+            (string-trim-right (buffer-string)))))
+      lines
+      "\n"))))
+
+(defun agent-decision--action-specs (asking)
+  "Return the suffix specs of the answers ASKING offers besides an option.
+\\`RET' takes the recommendation, when the item shown has one; \\`c'
+comments, when the decision takes comments; \\`x' drops it; \\`q' quits."
+  (append
+   (when (agent-decision-recommended (agent-decision--asking-item asking))
+     (list (list "RET" "accept the recommendation" 'agent-decision-menu-accept
+                 :transient (not (agent-decision--asking-last-p asking)))))
+   (when (agent-decision--asking-comments asking)
+     (list (list "c" "comment" 'agent-decision-menu-comment)))
+   (list (list "x" "drop the decision" 'agent-decision-menu-drop)
+         (list "q" "quit" 'transient-quit-one))))
+
+(defun agent-decision--menu-act (command action)
+  "Act on ACTION, which COMMAND of `agent-decision-menu' was called to do.
+ACTION is (choose . OPTION), (accept), (comment) or (drop).  COMMAND
+must have been called from the keyboard, as
+`agent-decision-from-keyboard-p' tells, while the menu shows a decision."
+  (unless (agent-decision-from-keyboard-p command)
+    (user-error "A decision is answered only from the keyboard"))
+  (let ((asking (or (agent-decision--menu-asking)
+                    (user-error "No decision is being answered"))))
+    (pcase action
+      (`(choose . ,option) (agent-decision--choose asking option))
+      ('(accept)
+       (agent-decision--choose
+        asking (or (agent-decision-recommended
+                    (agent-decision--asking-item asking))
+                   (user-error "This question has no recommendation"))))
+      ('(comment)
+       (let ((text (string-trim (read-string "Comment: "))))
+         (when (string-empty-p text)
+           (user-error "The comment was empty; nothing was answered"))
+         (funcall (agent-decision--asking-callback asking)
+                  (cons 'comment text))))
+      ('(drop) (funcall (agent-decision--asking-callback asking) '(drop))))))
+
+(defun agent-decision--choose (asking option)
+  "Choose OPTION for the item ASKING shows.
+After the last item, give the answer to ASKING's callback; else show
+the next item."
+  (push (cons (agent-decision--asking-index asking) option)
+        (agent-decision--asking-choices asking))
+  (if (agent-decision--asking-last-p asking)
+      (funcall (agent-decision--asking-callback asking)
+               (cons 'answer (reverse (agent-decision--asking-choices asking))))
+    (cl-incf (agent-decision--asking-index asking))))
 
 (defun agent-decision-answer (record choices drafts)
   "Return RECORD answered with CHOICES, now.
-CHOICES is a list of (ITEM . OPTION), as `agent-decision-read-answer'
-returns it.  DRAFTS maps each send to its text, which the answer keeps:
+CHOICES is a list of (ITEM . OPTION), as `agent-decision-ask' passes
+it.  DRAFTS maps each send to its text, which the answer keeps:
 it is the text the user approved, and the one that is sent."
   (let ((items (agent-decision-items record)))
     (thread-first

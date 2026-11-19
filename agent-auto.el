@@ -220,7 +220,7 @@ recommend, or null when you recommend none, and `why` your reason.  An option \
 that sends a message you drafted has the effect {\"kind\": \"send\", \"to\": \
 \"...\", \"to_label\": \"...\", \"instruction\": \"...\", \"text\": \"...\"}: \
 `to` says where it goes, in a form you can act on, `to_label` names the person \
-and the channel, and `text` is the exact text, which the user may revise \
+and the channel, and `text` is the exact text, which the user reads \
 before he answers.  Write the questions and the reasons in your own words: \
 never quote or paste a message, an email or any other private material."
   "How a session that needs the user writes the decision he is to answer.
@@ -529,7 +529,6 @@ in it, it is his own and is no longer closed for him."
     (agent-before-exit-step-functions . agent-auto--handover-step)
     (agent-before-exit-stopped-functions . agent-auto--exit-stopped)
     (after-save-hook . agent-auto--after-save)
-    (before-save-hook . agent-auto--before-save)
     (kill-buffer-hook . agent-auto--session-killed)
     (org-mode-hook . agent-auto--schedule-marks)
     (org-agenda-finalize-hook . agent-auto--mark-agenda)
@@ -558,6 +557,9 @@ this version installs, without the mode being toggled."
     (add-to-list 'agent-session-inherited-variables variable))
   (pcase-dolist (`(,hook . ,function) agent-auto--hooks)
     (add-hook hook function))
+  ;; An older version showed decisions in the task's body before saving;
+  ;; an Emacs that loaded it still has its hook.
+  (remove-hook 'before-save-hook 'agent-auto--before-save)
   (agent-auto--schedule-marks)
   (agent-auto--guard "reading the handover receipts"
     (agent-auto--load-handovers))
@@ -677,7 +679,7 @@ DIRECTORY is the home directory."
 ;;;; Searching
 
 (defun agent-auto--scan ()
-  "Search the files for ready tasks, recorded sessions, waits and decisions.
+  "Search the files for ready tasks, recorded sessions and recorded waits.
 Waits are searched for only while `agent-auto-wait-over-functions' has a
 function to ask.  Each file ripgrep finds is then visited in a step of
 its own.  Nothing is searched while the steps of the search before are
@@ -690,8 +692,7 @@ still running."
                  "--no-messages")
                (mapcan (lambda (pattern) (list "-e" pattern))
                        (append
-                        (list (format ":%s:" agent-auto-ready-tag)
-                              (format ":%s:" agent-decision-property))
+                        (list (format ":%s:" agent-auto-ready-tag))
                         (and agent-auto-wait-over-functions
                              (list (format ":%s:" agent-auto-wait-property)))
                         (agent-auto--unchecked-values)))
@@ -733,18 +734,14 @@ once.  The values returned are marked as searched."
 
 (defun agent-auto--visit-file (file)
   "Link the sessions FILE records and queue its ready tasks.
-The tasks whose wait is over leave the waiting keyword, and the
-decisions whose record changed are shown again; see
-`agent-auto--render-decisions'.  A file whose buffer has unsaved edits
-is left for a later search."
+The tasks whose wait is over leave the waiting keyword.  A file whose
+buffer has unsaved edits is left for a later search."
   (when-let* ((buffer (agent-auto--org-buffer file)))
     (with-current-buffer buffer
       (agent-auto--attach-recorded file))
     (when (eq (agent-auto--editable-buffer file) buffer)
       (with-current-buffer buffer
-        (agent-auto--check-waits)
-        (agent-auto--render-decisions)
-        (agent-todo--save))
+        (agent-auto--check-waits))
       (dolist (marker (with-current-buffer buffer
                         (agent-auto--ready-headings)))
         (agent-auto--enqueue
@@ -2290,12 +2287,16 @@ on each of the others."
   "Answer the decision proposed on the Org task at point.
 The task is the heading at point, the one the agenda line at point
 shows, or the one a function of `agent-decision-task-functions' finds.
-Its decision, which `agent-decision-property' records and a block at
-the top of its body shows, is read item by item in the minibuffer; see
-`agent-decision-read-answer'.  \\`RET' takes every recommendation, a
-digit another option, \\`c' comments, \\`x' drops the decision and
-\\`C-g' answers nothing.  Nothing is carried out before the last item is
-answered.
+Its decision, which `agent-decision-property' records, is shown in a
+menu at the bottom of the frame, one question at a time, until it is
+answered; see `agent-decision-ask'.  A digit chooses the option shown
+with it, \\`RET' the recommended one, \\`c' comments, \\`x' drops the
+decision and \\`q' or \\`C-g' answers nothing.  Nothing is carried out
+before the last question is answered.
+
+The text a send would send is read when the menu opens, from
+`agent-decision-draft-functions', and shown under the option: that text
+is the one the answer keeps and the session is given.
 
 The answer is then recorded on the task and carried out, once: a
 command effect runs its command, which must be on
@@ -2303,16 +2304,14 @@ command effect runs its command, which must be on
 effects go, in one message, to the session the task records, resumed
 if need be, or to a new session, unattended and snoozed, as
 `agent-delegate-tasks' starts one, and asked of
-`agent-auto-eligible-functions' with `agent-auto-by-hand' non-nil.  The
-text a send was approved with is the draft as the block showed it when
-the answer was given.
+`agent-auto-eligible-functions' with `agent-auto-by-hand' non-nil.
 
 The command refuses a decision that is not open, as one answered
 already or being carried out, one that is stale, as a function of
 `agent-decision-stale-functions' or a later turn of the session that
 proposed it says, and one that names a command not on
-`agent-decision-commands'.  It acts only when called from the keyboard:
-see `agent-decision-from-keyboard-p'.
+`agent-decision-commands'.  It and the menu's keys act only when called
+from the keyboard: see `agent-decision-from-keyboard-p'.
 
 With lines marked in an agenda, the options common to the decisions of
 every marked task are offered, and the one chosen answers all of them."
@@ -2321,9 +2320,7 @@ every marked task are offered, and the one chosen answers all of them."
     (user-error "A decision is answered only from the keyboard"))
   (if (and (derived-mode-p 'org-agenda-mode) org-agenda-bulk-marked-entries)
       (agent-auto--decide-marked)
-    (let ((marker (agent-auto--decision-task)))
-      (unwind-protect (agent-auto--decide-at marker)
-        (set-marker marker nil)))))
+    (agent-auto--decide-at (agent-auto--decision-task))))
 
 (defun agent-auto--decision-task ()
   "Return a marker at the task of the thing at point, or signal a `user-error'.
@@ -2333,40 +2330,53 @@ See `agent-decision-task-functions'."
       (user-error "Call this on an Org task or on an agenda line")))
 
 (defun agent-auto--decide-at (marker)
-  "Read the user's answer to the decision of the task at MARKER, and act on it."
+  "Ask the user's answer to the decision of the task at MARKER, to act on it.
+The menu that asks it acts on the answer when it is complete; see
+`agent-auto--answered'."
   (let* ((record (agent-auto--at-task-saving marker #'agent-auto--open-decision))
          (drafts (agent-auto--at-task
-                  marker (lambda ()
-                           (agent-decision-drafts
-                            record (agent-decision-block-drafts)))))
+                  marker (lambda () (agent-decision-drafts record))))
          (comments (agent-auto--at-task
-                    marker (lambda () (agent-auto--comments-p record))))
-         (reply (agent-decision-read-answer record drafts comments)))
-    (agent-auto--still-open marker record)
-    (pcase reply
-      (`(answer . ,choices)
-       (agent-auto--carry-out marker (agent-decision-answer record choices
-                                                            drafts)))
-      (`(comment . ,text)
-       (agent-auto--carry-out marker (agent-decision-comment record text)))
-      (`(drop)
-       (agent-auto--at-task-saving marker #'agent-decision-drop)
-       (message "Dropped the decision")))))
+                    marker (lambda () (agent-auto--comments-p record)))))
+    (agent-decision-ask record drafts comments
+                        (lambda (reply)
+                          (agent-auto--answered marker record drafts reply)))))
+
+(defun agent-auto--answered (marker record drafts reply)
+  "Act on REPLY, the user's answer to RECORD, the decision of the task at MARKER.
+DRAFTS is the text of each send, as the menu showed it.  REPLY is what
+`agent-decision-ask' passes on."
+  (unwind-protect
+      (progn
+        (agent-auto--still-open marker record)
+        (pcase reply
+          (`(answer . ,choices)
+           (agent-auto--carry-out marker (agent-decision-answer record choices
+                                                                drafts)))
+          (`(comment . ,text)
+           (agent-auto--carry-out marker (agent-decision-comment record text)))
+          (`(drop)
+           (agent-auto--at-task-saving marker #'agent-decision-drop)
+           (message "Dropped the decision"))))
+    (set-marker marker nil)))
 
 (defun agent-auto--open-decision ()
   "Return the decision of the task at point, which can be answered now.
 Signal a `user-error' that says why it cannot: there is none, it cannot
 be read, it is not open, it names a command not on
-`agent-decision-commands', or it is stale.  The block is brought up to
-date first, so that the drafts read from it are those the user sees."
-  (agent-decision-render)
+`agent-decision-commands', or it is stale."
   (let ((record (or (agent-decision-read)
                     (user-error "This task has no decision"))))
     (when-let* ((problem (agent-decision-problem record)))
       (user-error "This decision cannot be answered: %s" problem))
     (unless (equal (agent-decision-state record) "open")
-      (user-error "This decision was answered already (%s)"
-                  (agent-decision-state record)))
+      (user-error "This decision was answered already%s"
+                  (pcase (agent-decision-state record)
+                    ((or "answered" "carrying-out") ", and its answer is being carried out")
+                    ("done" ", and its answer was carried out")
+                    ("failed" ", and its answer failed")
+                    ("uncertain" ", and whether its answer was carried out is uncertain")
+                    (state (format " (%s)" state)))))
     (when-let* ((refused (agent-decision-refused-commands record)))
       (user-error "This decision names a command not on `agent-decision-commands': %s"
                   (string-join refused ", ")))
@@ -2379,7 +2389,7 @@ date first, so that the drafts read from it are those the user sees."
 
 (defun agent-auto--still-open (marker record)
   "Signal a `user-error' unless RECORD is still the open decision at MARKER.
-Timers run while the prompt waits, and one can answer, replace or mark
+Timers run while the menu waits, and one can answer, replace or mark
 stale the decision being answered."
   (let ((now (agent-auto--at-task marker #'agent-decision-read)))
     (unless (and now
@@ -2446,9 +2456,14 @@ saying why, and so does a command that signals an error."
       (unless for-session
         (agent-auto--decision-at
          marker id (lambda (now) (agent-decision-put now 'state "done"))))
-      (message "%s" (if for-session
-                        "Answered; a session carries the answer out"
-                      "Answered")))))
+      (message "Answered%s%s"
+               (if-let* ((labels (mapcar (lambda (choice)
+                                           (agent-decision-get (nth 1 choice) 'label))
+                                         chosen)))
+                   (format " %s" (mapconcat (lambda (label) (format "“%s”" label))
+                                            labels ", "))
+                 (if comment " with a comment" ""))
+               (if for-session "; a session carries it out" "")))))
 
 (defun agent-auto--carry-effects (marker record commands for-session comment)
   "Carry out the answer RECORD holds on the task at MARKER; return nil, or why not.
@@ -2678,26 +2693,32 @@ Every marked task must have an open decision of one item that can be
 answered.  The options offered are those all of them have, the same
 label with the same effect, and the one chosen answers each.  The marks
 are then cleared."
-  (let ((markers (agent-auto--marked-tasks)))
-    (unwind-protect
-        (let* ((records (mapcar #'agent-auto--marked-decision markers))
-               (common (agent-auto--common-options records))
-               (choice (agent-auto--read-common records common)))
-          (cl-mapc (lambda (marker record)
-                     (agent-auto--carry-out
-                      marker
-                      (agent-decision-answer
-                       record (list (cons 0 (agent-auto--option-index
-                                             record choice)))
-                       nil)))
-                   markers records)
-          (let ((inhibit-message t))
-            (org-agenda-bulk-unmark-all))
-          (message "Answered %d decisions: %s" (length records)
-                   (agent-decision-get choice 'label)))
-      (dolist (marker markers)
-        (when marker
-          (set-marker marker nil))))))
+  (let* ((markers (agent-auto--marked-tasks))
+         (records (mapcar #'agent-auto--marked-decision markers))
+         (common (agent-auto--common-options records))
+         (agenda (current-buffer)))
+    (agent-auto--read-common
+     records common
+     (lambda (choice)
+       (unwind-protect
+           (progn
+             (cl-mapc (lambda (marker record)
+                        (agent-auto--carry-out
+                         marker
+                         (agent-decision-answer
+                          record (list (cons 0 (agent-auto--option-index
+                                                record choice)))
+                          nil)))
+                      markers records)
+             (when (buffer-live-p agenda)
+               (with-current-buffer agenda
+                 (let ((inhibit-message t))
+                   (org-agenda-bulk-unmark-all))))
+             (message "Answered %d decisions: %s" (length records)
+                      (agent-decision-get choice 'label)))
+         (dolist (marker markers)
+           (when marker
+             (set-marker marker nil))))))))
 
 (defun agent-auto--marked-decision (marker)
   "Return the open decision of the marked task at MARKER.
@@ -2734,10 +2755,10 @@ Two options are the same when their labels and effects are.  Signal a
                        (equal (agent-decision-effect one)
                               (agent-decision-effect other))))))
 
-(defun agent-auto--read-common (records common)
-  "Read which of the options COMMON answers the decisions RECORDS.
-The option is recommended when every decision recommends it.  Return
-the option."
+(defun agent-auto--read-common (records common callback)
+  "Ask which of the options COMMON answers the decisions RECORDS.
+The option is recommended when every decision recommends it.  CALLBACK
+is called with the option chosen."
   (let* ((recommended
           (seq-position common nil
                         (lambda (option _)
@@ -2753,17 +2774,17 @@ the option."
                                          'question))
                                       records)))
          (item `((question . ,(if (cdr questions)
-                                  (format "the decisions of %d marked tasks"
+                                  (format "The decisions of %d marked tasks"
                                           (length records))
                                 (car questions)))
                  (options . ,(vconcat common))
-                 (recommended . ,(or recommended :null))))
-         (reply (agent-decision-read-answer `((id . "marked")
-                                              (items . ,(vector item)))
-                                            nil)))
-    (pcase reply
-      (`(answer (0 . ,index)) (nth index common))
-      (_ (user-error "Drop the decisions of marked tasks one at a time")))))
+                 (recommended . ,(or recommended :null)))))
+    (agent-decision-ask `((id . "marked") (items . ,(vector item))) nil nil
+                        (lambda (reply)
+                          (pcase reply
+                            (`(answer (0 . ,index))
+                             (funcall callback (nth index common)))
+                            (_ (user-error "Drop the decisions of marked tasks one at a time")))))))
 
 ;;;;; A session's decision
 
@@ -2919,31 +2940,6 @@ REASON says why.  Only a decision being carried out is put back."
        (message "agent-auto: the answer was not carried out (%s); the decision is open again"
                 reason)))
    t))
-
-;;;;; Showing decisions
-
-(defun agent-auto--render-decisions ()
-  "Show again the decisions of the current Org buffer whose record changed.
-See `agent-decision-render'.  A task whose block cannot be written is
-reported in *Messages* and left as it is."
-  (when (derived-mode-p 'org-mode)
-    (org-with-wide-buffer
-     (goto-char (point-min))
-     (let ((regexp (format "^[ \t]*:\\(?:%s\\|%s\\):"
-                           (regexp-quote agent-decision-property)
-                           (regexp-quote agent-decision-shown-property)))
-           (case-fold-search t))
-       (while (re-search-forward regexp nil t)
-         (save-excursion
-           (agent-auto--guard "showing a decision"
-             (org-back-to-heading t)
-             (agent-decision-render))))))))
-
-(defun agent-auto--before-save ()
-  "Show again the decisions of the buffer being saved whose record changed.
-For `before-save-hook': a program that writes a decision on a task saves
-the task's buffer, and the block shows the decision from then on."
-  (agent-auto--render-decisions))
 
 ;;;; The keys of a list of tasks
 

@@ -127,6 +127,54 @@ that follow, such as loading a file of the package a second time."
       (goto-char (point-min))
       (read (current-buffer)))))
 
+;;;; Answering a decision
+
+(declare-function agent-decision--asking-create "agent-decision")
+(declare-function agent-decision--option-specs "agent-decision" (asking))
+(declare-function agent-decision--action-specs "agent-decision" (asking))
+(declare-function agent-decision--menu-act "agent-decision" (command action))
+
+(defun agent-test-helper-decision-keys (keys)
+  "Return a stand-in for `agent-decision-ask' that answers with KEYS.
+Each of KEYS is a key of `agent-decision-menu' as a string, as its
+suffixes name it, or as an event: 13 for \"RET\" and a character for
+itself.  Each is pressed in turn, as the menu would run the suffix the
+menu shows for it, from the keyboard; a key the menu does not show
+signals an error, and \"q\" quits, answering nothing."
+  (lambda (record drafts comments callback)
+    (let ((asking (agent-decision--asking-create
+                   :record record :drafts drafts :comments comments
+                   :callback callback)))
+      (cl-letf (((symbol-function 'agent-decision--menu-asking)
+                 (lambda () asking)))
+        (catch 'agent-test-helper--quit
+          (dolist (key keys)
+            (agent-test-helper--decision-press
+             asking (cond ((eql key 13) "RET")
+                          ((integerp key) (string key))
+                          (t key)))))))))
+
+(defun agent-test-helper--decision-press (asking key)
+  "Press KEY, a string, in `agent-decision-menu' showing ASKING."
+  (let* ((spec (or (seq-find (lambda (spec) (equal (car spec) key))
+                             (append (agent-decision--option-specs asking)
+                                     (agent-decision--action-specs asking)))
+                   (error "The menu shows no key %s" key)))
+         (command (nth 2 spec)))
+    (if (eq command 'transient-quit-one)
+        (throw 'agent-test-helper--quit nil)
+      (let ((this-command command)
+            (last-input-event (if (equal key "RET") 13 (aref key 0)))
+            (inhibit-quit nil))
+        (agent-decision--menu-act
+         command
+         (pcase command
+           ('agent-decision-menu-choose
+            (cons 'choose (plist-get (nthcdr 3 spec) :option)))
+           ('agent-decision-menu-accept '(accept))
+           ('agent-decision-menu-comment '(comment))
+           ('agent-decision-menu-drop '(drop))))))))
+
 (provide 'agent-test-helper)
 
 ;;; agent-test-helper.el ends here

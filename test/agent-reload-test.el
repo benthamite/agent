@@ -80,7 +80,6 @@
     (agent-before-exit-step-functions agent-auto--handover-step)
     (agent-before-exit-stopped-functions agent-auto--exit-stopped)
     (after-save-hook agent-auto--after-save)
-    (before-save-hook agent-auto--before-save)
     (kill-buffer-hook agent-auto--session-killed)
     (org-mode-hook agent-auto--schedule-marks)
     (org-agenda-finalize-hook agent-auto--mark-agenda))
