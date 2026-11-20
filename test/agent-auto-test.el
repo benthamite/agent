@@ -5565,6 +5565,48 @@ recommended: the menu offers no RET, and a digit chooses it."
       (should (equal (agent-auto-test--decision-state file "Answer Ann") "done"))
       (should (equal (agent-auto-test--decision-state file "Answer Ben") "done")))))
 
+(ert-deftest agent-auto-test-decide-on-marked-lines-sends-each-draft ()
+  "Give each marked task's session the draft of its own send.
+The decisions offer the same send, whose text
+`agent-decision-draft-functions' reads from each task.  The approval
+shows each draft, and each answer keeps and gives its own, never an
+empty text."
+  (agent-auto-test--with root
+    (let ((file (agent-auto-test--listed-tasks root "Answer Ann" "Answer Ben"))
+          (agent-decision-draft-functions
+           (list (lambda (_effect)
+                   (format "Draft for %s." (org-get-heading t t t t))))))
+      (dolist (heading '("Answer Ann" "Answer Ben"))
+        (agent-auto-test--put-decision
+         file heading
+         (agent-auto-test--decision-json
+          "engine" "chat:1" (list (agent-auto-test--option
+                                   "Send it" "send" :to "chat:1"
+                                   :instruction "Send it."))
+          0 heading)))
+      (with-current-buffer (find-file-noselect file)
+        (agent-test-helper-in-agenda "Answer Ann"
+          (agent-auto-test--mark-lines "Answer Ann" "Answer Ben")
+          (cl-letf (((symbol-function 'agent-decision-ask)
+                     (agent-test-helper-decision-keys '("RET"))))
+            (let ((this-command 'agent-decide)
+                  (last-input-event ?Y))
+              (call-interactively #'agent-decide)))))
+      (should (= (length agent-auto-test--asked) 1))
+      (dolist (heading '("Answer Ann" "Answer Ben"))
+        (let ((draft (format "Draft for %s." heading)))
+          (should (string-search (format "-----\n%s\n-----" draft)
+                                 (car agent-auto-test--asked)))
+          (should (equal (nth 2 (car (agent-decision-chosen
+                                      (agent-auto-test--decision file heading))))
+                         draft))
+          (should (seq-some (lambda (start)
+                              (string-search
+                               (format "-----\n%s\n-----" draft)
+                               (plist-get (cdr start) :initial-prompt)))
+                            agent-auto-test--started))))
+      (should (= (length agent-auto-test--started) 2)))))
+
 ;;;; Approving the text of an unattended session
 
 (defun agent-auto-test--foreign-p ()

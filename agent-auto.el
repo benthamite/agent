@@ -3033,9 +3033,12 @@ Every marked task must have an open decision of one item that can be
 answered.  The options offered are those all of them have, the same
 label with the same effect, and the one chosen answers each.  What the
 answers give sessions is approved, when it needs to be, once for all of
-them; see `agent-auto--answer-plan'.  The marks are then cleared."
+them; see `agent-auto--answer-plan'.  A send gives each task's session
+the draft of that task, read when the menu opens, as for one task; see
+`agent-decision-drafts'.  The marks are then cleared."
   (let* ((markers (agent-auto--marked-tasks))
          (records (mapcar #'agent-auto--marked-decision markers))
+         (drafts (cl-mapcar #'agent-auto--marked-drafts markers records))
          (common (agent-auto--common-options records))
          (agenda (current-buffer)))
     (agent-auto--read-common
@@ -3043,12 +3046,12 @@ them; see `agent-auto--answer-plan'.  The marks are then cleared."
      (lambda (choice)
        (unwind-protect
            (let* ((answers
-                   (cl-mapcar (lambda (record)
+                   (cl-mapcar (lambda (record texts)
                                 (agent-decision-answer
                                  record (list (cons 0 (agent-auto--option-index
                                                        record choice)))
-                                 nil))
-                              records))
+                                 texts))
+                              records drafts))
                   (approvals (agent-auto--approve-some
                               (cl-mapcar #'agent-auto--answer-plan
                                          markers answers))))
@@ -3076,6 +3079,11 @@ it has more than one item."
                   (agent-auto--at-task marker (lambda ()
                                                 (org-get-heading t t t t)))))
     record))
+
+(defun agent-auto--marked-drafts (marker record)
+  "Return the text of each send of RECORD, from the marked task at MARKER.
+See `agent-decision-drafts'."
+  (agent-auto--at-task marker (lambda () (agent-decision-drafts record))))
 
 (defun agent-auto--common-options (records)
   "Return the options the one item of each of RECORDS has, in the first's order.
