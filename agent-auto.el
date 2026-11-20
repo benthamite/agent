@@ -1012,7 +1012,8 @@ See `agent-auto--approve'."
   (concat
    "Nobody will be watching: each session below is given exactly the text\n"
    "between the lines, then works unattended.  A new session's brief also\n"
-   "holds your `agent-auto-instructions' and `agent-auto-decision-instructions'.\n"
+   "holds your `agent-auto-instructions' and `agent-auto-decision-instructions',\n"
+   "unless it is given this text only.\n"
    "Approve only text you have read: any change voids the approval.\n"
    (mapconcat
     (lambda (plan)
@@ -2126,6 +2127,16 @@ moved to `agent-todo-in-progress-keyword', and a message says how many
 sessions were started, how many tasks had a running session already,
 and why no session was started on each of the others.
 
+A marked task whose text you did not write, as
+`agent-auto-approval-functions' tell, gets a new session only with your
+approval, since nobody sees the session it is given to: its text and the
+directory its session runs in are shown in full first, as
+`agent-delegate-tasks' shows them, and you are asked once for all such
+tasks.  Nothing is started when you say no.  A task that changed after
+you approved it, or that names no directory, so that none could be
+approved with its text, is not started.  A task that records a session
+that can be resumed needs no approval: nothing is sent to that session.
+
 The prefix argument is out of sight while tasks are acted on.  An
 agenda that is built again meanwhile, by whichever package, is then
 built from its own search: with a prefix argument in sight, Org's
@@ -2147,20 +2158,28 @@ A task that is closed is refused; see `agent-act-on-tasks'."
 
 (defun agent-auto--start-marked ()
   "Start a session on each task marked in the current agenda; clear the marks.
-No session is shown and the selected window stays selected.  The agenda
+The text of the tasks that need the user's approval is shown first, and
+approved, or refused, all at once; see `agent-auto--start-plan'.  No
+session is shown and the selected window stays selected.  The agenda
 then shows the tasks as they now are, and what came of it is said in the
 echo area; see `agent-auto--show-started' and
 `agent-auto--started-report'."
   (let* ((markers (agent-auto--marked-tasks))
          (outcomes
           (unwind-protect
-              (save-selected-window
-                (let ((display-buffer-overriding-action
-                       '(display-buffer-no-window (allow-no-window . t)))
-                      ;; The backend is then asked for once, not for each task.
-                      (agent-reuse-backend-choice t)
-                      (current-prefix-arg nil))
-                  (mapcar #'agent-auto--start-marked-task markers)))
+              (let ((approvals (agent-auto--approve-some
+                                (mapcar #'agent-auto--start-plan markers))))
+                (save-selected-window
+                  (let ((display-buffer-overriding-action
+                         '(display-buffer-no-window (allow-no-window . t)))
+                        ;; The backend is then asked for once, not for each task.
+                        (agent-reuse-backend-choice t)
+                        (current-prefix-arg nil)
+                        (agent-before-new-session-functions
+                         (cons #'agent-auto--approved-start-p
+                               agent-before-new-session-functions)))
+                    (cl-mapcar #'agent-auto--start-marked-task
+                               markers approvals))))
             (dolist (marker markers)
               (when marker
                 (set-marker marker nil))))))
@@ -2181,32 +2200,113 @@ releases the markers."
             (and (markerp marker) (marker-buffer marker) (copy-marker marker)))
           (reverse org-agenda-bulk-marked-entries)))
 
-(defun agent-auto--start-marked-task (marker)
+(defun agent-auto--start-plan (marker)
+  "Return what the user must approve to start a session on the task at MARKER.
+That is a plan as `agent-auto--approve' takes it, or nil: for an open
+task whose text needs approval and that records no session that can be
+resumed or shown, of the context a new session on it is given, with the
+directory that context names.  Nil too when the context names no
+directory, or cannot be had at once; the task is then not started; see
+`agent-auto--start-task-at-point'.  MARKER can be nil, as for
+`agent-auto--start-marked-task'."
+  (when (and marker (marker-buffer marker))
+    (agent-auto--at-task
+     marker
+     (lambda ()
+       (when-let* (((not (org-entry-is-done-p)))
+                   ((not (agent-auto--recorded-session-p)))
+                   ((agent-auto--approval-required-p))
+                   (context (agent-auto--context-now))
+                   (directory (plist-get context :directory)))
+         (list :title (substring-no-properties (org-get-heading t t t t))
+               :how "a new session, out of sight, given this text only"
+               :directory directory
+               :text (or (plist-get context :payload) "")))))))
+
+(defun agent-auto--context-now ()
+  "Return the context a new session on the task at point would be given.
+It is what the extractor of the thing at point gives, as
+`agent-act-on-thing-at-point' would ask it, or nil when there is no
+extractor, it signals an error, or it does not answer at once."
+  (when-let* ((extractor (agent--extractor-at-point)))
+    (let (context)
+      (ignore-errors
+        (funcall extractor (lambda (value) (setq context value))))
+      context)))
+
+(defvar agent-auto--start-approval nil
+  "The user's approval of the text of the marked task being started, or nil.
+`agent-auto--start-task-at-point' binds it for
+`agent-auto--approved-start-p'.")
+
+(defun agent-auto--approved-start-p (context directory)
+  "Return t when a session in DIRECTORY may be given CONTEXT's payload.
+For `agent-before-new-session-functions', while marked tasks are
+started.  It may unless the payload of CONTEXT's task needs approval and
+`agent-auto--start-approval' is not of that payload and DIRECTORY; see
+`agent-auto--unapproved'.  Signal a `user-error' that says why it may
+not, also when CONTEXT is of no task that can be reached."
+  (let* ((marker (plist-get context :todo))
+         (problem (if (and marker (marker-buffer marker))
+                      (agent-auto--at-task
+                       marker
+                       (lambda ()
+                         (agent-auto--unapproved
+                          directory (or (plist-get context :payload) "")
+                          agent-auto--start-approval)))
+                    "it is of no task whose text can be checked")))
+    (when problem
+      (user-error "%s" problem))
+    t))
+
+(defun agent-auto--start-marked-task (marker &optional approval)
   "Start a session on the marked task at MARKER, and return what came of it.
 MARKER is one of `agent-auto--marked-tasks', or nil for a marked line
-whose marker pointed nowhere.  Return `started', or `running' for a task
+whose marker pointed nowhere.  APPROVAL is the user's approval of the
+text of the task, as `agent-auto--start-plan' had it shown, or nil.
+Return `started', or `running' for a task
 whose recorded session is running, or, when no session was started, a
 string that says why: the task is no longer in its file, it is closed,
 or acting on it signaled an error.  A task whose marker points nowhere
 is not looked for elsewhere: the task of another line would be a guess."
   (if (and marker (marker-buffer marker))
       (condition-case err
-          (agent-auto--at-task marker #'agent-auto--start-task-at-point)
+          (agent-auto--at-task
+           marker (lambda () (agent-auto--start-task-at-point approval)))
         (error (error-message-string err)))
     "a marked task is no longer in its file"))
 
-(defun agent-auto--start-task-at-point ()
+(defun agent-auto--start-task-at-point (&optional approval)
   "Start a session on the task at point, one that was marked in an agenda.
 The task is acted on at its own heading, as `agent-act-on-thing-at-point'
-acts on it there.  Return as `agent-auto--start-marked-task' does."
+acts on it there, with APPROVAL, the user's approval of its text or nil,
+as `agent-auto--start-approval'.  A task whose text needs approval, which
+it lacks, is not acted on unless it records a session to go back to.
+Return as `agent-auto--start-marked-task' does."
   (let ((title (org-get-heading t t t t)))
     (cond ((org-entry-is-done-p) (format "\"%s\" is closed" title))
           ((agent-auto--session-running-p) 'running)
+          ((and (not approval)
+                (not (agent-auto--recorded-session-p))
+                (agent-auto--approval-required-p))
+           (format "\"%s\": %s" title
+                   (if (agent-auto--task-directory)
+                       "its text could not be shown for your approval"
+                     "its text needs your approval, and it names no directory to approve with it")))
           (t (condition-case err
-                 (progn (agent-act-on-thing-at-point)
-                        'started)
+                 (let ((agent-auto--start-approval approval))
+                   (agent-act-on-thing-at-point)
+                   'started)
                (error (format "\"%s\": %s" title
                               (error-message-string err))))))))
+
+(defun agent-auto--recorded-session-p ()
+  "Return non-nil if the task at point records a session to show or resume.
+That is a session `agent-recorded-session-functions' name by its buffer
+or by an id to resume it by: acting on the task then sends it nothing."
+  (let ((context (run-hook-with-args-until-success
+                  'agent-recorded-session-functions)))
+    (or (plist-get context :buffer) (plist-get context :resume-id))))
 
 (defun agent-auto--session-running-p ()
   "Return non-nil if the task at point records a session that is running.

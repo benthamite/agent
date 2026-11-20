@@ -5771,6 +5771,96 @@ no task is started, his own included."
       (should (= (length agent-auto-test--asked) 2))
       (should (equal (agent-auto-test--started-instances) '("ann" "ben" "mine"))))))
 
+;; `s' on marked lines started every marked task out of sight with its
+;; text submitted, though no one approved a text the user did not write.
+(ert-deftest agent-auto-test-act-on-tasks-asks-once-for-marked-tasks ()
+  "Ask once for every marked task whose text needs approval, before `s' starts.
+The approval shows each such task's text and directory in full; the
+task whose text is the user's own is not shown.  When he declines, no
+task is started, his own included.  Each approved session is given
+exactly the text shown."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (concat "#+TODO: TODO | DONE\n"
+                               (agent-auto-test--foreign-task root "Ann")
+                               (agent-auto-test--foreign-task root "Ben")
+                               (agent-auto-test--task root "Mine" ""))))
+           (agent-auto-approval-functions (list #'agent-auto-test--foreign-p)))
+      (with-current-buffer (find-file-noselect file)
+        (let ((agent-auto-test--approve nil))
+          (agent-test-helper-in-agenda "Ann"
+            (agent-auto-test--mark-lines "Ann" "Ben" "Mine")
+            (should (string-match-p
+                     "did not approve"
+                     (cadr (should-error (call-interactively #'agent-act-on-tasks)
+                                         :type 'user-error))))))
+        (should (= (length agent-auto-test--asked) 1))
+        (let ((shown (car agent-auto-test--asked)))
+          (should (string-search "Task: Ann\n" shown))
+          (should (string-search "-----\nAnn\n\nBody of Ann.\n-----" shown))
+          (should (string-search (abbreviate-file-name root) shown))
+          (should (string-search "Task: Ben\n" shown))
+          (should-not (string-search "Task: Mine" shown)))
+        (should-not agent-auto-test--started)
+        (agent-test-helper-in-agenda "Ann"
+          (agent-auto-test--mark-lines "Ann" "Ben" "Mine")
+          (should (equal (agent-auto-test--act-on-marked)
+                         "Started 3 sessions"))))
+      (should (= (length agent-auto-test--asked) 2))
+      (should (equal (agent-auto-test--started-instances) '("ann" "ben" "mine")))
+      (should (equal (mapcar (lambda (start)
+                               (plist-get (cdr start) :initial-prompt))
+                             (reverse agent-auto-test--started))
+                     '("Ann\n\nBody of Ann." "Ben\n\nBody of Ben."
+                       "Mine\n\nThe body."))))))
+
+(ert-deftest agent-auto-test-act-on-tasks-refuses-marked-text-changed-after-approval ()
+  "Start no session on a marked task whose text changed after its approval.
+A program rewrites one body while the user reads: that task is reported
+with the reason, and the other task, unchanged, is started."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (concat "#+TODO: TODO | DONE\n"
+                               (agent-auto-test--foreign-task root "Ann")
+                               (agent-auto-test--foreign-task root "Ben"))))
+           (agent-auto-approval-functions (list #'agent-auto-test--foreign-p))
+           (agent-auto-test--approve
+            (lambda (_text)
+              (agent-auto-test--set-body file "Ben" "Do something else.")
+              t)))
+      (with-current-buffer (find-file-noselect file)
+        (agent-test-helper-in-agenda "Ann"
+          (agent-auto-test--mark-lines "Ann" "Ben")
+          (should (equal (agent-auto-test--act-on-marked)
+                         (concat "1 started, 0 already running, 1 failed: "
+                                 "\"Ben\": its text or its directory changed "
+                                 "after you approved them")))))
+      (should (equal (agent-auto-test--started-instances) '("ann")))
+      (should-not (agent-auto-test--property file "Ben" "AGENT_SESSION")))))
+
+(ert-deftest agent-auto-test-act-on-tasks-refuses-a-marked-task-with-no-directory ()
+  "Start no session on a marked task whose text needs approval and has no directory.
+Its project would be chosen after the approval, so none can be approved
+with its text: it is not shown, no project is asked for, and the reason
+is reported."
+  (agent-auto-test--with root
+    (let* ((file (agent-auto-test--file
+                  root (concat "#+TODO: TODO | DONE\n"
+                               "* TODO Ann\n:PROPERTIES:\n:FROM: chat\n:END:\n"
+                               "Body of Ann.\n")))
+           (agent-auto-approval-functions (list #'agent-auto-test--foreign-p)))
+      (cl-letf (((symbol-function 'agent-project-read)
+                 (lambda (&rest _) (error "A project was asked for"))))
+        (with-current-buffer (find-file-noselect file)
+          (agent-test-helper-in-agenda "Ann"
+            (agent-auto-test--mark-lines "Ann")
+            (should (equal (agent-auto-test--act-on-marked)
+                           (concat "0 started, 0 already running, 1 failed: "
+                                   "\"Ann\": its text needs your approval, and "
+                                   "it names no directory to approve with it"))))))
+      (should-not agent-auto-test--asked)
+      (should-not agent-auto-test--started))))
+
 (ert-deftest agent-auto-test-answer-shows-the-instruction-and-asks ()
   "Show what an answer gives a session, and carry it out only once approved.
 A session option's instruction is not in the menu, only its label, so

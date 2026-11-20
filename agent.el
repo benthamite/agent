@@ -837,6 +837,16 @@ ends with a `user-error'; a function that asks the user something
 returns nil for a declined question.  The hook is not run for a session
 started for the thing.")
 
+(defvar agent-before-new-session-functions nil
+  "Abnormal hook run before a session is started for the thing at point.
+Each function is called with the context plist the thing's extractor
+gave and the directory the session is to run in, once that directory is
+known, in the buffer current then, before the session is started.  When
+a function returns nil no session is started, nothing is sent, and the
+command ends with a `user-error'; a function can instead signal a
+`user-error' of its own, which says why.  The hook is not run for a
+running session the thing is sent to, nor for a session resumed.")
+
 (defvar agent-recorded-session-functions nil
   "Abnormal hook finding the session the thing at point already has.
 `agent-act-on-thing-at-point' and the commands built on it run it before
@@ -5049,7 +5059,12 @@ directory the CLI has not seen before opens with a trust prompt that the
 typed text would answer.  An unsubmitted payload is typed in, since it
 is meant to sit in the prompt for the user to edit.  The session takes
 the instance name the context carries as `:instance', when it carries
-one.  ORIGIN is the buffer the command was invoked from."
+one.  ORIGIN is the buffer the command was invoked from.  Nothing is
+started when a function of `agent-before-new-session-functions' refuses."
+  (unless (run-hook-with-args-until-failure
+           'agent-before-new-session-functions context directory)
+    (user-error "No session was started in %s"
+                (abbreviate-file-name directory)))
   (let* ((payload (plist-get context :payload))
          (submit (plist-get context :submit))
          (buffer (agent--start-session-in backend directory
