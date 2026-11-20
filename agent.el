@@ -470,7 +470,9 @@ per `agent-account-logged-in-p', since the backend would only produce
 authentication failures.  Signal a `user-error' too when SESSION names
 an instance that a live session in the same directory already holds:
 the backend would hand back that session's buffer, still running its
-own conversation, and SESSION would overwrite its identity.
+own conversation, and SESSION would overwrite its identity.  Signal one
+also when the directory does not exist, before any buffer is made: the
+backend would leave a session buffer with no process behind.
 
 This is the entry point for starting sessions from Lisp.  Nothing here
 prompts for an account.  The one question left is the instance name of a
@@ -488,6 +490,7 @@ Return the new session buffer."
          (account (or (agent-session-account session)
                       (setf (agent-session-account session)
                             (agent-account-resolve backend nil directory)))))
+    (agent--check-start-directory directory)
     (when-let* ((instance (agent-session-instance session))
                 ((stringp directory))
                 (holder (assoc instance
@@ -508,6 +511,11 @@ Return the new session buffer."
                  session options)
           typed)
          initial-prompt)))))
+
+(defun agent--check-start-directory (directory)
+  "Signal a `user-error' when DIRECTORY is a string naming no directory."
+  (when (and (stringp directory) (not (file-directory-p directory)))
+    (user-error "Directory %s does not exist" directory)))
 
 (defvar agent-start-dialog-interval 10
   "Seconds between looks at a new session's screen for a dialog.

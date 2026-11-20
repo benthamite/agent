@@ -2759,6 +2759,21 @@ answers \"Two\"."
        (should (equal (agent-session-instance session) "new-2")))
      (should (equal started '(one one))))))
 
+(ert-deftest agent-test-start-session-refuses-a-missing-directory ()
+  "A session in a directory that does not exist is refused before it starts.
+The backend would otherwise leave a buffer with no process, as Protean's
+reopen of a session in a deleted folder did on 19 Nov 2026."
+  (agent-test--with-two-backends
+   (let ((agent-test-helper-check-directories t)
+         (missing (agent-session-create
+                   :backend 'one :directory "/nonexistent/agent-test/"))
+         (present (agent-session-create
+                   :backend 'one :directory temporary-file-directory)))
+     (should-error (agent-start-session missing) :type 'user-error)
+     (should-not started)
+     (agent-start-session present)
+     (should (equal started '(one))))))
+
 (ert-deftest agent-test-second-session-takes-the-typed-name ()
   "A name typed for a second session in a directory becomes its instance."
   (agent-test--with-two-backends

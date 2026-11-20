@@ -32,6 +32,15 @@
 
 (advice-add 'ert-run-test :around #'agent-test-helper--cancel-leftover-timers)
 
+(defvar agent-test-helper-check-directories nil
+  "Non-nil to let `agent--check-start-directory' look at the file system.
+Most tests start sessions in made-up directories, so the check passes
+unless a test binds this.")
+
+(advice-add 'agent--check-start-directory :before-while
+            (lambda (&rest _) agent-test-helper-check-directories)
+            '((name . agent-test-helper-check-directories)))
+
 (defmacro agent-test-helper-with-messages (messages &rest body)
   "Evaluate BODY with MESSAGES bound to the text `message' is given.
 MESSAGES is a string holding each message BODY has issued so far, one to
