@@ -82,7 +82,8 @@
     (after-save-hook agent-auto--after-save)
     (kill-buffer-hook agent-auto--session-killed)
     (org-mode-hook agent-auto--schedule-marks)
-    (org-agenda-finalize-hook agent-auto--mark-agenda))
+    (org-agenda-finalize-hook agent-auto--mark-agenda)
+    (agent-notify-functions agent-remote--record-notification))
   "What the global modes put on hooks, each a list (HOOK FUNCTION).
 The functions are on the global value of each hook.")
 

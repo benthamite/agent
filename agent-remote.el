@@ -1106,6 +1106,14 @@ Signal a user error when no session has that name."
       (user-error "No such session: %s" id))
     buffer))
 
+;;;; Loading again
+
+;; The mode's own function runs only when the mode is toggled.  Loading
+;; this file again while the mode is on, as when the package is updated
+;; in a running Emacs, therefore installs what this version needs.
+(when agent-remote-mode
+  (add-hook 'agent-notify-functions #'agent-remote--record-notification))
+
 (provide 'agent-remote)
 
 ;;; agent-remote.el ends here
