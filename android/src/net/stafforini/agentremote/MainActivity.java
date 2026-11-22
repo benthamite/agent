@@ -1,5 +1,6 @@
 package net.stafforini.agentremote;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
@@ -10,12 +11,14 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.webkit.RenderProcessGoneDetail;
+import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
@@ -31,6 +34,7 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.window.OnBackInvokedCallback;
 import android.window.OnBackInvokedDispatcher;
+import org.json.JSONObject;
 
 /**
  * Shows the single page at the server address the user entered, and
@@ -44,9 +48,12 @@ import android.window.OnBackInvokedDispatcher;
  * any other navigation away from the page is silently dropped.
  */
 public class MainActivity extends Activity {
-  private static final String PREFS = "agent-remote";
-  private static final String KEY_URL = "url";
+  private static final String KEY_URL = Notifications.KEY_URL;
   private static final int DEFAULT_PORT = 8787;
+
+  /** The session a tapped notification asks to open, and its name. */
+  static final String EXTRA_SESSION = "session";
+  static final String EXTRA_NAME = "name";
 
   /** The page's address, or null until the user has entered one. */
   private Uri base;
@@ -59,6 +66,14 @@ public class MainActivity extends Activity {
   private static final long LOAD_TIMEOUT_MS = 15_000;
 
   private static final int REQUEST_FILES = 1;
+  private static final int REQUEST_NOTIFY = 2;
+
+  /** The mode awaiting the notification permission, while it is asked for. */
+  private String requestedMode;
+
+  /** A session to open once the page has loaded, or null. */
+  private Intent pendingOpen;
+  private boolean pageLoaded;
 
   /** Awaits the files the system picker returns, while it is open. */
   private ValueCallback<Uri[]> filesCallback;
@@ -104,6 +119,7 @@ public class MainActivity extends Activity {
     web.setDownloadListener((url, ua, disposition, mime, length) -> { });
     web.setWebViewClient(new Client());
     web.setWebChromeClient(new FilePicker());
+    web.addJavascriptInterface(new Bridge(), "AgentApp");
     root.addView(web);
 
     errorView = buildErrorView();
@@ -119,6 +135,8 @@ public class MainActivity extends Activity {
     root.addView(setupView);
 
     setContentView(root);
+    pendingOpen = sessionIntent(getIntent());
+    Notifications.sync(this);
 
     String saved = prefs().getString(KEY_URL, null);
     if (saved == null) {
@@ -136,7 +154,107 @@ public class MainActivity extends Activity {
   }
 
   private SharedPreferences prefs() {
-    return getSharedPreferences(PREFS, MODE_PRIVATE);
+    return Notifications.prefs(this);
+  }
+
+  /** INTENT, when it is a tapped notification naming a session, else null. */
+  private static Intent sessionIntent(Intent intent) {
+    return intent != null && intent.hasExtra(EXTRA_SESSION) ? intent : null;
+  }
+
+  @Override
+  protected void onNewIntent(Intent intent) {
+    super.onNewIntent(intent);
+    setIntent(intent);
+    pendingOpen = sessionIntent(intent);
+    if (pageLoaded) {
+      openPending();
+    }
+  }
+
+  /** Have the page open the session a tapped notification named. */
+  private void openPending() {
+    if (pendingOpen == null) {
+      return;
+    }
+    String id = pendingOpen.getStringExtra(EXTRA_SESSION);
+    String name = pendingOpen.getStringExtra(EXTRA_NAME);
+    pendingOpen = null;
+    web.evaluateJavascript("window.agentOpenSession && agentOpenSession("
+        + JSONObject.quote(id) + ", " + JSONObject.quote(name == null ? id : name)
+        + ")", null);
+  }
+
+  /** Tell the page that the notification mode is now MODE. */
+  private void reportMode(String mode) {
+    web.evaluateJavascript("window.agentNotifyModeChanged && agentNotifyModeChanged("
+        + JSONObject.quote(mode) + ")", null);
+  }
+
+  @Override
+  public void onRequestPermissionsResult(int request, String[] permissions,
+                                         int[] results) {
+    super.onRequestPermissionsResult(request, permissions, results);
+    if (request != REQUEST_NOTIFY || requestedMode == null) {
+      return;
+    }
+    String mode = requestedMode;
+    requestedMode = null;
+    if (Notifications.permitted(this)) {
+      Notifications.setMode(this, mode);
+      Notifications.sync(this);
+    } else if (!shouldShowRequestPermissionRationale(
+        Manifest.permission.POST_NOTIFICATIONS)) {
+      // Android no longer asks once the user has refused twice; only the
+      // app's notification settings can allow it then.
+      startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+          .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+    }
+    reportMode(Notifications.mode(this));
+  }
+
+  /** What the page may ask of the app, as {@code window.AgentApp}. */
+  private class Bridge {
+    /** The notification mode: "off", "visual" or "sound". */
+    @JavascriptInterface
+    public String notifyMode() {
+      return Notifications.mode(MainActivity.this);
+    }
+
+    /**
+     * Switch notifications to MODE and return the mode now in effect.
+     * Without the permission to notify, the mode stays as it was while
+     * Android asks for it, and the page hears the outcome through
+     * {@code agentNotifyModeChanged}.
+     */
+    @JavascriptInterface
+    public String setNotifyMode(String mode) {
+      Activity a = MainActivity.this;
+      if (!Notifications.OFF.equals(mode) && !Notifications.VISUAL.equals(mode)
+          && !Notifications.SOUND.equals(mode)) {
+        return Notifications.mode(a);
+      }
+      if (!Notifications.OFF.equals(mode) && !Notifications.permitted(a)) {
+        handler.post(() -> {
+          requestedMode = mode;
+          requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS},
+              REQUEST_NOTIFY);
+        });
+        return Notifications.mode(a);
+      }
+      Notifications.setMode(a, mode);
+      handler.post(() -> Notifications.sync(a));
+      return mode;
+    }
+
+    /** Note that the page shows session ID, or none when ID is empty. */
+    @JavascriptInterface
+    public void setViewing(String id) {
+      Notifications.viewing = id == null || id.isEmpty() ? null : id;
+      if (Notifications.viewing != null) {
+        Notifications.dismiss(MainActivity.this, Notifications.viewing);
+      }
+    }
   }
 
   private void setBase(Uri uri) {
@@ -213,6 +331,9 @@ public class MainActivity extends Activity {
       return;
     }
     prefs().edit().putString(KEY_URL, uri.toString()).apply();
+    // The service listens to the address it started with.
+    stopService(new Intent(this, NotifyService.class));
+    Notifications.sync(this);
     getSystemService(InputMethodManager.class)
         .hideSoftInputFromWindow(setupInput.getWindowToken(), 0);
     setBase(uri);
@@ -292,6 +413,7 @@ public class MainActivity extends Activity {
 
   /** Load URL behind the connecting screen, failing after a timeout. */
   private void load(String url) {
+    pageLoaded = false;
     showLoading();
     web.loadUrl(url);
   }
@@ -363,6 +485,7 @@ public class MainActivity extends Activity {
   @Override
   protected void onResume() {
     super.onResume();
+    Notifications.appVisible = true;
     web.onResume();
     if (failedUrl != null) {
       retry();
@@ -371,6 +494,7 @@ public class MainActivity extends Activity {
 
   @Override
   protected void onPause() {
+    Notifications.appVisible = false;
     web.onPause();
     super.onPause();
   }
@@ -503,6 +627,14 @@ public class MainActivity extends Activity {
       // screen; a timed-out load was stopped and never commits.
       if (failedUrl == null) {
         showPage();
+      }
+    }
+
+    @Override
+    public void onPageFinished(WebView view, String url) {
+      if (failedUrl == null && url != null && sameOrigin(Uri.parse(url))) {
+        pageLoaded = true;
+        openPending();
       }
     }
 

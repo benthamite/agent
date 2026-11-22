@@ -1217,6 +1217,128 @@ Keys are (DOMAIN . KEY) pairs; the variable `settings' holds them."
       (should-not (agent-remote--bundle-id))
       (agent-remote--warn-about-app-nap))))
 
+;;;; Notifications
+
+(defmacro agent-remote-test--with-notifications (&rest body)
+  "Run BODY with an empty notification feed of its own."
+  (declare (indent 0))
+  `(let ((agent-remote--notifications nil)
+         (agent-remote--notification-seq 0)
+         (agent-remote--notification-epoch "e1")
+         (agent-remote--notification-waiters nil))
+     ,@body))
+
+(defun agent-remote-test--notifications (query)
+  "Return the parsed reply to a notifications request with QUERY."
+  (agent-remote-test--json
+   (agent-remote-test--http "GET" (concat "/api/notifications?" query))))
+
+(ert-deftest agent-remote-test-notify-reaches-feed ()
+  "A notification from `agent-notify' is kept for the phone with its session."
+  (agent-remote-test--with-notifications
+    (agent-remote-test--with-session buffer
+      (let ((agent-notify-functions '(agent-remote--record-notification))
+            (agent-alert-on-ready nil))
+        (cl-letf (((symbol-function 'message) #'ignore))
+          (agent-notify "Claude Code ready" "proj: waiting" nil nil buffer)))
+      (let ((n (car agent-remote--notifications)))
+        (should (= (plist-get n :seq) 1))
+        (should (equal (plist-get n :id) (buffer-name buffer)))
+        (should (equal (plist-get n :name) "proj"))
+        (should (equal (plist-get n :title) "Claude Code ready"))
+        (should (eq (plist-get n :blocking) :false))))))
+
+(ert-deftest agent-remote-test-feed-keeps-latest ()
+  "The feed keeps only the latest `agent-remote--notification-limit'."
+  (agent-remote-test--with-notifications
+    (dotimes (_ (+ agent-remote--notification-limit 5))
+      (agent-remote--record-notification "t" "m" nil nil))
+    (should (= (length agent-remote--notifications)
+               agent-remote--notification-limit))
+    (should (= (plist-get (car (last agent-remote--notifications)) :seq) 6))))
+
+(ert-deftest agent-remote-test-notifications-sync-and-since ()
+  "Without `after' only the latest number comes back; with it, what is newer."
+  (agent-remote-test--with-notifications
+    (agent-remote--record-notification "one" "m" nil 'blocking)
+    (agent-remote--record-notification "two" "m" nil nil)
+    (agent-remote-test--with-server
+      (let ((sync (agent-remote-test--notifications "")))
+        (should (equal (alist-get 'epoch sync) "e1"))
+        (should (= (alist-get 'last sync) 2))
+        (should-not (alist-get 'notifications sync)))
+      (let ((since (agent-remote-test--notifications "epoch=e1&after=1")))
+        (should (equal (mapcar (lambda (n) (alist-get 'title n))
+                               (alist-get 'notifications since))
+                       '("two"))))
+      (let ((other (agent-remote-test--notifications "epoch=old&after=7")))
+        (should (equal (mapcar (lambda (n) (alist-get 'title n))
+                               (alist-get 'notifications other))
+                       '("one" "two")))
+        (should (eq (alist-get 'blocking
+                               (car (alist-get 'notifications other)))
+                    t))))))
+
+(ert-deftest agent-remote-test-notifications-wait-for-one ()
+  "A waiting request is answered when a notification arrives."
+  (agent-remote-test--with-notifications
+    (agent-remote-test--with-server
+      (let* ((port (process-contact agent-remote--server :service))
+             (response "")
+             (client (make-network-process
+                      :name "agent-remote-test-wait" :host "127.0.0.1"
+                      :service port :coding 'binary
+                      :filter (lambda (_proc data)
+                                (setq response (concat response data))))))
+        (unwind-protect
+            (progn
+              (process-send-string
+               client
+               (format (concat "GET /api/notifications?epoch=e1&after=0&wait=1"
+                               " HTTP/1.1\r\nHost: %s\r\n\r\n")
+                       (process-get agent-remote--server :authority)))
+              (accept-process-output nil 0.3)
+              (should (equal response ""))
+              (should (= (length agent-remote--notification-waiters) 1))
+              (agent-remote--record-notification "ready" "m" nil nil)
+              (with-timeout (5 (error "No response from server"))
+                (while (process-live-p client)
+                  (accept-process-output nil 0.05)))
+              (should-not agent-remote--notification-waiters)
+              (should (equal (mapcar (lambda (n) (alist-get 'title n))
+                                     (alist-get 'notifications
+                                                (agent-remote-test--json
+                                                 response)))
+                             '("ready"))))
+          (delete-process client))))))
+
+(ert-deftest agent-remote-test-notifications-wait-runs-out ()
+  "A waiting request is answered empty once its wait runs out."
+  (agent-remote-test--with-notifications
+    (let ((agent-remote--notification-wait 0.2))
+      (agent-remote-test--with-server
+        (let ((reply (agent-remote-test--notifications
+                      "epoch=e1&after=0&wait=1")))
+          (should (= (alist-get 'last reply) 0))
+          (should-not (alist-get 'notifications reply))
+          (should-not agent-remote--notification-waiters))))))
+
+(ert-deftest agent-remote-test-mode-installs-notification-hook ()
+  "The mode records notifications only while it is on."
+  (let ((agent-notify-functions nil))
+    (cl-letf (((symbol-function 'agent-remote--start) #'ignore)
+              ((symbol-function 'agent-remote--stop) #'ignore)
+              ((symbol-function 'agent-remote--warn-about-app-nap) #'ignore))
+      (unwind-protect
+          (progn
+            (agent-remote-mode 1)
+            (should (memq #'agent-remote--record-notification
+                          agent-notify-functions))
+            (agent-remote-mode -1)
+            (should-not (memq #'agent-remote--record-notification
+                              agent-notify-functions)))
+        (agent-remote-mode -1)))))
+
 (provide 'agent-remote-test)
 
 ;;; agent-remote-test.el ends here

@@ -2687,7 +2687,15 @@ session."
 
 ;;;; Alert and notification system
 
-(defun agent-notify (title message &optional pulse blocking)
+(defvar agent-notify-functions nil
+  "Abnormal hook run by `agent-notify' for every notification.
+Each function is called with TITLE, MESSAGE, BUFFER and BLOCKING: the
+notification's title and text, the session buffer it concerns or nil,
+and non-nil when the session cannot continue until the user answers.
+It runs whatever `agent-alert-on-ready' says, so that a listener such
+as the phone app decides for itself whether to alert.")
+
+(defun agent-notify (title message &optional pulse blocking buffer)
   "Show notification with TITLE and MESSAGE.
 When `agent-alert-on-ready' is non-nil, dispatch to the configured
 alert style.  PULSE, when non-nil, is a function called with no
@@ -2696,11 +2704,16 @@ no visual alert carries it; otherwise it goes to the *Messages* buffer
 only, so one session event does not also fill the echo area.  With
 BLOCKING non-nil, the session cannot continue until the user answers,
 such as an approval request, so the text is always echoed: a desktop
-notification can be hidden, for instance by Do Not Disturb."
+notification can be hidden, for instance by Do Not Disturb.  BUFFER is
+the session buffer the notification concerns, or nil; it is passed on
+to `agent-notify-functions'."
   (let ((inhibit-message (and (not blocking) (agent--alert-visual-p))))
     (message "%s: %s" title message))
   (when pulse (funcall pulse))
-  (agent--alert-route title message))
+  (agent--alert-route title message)
+  (with-demoted-errors "agent-notify-functions: %S"
+    (run-hook-with-args 'agent-notify-functions
+                        title message buffer blocking)))
 
 (defun agent--alert-route (title message)
   "Fire the configured visual/sound alert for TITLE and MESSAGE."
@@ -2832,7 +2845,8 @@ ready alert fires only for `idle-prompt' events."
 (defun agent--session-notify-ready (buffer)
   "Fire the ready alert for session BUFFER, unless it is snoozed.
 Dispatch through the backend's `:notify' function when one is
-registered, falling back to `agent-notify'."
+registered, falling back to `agent-notify'.  Either is called with the
+title, the message, nil for BLOCKING and BUFFER."
   (let* ((backend (agent--detect-backend buffer))
          (struct (and backend (agent-backend backend)))
          (label (or (and struct (agent-backend-label struct))
@@ -2843,7 +2857,8 @@ registered, falling back to `agent-notify'."
     (unless (agent-session-snoozed-p buffer)
       (funcall notify
              (format "%s ready" label)
-             (format "%s: waiting for your response" name)))))
+             (format "%s: waiting for your response" name)
+             nil buffer))))
 
 ;;;###autoload
 (defun agent-jump-to-waiting ()

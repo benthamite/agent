@@ -205,6 +205,10 @@
   .toggle { background: var(--panel-2); border-radius: 10px; padding: 8px 9px;
     font-size: 13px; }
   .toggle.danger { color: var(--error); }
+  .toggle.bell { display: flex; align-items: center; justify-content: center; }
+  .toggle.bell[hidden] { display: none; }
+  .toggle.bell.on { color: var(--accent); }
+  .toggle.bell svg { width: 16px; height: 16px; display: block; }
   .list-tools { gap: 8px; font-size: 13px; }
   .list-tools .status { flex: 1; min-width: 0; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
@@ -283,6 +287,7 @@
 <section id="list-view" class="view active">
   <header class="list-tools">
     <button class="toggle" id="list-new">New</button>
+    <button class="toggle bell" id="list-notify" hidden></button>
     <select id="list-sort" aria-label="Sort by">
       <option value="manual">Manual</option>
       <option value="project">Project</option>
@@ -307,6 +312,7 @@
           <button class="toggle" id="new">New</button>
           <button class="toggle" id="restart">Restart</button>
           <button class="toggle danger" id="exit">Exit</button>
+          <button class="toggle bell" id="notify" hidden></button>
         </div>
         <span id="session-badge" class="badge"></span>
       </div>
@@ -905,13 +911,16 @@ function show(viewId) {
     v.classList.toggle("active", v.id === viewId);
 }
 
-function openSession(s) {
+// REPLACE takes the place of the session on show in the history, so that
+// Back still returns to the list.
+function openSession(s, replace) {
   current = s.id;
+  setViewing(s.id);
   $("session-title").textContent = s.name;
   resetSessionView();
   showDraft(s.id);
   show("session-view");
-  history.pushState({ session: s.id }, "");
+  history[replace ? "replaceState" : "pushState"]({ session: s.id }, "");
   loadOlder().then(() => refreshSession(true));
   schedule();
 }
@@ -978,6 +987,7 @@ function updateOverlay() {
 function closeSession() {
   closeSheets();
   current = null;
+  setViewing(null);
   showDraft(null);
   show("list-view");
   refreshList();
@@ -1870,6 +1880,7 @@ function closeSheets() {
 function followSession(id) {
   closeSheets();
   current = id;
+  setViewing(id);
   resetSessionView();
   setTimeout(() => loadOlder().then(() => refreshSession(true)), 1500);
 }
@@ -2225,6 +2236,57 @@ async function doRestart() {
   }
 }
 
+// Notifications come from the Agents app, which gives the page
+// `window.AgentApp'; a browser cannot show them from a page served over
+// plain http, so there the bell buttons stay hidden.  The mode is "off",
+// "visual" (a banner) or "sound" (a banner with sound), and the bell
+// steps through them in that order.
+const app = window.AgentApp && typeof window.AgentApp.setNotifyMode === "function"
+  ? window.AgentApp : null;
+const NOTIFY_NEXT = { off: "visual", visual: "sound", sound: "off" };
+const NOTIFY_LABEL = { off: "Notifications off",
+                       visual: "Notifications: banner, no sound",
+                       sound: "Notifications: banner and sound" };
+const BELL = "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0";
+const NOTIFY_ICON = { off: BELL + "M2 2l20 20", visual: BELL,
+                      sound: BELL + "M22 8c0-2.3-.8-4.3-2-6M4 2C2.8 3.7 2 5.7 2 8" };
+
+function renderNotifyMode(mode) {
+  if (!NOTIFY_ICON[mode]) mode = "off";
+  for (const b of document.querySelectorAll(".bell")) {
+    b.hidden = !app;
+    b.classList.toggle("on", mode !== "off");
+    b.title = NOTIFY_LABEL[mode];
+    b.setAttribute("aria-label", NOTIFY_LABEL[mode]);
+    b.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+      + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+      + '<path d="' + NOTIFY_ICON[mode] + '"/></svg>';
+  }
+}
+
+// The app may first ask Android for permission to notify; it then
+// reports the outcome through `agentNotifyModeChanged'.
+function cycleNotifyMode() {
+  renderNotifyMode(app.setNotifyMode(NOTIFY_NEXT[app.notifyMode()] || "off"));
+}
+
+// Tell the app which session is on show, whose notifications it skips.
+function setViewing(id) {
+  if (app) app.setViewing(id || "");
+}
+
+window.agentNotifyModeChanged = renderNotifyMode;
+
+// The app calls this when a notification about session ID is tapped.
+window.agentOpenSession = (id, name) => {
+  closeSheets();
+  if (current === id) {
+    refreshSession(true);
+    return;
+  }
+  openSession({ id, name }, current !== null);
+};
+
 function alertError(e) {
   const badge = $("session-badge");
   badge.className = "badge";
@@ -2293,6 +2355,9 @@ $("folder-hidden").addEventListener("click", () => {
   renderFolders();
 });
 $("exit").addEventListener("click", openExit);
+$("notify").addEventListener("click", cycleNotifyMode);
+$("list-notify").addEventListener("click", cycleNotifyMode);
+renderNotifyMode(app ? app.notifyMode() : "off");
 $("exit-skills").addEventListener("click", () => doExit(true));
 $("exit-plain").addEventListener("click", () => doExit(false));
 for (const sheet of document.querySelectorAll(".sheet")) {

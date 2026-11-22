@@ -3324,7 +3324,7 @@ reopen of a session in a deleted folder did on 19 Nov 2026."
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
           :skill-command-prefix "/"
-          :notify (lambda (title _message) (push title alerts))
+          :notify (lambda (title _message &rest _) (push title alerts))
           :submit (lambda (command &optional _buffer) (push command events))))
         (cl-letf (((symbol-function 'agent--before-exit-start-watchdog)
                    (lambda (_buffer) nil))
@@ -5131,7 +5131,7 @@ Naming the backend there instead would present a tool as an account."
     (with-temp-buffer
       (rename-buffer "*one:~/repo/project/:default*" t)
       (cl-letf (((symbol-function 'agent-notify)
-                 (lambda (title message)
+                 (lambda (title message &rest _)
                    (setq notified (list title message)))))
         (agent-session-event (current-buffer) 'idle-prompt))
       (should (eq agent--session-state 'awaiting-input))
@@ -5150,14 +5150,15 @@ Naming the backend there instead would present a tool as an account."
          'one
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))
-          :notify (lambda (title message)
-                    (setq notified (list title message)))))
+          :notify (lambda (title message &optional blocking buffer)
+                    (setq notified (list title message blocking buffer)))))
         (cl-letf (((symbol-function 'agent-notify)
                    (lambda (&rest args) (setq fallback args))))
           (agent--session-notify-ready buf))
         (should (equal notified
-                       '("Test ready"
-                         "project: waiting for your response")))
+                       (list "Test ready"
+                             "project: waiting for your response"
+                             nil buf)))
         (should-not fallback)))))
 
 (ert-deftest agent-test-notify-ready-falls-back-to-agent-notify ()
@@ -5172,7 +5173,7 @@ Naming the backend there instead would present a tool as an account."
          (agent-test--backend
           :buffer-p (lambda (candidate) (eq candidate buf))))
         (cl-letf (((symbol-function 'agent-notify)
-                   (lambda (title message)
+                   (lambda (title message &rest _)
                      (setq notified (list title message)))))
           (agent--session-notify-ready buf))
         (should (equal notified
@@ -5197,7 +5198,7 @@ stored struct still yields the project name."
                                           :directory "~/repo/project/"
                                           :instance "a"))
         (cl-letf (((symbol-function 'agent-notify)
-                   (lambda (title message)
+                   (lambda (title message &rest _)
                      (setq notified (list title message)))))
           (agent--session-notify-ready buf))
         (should (equal notified
@@ -7510,6 +7511,20 @@ longer looked at once it has been said."
         (should (equal messages "")))
       (should (agent-session-snoozed-p buffer))
       (should-not (buffer-local-value 'agent--start-dialog-timer buffer)))))
+
+(ert-deftest agent-test-notify-runs-notify-functions ()
+  "Pass every notification to `agent-notify-functions', alerts on or off."
+  (let ((agent-alert-on-ready nil)
+        (calls nil))
+    (let ((agent-notify-functions
+           (list (lambda (&rest args) (push args calls))
+                 (lambda (&rest _) (error "Listener failed")))))
+      (cl-letf (((symbol-function 'message) #'ignore))
+        (with-temp-buffer
+          (agent-notify "Needs approval" "s: pending" nil 'blocking
+                        (current-buffer))
+          (should (equal calls (list (list "Needs approval" "s: pending"
+                                           (current-buffer) 'blocking)))))))))
 
 (provide 'agent-test)
 ;;; agent-test.el ends here

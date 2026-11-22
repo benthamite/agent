@@ -170,6 +170,33 @@ loaded, whatever the file now says.")
 (defvar agent-remote--server nil
   "The listening server process, or nil when the server is stopped.")
 
+(defconst agent-remote--notification-limit 50
+  "Most notifications kept for the phone to fetch.")
+
+(defconst agent-remote--notification-wait 45
+  "Seconds a request for notifications waits for one before answering.
+The phone app asks again at once, so a request is always waiting; it
+must answer before the app's own read timeout, 90 seconds.")
+
+(defvar agent-remote--notifications nil
+  "Notifications kept for the phone, newest first.
+Each is a plist with `:seq', `:time', `:id', `:name', `:title',
+`:message' and `:blocking'.")
+
+(defvar agent-remote--notification-seq 0
+  "Sequence number of the latest notification recorded.")
+
+(defvar agent-remote--notification-epoch
+  (format "%x" (truncate (float-time)))
+  "Stamp of this Emacs's notification numbering.
+The phone sends back the stamp with the last number it has seen, so
+that numbers from an earlier Emacs are not mistaken for this one's.")
+
+(defvar agent-remote--notification-waiters nil
+  "Functions answering requests that wait for a notification.
+Each is called once, with no arguments, when a notification arrives,
+when its request's wait runs out, or when the server stops.")
+
 (defconst agent-remote--keys
   '(("enter" . "\r") ("esc" . "\e") ("tab" . "\t") ("shift-tab" . "\e[Z")
     ("up" . "\e[A") ("down" . "\e[B") ("left" . "\e[D") ("right" . "\e[C")
@@ -191,10 +218,13 @@ When enabled, listen on `agent-remote-host' and `agent-remote-port'."
       (condition-case err
           (progn
             (agent-remote--start)
+            (add-hook 'agent-notify-functions
+                      #'agent-remote--record-notification)
             (agent-remote--warn-about-app-nap))
         (error
          (setq agent-remote-mode nil)
          (signal (car err) (cdr err))))
+    (remove-hook 'agent-notify-functions #'agent-remote--record-notification)
     (agent-remote--stop)))
 
 ;;;; App Nap
@@ -280,7 +310,9 @@ Signal a `user-error' when the host cannot be determined."
         authority)))
 
 (defun agent-remote--stop ()
-  "Stop the remote-control server if it is running."
+  "Stop the remote-control server if it is running.
+Requests still waiting for a notification are answered first."
+  (agent-remote--wake-notification-waiters)
   (when (process-live-p agent-remote--server)
     (delete-process agent-remote--server))
   (setq agent-remote--server nil))
@@ -444,6 +476,8 @@ must call it exactly once, without signaling."
           (agent-remote--json (agent-remote--backends request)))
          ((and (equal method "GET") (equal path "/api/directories"))
           (agent-remote--json (agent-remote--directories request)))
+         ((and (equal method "GET") (equal path "/api/notifications"))
+          (agent-remote--notifications-response request))
          ((not (equal method "POST"))
           (agent-remote--error "405 Method Not Allowed" "Method not allowed"))
          ((not (assoc "x-agent-remote" (plist-get request :headers)))
@@ -515,6 +549,86 @@ reloads instead of misreading the newer API's answers."
   "Return an error response with STATUS and MESSAGE as JSON."
   (list status "application/json"
         (json-serialize (list :error message))))
+
+;;;; Notifications
+
+(defun agent-remote--record-notification (title message buffer blocking)
+  "Keep a notification for the phone and answer the requests awaiting one.
+TITLE and MESSAGE are its text, BUFFER the session buffer it concerns or
+nil, and BLOCKING non-nil when the session waits on the user's answer.
+Runs from `agent-notify-functions'."
+  (let ((live (buffer-live-p buffer)))
+    (setq agent-remote--notification-seq (1+ agent-remote--notification-seq))
+    (push (list :seq agent-remote--notification-seq
+                :time (truncate (float-time))
+                :id (and live (buffer-name buffer))
+                :name (and live (agent-display-name buffer))
+                :title title
+                :message message
+                :blocking (if blocking t :false))
+          agent-remote--notifications))
+  (when-let* ((tail (nthcdr (1- agent-remote--notification-limit)
+                            agent-remote--notifications)))
+    (setcdr tail nil))
+  (agent-remote--wake-notification-waiters))
+
+(defun agent-remote--wake-notification-waiters ()
+  "Answer every request waiting for a notification."
+  (mapc #'funcall (copy-sequence agent-remote--notification-waiters)))
+
+(defun agent-remote--notifications-response (request)
+  "Return the response to REQUEST for notifications.
+Its query names the `epoch' and the number `after' which the phone has
+seen everything; without `after' only the latest number is returned, so
+that a phone starting to listen is not shown old notifications.  With
+`wait' set to 1 and nothing new, the answer is deferred until a
+notification arrives or `agent-remote--notification-wait' runs out."
+  (let ((after (agent-remote--notifications-after request)))
+    (if (and after
+             (equal (agent-remote--query-param request "wait") "1")
+             (null (agent-remote--notifications-since after)))
+        (list :defer (lambda (send)
+                       (agent-remote--await-notification after send)))
+      (agent-remote--json (agent-remote--notifications-reply after)))))
+
+(defun agent-remote--notifications-after (request)
+  "Return the number after which REQUEST wants notifications, or nil.
+A request naming another `epoch' than this Emacs's has seen none of
+this Emacs's notifications, so it gets every one kept."
+  (when-let* ((after (agent-remote--query-param request "after")))
+    (if (equal (agent-remote--query-param request "epoch")
+               agent-remote--notification-epoch)
+        (string-to-number after)
+      0)))
+
+(defun agent-remote--notifications-since (after)
+  "Return the notifications numbered above AFTER, oldest first."
+  (nreverse (seq-filter (lambda (n) (> (plist-get n :seq) after))
+                        agent-remote--notifications)))
+
+(defun agent-remote--notifications-reply (after)
+  "Return the reply listing the notifications numbered above AFTER.
+With AFTER nil, list none."
+  (list :epoch agent-remote--notification-epoch
+        :last agent-remote--notification-seq
+        :notifications (vconcat (and after
+                                     (agent-remote--notifications-since
+                                      after)))))
+
+(defun agent-remote--await-notification (after send)
+  "Call SEND with the reply for AFTER once a notification arrives.
+Give up after `agent-remote--notification-wait' seconds and send the
+reply then, empty."
+  (let (timer waiter)
+    (setq waiter
+          (lambda ()
+            (cancel-timer timer)
+            (setq agent-remote--notification-waiters
+                  (delq waiter agent-remote--notification-waiters))
+            (funcall send (agent-remote--json
+                           (agent-remote--notifications-reply after)))))
+    (setq timer (run-at-time agent-remote--notification-wait nil waiter))
+    (push waiter agent-remote--notification-waiters)))
 
 ;;;; Session API
 

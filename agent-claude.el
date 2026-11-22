@@ -1323,13 +1323,14 @@ CACHE_READ_INPUT_TOKENS."
 
 ;;;;; Alert
 
-(defun agent-claude-notify (title message &optional blocking)
+(defun agent-claude-notify (title message &optional blocking buffer)
   "Notification function combining modeline pulse with optional alert.
 TITLE is the notification title.  MESSAGE is the notification
 body.  When `agent-alert-on-ready' is non-nil, dispatch to
-the style configured in `agent-alert-style'.  BLOCKING is passed
-to `agent-notify'."
-  (agent-notify title message #'claude-code--pulse-modeline blocking))
+the style configured in `agent-alert-style'.  BLOCKING and BUFFER,
+the session buffer the notification concerns, are passed to
+`agent-notify'."
+  (agent-notify title message #'claude-code--pulse-modeline blocking buffer))
 
 (defun agent-claude--payload-agent-id (json-str)
   "Return the `agent_id' in hook payload JSON-STR, or nil.
@@ -1396,17 +1397,18 @@ so that only that thread's next tool hook ends the wait."
            (agent-claude-notify
             (format "%s needs approval" label)
             (format "%s: permission request pending" name)
-            'blocking))
+            'blocking buf))
           ("elicitation_dialog"
            (agent-claude--block-on-dialog buf (plist-get message :json-data))
            (agent-claude-notify
             (format "%s needs input" label)
             (format "%s: waiting for your input" name)
-            'blocking))
+            'blocking buf))
           (_
            (agent-claude-notify
             label
-            (format "%s: needs your attention" name)))))))
+            (format "%s: needs your attention" name)
+            nil buf))))))
   nil)
 
 (defconst agent-claude--turn-in-progress-regexp

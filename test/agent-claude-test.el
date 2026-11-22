@@ -120,16 +120,16 @@ session would split the window the user is working in."
         notified)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-claude-notify)
-                   (lambda (title message &optional blocking)
-                     (setq notified (list title message blocking)))))
+                   (lambda (title message &optional blocking buffer)
+                     (setq notified (list title message blocking buffer)))))
           (agent-claude--handle-notification
            (list :type 'notification
                  :buffer-name (buffer-name buf)
                  :json-data "{\"notification_type\":\"permission_prompt\"}"))
           (should (equal notified
-                         '("Claude Code needs approval"
-                           "project: permission request pending"
-                           blocking))))
+                         (list "Claude Code needs approval"
+                               "project: permission request pending"
+                               'blocking buf))))
       (kill-buffer buf))))
 
 (ert-deftest agent-claude-test-new-prompt-id-marks-session-busy ()

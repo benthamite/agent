@@ -661,8 +661,8 @@ session would split the window the user is working in."
         notified)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-codex-notify)
-                   (lambda (title message &optional blocking)
-                     (setq notified (list title message blocking)))))
+                   (lambda (title message &optional blocking buffer)
+                     (setq notified (list title message blocking buffer)))))
           (with-current-buffer buf
             (setq-local agent--backend 'codex))
           (agent-codex--handle-notification
@@ -670,9 +670,9 @@ session would split the window the user is working in."
           (should (eq (buffer-local-value 'agent--session-state buf)
                       'awaiting-input))
           (should (equal notified
-                         '("Codex ready"
-                           "project: waiting for your response"
-                           nil))))
+                         (list "Codex ready"
+                               "project: waiting for your response"
+                               nil buf))))
       (kill-buffer buf))))
 
 (ert-deftest agent-codex-test-permission-request-alerts-without-state-change ()
@@ -681,8 +681,8 @@ session would split the window the user is working in."
         notified session-events)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-codex-notify)
-                   (lambda (title message &optional blocking)
-                     (setq notified (list title message blocking))))
+                   (lambda (title message &optional blocking buffer)
+                     (setq notified (list title message blocking buffer))))
                   ((symbol-function 'agent-session-event)
                    (lambda (&rest args) (push args session-events))))
           (with-current-buffer buf
@@ -694,9 +694,9 @@ session would split the window the user is working in."
                                     "\"tool_name\":\"Bash\","
                                     "\"tool_input\":{\"command\":\"touch /tmp/x\"}}")))
           (should (equal notified
-                         '("Codex needs approval"
-                           "project: permission request pending"
-                           blocking)))
+                         (list "Codex needs approval"
+                               "project: permission request pending"
+                               'blocking buf)))
           (should-not session-events)
           (should (eq (buffer-local-value 'agent--session-state buf) 'unknown)))
       (kill-buffer buf))))
@@ -707,17 +707,17 @@ session would split the window the user is working in."
         notified fallback)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-codex-notify)
-                   (lambda (title message &optional blocking)
-                     (setq notified (list title message blocking))))
+                   (lambda (title message &optional blocking buffer)
+                     (setq notified (list title message blocking buffer))))
                   ((symbol-function 'agent-notify)
                    (lambda (&rest args) (setq fallback args))))
           (with-current-buffer buf
             (setq-local agent--backend 'codex))
           (agent--session-notify-ready buf)
           (should (equal notified
-                         '("Codex ready"
-                           "project: waiting for your response"
-                           nil)))
+                         (list "Codex ready"
+                               "project: waiting for your response"
+                               nil buf)))
           (should-not fallback))
       (kill-buffer buf))))
 
