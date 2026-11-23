@@ -28,6 +28,7 @@ _LIB_SPEC.loader.exec_module(session)
 MAX_MESSAGE_BYTES = 32 * 1024
 DEFAULT_WAIT_SECONDS = 30.0
 SENDER_VARIABLES = ("CLAUDE_BUFFER_NAME", "CODEX_BUFFER_NAME")
+SENDER_ID_VARIABLES = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID")
 BACKEND_LABELS = {"claude-code": "claude", "codex": "codex"}
 
 HELP = """\
@@ -51,8 +52,10 @@ TARGET
      working directory contains TARGET as a substring. Exactly one match is
      required. No match or several matches is an error that lists candidates;
      pass the exact buffer name to disambiguate.
-  Sending to your own session (CLAUDE_BUFFER_NAME or CODEX_BUFFER_NAME) is
-  refused.
+  Sending to your own session is refused. That is the session whose id the
+  CLI gave this process (CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID) or, when
+  no listed session has that id, the one named by CLAUDE_BUFFER_NAME or
+  CODEX_BUFFER_NAME.
 
 Message
   Read from stdin, never from arguments, so quoting and shell history are not
@@ -167,8 +170,19 @@ def format_sessions(records: list[dict[str, Any]], own: set[str]) -> str:
     return "\n".join(lines)
 
 
-def own_buffers(environ=os.environ) -> set[str]:
-    return {environ[name] for name in SENDER_VARIABLES if environ.get(name)}
+def own_buffers(records: list[dict[str, Any]] = (), environ=os.environ) -> set[str]:
+    """Return the names of the session this process runs in.
+
+    That is the session in RECORDS whose id the CLI gave this process.  The
+    buffer names in the environment are those of the session that started
+    the process, which a session run by a CLI's background service does not
+    share, so they count only when RECORDS has no session with that id.
+    """
+    ids = {environ[name] for name in SENDER_ID_VARIABLES if environ.get(name)}
+    running = {record["buffer"] for record in records
+               if not record.get("error") and record.get("session_id") in ids}
+    return running or {environ[name] for name in SENDER_VARIABLES
+                       if environ.get(name)}
 
 
 def is_own(record: dict[str, Any], own: set[str]) -> bool:
@@ -176,9 +190,8 @@ def is_own(record: dict[str, Any], own: set[str]) -> bool:
     return record["buffer"] in own or record.get("launch") in own
 
 
-def sender_label(environ=os.environ) -> str:
-    names = [environ[name] for name in SENDER_VARIABLES if environ.get(name)]
-    return " / ".join(names) if names else "unknown session"
+def sender_label(own: set[str]) -> str:
+    return " / ".join(sorted(own)) if own else "unknown session"
 
 
 def _directory_forms(record: dict[str, Any]) -> list[str]:
@@ -309,7 +322,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.help:
         sys.stdout.write(HELP)
         return 0
-    own = own_buffers()
     try:
         if args.extra:
             raise Refusal("the message goes on stdin, not in arguments")
@@ -317,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.target:
                 raise Refusal("--list takes no TARGET")
             records = list_sessions()
+            own = own_buffers(records)
             if args.json:
                 print(session.json_for_display(
                     [{**r, "state": display_state(r)} for r in records]))
@@ -330,10 +343,12 @@ def main(argv: list[str] | None = None) -> int:
         if sys.stdin.isatty():
             raise Refusal("the message must arrive on stdin (pipe or heredoc)")
         message = normalize_message(sys.stdin.buffer.read())
-        target = resolve_target(args.target, list_sessions(), own)
+        records = list_sessions()
+        own = own_buffers(records)
+        target = resolve_target(args.target, records, own)
         identity = confirmed_identity(target)
         message_id = new_message_id()
-        prompt = compose(message, sender=sender_label(), cwd=os.getcwd(),
+        prompt = compose(message, sender=sender_label(own), cwd=os.getcwd(),
                          message_id=message_id)
         try:
             transcript = deliver(identity, prompt, message_id, args.wait)

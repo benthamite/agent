@@ -10,16 +10,16 @@
 # the file with the latest TIME of each kind, so a late older write
 # never replaces a newer one.  Subagents' tool calls and tool lookups
 # (ToolSearch) are left out.
-uuid=${AGENT_SESSION_UUID:-}
 payload=$(cat)
-[ -n "$uuid" ] || exit 0
 sent=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')
 dir=${AGENT_CLAUDE_STATUS_DIR:-${TMPDIR:-/tmp}/claude-code-status}
 here=$(dirname "$0")
 (
   . "$here/session-owner.sh"
   agent_hook_foreign_p "$payload" && exit 0
-  key=$(printf '%s' "$uuid" | shasum -a 256 | awk '{print $1}')
+  uuid=${AGENT_SESSION_UUID:-}
+  [ -n "$uuid" ] || exit 0
+  key=$(agent_hook_key "$uuid")
   line=$(printf '%s' "$payload" | perl -MJSON::PP -MFile::Basename -0777 -ne '
     my $d = eval { decode_json($_) };
     exit unless ref $d eq "HASH";

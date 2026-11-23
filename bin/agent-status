@@ -13,7 +13,13 @@ TRANSPORT_ERRORS = ("can't connect", "error accessing socket")
 
 
 def request_payload(text, backend, environ):
-    """Resolve an unambiguous session from the caller's inherited environment."""
+    """Resolve an unambiguous session from the caller's environment.
+
+    The buffer name and the process token are inherited from the session
+    that started the caller's process.  The session id is what the CLI gives
+    the session the caller runs in, so Emacs publishes to the session with
+    that id and uses the inherited name only when it knows no such session.
+    """
     buffers = {"codex": environ.get("CODEX_BUFFER_NAME"),
                "claude-code": environ.get("CLAUDE_BUFFER_NAME")}
     if backend is None:
@@ -26,7 +32,8 @@ def request_payload(text, backend, environ):
     normalized = " ".join(text.split())
     if len(normalized) > 160:
         raise ValueError("Status must be at most 160 characters")
-    session_id = environ.get("CODEX_THREAD_ID") if backend == "codex" else None
+    session_id = environ.get("CODEX_THREAD_ID" if backend == "codex"
+                             else "CLAUDE_CODE_SESSION_ID")
     process_token = environ.get("AGENT_SESSION_UUID") if backend == "claude-code" else None
     if not (session_id or process_token):
         raise ValueError("No publisher identity recorded for this agent session")

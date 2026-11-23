@@ -15,10 +15,12 @@ case $type in
   activity|stop) ;;
   *) exit 0 ;;
 esac
-buf=${CLAUDE_BUFFER_NAME:-}
-[ -n "$buf" ] || exit 0
+# The session to report as is the one the payload names when Emacs
+# recorded it, and otherwise the inherited one; see session-owner.sh.
 . "$(dirname "$0")/session-owner.sh"
 agent_hook_foreign_p "$payload" && exit 0
+buf=${CLAUDE_BUFFER_NAME:-}
+[ -n "$buf" ] || exit 0
 # Emacs mirrors each session's state to a file keyed like the statusline
 # file.  An `activity' event for a session Emacs already marks busy changes
 # nothing, so skip the emacsclient call; a missing or unreadable file sends.
@@ -33,7 +35,11 @@ sent=$(perl -MTime::HiRes=time -e 'printf "%.6f", time')
 # id is a UUID-like token, so it needs no escaping.
 agent=$(printf '%s' "$payload" | perl -MJSON::PP -0777 -ne \
   'my $d = eval { decode_json($_) }; my $a = ref $d eq "HASH" ? $d->{agent_id} : undef; print $a if defined $a && !ref $a && $a =~ /\A[\w-]+\z/')
+# The UUID lets Emacs drop an event for a buffer that another process
+# now runs under the same name.  Pass it only when it is a plain token.
+uuid=${AGENT_SESSION_UUID:-}
+case $uuid in *[!A-Za-z0-9-]*) uuid= ;; esac
 # Escape backslashes and double-quotes so the value is safe inside an Elisp string.
 buf=${buf//\\/\\\\}
 buf=${buf//\"/\\\"}
-emacsclient --timeout=10 --eval "(claude-code-handle-hook '${type} \"${buf}\" \"${sent}\" \"${agent}\")" >/dev/null 2>&1 || true
+emacsclient --timeout=10 --eval "(claude-code-handle-hook '${type} \"${buf}\" \"${sent}\" \"${agent}\" \"${uuid}\")" >/dev/null 2>&1 || true

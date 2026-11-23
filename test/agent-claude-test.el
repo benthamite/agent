@@ -819,6 +819,87 @@ while every Stop lists it as running."
                  :json-data (format "{\"session_id\":\"%s\"}" id)))))
       (should (equal events '(stop))))))
 
+(ert-deftest agent-claude-test-hook-from-another-process-is-ignored ()
+  "An event reporting as another process's UUID leaves the session alone."
+  (agent-claude-test--with-tasks-session
+    (let (events)
+      (cl-letf (((symbol-function 'agent-session-event)
+                 (lambda (_buffer event) (push event events))))
+        (dolist (uuid '("starter-uuid" "test-uuid" "" nil))
+          (agent-claude--handle-stop
+           (list :type 'stop :buffer-name (buffer-name)
+                 :args (list nil "" uuid)))
+          (agent-claude--handle-session-state
+           (list :type 'activity :buffer-name (buffer-name)
+                 :args (list nil "" uuid)))))
+      (should (equal (seq-count (lambda (event) (eq event 'stop)) events) 3))
+      (should (equal (seq-count (lambda (event) (eq event 'activity)) events)
+                     3)))))
+
+(defun agent-claude-test--owner (session-id)
+  "Return the contents of SESSION-ID's owner file, or nil when it has none."
+  (let ((file (agent-claude--owner-file session-id)))
+    (when (file-exists-p file)
+      (with-temp-buffer
+        (insert-file-contents file)
+        (buffer-string)))))
+
+(ert-deftest agent-claude-test-record-session-id-keeps-one-owner-file ()
+  "A session's owner file follows its id and goes with the session."
+  (agent-claude-test--with-tasks-session
+    (agent-claude--record-session-id (current-buffer) "s1")
+    (should (equal (agent-claude-test--owner "s1")
+                   (format "test-uuid\n%s\n" (buffer-name))))
+    (setq agent--launch-name "*claude:launch*")
+    (agent-claude--record-session-id (current-buffer) "s2")
+    (should-not (agent-claude-test--owner "s1"))
+    (should (equal (agent-claude-test--owner "s2")
+                   "test-uuid\n*claude:launch*\n"))
+    (agent-claude--cleanup-status-file)
+    (should-not (agent-claude-test--owner "s2"))))
+
+(ert-deftest agent-claude-test-owner-file-taken-by-another-session-is-kept ()
+  "Cleaning up a session leaves an owner file another session has taken."
+  (agent-claude-test--with-tasks-session
+    (agent-claude--record-session-id (current-buffer) "s1")
+    (with-temp-buffer
+      (setq agent-claude--status-uuid "later-uuid")
+      (agent-claude--record-session-id (current-buffer) "s1"))
+    (agent-claude--cleanup-status-file)
+    (should (string-prefix-p "later-uuid\n" (agent-claude-test--owner "s1")))))
+
+(ert-deftest agent-claude-test-scripts-report-as-the-recorded-owner ()
+  "A payload naming a recorded session is that session's, whatever the environment.
+A session Claude Code runs in its background service has the environment
+of the session that started the service, here the test session."
+  (agent-claude-test--with-tasks-session
+    (agent-claude--record-session-id (current-buffer) "starter")
+    (let ((starter (current-buffer)))
+      (with-temp-buffer
+        (setq agent-claude--status-uuid "attached-uuid")
+        (agent-claude--record-session-id (current-buffer) "background")
+        (agent-claude-test--run-hook
+         "hooks/record-background-tasks.sh"
+         (replace-regexp-in-string "\"s\"" "\"background\""
+                                   agent-claude-test--stop-payload))
+        (agent-claude-test--run-hook "etc/claude-code-statusline.sh"
+                                     "{\"session_id\":\"background\"}")
+        (should (equal (agent-claude--background-tasks (current-buffer))
+                       '("boi38yr6f")))
+        (should (equal (plist-get (agent-claude--parse-status-file) :session_id)
+                       "background"))
+        (should-not (file-exists-p (agent-claude--tasks-file starter)))
+        (should-not (file-exists-p (with-current-buffer starter
+                                     (agent-claude--status-file))))))))
+
+(ert-deftest agent-claude-test-status-line-of-unrecorded-session-uses-environment ()
+  "A status line naming a session Emacs has not recorded is the environment's."
+  (agent-claude-test--with-tasks-session
+    (agent-claude-test--run-hook "etc/claude-code-statusline.sh"
+                                 "{\"session_id\":\"new\"}")
+    (should (equal (plist-get (agent-claude--parse-status-file) :session_id)
+                   "new"))))
+
 (ert-deftest agent-claude-test-has-background-tasks-ignores-footer-counts ()
   "Footer task counts are not evidence; the fleet count spans all sessions."
   (with-temp-buffer
@@ -2207,9 +2288,12 @@ Run the hook as session UUID with state files in STATUS-DIR."
       (kill-buffer buffer))))
 
 (ert-deftest agent-claude-test-start-session-attaches-background-session ()
-  "Attach to a resumed session that is still running in the background."
+  "Attach to a resumed session that is still running in the background.
+The buffer is recorded as that session's owner at once, since the
+session's own process does not carry the buffer's environment."
   (let ((buffer (generate-new-buffer " *claude-test-session*"))
         (claude-code-program-switches '("--chrome"))
+        (agent-claude-status-directory (make-temp-file "claude-status" t))
         captured-switches captured-program-switches)
     (unwind-protect
         (cl-letf (((symbol-function 'agent-account-sync) #'ignore)
@@ -2221,6 +2305,8 @@ Run the hook as session UUID with state files in STATUS-DIR."
                      (setq captured-switches switches)
                      (setq captured-program-switches
                            claude-code-program-switches)
+                     (with-current-buffer buffer
+                       (setq agent-claude--status-uuid "attach-uuid"))
                      buffer)))
           (let ((session (agent-session-create
                           :backend 'claude-code
@@ -2228,10 +2314,13 @@ Run the hook as session UUID with state files in STATUS-DIR."
             (agent-start-session session :resume-id "abc-full")
             (should (equal captured-switches '("attach" "abc")))
             (should-not captured-program-switches)
+            (should (equal (agent-claude-test--owner "abc-full")
+                           (format "attach-uuid\n%s\n" (buffer-name buffer))))
             (agent-start-session session :resume-id "other")
             (should (equal captured-switches '("--resume" "other")))
             (should (equal captured-program-switches '("--chrome")))))
-      (kill-buffer buffer))))
+      (kill-buffer buffer)
+      (delete-directory agent-claude-status-directory t))))
 
 ;;;; Resuming a session with no conversation
 

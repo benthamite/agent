@@ -29,6 +29,14 @@ class StatusPublisherTests(unittest.TestCase):
         self.assertEqual(request["text"], "")
         self.assertIsNone(request["session_id"])
 
+    def test_claude_session_id_travels_with_the_inherited_identity(self):
+        request = helper["request_payload"]("Testing", None,
+                    {"CLAUDE_BUFFER_NAME": "b", "AGENT_SESSION_UUID": "uuid-1",
+                     "CLAUDE_CODE_SESSION_ID": "session-1"})
+        self.assertEqual(request["session_id"], "session-1")
+        self.assertEqual(request["process_token"], "uuid-1")
+        self.assertEqual(request["buffer"], "b")
+
     def test_missing_publisher_identity(self):
         with self.assertRaises(ValueError):
             helper["request_payload"]("Testing", None, {"CLAUDE_BUFFER_NAME": "b"})

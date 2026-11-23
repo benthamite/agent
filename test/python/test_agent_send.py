@@ -93,8 +93,22 @@ class ResolveTargetTests(unittest.TestCase):
 
     def test_own_buffers_come_from_both_variables(self):
         env = {"CLAUDE_BUFFER_NAME": "*claude:x*", "CODEX_BUFFER_NAME": "*codex:y*"}
-        self.assertEqual(agent_send.own_buffers(env), {"*claude:x*", "*codex:y*"})
-        self.assertEqual(agent_send.own_buffers({}), set())
+        self.assertEqual(agent_send.own_buffers(environ=env),
+                         {"*claude:x*", "*codex:y*"})
+        self.assertEqual(agent_send.own_buffers(environ={}), set())
+
+    def test_own_buffer_is_the_session_with_this_process_id(self):
+        """A session run by a background service inherits another's names."""
+        records = [{"buffer": "*claude:a*", "session_id": "id-a"},
+                   {"buffer": "*claude:b*", "session_id": "id-b"},
+                   {"buffer": "*claude:c*", "session_id": "id-b", "error": "x"}]
+        env = {"CLAUDE_BUFFER_NAME": "*claude:a*", "CLAUDE_CODE_SESSION_ID": "id-b"}
+        self.assertEqual(agent_send.own_buffers(records, env), {"*claude:b*"})
+        env["CLAUDE_CODE_SESSION_ID"] = "id-unlisted"
+        self.assertEqual(agent_send.own_buffers(records, env), {"*claude:a*"})
+        self.assertEqual(
+            agent_send.own_buffers(records, {"CODEX_THREAD_ID": "id-a"}),
+            {"*claude:a*"})
 
 
 class HeaderAndMessageTests(unittest.TestCase):
@@ -115,7 +129,8 @@ class HeaderAndMessageTests(unittest.TestCase):
         self.assertFalse(prompt.lstrip().startswith(("/", "!", "#")))
 
     def test_unknown_sender(self):
-        self.assertEqual(agent_send.sender_label({}), "unknown session")
+        self.assertEqual(agent_send.sender_label(set()), "unknown session")
+        self.assertEqual(agent_send.sender_label({"*b*", "*a*"}), "*a* / *b*")
 
     def test_message_normalization(self):
         self.assertEqual(agent_send.normalize_message(b'a "q"\r\nb \\ c\n\n'),

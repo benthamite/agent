@@ -872,7 +872,14 @@ or @samp{CLAUDE_BUFFER_NAME}@comma{} requiring @samp{--backend codex} or
 identity@comma{} including before the first submission has cached that identity.
 A registered identity resolver is authoritative even when it returns no id;
 only backends without one use their recorded identity. Claude requires @samp{AGENT_SESSION_UUID} to match its process token@comma{}
-so an old process cannot update a replacement session with the same name. The helper
+so an old process cannot update a replacement session with the same name.
+Those variables name the session that started the helper's process@comma{} which a
+session run by a CLI's background service does not share. So the helper also
+sends the session id the CLI gives its own session (@samp{CLAUDE_CODE_SESSION_ID}
+for Claude)@comma{} and the status goes to the live session with that identity@comma{}
+whatever the buffer variable says. The buffer variable is used only when no
+live session has that identity@comma{} and then a named session whose identity is
+known rejects the status. The helper
 rejects absent or mismatched sessions@comma{} passes text as encoded JSON rather
 than executable Lisp@comma{} and reports failures. When a briefly stalled Emacs
 refuses the connection@comma{} the helper retries for about eight seconds before
@@ -887,6 +894,7 @@ agents need to receive the instruction before they will publish updates.
 
 The public function @code{agent-session-set-status} accepts a buffer name@comma{} backend
 symbol@comma{} status text@comma{} optional native session id@comma{} and optional process token. The hook @code{agent-session-status-token-functions} supplies backend process tokens.
+The session is the live one with that native session id when there is one@comma{} and otherwise the one named.
 The function validates the target and text@comma{} stores the update in that buffer@comma{} and refreshes an open switcher.
 @code{agent-session-state-summary-functions} supplies the column using the same
 cheap@comma{} first-non-nil convention as the session-summary hook. The built-in
@@ -1171,6 +1179,25 @@ under the session's account@comma{} and then kill its buffer. If @samp{claude st
 they say so and submit @samp{/exit} as before. Claude Code does this through
 @samp{agent-exit-session-functions}: each function there is called with the session
 buffer and may end the session itself in place of @samp{/exit}.
+
+Claude Code runs a background session in a service of its own@comma{} and the
+session's hooks@comma{} status line and tool commands then get the environment of
+whichever session started that service: its @samp{CLAUDE_BUFFER_NAME} and
+@samp{AGENT_SESSION_UUID} name another session. So the scripts take a session's
+identity from the session id Claude Code hands them. For each session id a
+buffer runs@comma{} the backend keeps an owner file in @code{agent-claude-status-directory}
+(@samp{<sha256 of the id>.owner}: the buffer's UUID and the name its CLI was started
+under)@comma{} written when the status line first reports the id and@comma{} for a buffer
+that attaches to a background session@comma{} as soon as it attaches. The hook and
+status line scripts report as the owner of the session their payload names;
+@samp{bin/agent-status} and @samp{bin/agent-send} go by @samp{CLAUDE_CODE_SESSION_ID}. The
+environment decides only for a session id no buffer has recorded@comma{} and a hook
+event that reports as a UUID other than its buffer's is dropped@comma{} so a process
+outliving its session cannot reach the session that took its buffer name. One
+gap remains: a background session that changes its id@comma{} as @samp{/clear} does@comma{} has
+no owner file for the new id@comma{} so until one is written its status line and
+hooks report as the session whose environment it carries@comma{} and that session@comma{} if
+it is still live@comma{} takes the new id for its own.
 
 The chain is driven by session stop events and guarded by a watchdog. Each
 submitted skill gets @code{agent-before-exit-timeout} seconds (default 600) before

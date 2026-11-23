@@ -1212,6 +1212,43 @@ The buffer is bound to `buf' and holds session key \"a\"."
     (agent-session-event buf 'submit)
     (should (equal (agent-session-state-summary buf) "Testing pagination fix"))))
 
+(ert-deftest agent-test-session-status-goes-to-the-session-with-the-identity ()
+  "A status names its session by identity; the buffer name is a fallback.
+A publisher run by a CLI's background service inherits the buffer name
+and process token of the session that started the service."
+  (agent-test--with-session-buffer "*one:~/repo/starter/:default*"
+    (setq-local agent--session
+                (agent-session-create :backend 'one :id "session-1"))
+    (with-temp-buffer
+      (rename-buffer "*one:~/repo/attached/:default*" t)
+      (let ((other (current-buffer))
+            (agent-session-status-token-functions
+             (list (lambda (buffer) (and (eq buffer buf) "process-1")))))
+        (setq-local agent--session
+                    (agent-session-create :backend 'one :id "session-2"))
+        (puthash other "b" agent--session-keys)
+        (apply #'agent-register-backend
+               'one
+               (agent-test--backend
+                :buffer-p (lambda (candidate) (memq candidate (list buf other)))
+                :find-all-buffers (lambda () (list buf other))))
+        (should (agent-session-set-status (buffer-name buf) 'one "Attached work"
+                                          "session-2" "process-1"))
+        (should (equal (agent-session-state-summary other) "Attached work"))
+        (should-not (agent--session-published-status buf))
+        (should-error (agent-session-set-status (buffer-name buf) 'one
+                                                "Unknown session"
+                                                "session-3" "process-1")
+                      :type 'user-error)
+        (setf (agent-session-id (agent-session buf)) nil)
+        (should (agent-session-set-status (buffer-name buf) 'one "Early status"
+                                          "session-3" "process-1"))
+        (should (equal (agent--session-published-status buf) "Early status"))
+        (should-not (agent-session-id (agent-session buf)))
+        (should-error (agent-session-set-status (buffer-name buf) 'one
+                                                "No token" "session-3")
+                      :type 'user-error)))))
+
 (ert-deftest agent-test-session-published-status-survives-activity-turns ()
   "Keep the status current through notification turns."
   (agent-test--with-session-buffer "*one:~/repo/project/:default*"

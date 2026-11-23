@@ -1929,39 +1929,30 @@ width at zero."
 
 (defun agent-session-set-status
     (buffer-name backend text &optional session-id process-token)
-  "Publish TEXT as the current state of BUFFER-NAME's BACKEND session.
-SESSION-ID, when supplied, must match the backend's current native identity.
-Use the recorded identity only for backends without an identity resolver.
-PROCESS-TOKEN, when supplied, must match the backend publisher process token.
+  "Publish TEXT as the current state of a BACKEND session.
+The session is the live one whose native identity is SESSION-ID.  When
+there is none, it is the one the CLI knows as BUFFER-NAME, which the
+publisher takes from its environment.  That environment names the
+session that started the publisher's process, which need not be the
+session it runs in, so a named session whose identity is known must
+have SESSION-ID when one is supplied, and a publisher that supplies no
+PROCESS-TOKEN must supply the named session's identity.  PROCESS-TOKEN,
+when supplied, must match the named session's publisher process token.
 Reject missing sessions, mismatched identities, and text longer than 160
 characters.  Collapse whitespace; empty text clears the status.  This does
 not change the session's lifecycle state or its state-transition timestamp."
-  (let* ((buffer (agent-session-buffer-for-name buffer-name))
-         (session (and buffer (agent-session buffer))))
-    (unless (and session (memq buffer (agent-session-buffers)))
-      (user-error "No live agent session named %s" buffer-name))
-    (unless (eq backend (agent-session-backend session))
-      (user-error "Backend does not match session %s" buffer-name))
-    (when session-id
-      (let* ((definition (agent-backend backend))
-             (resolver (and definition
-                            (agent-backend-session-identity definition)))
-             (identity (if resolver (funcall resolver buffer)
-                         (agent-session-id session))))
-        (unless (equal session-id identity)
-          (user-error "Session identity does not match %s" buffer-name))))
-    (when (and process-token
-               (not (equal process-token
-                           (run-hook-with-args-until-success
-                            'agent-session-status-token-functions buffer))))
-      (user-error "Publisher process does not match %s" buffer-name))
+  (let* ((owner (and session-id
+                     (agent--session-buffer-with-identity backend session-id)))
+         (buffer (or owner
+                     (agent--session-buffer-named
+                      buffer-name backend session-id process-token))))
     (unless (stringp text)
       (user-error "Status must be a string"))
     (let ((status (string-trim
                    (replace-regexp-in-string "[ \t\n\r\f\v]+" " " text))))
       (when (> (length status) 160)
         (user-error "Status must be at most 160 characters"))
-      (when session-id (agent--note-session-id buffer session-id))
+      (when owner (agent--note-session-id buffer session-id))
       (with-current-buffer buffer
         (setq agent--session-published-status
               (unless (string-empty-p status) status)
@@ -1970,6 +1961,45 @@ not change the session's lifecycle state or its state-transition timestamp."
         (force-mode-line-update)))
     (agent--refresh-session-switcher)
     t))
+
+(defun agent--session-buffer-with-identity (backend session-id)
+  "Return the live BACKEND session buffer whose native identity is SESSION-ID.
+Return nil when there is none."
+  (seq-find (lambda (buffer)
+              (and (eq backend (agent-session-backend (agent-session buffer)))
+                   (equal session-id
+                          (agent--session-native-identity buffer backend))))
+            (agent-session-buffers)))
+
+(defun agent--session-native-identity (buffer backend)
+  "Return the native identity of BACKEND session BUFFER, or nil if unknown.
+Use the recorded identity only for backends without an identity resolver."
+  (if-let* ((definition (agent-backend backend))
+            (resolver (agent-backend-session-identity definition)))
+      (ignore-errors (funcall resolver buffer))
+    (agent-session-id (agent-session buffer))))
+
+(defun agent--session-buffer-named (buffer-name backend session-id process-token)
+  "Return the live BACKEND session buffer the CLI knows as BUFFER-NAME.
+Signal a `user-error' when there is none, or when SESSION-ID or
+PROCESS-TOKEN say the publisher runs in another session, as
+`agent-session-set-status' describes."
+  (let* ((buffer (agent-session-buffer-for-name buffer-name))
+         (session (and buffer (agent-session buffer))))
+    (unless (and session (memq buffer (agent-session-buffers)))
+      (user-error "No live agent session named %s" buffer-name))
+    (unless (eq backend (agent-session-backend session))
+      (user-error "Backend does not match session %s" buffer-name))
+    (when (and session-id
+               (or (agent--session-native-identity buffer backend)
+                   (not process-token)))
+      (user-error "Session identity does not match %s" buffer-name))
+    (when (and process-token
+               (not (equal process-token
+                           (run-hook-with-args-until-success
+                            'agent-session-status-token-functions buffer))))
+      (user-error "Publisher process does not match %s" buffer-name))
+    buffer))
 
 (defun agent--session-published-status (buffer)
   "Return BUFFER's explicitly published state description.

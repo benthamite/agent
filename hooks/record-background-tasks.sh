@@ -14,19 +14,17 @@
 # remove it.  Emacs counts teammate tasks only while that directory has
 # an entry.
 #
-# A payload from another session, such as a `claude -p' the session ran,
-# is dropped; see session-owner.sh.
-uuid=${AGENT_SESSION_UUID:-}
-if [ -z "$uuid" ]; then
-  cat >/dev/null
-  exit 0
-fi
-dir=${AGENT_CLAUDE_STATUS_DIR:-${TMPDIR:-/tmp}/claude-code-status}
-key=$(printf '%s' "$uuid" | shasum -a 256 | awk '{print $1}')
-mkdir -p "$dir" || exit 0
+# The session is the one the payload names when Emacs recorded it, and
+# otherwise the inherited one, whose payloads from another session, such
+# as a `claude -p' the session ran, are dropped; see session-owner.sh.
 payload=$(cat) || exit 0
 . "$(dirname "$0")/session-owner.sh"
 agent_hook_foreign_p "$payload" && exit 0
+uuid=${AGENT_SESSION_UUID:-}
+[ -n "$uuid" ] || exit 0
+dir=${AGENT_CLAUDE_STATUS_DIR:-${TMPDIR:-/tmp}/claude-code-status}
+key=$(agent_hook_key "$uuid")
+mkdir -p "$dir" || exit 0
 fields=$(printf '%s' "$payload" | perl -MJSON::PP -0777 -ne \
   'my $d = eval { decode_json($_) }; exit unless ref $d eq "HASH";
    my ($e, $a) = @$d{qw(hook_event_name agent_id)};

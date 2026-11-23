@@ -9,7 +9,11 @@ json_data=$(cat)
 . "$(dirname "$0")/session-owner.sh"
 agent_hook_foreign_p "$json_data" && exit 0
 buf=${CLAUDE_BUFFER_NAME:-}
+# The UUID lets Emacs drop an event for a buffer that another process
+# now runs under the same name.  Pass it only when it is a plain token.
+uuid=${AGENT_SESSION_UUID:-}
+case $uuid in *[!A-Za-z0-9-]*) uuid= ;; esac
 # Escape backslashes and double-quotes so the value is safe inside an Elisp string.
 buf=${buf//\\/\\\\}
 buf=${buf//\"/\\\"}
-emacsclient --timeout=10 --eval "(claude-code-handle-hook 'notification \"${buf}\")" "$json_data" 2>/dev/null || true
+emacsclient --timeout=10 --eval "(claude-code-handle-hook 'notification \"${buf}\" \"${uuid}\")" "$json_data" 2>/dev/null || true
