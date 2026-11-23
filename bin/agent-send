@@ -83,10 +83,11 @@ Delivery
   once the box is clear. The text crosses to Emacs through a private temporary
   file, not an Elisp string literal. The window layout is restored after the
   submit. Success is reported only when the recipient's own transcript
-  records a user message with the delivery id (exact text match, or the id
-  when the CLI normalized the text). Otherwise agent-send exits non-zero and
-  says delivery is unconfirmed; the text may be queued or sitting in the
-  recipient's composer. It never resends. Check with `agent-send --list`
+  records the message with the delivery id (exact text match, or the id when
+  the CLI normalized the text), as a user message or, for a busy recipient,
+  as a prompt it queued. Otherwise agent-send exits non-zero and says
+  delivery is unconfirmed; the text may be sitting in the recipient's
+  composer. It never resends. Check with `agent-send --list`
   or the recipient's transcript before deciding anything else.
 
 --wait SECONDS

@@ -490,17 +490,40 @@ def _user_marker_offset(
     return None
 
 
+def _queued_message_text(obj: dict[str, Any]) -> str | None:
+    """Return the text of OBJ when it records a prompt a busy session queued.
+
+    Claude Code writes no user record for a prompt that arrives mid-turn.  It
+    writes a ``queue-operation`` / ``enqueue`` record holding the text under
+    ``content`` and, when the running turn takes the prompt in, an
+    ``attachment`` of type ``queued_command`` holding it under ``prompt``.
+    """
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("type") == "queue-operation" and obj.get("operation") == "enqueue":
+        text = obj.get("content")
+    elif obj.get("type") == "attachment":
+        attachment = obj.get("attachment")
+        attachment = attachment if isinstance(attachment, dict) else {}
+        text = (attachment.get("prompt")
+                if attachment.get("type") == "queued_command" else None)
+    else:
+        return None
+    return text if isinstance(text, str) else _text_parts(text, "text")
+
+
 def _marker_delivered(
     transcript: str, offset: int, marker: str, *,
     expected_prompt_sha256: str | None = None,
 ) -> bool:
-    """Return whether a user message containing MARKER was appended past OFFSET.
+    """Return whether a prompt containing MARKER was recorded past OFFSET.
 
     This is the only acknowledgement of a delivery: the delivered text itself,
     recorded in the actor's own transcript after the boundary captured before
-    the submit.  Transcript growth from bookkeeping records and a busy
-    terminal (a session still starting up, compacting, or mid-turn) are not
-    evidence that the prompt was received.
+    the submit, as a user message or as a prompt a busy session queued.
+    Transcript growth from bookkeeping records and a busy terminal (a session
+    still starting up, compacting, or mid-turn) are not evidence that the
+    prompt was received.
     """
     path = Path(transcript)
     try:
@@ -522,8 +545,8 @@ def _marker_delivered(
             obj = json.loads(line.decode("utf-8", "replace"))
         except json.JSONDecodeError:
             continue
-        text = _user_message_text(obj)
-        if _prompt_matches(text, marker, expected_prompt_sha256):
+        if any(_prompt_matches(text, marker, expected_prompt_sha256)
+               for text in (_user_message_text(obj), _queued_message_text(obj))):
             return True
     return False
 

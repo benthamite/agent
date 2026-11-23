@@ -1,5 +1,5 @@
-import importlib.util
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -97,6 +97,34 @@ class MarkerDeliveredTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             transcript = self.write(directory, [self.codex_user("body\nREVIEW: go")])
             self.assertTrue(session._marker_delivered(str(transcript), 0, "REVIEW: go"))
+
+    def test_prompt_queued_by_a_busy_session_is_delivered(self):
+        text = "[header id MARKER]\nbody"
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        queued = [
+            {"type": "queue-operation", "operation": "enqueue", "content": text},
+            {"type": "attachment",
+             "attachment": {"type": "queued_command", "prompt": text}},
+        ]
+        for record in queued:
+            with tempfile.TemporaryDirectory() as directory:
+                transcript = self.write(directory, [record])
+                self.assertTrue(session._marker_delivered(
+                    str(transcript), 0, "MARKER", expected_prompt_sha256=sha))
+                self.assertFalse(session._marker_delivered(
+                    str(transcript), 0, "MARKER", expected_prompt_sha256="0" * 64))
+
+    def test_other_queue_and_attachment_records_are_not_delivered(self):
+        records = [
+            {"type": "queue-operation", "operation": "remove", "content": "MARKER"},
+            {"type": "queue-operation", "operation": "dequeue"},
+            {"type": "attachment",
+             "attachment": {"type": "hook_success", "prompt": "MARKER"}},
+            {"type": "attachment", "attachment": "MARKER"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = self.write(directory, records)
+            self.assertFalse(session._marker_delivered(str(transcript), 0, "MARKER"))
 
 
 class TranscriptOffsetTests(unittest.TestCase):
